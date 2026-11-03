@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buka-ltd.github.io/buka.dsh-plugin-marketplace/schemas/index.schema.json",
+  "title": "DSH plugin market index (format 1)",
+  "description": "DeepSeek Harness 插件市场索引。权威校验以 @deepseek-ai/dsh-plugin-market-index 的 parseMarketIndex 为准，本文件只用于编辑期提示与评审。",
+  "type": "object",
+  "required": ["format", "title", "plugins"],
+  "additionalProperties": true,
+  "properties": {
+    "format": {
+      "const": 1,
+      "description": "索引格式版本，当前只有 1。"
+    },
+    "title": {
+      "$ref": "#/$defs/localizedText",
+      "description": "索引标题，必须含 en。"
+    },
+    "description": {
+      "$ref": "#/$defs/localizedText"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "categories": {
+          "$ref": "#/$defs/declarations"
+        },
+        "labels": {
+          "$ref": "#/$defs/declarations"
+        },
+        "sortKeys": {
+          "type": "object",
+          "description": "可排序字段声明，排序值写在 plugins[].metadata.sortKeys。",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["title", "order"],
+            "additionalProperties": true,
+            "properties": {
+              "title": {
+                "$ref": "#/$defs/localizedText"
+              },
+              "order": {
+                "enum": ["asc", "desc"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/plugin"
+      }
+    }
+  },
+  "$defs": {
+    "localizedText": {
+      "description": "字符串，或按小写语言 id 归档的映射且必须含 en。",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": ["en"],
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z]{2,8}(-[a-z0-9]{1,8})*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "type": "object",
+      "description": "id 到展示信息的声明表，插件通过 id 引用；未声明的 id 会被拒绝。",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title"],
+        "additionalProperties": true,
+        "properties": {
+          "title": {
+            "$ref": "#/$defs/localizedText"
+          }
+        }
+      }
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\\+[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*)?$"
+    },
+    "packageName": {
+      "type": "string",
+      "maxLength": 214,
+      "pattern": "^(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$"
+    },
+    "source": {
+      "description": "安装来源：npm 版本，或 git 仓库里某次提交的包目录。",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": true,
+          "properties": {
+            "type": {
+              "const": "npm"
+            },
+            "registry": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "url", "commit"],
+          "additionalProperties": true,
+          "properties": {
+            "type": {
+              "const": "git"
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https://"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+            }
+          }
+        }
+      ]
+    },
+    "version": {
+      "type": "object",
+      "required": ["version", "publishTimestamp", "source"],
+      "additionalProperties": true,
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/semver"
+        },
+        "publishTimestamp": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 109999999999,
+          "description": "Unix 秒。"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "engines": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "dsh": {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "pattern": "^workspace:"
+              }
+            }
+          }
+        }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "required": ["name", "versions"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "title": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "description": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "icon": {
+          "type": "string",
+          "description": "https 绝对地址、https 或索引同源的相对地址，或不超过 32 KiB 的 base64 SVG/PNG/JPEG/WebP data URL。"
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "repository": {
+          "type": "object",
+          "required": ["url"],
+          "additionalProperties": true,
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://"
+            },
+            "directory": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "category": {
+              "type": "string",
+              "minLength": 1
+            },
+            "keywords": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "sortKeys": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/version"
+          }
+        }
+      }
+    }
+  }
+}

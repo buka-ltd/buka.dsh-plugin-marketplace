@@ -1,0 +1,62 @@
+name: market
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: market-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 校验索引与插件
+    runs-on: ubuntu-latest
+    env:
+      # 索引里的安装地址必须指向公司仓库，不能是 PR 的 fork
+      DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 索引钉住的是插件目录的提交，浅克隆会让 check 拿不到历史
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20
+      - run: pnpm run check
+      - run: pnpm test
+      - run: pnpm run build
+
+  deploy:
+    name: 发布索引
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20
+      - run: pnpm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,16 @@
+{
+  "title": {
+    "en": "Buka Hello",
+    "zh-cn": "Buka 问候"
+  },
+  "description": {
+    "en": "Template-grade bundle that registers the buka_hello tool; use it to confirm the marketplace, the index and installation all work.",
+    "zh-cn": "模板级插件：注册 buka_hello 工具，用来验证市场、索引与安装链路是否打通。"
+  },
+  "icon": "./icon.svg",
+  "author": "Buka Ltd",
+  "homepage": "https://github.com/buka-ltd/buka.dsh-plugin-marketplace/tree/main/plugins/hello",
+  "category": "tools",
+  "labels": ["stable"],
+  "keywords": ["hello", "example", "template", "smoke-test"]
+}

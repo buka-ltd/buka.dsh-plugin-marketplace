@@ -1,0 +1,12 @@
+# 构建产物：由 `pnpm run build` 生成，不进版本库
+dist/
+node_modules/
+
+# 本地临时目录（调研脚本、验证产物）
+.tmp/
+
+# skills 安装产物：不要在仓库内安装 SKILL
+.agents/
+skills-lock.json
+
+.DS_Store

@@ -1,0 +1,17 @@
+{
+  "name": "@buka/dsh-plugin-marketplace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Buka Ltd 的 DeepSeek Harness 插件市场：校验插件 bundle 并生成/发布 format 1 索引",
+  "engines": {
+    "node": ">=22.20"
+  },
+  "packageManager": "pnpm@11.28.5",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/check.mjs",
+    "serve": "node scripts/serve.mjs",
+    "test": "node --test"
+  }
+}
