@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Buka Bell",
+    "description": "Plays a system sound when a task finishes or DSH waits for your input. Pick the two sounds in Settings → Notification sounds."
+  }
+}

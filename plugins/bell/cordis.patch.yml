@@ -1,0 +1,7 @@
+# `@buka/dsh-plugin-bell` 的 bundle 层：把本插件自己插进组成。
+#
+# 只插入一行：插件没有依赖别的 DSH 服务行，只监听 Host 事件。
+# `id` 是它在 composition 里的唯一名字；`name` 是包名，由 profile 的依赖解析。
+- insert:
+    - id: sound-buka-bell
+      name: '@buka/dsh-plugin-bell'

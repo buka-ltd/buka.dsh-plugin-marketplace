@@ -1,0 +1,31 @@
+{
+  "title": {
+    "en": "Buka Bell",
+    "zh-cn": "Buka 提示音"
+  },
+  "description": {
+    "en": "Plays a system sound when an agent finishes a task or pauses to wait for your input. Pick the two sounds in Settings → Notification sounds; selecting one previews it.",
+    "zh-cn": "任务结束、或 DSH 停下来等你输入时播放系统提示音。两个声音可在 设置 → 提示音 里选择，选中即试听。"
+  },
+  "icon": "./icon.svg",
+  "author": "Buka Ltd",
+  "homepage": "https://github.com/buka-ltd/buka.dsh-plugin-marketplace/tree/main/plugins/bell",
+  "category": "workflow",
+  "labels": ["beta"],
+  "keywords": [
+    "notification",
+    "sound",
+    "bell",
+    "alert",
+    "notify",
+    "finish",
+    "wait",
+    "settings",
+    "提示音",
+    "通知",
+    "完成",
+    "等待",
+    "声音",
+    "设置"
+  ]
+}
