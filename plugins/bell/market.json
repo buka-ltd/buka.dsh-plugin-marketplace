@@ -4,8 +4,8 @@
     "zh-cn": "Buka 提示音"
   },
   "description": {
-    "en": "Plays a system sound when an agent finishes a task or pauses to wait for your input. Pick the two sounds in Settings → Notification sounds; selecting one previews it.",
-    "zh-cn": "任务结束、或 DSH 停下来等你输入时播放系统提示音。两个声音可在 设置 → 提示音 里选择，选中即试听。"
+    "en": "Plays a system sound when an agent finishes a task, waits for your input, has a plan sent back for changes, or is stopped manually. Pick all four sounds in Settings → Notification sounds; “None” turns a moment off.",
+    "zh-cn": "任务结束、等待你输入、计划被退回修改、手动终止任务时播放系统提示音。四个声音可在 设置 → 提示音 里选择，「无」表示不播放。"
   },
   "icon": "./icon.svg",
   "author": "Buka Ltd",
@@ -20,11 +20,15 @@
     "notify",
     "finish",
     "wait",
+    "plan",
+    "stop",
     "settings",
     "提示音",
     "通知",
     "完成",
     "等待",
+    "计划",
+    "终止",
     "声音",
     "设置"
   ]

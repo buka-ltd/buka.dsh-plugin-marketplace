@@ -1,29 +1,34 @@
 # @buka/dsh-plugin-bell
 
-任务结束、或 DSH 停下来等你操作时，播放一声系统提示音。两个声音都在 **设置 → 提示音** 里选，选中即试听。
+任务结束、DSH 停下来等你操作、计划被退回修改、或你手动终止任务时，播放一声系统提示音。四个声音都在 **设置 → 提示音** 里选，选中即试听；每个都可以设成「无」表示不播放。
 
-装好以后你就不必盯着屏幕等模型跑完：Agent 一轮任务真正结束会响**完成音**，DSH 弹出问题或审批等待你回复时会响**等待音**。
+装好以后你就不必盯着屏幕等模型跑完：Agent 一轮任务真正结束会响**完成音**，DSH 弹出问题或审批等待你回复时会响**等待音**。计划被退回修改、手动终止默认静音——这两个时机人通常就在屏幕前，想要提示的人可以单独打开。
 
 ## 什么时候响
 
 | 提示音 | 触发时机 | 依据 |
 | --- | --- | --- |
-| 完成音 | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + `ctx.agents.roots()` |
+| 完成音 | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + `ctx.agents.roots()`，完成前先看 `turn/end` 的原因 |
 | 等待音 | `ask_user_question` 发起提问、plan review 等待确认、工具调用请求审批 | Host waterfall 事件 `user-questions/request`、`approval/request` |
+| 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型 | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因 |
+| 手动终止音 | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务 | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user` |
 
-**手动终止不响完成音**：点 GUI 的终止按钮（或按停止快捷键）会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因，`aborted`（手动终止、会话归档、Agent 卸载）就跳过完成音；记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然要响。
+**手动终止不响完成音**：点终止按钮会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因：`aborted` 且取消来源是 `user` 时改播手动终止音（默认「无」）；会话归档、父级取消、插件卸载同样以 aborted 收尾，但它们不是手动停止，保持静音。记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然按那一轮的原因响。
 
-两个信号都来自 DSH 自己的生命周期，插件不轮询、不改会话日志、不截胡 waterfall 事件（只旁听后继续 `next()`）。
+**计划被退回不算任务完成**：plan review 卡片上的「要求修改」不会回答批准/拒绝选项，而是由 Web UI 以 `ASK_CANCELLED` 取消这次提问。`dsh-plan-mode` 收到取消后调用 `concludeTurn()`，这一轮随即以 `turn/end` `completed` 收尾，因此看起来和任务完成一模一样。插件在旁听 `user-questions/request` 时接住 `next()` 的拒绝结果：看到 `ASK_CANCELLED` 且请求带 `plan-review` 意图，就记下这个会话；等 idle 时改播计划被退回音（默认「无」），而不是完成音。如果退回后用户紧接着发消息、DSH 在同一驱动里直接开下一轮（中间没有 idle），标记会在 `turn/start` 时清掉，避免把下一轮真正的完成错当成计划退回。
 
-等待音的两个监听器用 `prepend: true` 注册：Web UI 的回答器由 `api-remotes` 更早注册，它会把请求转发给浏览器并等用户作答、期间不调用 `next()`；普通顺序的监听器会被它挡在后面收不到事件。排在前面响铃、再 `next()` 交回决定，才能既响铃又不影响 UI。
+四个信号都来自 DSH 自己的生命周期，插件不轮询、不改会话日志、不截胡 waterfall 事件（只旁听后继续 `next()`）。
+
+等待音的监听器用 `prepend: true` 注册：Web UI 的回答器由 `api-remotes` 更早注册，它会把请求转发给浏览器并等用户作答、期间不调用 `next()`；普通顺序的监听器会被它挡在后面收不到事件。排在前面响铃、再 `next()` 交回决定，才能既响铃又不影响 UI。计划被退回的音也是靠这个排在前面的监听器旁听 `next()` 的结果。
 
 子 Agent（subagent、workflow 子运行）结束时不会响：它们也发 `agent/status`，但不在 `ctx.agents.roots()` 里，插件按运行时归属过滤掉了。
 
 ## 设置页
 
-**设置 → 提示音** 里有两个下拉框（任务结束 / 等待输入），选项是 macOS 系统自带提示音：
+**设置 → 提示音** 里有四个下拉框（任务结束 / 等待输入 / 计划被退回修改 / 手动终止），选项是「无」加 macOS 系统自带提示音：
 
 ```text
+无
 Basso  Blow  Bottle  Frog  Funk  Glass  Hero  Morse
 Ping   Pop   Purr    Sosumi  Submarine  Tink
 ```
@@ -32,19 +37,19 @@ Ping   Pop   Purr    Sosumi  Submarine  Tink
 
 1. 浏览器一半通过 `ctx.configForms` 把选择写回 Host（插件 Config 的 volatile 字段）；
 2. Loader 不重载插件，只更新配置引用并派发 `loader/volatile-update`；
-3. Host 一半在这个事件里播放新选中的声音 —— 这就是试听。
+3. Host 一半在这个事件里播放新选中的声音 —— 这就是试听；选中「无」时不试听，之后那个时机也不响。
 
-默认：任务结束 `Glass`，等待输入 `Ping`。
+默认：任务结束 `Glass`，等待输入 `Ping`，计划被退回 `无`，手动终止 `无`。
 
 这些名字是 macOS 的 `/System/Library/Sounds/<name>.aiff`；Windows / Linux 上会回退到平台默认提示音（Windows `SystemSounds`，Linux `paplay` / `canberra-gtk-play` / `aplay`）。找不到播放器时只在日志里警告一次，不影响任务执行。
 
 ## 平台
 
-| 平台 | 完成音 | 等待音 |
-| --- | --- | --- |
-| macOS | 设置页选中的系统声音（默认 `Glass`） | 设置页选中的系统声音（默认 `Ping`） |
-| Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` |
-| Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） |
+| 平台 | 完成音 | 等待音 | 计划被退回音 | 手动终止音 |
+| --- | --- | --- | --- | --- |
+| macOS | 设置页选中的系统声音（默认 `Glass`） | 设置页选中的系统声音（默认 `Ping`） | 设置页选中的系统声音（默认「无」） | 设置页选中的系统声音（默认「无」） |
+| Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` | `SystemSounds.Question` | `SystemSounds.Hand` |
+| Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） | `dialog-information.oga`（同上） | `dialog-warning.oga`（同上） |
 
 ## 结构
 
@@ -53,7 +58,7 @@ Ping   Pop   Purr    Sosumi  Submarine  Tink
 | `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch` 声明它是 bundle、`dsh.client` 声明浏览器一半、`locale` / `icon` 导出让 Plugins 页展示 |
 | `cordis.patch.yml` | bundle 层唯一的一行：把自己作为 `sound-buka-bell` 插入组成 |
 | `lib/index.js` | Host 一半：导出 `name` / `inject` / `Config` / `apply`，监听生命周期事件、读写 volatile 声音配置并调用系统播放器 |
-| `client.js` | 浏览器一半：在 设置 → 提示音 注册页面，两个下拉框通过 `ctx.configForms` 读写 Host 配置 |
+| `client.js` | 浏览器一半：在 设置 → 提示音 注册页面，四个下拉框通过 `ctx.configForms` 读写 Host 配置 |
 | `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
 | `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
@@ -66,6 +71,6 @@ cd plugins/bell && pnpm install --ignore-workspace
 
 ## 验证安装
 
-在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库的索引地址，安装后在 **设置 → 提示音** 看到两个下拉框即成功。
+在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库的索引地址，安装后在 **设置 → 提示音** 看到四个下拉框即成功。
 
 本地调试也可以直接装目录：`dsh plugin --profile <profile> add "link:$PWD/plugins/bell"`。

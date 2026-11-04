@@ -1,9 +1,10 @@
 /**
- * `@buka/dsh-plugin-bell` 的浏览器一半：在 设置 → 提示音 里选两个声音。
+ * `@buka/dsh-plugin-bell` 的浏览器一半：在 设置 → 提示音 里选四个声音。
  *
  * 页面本身不保存任何状态：读写都走 DSH 的设置表单服务 `ctx.configForms`
  * （Host 设置的浏览器镜像）。写配置会路由回 Host 的 volatile 配置更新，
- * Host 插件监听到后播放一次新声音，于是「选中即试听」。
+ * Host 插件监听到后播放一次新声音，于是「选中即试听」；选中「无」时不试听，
+ * 之后那个时机也不响。
  *
  * 客户端模块格式固定为 `window.__ModuleLoader__.load({ id, factory })`，
  * `id` 必须等于包名；React 由浏览器模块表提供，不重复安装。
@@ -19,6 +20,9 @@ window.__ModuleLoader__.load({
 
     /** Host 插件行 id：设置表单按这个命名空间读写 Host 的 volatile 配置。 */
     const NAMESPACE = 'sound-buka-bell'
+
+    /** 与 Host 侧 `SILENT` 一致：设置页的「无」选项值。 */
+    const NONE = 'none'
 
     /** 与 Host 侧 `SYSTEM_SOUNDS` 保持一致的可选声音。 */
     const SOUNDS = [
@@ -43,9 +47,12 @@ window.__ModuleLoader__.load({
       nav: 'Notification sounds',
       title: 'Notification sounds',
       intro:
-        'Choose which macOS system sound plays when a task finishes or when DSH waits for your input. Picking a sound plays it once as a preview. No sound plays when you stop a task manually.',
+        'Choose which macOS system sound plays when a task finishes, when DSH waits for your input, when a plan is sent back for changes, or when you stop a task manually. Picking a sound plays it once as a preview; “None” turns that moment off. The plan and manual-stop sounds are off by default.',
       finish: 'Task finished',
       wait: 'Waiting for input',
+      plan: 'Plan sent back for changes',
+      abort: 'Task stopped manually',
+      none: 'None',
       saveFailed: 'Could not save the sound. Try again.',
       loading: 'Loading sound settings…',
       unavailable: 'This plugin has no editable configuration in the current profile.',
@@ -55,9 +62,13 @@ window.__ModuleLoader__.load({
     const zh = {
       nav: '提示音',
       title: '提示音',
-      intro: '选择任务结束、或 DSH 等待你输入时播放的 macOS 系统提示音。选中某个声音会立即试听一次；手动终止任务时不会响。',
+      intro:
+        '选择任务结束、DSH 等待你输入、计划被退回修改、手动终止任务时播放的 macOS 系统提示音。选中某个声音会立即试听一次；「无」表示这个时机不播放。计划被退回与手动终止默认不响。',
       finish: '任务结束',
       wait: '等待输入',
+      plan: '计划被退回修改',
+      abort: '手动终止',
+      none: '无',
       saveFailed: '保存失败，请重试。',
       loading: '正在读取提示音设置…',
       unavailable: '当前 profile 里这个插件没有可编辑的配置。',
@@ -105,6 +116,8 @@ window.__ModuleLoader__.load({
       const rows = [
         ['finish', t('finish')],
         ['wait', t('wait')],
+        ['plan', t('plan')],
+        ['abort', t('abort')],
       ].map(([field, label]) =>
         h(
           'label',
@@ -119,6 +132,7 @@ window.__ModuleLoader__.load({
               'aria-label': label,
               onChange: choose(field),
             },
+            h('option', { key: NONE, value: NONE }, t('none')),
             SOUNDS.map((name) => h('option', { key: name, value: name }, name)),
           ),
         ),
