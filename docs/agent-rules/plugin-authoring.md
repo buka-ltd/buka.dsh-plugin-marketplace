@@ -55,6 +55,24 @@ DSH 的插件就是 Cordis 插件；能被市场安装还要求它同时是一�
 - 需要改其他行的配置用 `config`；需要插多个插件就写多条（官方就是用一个 bundle 插 Host 服务与 UI 两行）
 - 补丁层只能声明「有哪些行」，不能声明「依赖哪些包」；依赖仍由 `package.json` 表达
 
+## 浏览器一半（可选）
+
+插件要往 Web UI 加页面或控件时，再给包加一个 `client.js` 并在 `package.json` 里声明：
+
+```jsonc
+{
+  "exports": { "./client": "./client.js" },
+  "files": ["lib/index.js", "client.js", "cordis.patch.yml"],
+  "dsh": { "client": { "platform": "web", "immediately": true } }
+}
+```
+
+`client.js` 的格式固定为 `window.__ModuleLoader__.load({ id: '<包名>', factory(require) { … return { inject, apply } } })`，`id` 必须等于包名；React 由浏览器模块表提供（`require('react')`），不要另装依赖。浏览器一半通过 Cordis 服务拿能力，例如 `ctx.slots` 注册插槽、`ctx.locale` 注册文案、`ctx.configForms` 读写 Host 的插件配置。
+
+要让插件配置能在设置页/插件页被编辑，Host 的 `Config` 字段必须声明 `.volatile()`（只有 volatile 字段可热更新、不重启插件）。一个内置例子是 [plugins/bell](../../plugins/bell)：Host 一半监听 `loader/volatile-update` 播放试听音，浏览器一半把页面注册进 `settings.section`。
+
+注意：**浏览器一半是在插件已加载之后才新增的**，DSH 对「该包没有 client」的判定有缓存，需要重启 DSH 才会加载；新装（或重启后）不受影响。
+
 ## 插件入口
 
 ```js

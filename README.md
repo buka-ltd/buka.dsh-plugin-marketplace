@@ -18,6 +18,13 @@ Buka Ltd 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 索引地址必须能直连（DSH 拒绝重定向），也不能带账号密码或 `?query`。索引默认缓存 10 分钟，看到旧列表就等一会儿或刷新。
 
+## 已登记插件
+
+| 目录 | 插件 | 用途 |
+| --- | --- | --- |
+| [plugins/hello](plugins/hello) | `@buka/dsh-plugin-hello` | 冒烟模板：注册 `buka_hello` 工具，验证市场 → 安装 → composition 链路 |
+| [plugins/bell](plugins/bell) | `@buka/dsh-plugin-bell` | 任务结束、或 DSH 停下来等你输入时播放系统提示音；声音可在 设置 → 提示音 里选择 |
+
 ## 仓库结构
 
 ```text
@@ -27,6 +34,7 @@ plugins/<dir>/              # 一个插件一个目录
   market.json               # 挂牌信息：标题、简介、图标、分类、标签、关键词
   cordis.patch.yml          # bundle 层：把自己插进 composition
   lib/index.js              # Cordis 插件：导出 name / inject / apply
+  client.js                 # 浏览器一半（可选）：Web UI 入口，dsh.client 声明
   icon.svg                  # Discover 页图标
 scripts/                    # 生成与校验索引，无第三方依赖
 schemas/index.schema.json   # format 1 的 JSON Schema（编辑期提示）

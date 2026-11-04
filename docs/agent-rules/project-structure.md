@@ -10,7 +10,8 @@ plugins/<dir>/              # 一个插件一个目录，目录名 = 包名后�
   package.json              # 包身份、engines.dsh、dsh.bundle.patch
   market.json               # 挂牌信息（不随包发布）
   cordis.patch.yml          # bundle 层补丁
-  lib/index.js              # Cordis 插件入口
+  lib/index.js              # Cordis 插件入口（Host 一半）
+  client.js                 # 浏览器一半（可选）：Web UI 入口，package.json 的 dsh.client 声明
   icon.svg                  # 展示图标
 scripts/
   build.mjs                 # 生成 dist/
