@@ -23,7 +23,7 @@ Buka Ltd 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 | 目录 | 插件 | 用途 |
 | --- | --- | --- |
 | [plugins/hello](plugins/hello) | `@buka/dsh-plugin-hello` | 冒烟模板：注册 `buka_hello` 工具，验证市场 → 安装 → composition 链路 |
-| [plugins/bell](plugins/bell) | `@buka/dsh-plugin-bell` | 任务结束、或 DSH 停下来等你输入时播放系统提示音；声音可在 设置 → 提示音 里选择 |
+| [plugins/bell](plugins/bell) | `@buka/dsh-plugin-bell` | 任务结束、等待你输入、计划被退回修改、手动终止时播放系统提示音；四个声音可在 设置 → 提示音 里选择（可设为「无」） |
 
 ## 仓库结构
 
