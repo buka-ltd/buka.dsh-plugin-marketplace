@@ -16,9 +16,6 @@ jobs:
   check:
     name: 校验索引与插件
     runs-on: ubuntu-latest
-    env:
-      # 索引里的安装地址必须指向公司仓库，不能是 PR 的 fork
-      DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,8 +26,14 @@ jobs:
         with:
           node-version: 22.20
       - run: pnpm run check
+        env:
+          # 索引里的安装地址必须指向公司仓库，不能是 PR 的 fork
+          DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
+      # 单测自己造 fixture，不该读这个变量，所以这一步不设它
       - run: pnpm test
       - run: pnpm run build
+        env:
+          DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
 
   deploy:
     name: 发布索引
@@ -44,8 +47,6 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    env:
-      DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +56,8 @@ jobs:
         with:
           node-version: 22.20
       - run: pnpm run build
+        env:
+          DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

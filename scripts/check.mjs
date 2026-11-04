@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { MAX_INLINE_ICON_BYTES, parseMarketIndex } from './lib/format.mjs'
-import { loadMarket, readJson } from './lib/market.mjs'
+import { loadMarket, readJson, sourceUrlFromEnvironment } from './lib/market.mjs'
 import { reportProblems } from './lib/report.mjs'
 
 const ROOT_MARKET_KEYS = new Set([
@@ -96,7 +96,7 @@ function checkInlineIcons(index) {
 }
 
 function main() {
-  const market = loadMarket()
+  const market = loadMarket({ sourceUrl: sourceUrlFromEnvironment() })
   problems.push(...market.problems)
   checkRepositoryFiles(market.root)
   checkPluginMarketFiles(market.root, market.plugins)

@@ -8,7 +8,7 @@ import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { loadMarket } from './lib/market.mjs'
+import { loadMarket, sourceUrlFromEnvironment } from './lib/market.mjs'
 import { formatProblems, reportProblems } from './lib/report.mjs'
 
 const { values } = parseArgs({
@@ -20,7 +20,7 @@ const { values } = parseArgs({
 })
 
 const outDir = path.resolve(values.out)
-const market = loadMarket({ sourceUrl: values['source-url'] })
+const market = loadMarket({ sourceUrl: values['source-url'] ?? sourceUrlFromEnvironment() })
 reportProblems(market.problems)
 
 if (market.problems.some((problem) => problem.level === 'error')) {

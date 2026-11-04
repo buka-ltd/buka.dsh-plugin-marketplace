@@ -81,7 +81,19 @@ function iconTarget(directory, icon) {
 }
 
 /**
+ * 命令行入口读取环境变量：CI 用 `DSH_MARKET_SOURCE_URL` 固定索引里的安装来源，
+ * 避免 PR 的 fork 地址混进索引。生成器本身不读环境变量，单测因此不受 CI 环境影响。
+ */
+export function sourceUrlFromEnvironment() {
+  const sourceUrl = process.env.DSH_MARKET_SOURCE_URL
+  return sourceUrl === undefined || sourceUrl === '' ? undefined : sourceUrl
+}
+
+/**
  * 读取仓库里的市场配置与全部插件，生成索引并收集问题。
+ *
+ * `sourceUrl` 为空时从仓库的 `origin` 推导；`DSH_MARKET_SOURCE_URL` 只由命令行入口
+ * （build/check）通过 `sourceUrlFromEnvironment()` 传进来，这里不读环境变量。
  *
  * @param {{ root?: string, sourceUrl?: string }} [options]
  * @returns {{
@@ -105,7 +117,7 @@ export function loadMarket(options = {}) {
   }
   const indexUrl = new URL(config.publicUrl)
 
-  let sourceUrl = options.sourceUrl ?? process.env.DSH_MARKET_SOURCE_URL
+  let sourceUrl = options.sourceUrl
   if (sourceUrl === undefined || sourceUrl === '') {
     let remote
     try {
