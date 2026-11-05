@@ -1,6 +1,6 @@
 # @buka/dsh-plugin-skills
 
-在**侧边栏**新增一个「技能」页面，顶部两个 Tab：
+在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`npx skills`](https://github.com/vercel-labs/skills) 安装和管理，并按来源决定卸载方式；
 - **收藏仓库**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub 链接、npm 包名），属于用户自己的书签；点仓库标题直接打开仓库页，旁边可复制安装命令；GitHub 仓库还能展开成一棵 skills 树（Host 拉取并缓存），看清仓库里有哪些可安装的 skill。
@@ -64,7 +64,7 @@ GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里�
 
 ## 页面
 
-侧边栏导航里（Plugins、Automation tasks 之后）出现一个「技能」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」+ 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
+侧边栏导航里（Plugins、Automation tasks 之后）出现一个「Skills」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」+ 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
 
 - **已安装**：标题行是名称 + 两个标签 —— 第一个是来源根（`agents` / `dsh`），第二个是安装来源（npx 管理时显示来源仓库，如 `vercel-labs/skills`；否则显示 `manual`）；卸载按钮在标题行右侧，点开后先二次确认再按上表选择方式执行。下面展示 skill 自己的 description（最多三行，超出显示 `…`），不展示安装时间；空列表会提示两个全局根目录的位置；
 - **收藏仓库**：顶部「来源 + 可选备注」输入行与「添加」主按钮，下面是卡片列表（标题可点开仓库页；标题行右侧是复制安装命令与移除，已安装的会带标记；GitHub 仓库左侧箭头展开 skills 树，目录可再折叠）；操作结果用页面底部的 Toast 提示。
@@ -95,7 +95,7 @@ Host 一半依赖 `@deepseek-ai/dsh-tools` 的 `defineTool` 来注册工具；�
 
 ## 验证安装
 
-在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「技能」图标、点开能看到列表即成功。本地调试也可以直接装目录：
+在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「Skills」图标、点开能看到列表即成功。本地调试也可以直接装目录：
 
 ```bash
 dsh plugin --profile <profile> add "link:$PWD/plugins/skills"

@@ -3,7 +3,7 @@
  *
  * 提供三件东西：
  *
- * - 包内 HTTP 路由，给浏览器一半的侧边栏「技能」页面用：
+ * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
  *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个；
  *   `GET /buka-skills/repos` 列出用户收藏的 npx skills 仓库，
  *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，

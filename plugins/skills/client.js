@@ -1,5 +1,5 @@
 /**
- * `@buka/dsh-plugin-skills` 的浏览器一半：侧边栏的「技能」页面。
+ * `@buka/dsh-plugin-skills` 的浏览器一半：侧边栏的「Skills」页面。
  *
  * DSH 的面板由两处注册拼成（见 `@deepseek-ai/dsh-client-ui-sidebar` 与
  * `@deepseek-ai/dsh-client-ui-layout` 的契约）：
@@ -131,9 +131,9 @@ window.__ModuleLoader__.load({
 
     /** 简体中文文案。 */
     const zh = {
-      panel: '技能',
-      title: '技能',
-      tabsLabel: '技能页面分区',
+      panel: 'Skills',
+      title: 'Skills',
+      tabsLabel: 'Skills 页面分区',
       tabInstalled: '已安装',
       tabRepos: '收藏仓库',
       refresh: '刷新',
@@ -509,7 +509,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 侧边栏「技能」页面。
+     * 侧边栏「Skills」页面。
      *
      * @param {{ t: function }} props 插槽注入的文案函数
      * @returns {object} React 元素
