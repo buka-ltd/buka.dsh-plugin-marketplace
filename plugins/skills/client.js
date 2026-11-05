@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
       IconCopyOutlineRegular,
       IconPlusOutlineRegular,
       IconRefreshOutlineRegular,
+      IconSkillOutlineRegular,
       IconTrashOutlineRegular,
       IconWarningOutlineRegular,
       writeClipboard,
@@ -479,33 +480,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 侧边栏的图标。侧边栏只给尺寸与选中态；颜色通过 `currentColor` 继承
-     * 面板行的前景色，不自己写死颜色。
+     * 侧边栏的图标。
+     *
+     * 复用基座自带的 skill 图标（文档 + 星芒），与 DSH 自己的 skill 界面
+     * 保持同一套图形；侧边栏只给尺寸与选中态，颜色通过 `currentColor`
+     * 继承面板行的前景色，不自己写死颜色。
      *
      * @param {{ size: number, active?: boolean }} props 侧边栏的图标入参
      * @returns {object} React 元素
      */
     function SkillsPanelIcon({ size }) {
-      return h(
-        'svg',
-        {
-          width: size,
-          height: size,
-          viewBox: '0 0 16 16',
-          fill: 'none',
-          'aria-hidden': true,
-        },
-        h('path', {
-          d: 'M8 2.4l1.35 3.25L12.6 7l-3.25 1.35L8 11.6 6.65 8.35 3.4 7l3.25-1.35z',
-          fill: 'currentColor',
-        }),
-        h('path', {
-          d: 'M4.4 13.1h7.2',
-          stroke: 'currentColor',
-          strokeWidth: 1.3,
-          strokeLinecap: 'round',
-        }),
-      )
+      return h(IconSkillOutlineRegular, { size })
     }
 
     /**
