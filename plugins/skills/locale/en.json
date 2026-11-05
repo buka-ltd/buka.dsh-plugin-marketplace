@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Buka Skills",
+    "description": "Lists the skills installed globally for every DSH session, uninstalls each through the right path, and keeps a personal list of npx skills sources with a cached skills tree per GitHub repository."
+  }
+}

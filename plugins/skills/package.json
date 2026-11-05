@@ -1,0 +1,44 @@
+{
+  "name": "@buka/dsh-plugin-skills",
+  "version": "0.1.0",
+  "description": "In a sidebar page, lists the skills installed globally for every DSH session, flags the ones the npx skills CLI manages, uninstalls each through the right path, and keeps a personal list of npx skills repositories to install later",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "lib/index.js",
+    "lib/skill-store.js",
+    "lib/npx.js",
+    "lib/repo-store.js",
+    "lib/repo-skills.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "engines": {
+    "node": ">=22.20",
+    "dsh": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

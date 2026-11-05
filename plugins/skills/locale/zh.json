@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Buka 技能",
+    "description": "列出对所有会话生效的全局 skills 并按来源选择正确的卸载方式，同时记下常用的 npx skills 来源，GitHub 仓库可展开成带缓存的 skills 树。"
+  }
+}
