@@ -3,7 +3,7 @@
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`npx skills`](https://github.com/vercel-labs/skills) 安装和管理，并按来源决定卸载方式；
-- **收藏仓库**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub 链接、npm 包名），属于用户自己的书签；点仓库标题直接打开仓库页，旁边可复制安装命令；GitHub 仓库还能展开成一棵 skills 树（Host 拉取并缓存），看清仓库里有哪些可安装的 skill。
+- **收藏**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub 链接、npm 包名），属于用户自己的书签；标题行右侧「刷新」旁边的「收藏」按钮打开对话框，填「仓库」与「备注」后提交；点仓库标题直接打开仓库页，卡片右侧的「删除」按钮（与已安装列表的卸载按钮同款样式）移除收藏；GitHub 仓库还能展开成一棵 skills 树（Host 拉取并缓存），看清仓库里有哪些可安装的 skill。
 
 ## 列出什么
 
@@ -43,15 +43,15 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 卸载请求在 Host 里串行执行：`npx skills` 会整份重写共享的 lockfile，两个卸载并发可能互相覆盖条目。
 
-## 收藏仓库
+## 收藏
 
 第二个 Tab 是用户自己的书签，和已安装列表互不影响：
 
-- 输入 `owner/repo`、GitHub 链接、任意 http(s) 链接，或 `npx skills add` 支持的包名（如 `notion`、`@scope/pkg`）；
+- 点标题行右侧的「收藏」按钮弹出对话框，填仓库与备注后提交；仓库支持 `owner/repo`、GitHub 链接、任意 http(s) 链接，或 `npx skills add` 支持的包名（如 `notion`、`@scope/pkg`）；
 - 来源在写入前规范化：`https://github.com/foo/bar.git`、`www.github.com/foo/bar` 都会收敛成 `foo/bar`，再用小写值去重，所以同一个仓库的链接形式不会重复收藏；
-- 每行可以「复制命令」（`npx skills add <来源> -g`）与移除收藏；标题本身就是仓库页链接，已安装列表里出现的来源会标「已安装」；
+- 每行右侧的「删除」按钮移除收藏（outline + 危险色，与已安装列表的卸载按钮一致）；标题本身就是仓库页链接，已安装列表里出现的来源会标「已安装」；
 - 数据存在 DSH home 下：`<DSH_HOME 或 ~/.dsh>/buka-skills/repos.json`。写入是原子的（临时文件 + rename），文件权限 `0600`；
-- 文件存在却解析不了（不是 JSON、结构不对、版本比插件新）时，页面提示并**拒绝写入**——否则「添加一条」会悄悄清掉其它收藏。
+- 文件存在却解析不了（不是 JSON、结构不对、版本比插件新）时，页面提示、禁用「收藏」按钮并**拒绝写入**——否则「收藏一条」会悄悄清掉其它收藏。
 
 ### 仓库 skills 树
 
@@ -64,10 +64,10 @@ GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里�
 
 ## 页面
 
-侧边栏导航里（Plugins、Automation tasks 之后）出现一个「Skills」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」+ 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
+侧边栏导航里（Plugins、Automation tasks 之后）出现一个「Skills」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `Modal` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」与「收藏」两个同尺寸按钮 + 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
 
 - **已安装**：标题行是名称 + 两个标签 —— 第一个是来源根（`agents` / `dsh`），第二个是安装来源（npx 管理时显示来源仓库，如 `vercel-labs/skills`；否则显示 `manual`）；卸载按钮在标题行右侧，点开后先二次确认再按上表选择方式执行。下面展示 skill 自己的 description（最多三行，超出显示 `…`），不展示安装时间；空列表会提示两个全局根目录的位置；
-- **收藏仓库**：顶部「来源 + 可选备注」输入行与「添加」主按钮，下面是卡片列表（标题可点开仓库页；标题行右侧是复制安装命令与移除，已安装的会带标记；GitHub 仓库左侧箭头展开 skills 树，目录可再折叠）；操作结果用页面底部的 Toast 提示。
+- **收藏**：标题行右侧常驻的「收藏」按钮（两个 Tab 都有，与「刷新」同尺寸）打开对话框，填「仓库」与「备注」后提交；页面本身只有卡片列表（标题可点开仓库页；标题行右侧是「删除」按钮，已安装的会带标记；GitHub 仓库左侧箭头展开 skills 树，目录可再折叠）；操作结果用页面底部的 Toast 提示，对话框里的失败留在对话框内提示。
 
 页面只做展示与触发，列表、卸载、收藏与仓库树的读写都走 Host 一半注册的包内路由（`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…&refresh=1`），沿用 web 组合的信任栅栏，只接受本机同源请求。
 
@@ -84,9 +84,9 @@ GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里�
 | `lib/index.js` | Host 一半：注册列表 / 卸载 / 收藏 / 仓库 skills 树路由与 `buka_skills` 工具 |
 | `lib/skill-store.js` | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试 |
 | `lib/npx.js` | 定位 `npx`（PATH → mise/nvm/Volta/Homebrew → npm 自带 `npx-cli.js`）并执行 `npx skills remove` |
-| `lib/repo-store.js` | 收藏仓库的规范化 / 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包 |
+| `lib/repo-store.js` | 收藏来源的规范化 / 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包 |
 | `lib/repo-skills.js` | 拉 GitHub 仓库树、按 `npx skills` 的规则找 `SKILL.md`、读 frontmatter 建树，并把结果按 TTL 缓存到 DSH home |
-| `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏仓库）都通过 Host 路由取数与操作；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
+| `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏）都通过 Host 路由取数与操作，收藏用 `Modal` 对话框录入仓库与备注；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
 | `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
 | `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`（插件安装卡片），不需要激活插件 |
@@ -107,7 +107,7 @@ dsh plugin --profile <profile> add "link:$PWD/plugins/skills"
 - 识别依赖 `npx skills` 当前的 lockfile 结构（version 3，位置随 `XDG_STATE_HOME` 变化）；更旧版本的 lockfile 会被当作不可用并拒绝自动卸载。
 - `npx skills remove` 需要本机有 Node.js / npm；离线且 npx 缓存里没有该包时会失败，错误会原样显示在页面上。
 - 同名 skill 同时存在于两个全局根时，两行都会列出；卸载其中一行只影响对应根目录。
-- 收藏页只记录来源，不会替你安装：「复制命令」拿到的是 `npx skills add <来源> -g`，安装范围与 skill 选择仍由该命令决定。
+- 收藏页只记录来源，不会替你安装、也不生成安装命令：安装仍要自己执行 `npx skills add <来源> -g`，安装范围与 skill 选择由该命令决定。
 - 收藏文件损坏时页面只读不写，修复或删除 `buka-skills/repos.json` 后刷新即可恢复。
 - 仓库树只支持 GitHub；要访问私有仓库或避开匿名限额，给 Host 进程设置 `GITHUB_TOKEN` / `GH_TOKEN`。
 - 仓库树按 30 分钟 TTL 缓存，仓库里的 skill 刚更新时可能还是旧列表；点顶部「刷新」可以强制重拉已展开的仓库。

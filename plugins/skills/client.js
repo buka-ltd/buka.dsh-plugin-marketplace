@@ -12,9 +12,12 @@
  *
  * - 「已安装」：两个全局 skills 根目录下现有的 skill，标注哪些由 npx skills
  *   管理，并提供按来源选择的卸载入口；
- * - 「收藏仓库」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub 链接
- *   或包名），用于以后 `npx skills add` 时随手取用；可以复制安装命令、打开
- *   仓库、移除收藏。
+ * - 「收藏」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub 链接
+ *   或包名），用于以后 `npx skills add` 时随手取用；点标题打开仓库，卡片右侧
+ *   的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。
+ *
+ * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
+ * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
  *
  * 视觉与交互直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`
  * （模块表里的静态项，不需要声明 external）：`Button` / `Input` /
@@ -45,13 +48,12 @@ window.__ModuleLoader__.load({
       StateDot,
       IconBranchOutlineRegular,
       IconChevronRightOutlineRegular,
-      IconCopyOutlineRegular,
       IconPlusOutlineRegular,
       IconRefreshOutlineRegular,
       IconSkillOutlineRegular,
       IconTrashOutlineRegular,
       IconWarningOutlineRegular,
-      writeClipboard,
+      Modal,
     } = require('@deepseek-ai/dsh-client-ui-primitives')
 
     /** 词典命名空间。 */
@@ -67,6 +69,9 @@ window.__ModuleLoader__.load({
     const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
     const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
 
+    /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
+    const SAVE_FORM_ID = 'buka-skills-save-form'
+
     /** Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。 */
     const TABS = [
       { value: 'installed', id: 'buka-skills-tab-installed', panelId: 'buka-skills-panel-installed' },
@@ -79,7 +84,7 @@ window.__ModuleLoader__.load({
       title: 'Skills',
       tabsLabel: 'Skill sections',
       tabInstalled: 'Installed',
-      tabRepos: 'Saved repos',
+      tabRepos: 'Saved',
       refresh: 'Refresh',
       loading: 'Loading…',
       loadFailed: 'Request failed:',
@@ -90,6 +95,7 @@ window.__ModuleLoader__.load({
       uninstalling: 'Uninstalling…',
       confirmRemove: 'Uninstall',
       cancel: 'Cancel',
+      close: 'Close',
       confirmNpx:
         'npx skills will remove this skill: the copy in ~/.agents/skills, the links in agent directories, and its lockfile entry.',
       confirmLocal: 'This skill was not installed by npx skills, so its directory is deleted directly.',
@@ -101,14 +107,17 @@ window.__ModuleLoader__.load({
         'The npx skills lockfile exists but cannot be used, so skills under ~/.agents are shown as manual and cannot be uninstalled here until it is fixed:',
       warningsLabel: 'Some skill directories could not be read:',
       repoEmpty: 'No saved skill repositories yet.',
-      addPlaceholder: 'owner/repo or a GitHub link',
-      notePlaceholder: 'Note (optional)',
-      add: 'Add',
-      adding: 'Adding…',
+      dialogTitle: 'Save repository',
+      fieldSource: 'Repository',
+      fieldNote: 'Note',
+      addPlaceholder: 'owner/repo, a GitHub link, or a package name',
+      notePlaceholder: 'Optional',
+      add: 'Save',
+      adding: 'Saving…',
       added: 'Saved:',
-      removeRepo: 'Remove',
-      removing: 'Removing…',
-      removed: 'Removed:',
+      removeRepo: 'Delete',
+      removing: 'Deleting…',
+      removed: 'Deleted:',
       duplicate: 'Already saved:',
       invalidSource: 'Invalid source: use owner/repo, a GitHub link, an http(s) link, or a package name.',
       invalidNote: 'The note is limited to 200 characters.',
@@ -116,9 +125,6 @@ window.__ModuleLoader__.load({
       addFailed: 'Could not save:',
       removeFailed: 'Could not remove:',
       installedBadge: 'installed',
-      copyCommand: 'Copy command',
-      copied: 'Install command copied.',
-      copyFailed: 'Could not copy to the clipboard:',
       expandRepo: 'Show skills',
       collapseRepo: 'Hide skills',
       treeLoading: 'Loading skills…',
@@ -136,7 +142,7 @@ window.__ModuleLoader__.load({
       title: 'Skills',
       tabsLabel: 'Skills 页面分区',
       tabInstalled: '已安装',
-      tabRepos: '收藏仓库',
+      tabRepos: '收藏',
       refresh: '刷新',
       loading: '正在读取…',
       loadFailed: '请求失败：',
@@ -147,6 +153,7 @@ window.__ModuleLoader__.load({
       uninstalling: '正在卸载…',
       confirmRemove: '确认卸载',
       cancel: '取消',
+      close: '关闭',
       confirmNpx: '这是 npx skills 安装的 skill：会删除 ~/.agents/skills 里的副本、各 agent 目录里的链接，以及 lockfile 记录。',
       confirmLocal: '这个 skill 不是 npx skills 安装的，将直接删除它的目录。',
       removedWithNpx: '已通过 npx skills 卸载：',
@@ -157,24 +164,24 @@ window.__ModuleLoader__.load({
         'npx skills 的 lockfile 存在却无法使用：~/.agents 下的 skill 暂按手工安装展示，修好它之前不能在这里卸载：',
       warningsLabel: '部分 skills 目录无法读取：',
       repoEmpty: '还没有收藏任何仓库。',
-      addPlaceholder: 'owner/repo 或 GitHub 链接',
-      notePlaceholder: '备注（可选）',
-      add: '添加',
-      adding: '添加中…',
+      dialogTitle: '收藏',
+      fieldSource: '仓库',
+      fieldNote: '备注',
+      addPlaceholder: 'owner/repo、GitHub 链接或包名',
+      notePlaceholder: '可选',
+      add: '收藏',
+      adding: '收藏中…',
       added: '已收藏：',
-      removeRepo: '移除',
-      removing: '移除中…',
-      removed: '已移除：',
+      removeRepo: '删除',
+      removing: '删除中…',
+      removed: '已删除：',
       duplicate: '已经收藏过：',
       invalidSource: '来源格式不对：只支持 owner/repo、GitHub 链接、http(s) 链接或 npm 包名。',
       invalidNote: '备注最长 200 个字符。',
       storeUnreadable: '收藏文件无法解析，请先修复或删除它：',
       addFailed: '收藏失败：',
-      removeFailed: '移除失败：',
+      removeFailed: '删除失败：',
       installedBadge: '已安装',
-      copyCommand: '复制命令',
-      copied: '已复制安装命令。',
-      copyFailed: '复制失败，请手动执行：',
       expandRepo: '展开 skills',
       collapseRepo: '收起 skills',
       treeLoading: '正在获取 skills…',
@@ -189,9 +196,15 @@ window.__ModuleLoader__.load({
     /**
      * 页面样式：结构与 Plugins 页面一致（标题行、Tab 行、960px 内容区、
      * 卡片列表），颜色与尺寸只用主题 token 和 DSH 的圆角/焦点 token。
+     *
+     * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
+     * 「已安装」比视口高、出现滚动条，「收藏」没有；滚动条一出现/一消失，
+     * 内容盒就窄/宽一个滚动条宽度，居中的标题、Tab 行和列表整体左右平移
+     * 半个滚动条宽度——切 Tab 时看起来就是整页左右抖一下。`scrollbar-gutter:
+     * stable` 常驻预留滚动条槽位，两个 Tab 内容盒等宽，版面不再跟着滚动条跳。
      */
     const CSS = `
-.buka-skills-page{--buka-skills-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-skills-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden auto;overscroll-behavior:contain}
+.buka-skills-page{--buka-skills-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-skills-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden auto;scrollbar-gutter:stable;overscroll-behavior:contain}
 @media (width<=767px){.buka-skills-page{--buka-skills-inset:20px}}
 .buka-skills-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-skills-inset));max-width:none;margin-inline:calc(-1 * var(--buka-skills-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-skills-inset) 0;background:var(--dsw-alias-bg-base);z-index:1;position:sticky;top:0}
 .buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:16px}
@@ -245,16 +258,12 @@ window.__ModuleLoader__.load({
 .buka-skills-meta{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-skills-hint{color:var(--dsw-alias-state-warn-primary);margin:2px 0 0;font-size:12px;line-height:18px}
 .buka-skills-danger{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent)}
-.buka-skills-iconButton{border-radius:var(--dsw-radius-sm);width:28px;height:28px;color:var(--dsw-alias-label-caption);cursor:pointer;background:0 0;border:0;justify-content:center;align-items:center;display:inline-flex;padding:0}
-@media (hover:hover){.buka-skills-iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
-.buka-skills-iconButton:active{background:var(--dsw-alias-interactive-bg-active)}
-.buka-skills-iconButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-.buka-skills-iconButton.buka-skills-iconDanger{color:var(--dsw-alias-state-error-primary)}
-@media (hover:hover){.buka-skills-iconButton.buka-skills-iconDanger:hover{background:var(--dsw-alias-interactive-bg-hover-danger,var(--dsw-alias-interactive-bg-hover))}}
-.buka-skills-form{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-.buka-skills-addButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
-.buka-skills-inputSource{flex:1 1 260px;display:flex;min-width:0}
-.buka-skills-inputNote{flex:0 1 220px;display:flex;min-width:0}
+.buka-skills-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
+.buka-skills-saveForm{display:flex;flex-direction:column;gap:16px}
+.buka-skills-field{display:flex;flex-direction:column;gap:6px}
+.buka-skills-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:500;line-height:20px}
+.buka-skills-fieldInput{box-sizing:border-box;display:flex;width:100%;min-width:0}
+.buka-skills-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px}
 `
 
     /**
@@ -328,16 +337,6 @@ window.__ModuleLoader__.load({
         return `https://github.com/${source}`
       }
       return ''
-    }
-
-    /**
-     * `npx skills add` 的命令行；收藏页的「复制命令」用它。
-     *
-     * @param {string} source 已规范化的来源
-     * @returns {string}
-     */
-    function installCommand(source) {
-      return `npx skills add ${source} -g`
     }
 
     /**
@@ -511,9 +510,11 @@ window.__ModuleLoader__.load({
       const [source, setSource] = React.useState('')
       const [note, setNote] = React.useState('')
       const [adding, setAdding] = React.useState(false)
+      const [dialogOpen, setDialogOpen] = React.useState(false)
+      const [addError, setAddError] = React.useState(null)
       const [removing, setRemoving] = React.useState(null)
       // 收藏仓库的树：哪些卡片展开、各仓库拿到（或正在拿）的树、哪些目录收起来。
-      // 按仓库 id 存，移除收藏后由下面的 prune 清掉，避免留下孤儿状态。
+      // 按仓库 id 存，删除收藏后由下面的 prune 清掉，避免留下孤儿状态。
       const [expandedRepos, setExpandedRepos] = React.useState({})
       const [trees, setTrees] = React.useState({})
       const [collapsedDirs, setCollapsedDirs] = React.useState({})
@@ -564,7 +565,7 @@ window.__ModuleLoader__.load({
         return keys
       }, [installedData])
 
-      // 收藏被移除（或宿主刷新后消失）时，把它的展开态与树一起丢掉。
+      // 收藏被删除（或宿主刷新后消失）时，把它的展开态与树一起丢掉。
       React.useEffect(() => {
         if (savedData === null) return
         const ids = new Set(repos.map((repo) => repo.id))
@@ -685,7 +686,29 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 收藏一个仓库；Host 负责校验、去重与写文件。
+       * 打开「收藏」对话框：清掉上一次的失败提示与残留输入。
+       * 收藏文件坏掉时不能写，按钮本身已禁用，这里再兜一次。
+       */
+      function openSaveDialog() {
+        if (adding || storeCorrupt) return
+        setAddError(null)
+        setSource('')
+        setNote('')
+        setDialogOpen(true)
+      }
+
+      /** 关闭「收藏」对话框；提交中不允许关闭，避免请求回来时状态错位。 */
+      function closeSaveDialog() {
+        if (adding) return
+        setDialogOpen(false)
+        setAddError(null)
+        setSource('')
+        setNote('')
+      }
+
+      /**
+       * 收藏一个仓库；Host 负责校验、去重与写文件。对话框内的失败留在对话框里
+       * 显示，用户可以直接改了再提交，不用关掉重开。
        *
        * @param {object} event 表单提交事件
        */
@@ -693,17 +716,17 @@ window.__ModuleLoader__.load({
         event.preventDefault()
         if (adding) return
         const value = source.trim()
-        if (value === '') {
-          flash('error', t('invalidSource'))
-          return
-        }
+        // 空输入时「收藏」按钮是禁用的；回车提交也直接忽略，不弹格式错误。
+        if (value === '') return
         setAdding(true)
+        setAddError(null)
         try {
           const body = await requestJson(REPOS_ROUTE, {
             method: 'POST',
             body: JSON.stringify({ source: value, note }),
           })
           setSaved({ data: body, error: null, loading: false })
+          setDialogOpen(false)
           setSource('')
           setNote('')
           flash('success', `${t('added')} ${body.repo?.source ?? value}`)
@@ -719,14 +742,14 @@ window.__ModuleLoader__.load({
                   : code === 'store-unreadable'
                     ? t('storeUnreadable')
                     : `${t('addFailed')} ${messageOf(failure)}`
-          flash('error', text)
+          setAddError(text)
         } finally {
           setAdding(false)
         }
       }
 
       /**
-       * 移除一条收藏；只动收藏文件，不碰已安装的 skill。
+       * 删除一条收藏；只动收藏文件，不碰已安装的 skill。
        *
        * @param {{ id: string, source: string }} repo 一条收藏
        */
@@ -749,18 +772,6 @@ window.__ModuleLoader__.load({
         } finally {
           setRemoving(null)
         }
-      }
-
-      /**
-       * 复制 `npx skills add` 命令；剪贴板不可用时把命令放进提示里。
-       *
-       * @param {{ source: string }} repo 一条收藏
-       */
-      async function copyCommand(repo) {
-        const command = installCommand(repo.source)
-        const ok = await writeClipboard(command)
-        if (ok) flash('success', t('copied'))
-        else flash('error', `${t('copyFailed')} ${command}`)
       }
 
       /** 切 Tab 时清掉上一条提示，避免串台。 */
@@ -987,7 +998,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** 「收藏仓库」页：添加表单、卡片列表与「已安装」标记。 */
+      /** 「收藏」页：卡片列表与「已安装」标记；新增走标题行右侧的「收藏」按钮。 */
       function renderSaved() {
         const rows = repos.map((repo) => {
           const link = repoUrl(repo.source)
@@ -1038,33 +1049,28 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'buka-skills-titleActions' },
-                  h(
-                    Button,
-                    {
-                      variant: 'outline',
-                      size: 'sm',
-                      icon: h(IconCopyOutlineRegular, { size: 13 }),
-                      onClick: () => copyCommand(repo),
-                    },
-                    t('copyCommand'),
-                  ),
-                  h(
-                    Tooltip,
-                    { label: t('removeRepo'), side: 'top', delayMs: 400 },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'buka-skills-iconButton buka-skills-iconDanger',
-                        'aria-label': `${t('removeRepo')} ${repo.source}`,
-                        disabled: removing !== null,
-                        onClick: () => removeRepo(repo),
-                      },
-                      removing === repo.id
-                        ? h(StateDot, { state: 'ongoing', size: 14 })
-                        : h(IconTrashOutlineRegular, { size: 16 }),
-                    ),
-                  ),
+                  // 样式与已安装列表的卸载按钮一致（outline + 危险色 + 文案）；
+                  // 删除中整块换成状态点，与卸载一致，也避免请求期间重复点击。
+                  removing === repo.id
+                    ? h(
+                        'span',
+                        { className: 'buka-skills-statusWithDot' },
+                        h(StateDot, { state: 'ongoing' }),
+                        t('removing'),
+                      )
+                    : h(
+                        Button,
+                        {
+                          variant: 'outline',
+                          size: 'sm',
+                          className: 'buka-skills-danger',
+                          icon: h(IconTrashOutlineRegular, { size: 13 }),
+                          'aria-label': `${t('removeRepo')} ${repo.source}`,
+                          onClick: () => removeRepo(repo),
+                          disabled: removing !== null,
+                        },
+                        t('removeRepo'),
+                      ),
                 ),
               ),
               typeof repo.note === 'string' && repo.note !== ''
@@ -1108,46 +1114,6 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null,
-          h(
-            'form',
-            { className: 'buka-skills-form', onSubmit: addRepo },
-            h(Input, {
-              className: 'buka-skills-inputSource',
-              type: 'text',
-              value: source,
-              placeholder: t('addPlaceholder'),
-              'aria-label': t('addPlaceholder'),
-              autoComplete: 'off',
-              spellCheck: false,
-              disabled: adding || storeCorrupt,
-              icon: h(IconBranchOutlineRegular, { size: 16 }),
-              onChange: (event) => setSource(event.target.value),
-            }),
-            h(Input, {
-              className: 'buka-skills-inputNote',
-              type: 'text',
-              value: note,
-              placeholder: t('notePlaceholder'),
-              'aria-label': t('notePlaceholder'),
-              autoComplete: 'off',
-              spellCheck: false,
-              maxLength: 200,
-              disabled: adding || storeCorrupt,
-              onChange: (event) => setNote(event.target.value),
-            }),
-            h(
-              Button,
-              {
-                variant: 'primary',
-                size: 'sm',
-                type: 'submit',
-                className: 'buka-skills-addButton',
-                icon: h(IconPlusOutlineRegular, { size: 13 }),
-                disabled: adding || storeCorrupt || source.trim() === '',
-              },
-              adding ? t('adding') : t('add'),
-            ),
-          ),
           savedData === null
             ? null
             : rows.length === 0 && !saved.loading
@@ -1179,6 +1145,7 @@ window.__ModuleLoader__.load({
                   {
                     variant: 'outline',
                     size: 'sm',
+                    className: 'buka-skills-toolbarButton',
                     'aria-label': t('refresh'),
                     'aria-busy': loading,
                     disabled: loading,
@@ -1187,6 +1154,20 @@ window.__ModuleLoader__.load({
                   },
                   t('refresh'),
                 ),
+              ),
+              // 「收藏」按钮常驻标题行（两个 Tab 都能用）：紧挨「刷新」，两者同一尺寸。
+              h(
+                Button,
+                {
+                  variant: 'primary',
+                  size: 'sm',
+                  className: 'buka-skills-toolbarButton',
+                  icon: h(IconPlusOutlineRegular, { size: 13 }),
+                  'aria-label': t('add'),
+                  disabled: storeCorrupt,
+                  onClick: openSaveDialog,
+                },
+                t('add'),
               ),
             ),
             h(
@@ -1225,6 +1206,70 @@ window.__ModuleLoader__.load({
               holdMs: 3200,
               onDone: () => setNotice(null),
             }),
+        // 「收藏」对话框：仓库必填、备注可选；提交失败留在框里提示，
+        // 提交中不响应关闭（遮罩点击 / Esc / 右上角都走 onClose）。
+        h(
+          Modal,
+          {
+            open: dialogOpen,
+            onClose: closeSaveDialog,
+            title: t('dialogTitle'),
+            closeLabel: t('close'),
+            footer: h(
+              React.Fragment,
+              null,
+              h(Button, { variant: 'outline', onClick: closeSaveDialog, disabled: adding }, t('cancel')),
+              h(
+                Button,
+                {
+                  variant: 'primary',
+                  type: 'submit',
+                  form: SAVE_FORM_ID,
+                  disabled: adding || source.trim() === '',
+                },
+                adding ? t('adding') : t('add'),
+              ),
+            ),
+          },
+          h(
+            'form',
+            { id: SAVE_FORM_ID, className: 'buka-skills-saveForm', onSubmit: addRepo },
+            h(
+              'label',
+              { className: 'buka-skills-field' },
+              h('span', { className: 'buka-skills-fieldLabel' }, t('fieldSource')),
+              h(Input, {
+                className: 'buka-skills-fieldInput',
+                type: 'text',
+                value: source,
+                placeholder: t('addPlaceholder'),
+                autoComplete: 'off',
+                spellCheck: false,
+                disabled: adding,
+                'data-modal-autofocus': '',
+                icon: h(IconBranchOutlineRegular, { size: 16 }),
+                onChange: (event) => setSource(event.target.value),
+              }),
+            ),
+            h(
+              'label',
+              { className: 'buka-skills-field' },
+              h('span', { className: 'buka-skills-fieldLabel' }, t('fieldNote')),
+              h(Input, {
+                className: 'buka-skills-fieldInput',
+                type: 'text',
+                value: note,
+                placeholder: t('notePlaceholder'),
+                autoComplete: 'off',
+                spellCheck: false,
+                maxLength: 200,
+                disabled: adding,
+                onChange: (event) => setNote(event.target.value),
+              }),
+            ),
+            addError === null ? null : h('p', { className: 'buka-skills-formError', role: 'alert' }, addError),
+          ),
+        ),
       )
     }
 

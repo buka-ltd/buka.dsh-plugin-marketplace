@@ -24,7 +24,7 @@ Buka Ltd 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 | --- | --- | --- |
 | [plugins/hello](plugins/hello) | `@buka/dsh-plugin-hello` | 冒烟模板：注册 `buka_hello` 工具，验证市场 → 安装 → composition 链路 |
 | [plugins/bell](plugins/bell) | `@buka/dsh-plugin-bell` | 任务结束、等待你输入、计划被退回修改、手动终止时播放系统提示音；四个声音可在 设置 → 提示音 里选择（可设为「无」） |
-| [plugins/skills](plugins/skills) | `@buka/dsh-plugin-skills` | 侧边栏新增「Skills」页面：「已安装」列出全局 skills 并识别哪些由 `npx skills` 管理、按来源选择卸载方式；「收藏仓库」记录常用的 npx skills 来源，标题即仓库链接，GitHub 仓库可展开成带缓存的 skills 树 |
+| [plugins/skills](plugins/skills) | `@buka/dsh-plugin-skills` | 侧边栏新增「Skills」页面：「已安装」列出全局 skills 并识别哪些由 `npx skills` 管理、按来源选择卸载方式；「收藏」记录常用的 npx skills 来源，点「刷新」旁边的「收藏」按钮在对话框里填仓库与备注，标题即仓库链接，GitHub 仓库可展开成带缓存的 skills 树 |
 
 ## 仓库结构
 
