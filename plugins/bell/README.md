@@ -1,6 +1,6 @@
 # @buka/dsh-plugin-bell
 
-任务结束、DSH 停下来等你操作、计划被退回修改、或你手动终止任务时，播放一声系统提示音。四个声音都在 **设置 → 提示音** 里选，选中即试听；每个都可以设成「无」表示不播放。
+任务结束、DSH 停下来等你操作、计划被退回修改、或你手动终止任务时，播放一声提示音。**设置 → 提示音** 里点一行就进入该时机的独立声音列表，点一项即选中并试听，听完点「返回」回到四行总览；候选是 macOS 系统自带音与插件自带的「你干嘛~哎哟」梗语音，每个时机都可以设成「无」表示不播放。
 
 装好以后你就不必盯着屏幕等模型跑完：Agent 一轮任务真正结束会响**完成音**，DSH 弹出问题或审批等待你回复时会响**等待音**。计划被退回修改、手动终止默认静音——这两个时机人通常就在屏幕前，想要提示的人可以单独打开。
 
@@ -25,31 +25,60 @@
 
 ## 设置页
 
-**设置 → 提示音** 里有四个下拉框（任务结束 / 等待输入 / 计划被退回修改 / 手动终止），选项是「无」加 macOS 系统自带提示音：
+**设置 → 提示音** 分两级页面。
+
+第一级是四行，对应四个时机（任务结束 / 等待输入 / 计划被退回修改 / 手动终止），行上显示当前声音：
 
 ```text
-无
-Basso  Blow  Bottle  Frog  Funk  Glass  Hero  Morse
-Ping   Pop   Purr    Sosumi  Submarine  Tink
+任务结束              Glass  ›
+等待输入              Ping   ›
+计划被退回修改          无     ›
+手动终止               无     ›
 ```
 
-选中某个声音后：
+点一行就**整页进入该时机的独立声音列表页**（这一级替换掉四行，不是弹窗、也不是行内展开）。列表是该时机的完整候选：
 
-1. 浏览器一半通过 `ctx.configForms` 把选择写回 Host（插件 Config 的 volatile 字段）；
-2. Loader 不重载插件，只更新配置引用并派发 `loader/volatile-update`；
-3. Host 一半在这个事件里播放新选中的声音 —— 这就是试听；选中「无」时不试听，之后那个时机也不响。
+```text
+← 返回
+任务结束
+单选：选中哪个就试听哪个；点「返回」回到上一页。
+──────────────────────────────
+◉ 无
+○ 你干嘛~哎哟                    ← 插件自带：assets/voice.mp3
+○ Basso
+○ Blow
+...
+◉ Glass
+```
+
+在列表页里：
+
+1. **单选 = 选中 + 试听**：列表是原生 `radio`，点一项就是选中它，同时立刻通过 `ctx.configForms` 写入 Host 的 volatile 配置字段，并请求 `POST /buka-bell/preview` 让 Host 播一次。没有额外的试听按钮——选哪个听哪个；已经选中的那一项再点一次会重播，方便反复听。点「无」只取消，不播放。
+2. **不自动返回**：点完还留在列表里，可以接着点下一项挨个听，满意后点左上角「返回」回到四行页面——「先听，再定」不用来回改配置，也不会被打断。
+
+列表页是整页替换，不用浮层：设置本身已经是浮层，再叠 Modal 或者行内展开都会打乱操作预期（弹窗套弹窗 / 布局跳动）。
+
+试听路由沿用 web 组合的信任栅栏（`connection.requestRejection`），只接受本机、已认证的浏览器请求；Host 侧再用 `isPlayableSound` 校验声音名，不认识的直接返回 400，不把浏览器发来的任意字符串交给播放器。
 
 默认：任务结束 `Glass`，等待输入 `Ping`，计划被退回 `无`，手动终止 `无`。
 
 这些名字是 macOS 的 `/System/Library/Sounds/<name>.aiff`；Windows / Linux 上会回退到平台默认提示音（Windows `SystemSounds`，Linux `paplay` / `canberra-gtk-play` / `aplay`）。找不到播放器时只在日志里警告一次，不影响任务执行。
 
+「你干嘛~哎哟」不走系统声音表，直接播放包里的 mp3（`import.meta.url` 定位，随包发布）：macOS 用 `afplay`；Windows / Linux 依次试 `ffplay`、`mpv`（Linux 先试 `paplay`），都没装时这个选项静音，同一时机换回系统声音即可。
+
 ## 平台
 
 | 平台 | 完成音 | 等待音 | 计划被退回音 | 手动终止音 |
 | --- | --- | --- | --- | --- |
-| macOS | 设置页选中的系统声音（默认 `Glass`） | 设置页选中的系统声音（默认 `Ping`） | 设置页选中的系统声音（默认「无」） | 设置页选中的系统声音（默认「无」） |
+| macOS | 设置页选中的声音（默认 `Glass`） | 设置页选中的声音（默认 `Ping`） | 设置页选中的声音（默认「无」） | 设置页选中的声音（默认「无」） |
 | Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` | `SystemSounds.Question` | `SystemSounds.Hand` |
 | Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） | `dialog-information.oga`（同上） | `dialog-warning.oga`（同上） |
+
+Windows / Linux 那两行是**没选**「你干嘛~哎哟」时的平台默认声音；选中梗语音时改由上面说的文件播放器播放，与系统声音表无关。
+
+## 素材版权
+
+`assets/voice.mp3` 是网络公开的二创梗语音片段（含公众人物声音），版权归原作者所有，**仅供个人学习交流使用**，请勿用于商业用途。仓库里代码的 MIT 许可（见根目录）**不覆盖**这个文件；要商用请自行替换成无版权素材（换文件即可，路径写在 `lib/sounds.js` 的 `CUSTOM_SOUNDS` 里；不用就把这个候选从 `CUSTOM_SOUNDS` 与 `client.js` 的 `CUSTOM_SOUNDS` 里一起删掉）。
 
 ## 结构
 
@@ -57,8 +86,10 @@ Ping   Pop   Purr    Sosumi  Submarine  Tink
 | --- | --- |
 | `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch` 声明它是 bundle、`dsh.client` 声明浏览器一半、`locale` / `icon` 导出让 Plugins 页展示 |
 | `cordis.patch.yml` | bundle 层唯一的一行：把自己作为 `sound-buka-bell` 插入组成 |
-| `lib/index.js` | Host 一半：导出 `name` / `inject` / `Config` / `apply`，监听生命周期事件、读写 volatile 声音配置并调用系统播放器 |
-| `client.js` | 浏览器一半：在 设置 → 提示音 注册页面，四个下拉框通过 `ctx.configForms` 读写 Host 配置 |
+| `lib/index.js` | Host 一半：导出 `name` / `inject` / `Config` / `apply`，监听生命周期事件、读 volatile 声音配置、调用播放器，并注册试听路由 `POST /buka-bell/preview` |
+| `lib/sounds.js` | 零依赖的候选表与播放命令：macOS 系统声音清单、自带音频、四个默认值、各平台播放器、试听路由路径、`isPlayableSound` 校验；单测直接导入它 |
+| `client.js` | 浏览器一半：在 设置 → 提示音 注册两级页面——四行总览，点一行进入该时机的独立声音列表；点一项同时写配置（`ctx.configForms`）并请求 Host 试听路由，点「返回」才回到总览 |
+| `assets/voice.mp3` | 声音列表里「你干嘛~哎哟」的音频；随包发布，播放时按 `import.meta.url` 定位 |
 | `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
 | `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
@@ -71,6 +102,6 @@ cd plugins/bell && pnpm install --ignore-workspace
 
 ## 验证安装
 
-在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库的索引地址，安装后在 **设置 → 提示音** 看到四个下拉框即成功。
+在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库的索引地址，安装后在 **设置 → 提示音** 看到四行提示音、点一行进入独立声音列表即成功。
 
 本地调试也可以直接装目录：`dsh plugin --profile <profile> add "link:$PWD/plugins/bell"`。

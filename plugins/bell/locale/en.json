@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Buka Bell",
-    "description": "Plays a system sound when a task finishes, DSH waits for your input, a plan is sent back for changes, or you stop a task manually. Pick all four sounds in Settings → Notification sounds; “None” turns a moment off, and the plan and manual-stop sounds are off by default."
+    "description": "Plays a sound when a task finishes, DSH waits for your input, a plan is sent back for changes, or you stop a task manually: a macOS system sound or the bundled “你干嘛~哎哟” clip. Each moment opens its own sound list; one click selects and plays, and Back returns. “None” turns a moment off."
   }
 }

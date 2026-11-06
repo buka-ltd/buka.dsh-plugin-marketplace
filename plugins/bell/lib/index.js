@@ -26,18 +26,35 @@
  *   同样以 aborted 收尾，但它们不是用户手动停止，保持静音。
  *
  * 播放交给宿主系统的声音工具（macOS `afplay`、Windows `SystemSounds`、
- * Linux `paplay` 等），不占用 DSH 自己的 UI 与音频权限。
+ * Linux `paplay` 等），不占用 DSH 自己的 UI 与音频权限。系统声音之外，
+ * 插件还自带一个梗语音文件作为候选（`CUSTOM_SOUNDS`），它由能解码文件的
+ * 播放器播放，不走系统声音表。
  *
  * 声音选择放在插件 Config 的 volatile 字段里：设置页写入时 Loader 不重载
- * 插件，只更新配置引用并派发 `loader/volatile-update`；插件在这个事件里
- * 播放新选中的声音，就是设置页下拉框的「选中即试听」。四种提示音都可以
- * 选「无」（配置值 `none`），表示这个时机不播放。
+ * 插件，只更新配置引用。四种提示音都可以选「无」（配置值 `none`），表示
+ * 这个时机不播放。
+ *
+ * 试听与选择是分开的两步：设置页先列出所有候选，点一下只播放一次
+ * （`POST /buka-bell/preview`，不写配置），听完再在下拉框里决定四个时机
+ * 各用哪个。路由沿用 web 组合的信任栅栏，只接受本机、已认证的浏览器请求。
  *
  * @module @buka/dsh-plugin-bell
  */
 
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
+import {
+  CUES,
+  DEFAULT_SOUND,
+  PREVIEW_ROUTE,
+  SILENT,
+  commandFor,
+  isPlayableSound,
+  selectedSound,
+} from './sounds.js'
+
+// 入口原来的公开常量继续可用（文档与单测按入口找它们）。
+export { CUSTOM_SOUNDS, SILENT } from './sounds.js'
 
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
 export const name = 'sound-buka-bell'
@@ -45,46 +62,11 @@ export const name = 'sound-buka-bell'
 /** 依赖的服务：用 `roots()` 判断一个 Agent 是不是运行时顶层会话。 */
 export const inject = ['agents']
 
-/**
- * 「无」选项的哨兵值：设置页下拉框里的「无」写入这个值，表示该时机不播放。
- * 它不是系统声音名，因此不会出现在 `SYSTEM_SOUNDS` 里。
- */
-export const SILENT = 'none'
-
-/**
- * macOS 系统自带提示音清单；设置页下拉框的可选项与这里保持一致。
- * 文件位置固定为 `/System/Library/Sounds/<name>.aiff`。
- */
-const SYSTEM_SOUNDS = [
-  'Basso',
-  'Blow',
-  'Bottle',
-  'Frog',
-  'Funk',
-  'Glass',
-  'Hero',
-  'Morse',
-  'Ping',
-  'Pop',
-  'Purr',
-  'Sosumi',
-  'Submarine',
-  'Tink',
-]
-
-/**
- * 四个提示音的默认选择。
- *
- * 计划被退回、手动终止默认静音：这两种时机都是用户刚操作完、人就在屏幕前，
- * 默认响铃只会打扰；想要提示的人可以在设置页单独打开。
- */
-const DEFAULT_SOUND = { finish: 'Glass', wait: 'Ping', plan: SILENT, abort: SILENT }
-
-/** 提示音种类；顺序与设置页下拉框一致。 */
-const CUES = ['finish', 'wait', 'plan', 'abort']
-
 /** 同类提示音的最小间隔，避免多个会话同时结束时响成一片。 */
 const COOLDOWN_MS = 500
+
+/** 试听请求体只有 `{ sound }`；超过这个大小按恶意请求处理。 */
+const MAX_PREVIEW_BODY_BYTES = 4 * 1024
 
 /**
  * 可在设置页改的四项声音。
@@ -93,93 +75,15 @@ const COOLDOWN_MS = 500
  * `loader/volatile-update`，不会重启插件。
  */
 export const Config = z.object({
-  /** 任务结束时播放的 macOS 系统提示音名（或 `none`）。 */
+  /** 任务结束时播放的提示音名：macOS 系统声音名、自带的 `ikun`，或 `none`。 */
   finish: z.string().default(DEFAULT_SOUND.finish).volatile(),
-  /** DSH 等待用户回答或审批时播放的 macOS 系统提示音名（或 `none`）。 */
+  /** DSH 等待用户回答或审批时播放的提示音名：同上，或 `none`。 */
   wait: z.string().default(DEFAULT_SOUND.wait).volatile(),
-  /** 计划评审被用户退回修改时播放的 macOS 系统提示音名（或 `none`）。 */
+  /** 计划评审被用户退回修改时播放的提示音名：同上，或 `none`。 */
   plan: z.string().default(DEFAULT_SOUND.plan).volatile(),
-  /** 用户手动终止任务时播放的 macOS 系统提示音名（或 `none`）。 */
+  /** 用户手动终止任务时播放的提示音名：同上，或 `none`。 */
   abort: z.string().default(DEFAULT_SOUND.abort).volatile(),
 })
-
-/**
- * 非 macOS 平台的默认播放命令，按数组顺序尝试，前一个无法启动时换下一个。
- * 设置里的 macOS 声音名在这些平台不可用，回退到这里的平台默认声音；
- * 默认静音的种类（`none`）在任何平台都不会播放。
- */
-const PLATFORM_COMMANDS = {
-  win32: {
-    finish: [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Media.SystemSounds]::Exclamation.Play()']]],
-    wait: [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Media.SystemSounds]::Asterisk.Play()']]],
-    plan: [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Media.SystemSounds]::Question.Play()']]],
-    abort: [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Media.SystemSounds]::Hand.Play()']]],
-  },
-  // freedesktop 声音包在大多数发行版上由 sound-theme-freedesktop 提供；
-  // 后两个候选是没装它时的退路。
-  linux: {
-    finish: [
-      ['paplay', ['/usr/share/sounds/freedesktop/stereo/complete.oga']],
-      ['canberra-gtk-play', ['-i', 'complete']],
-      ['aplay', ['/usr/share/sounds/alsa/Front_Center.wav']],
-    ],
-    wait: [
-      ['paplay', ['/usr/share/sounds/freedesktop/stereo/message.oga']],
-      ['canberra-gtk-play', ['-i', 'message']],
-      ['aplay', ['/usr/share/sounds/alsa/Front_Center.wav']],
-    ],
-    plan: [
-      ['paplay', ['/usr/share/sounds/freedesktop/stereo/dialog-information.oga']],
-      ['canberra-gtk-play', ['-i', 'dialog-information']],
-      ['aplay', ['/usr/share/sounds/alsa/Front_Center.wav']],
-    ],
-    abort: [
-      ['paplay', ['/usr/share/sounds/freedesktop/stereo/dialog-warning.oga']],
-      ['canberra-gtk-play', ['-i', 'dialog-warning']],
-      ['aplay', ['/usr/share/sounds/alsa/Front_Center.wav']],
-    ],
-  },
-}
-
-/**
- * 读一个提示音当前选中的声音名。配置里是 volatile 引用，值要经 `.get()` 读；
- * 手写节点被测试注入字符串时也兼容。读不到时回退默认值。
- *
- * @param {unknown} config 插件行配置
- * @param {'finish' | 'wait' | 'plan' | 'abort'} cue 提示音种类
- * @returns {string}
- */
-export function selectedSound(config, cue) {
-  const field = config?.[cue]
-  try {
-    if (field !== null && typeof field === 'object' && typeof field.get === 'function') {
-      const value = field.get()
-      if (typeof value === 'string' && value !== '') return value
-    } else if (typeof field === 'string' && field !== '') {
-      return field
-    }
-  } catch {
-    // volatile 引用不可读时走默认值
-  }
-  return DEFAULT_SOUND[cue]
-}
-
-/**
- * 一种提示音的候选播放命令；选中「无」时没有候选。
- *
- * @param {'finish' | 'wait' | 'plan' | 'abort'} cue 提示音种类
- * @param {string} sound 选中的声音名
- * @returns {Array<[string, string[]]>}
- */
-function commandFor(cue, sound) {
-  if (sound === SILENT) return []
-  if (process.platform === 'darwin') {
-    const fallback = DEFAULT_SOUND[cue] === SILENT ? undefined : DEFAULT_SOUND[cue]
-    const name = SYSTEM_SOUNDS.includes(sound) ? sound : fallback
-    return name === undefined ? [] : [['afplay', [`/System/Library/Sounds/${name}.aiff`]]]
-  }
-  return PLATFORM_COMMANDS[process.platform]?.[cue] ?? PLATFORM_COMMANDS.linux[cue]
-}
 
 /**
  * 同类提示音的节流门：返回 true 表示这次可以响。
@@ -308,7 +212,51 @@ export function apply(ctx, config) {
 
   const gates = new Map(CUES.map((cue) => [cue, createGate(COOLDOWN_MS)]))
   const play = createPlayer(ctx)
-  const lastSound = Object.fromEntries(CUES.map((cue) => [cue, selectedSound(config, cue)]))
+
+  // 设置页的试听按钮：先听，再决定四个时机各用哪个。播放不动配置，
+  // 也不占用各时机的节流门。
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
+    /** 复用 web 组合的信任栅栏；被拒绝时已经写好响应。 */
+    function rejected(req, res) {
+      let rejection
+      try {
+        rejection = webCtx.connection.requestRejection(req)
+      } catch {
+        rejection = 500
+      }
+      if (rejection === undefined) return false
+      res.statusCode = rejection
+      res.end()
+      return true
+    }
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: PREVIEW_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'POST')
+              return
+            }
+            const body = await readJsonBody(req, res, MAX_PREVIEW_BODY_BYTES)
+            if (body === undefined) return
+            const sound = body?.sound
+            if (!isPlayableSound(sound)) {
+              sendJson(res, 400, { ok: false, code: 'unknown-sound', message: 'unknown sound' })
+              return
+            }
+            // 试听按「完成音」的候选表播放：cue 只影响未知系统声音名的退路，
+            // 而这里的声音名已经校验过，不受影响。
+            play('finish', sound)
+            sendJson(res, 200, { ok: true })
+          },
+        }),
+      `buka-bell: POST ${PREVIEW_ROUTE}`,
+    )
+  })
 
   /**
    * 按当前配置播放一种提示音；选「无」时不响，也不占用节流门。
@@ -343,17 +291,6 @@ export function apply(ctx, config) {
     }
     if (event.type !== 'turn/end') return
     lastTurnEnd.set(session.id, event.data?.reason)
-  })
-
-  // 设置页切换声音只改 volatile 字段：Loader 更新配置引用后派发该事件。
-  // 这里把新选中的声音播放一次，就是下拉框的试听。
-  ctx.on('loader/volatile-update', () => {
-    for (const cue of CUES) {
-      const next = selectedSound(config, cue)
-      if (next === lastSound[cue]) continue
-      lastSound[cue] = next
-      if (next !== SILENT) play(cue, next)
-    }
   })
 
   ctx.on('agent/status', ({ agent, status }) => {
@@ -424,4 +361,73 @@ export function apply(ctx, config) {
     },
     { prepend: true },
   )
+}
+
+/**
+ * 读取并解析试听请求体。
+ *
+ * 失败时（content-type 不对、超过大小上限、不是合法 JSON）已经写好响应，
+ * 返回 `undefined` 让调用方直接返回。
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} maxBytes 请求体上限
+ * @returns {Promise<unknown>}
+ */
+async function readJsonBody(req, res, maxBytes) {
+  const mediaType = String(req.headers['content-type'] ?? '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase()
+  if (mediaType !== 'application/json') {
+    sendJson(res, 415, { ok: false, message: 'content-type 必须是 application/json' })
+    return undefined
+  }
+  const text = await readBoundedBody(req, maxBytes)
+  if (text === null) {
+    sendJson(res, 413, { ok: false, message: '请求体过大' })
+    return undefined
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' })
+    return undefined
+  }
+}
+
+/** 发送 JSON 响应；试听结果不缓存。 */
+function sendJson(res, status, payload) {
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(JSON.stringify(payload))
+}
+
+/** 405 并带上唯一支持的方法。 */
+function sendMethodNotAllowed(res, allow) {
+  res.statusCode = 405
+  res.setHeader('allow', allow)
+  res.end()
+}
+
+/**
+ * 读取有上限的请求体；超过上限时丢弃剩余流并返回 null。
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} maxBytes 请求体上限
+ * @returns {Promise<string | null>}
+ */
+async function readBoundedBody(req, maxBytes) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.byteLength
+    if (size > maxBytes) {
+      req.resume()
+      return null
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks, size).toString('utf8')
 }
