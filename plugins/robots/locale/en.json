@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Buka Robots",
+    "description": "Adds a Robots page to the sidebar. A robot is a directory the plugin creates under ~/.cache/dsh-plugin-robots/robots and mounts as a DSH workspace; only robots created here are managed. For each robot you can install project-level skills through npx skills, edit its AGENTS.md, open its conversation, or re-mount it after the workspace was removed."
+  }
+}

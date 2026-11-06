@@ -1,0 +1,7 @@
+# `@buka/dsh-plugin-robots` 的 bundle 层：把本插件自己插进组成。
+#
+# 只插入一行：Host 一半提供工作区/目录/AGENTS.md/npx skills 的包内路由与只读工具，
+# 浏览器一半把「机器人」标签页注册进侧边栏。
+- insert:
+    - id: page-buka-robots
+      name: '@buka/dsh-plugin-robots'

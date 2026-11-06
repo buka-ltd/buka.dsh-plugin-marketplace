@@ -1,0 +1,37 @@
+{
+  "title": {
+    "en": "Buka Robots",
+    "zh-cn": "Buka 机器人"
+  },
+  "description": {
+    "en": "Adds a Robots page to the sidebar. A robot is a directory the plugin creates under ~/.cache/dsh-plugin-robots/robots and mounts as a DSH workspace; only robots created here are managed. For each robot you can install project-level skills through npx skills, edit its AGENTS.md, open its conversation, or re-mount it after the workspace was removed.",
+    "zh-cn": "在侧边栏新增「机器人」页面。机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，只有这里创建的机器人才归插件管理。每个机器人可以用 npx skills 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话；工作区被删掉后还能重新挂载。"
+  },
+  "icon": "./icon.svg",
+  "author": "Buka Ltd",
+  "homepage": "https://github.com/buka-ltd/buka.dsh-plugin-marketplace/tree/main/plugins/robots",
+  "category": "ui",
+  "labels": [
+    "beta"
+  ],
+  "keywords": [
+    "robots",
+    "robot",
+    "workspace",
+    "workspaces",
+    "mount",
+    "agents.md",
+    "agents",
+    "skills",
+    "npx skills",
+    "project skills",
+    "sidebar",
+    "panel",
+    "机器人",
+    "工作区",
+    "挂载",
+    "技能",
+    "项目",
+    "配置"
+  ]
+}

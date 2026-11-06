@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Buka 机器人",
+    "description": "在侧边栏新增「机器人」页面。机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，只有这里创建的机器人才归插件管理。每个机器人可以用 npx skills 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话；工作区被删掉后还能重新挂载。"
+  }
+}
