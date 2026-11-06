@@ -24,7 +24,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.20
+          # 必须加引号：YAML 会把裸写的 22.20 当成浮点数 22.2，
+          # setup-node 于是装 22.2.0，pnpm 11 要求 >= 22.13，直接退出 1
+          node-version: '22.20'
       - run: pnpm run check
         env:
           # 索引里的安装地址必须指向公司仓库，不能是 PR 的 fork
@@ -54,7 +56,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.20
+          # 必须加引号：YAML 会把裸写的 22.20 当成浮点数 22.2，
+          # setup-node 于是装 22.2.0，pnpm 11 要求 >= 22.13，直接退出 1
+          node-version: '22.20'
       - run: pnpm run build
         env:
           DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
