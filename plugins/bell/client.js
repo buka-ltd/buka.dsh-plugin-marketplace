@@ -85,7 +85,7 @@ window.__ModuleLoader__.load({
       nav: 'Notification sounds',
       title: 'Notification sounds',
       intro:
-        'Choose which sound plays when a task finishes, when DSH waits for your input, when a plan is sent back for changes, or when you stop a task manually. Click a moment to open its sound list: clicking a sound selects it and plays it right away. “None” turns that moment off. The plan and manual-stop sounds are off by default.',
+        'Choose which sound plays when a task finishes, when DSH waits for your input, when a plan is sent back for changes, or when you stop a task manually. Click a moment to open its sound list: clicking a sound selects it and plays it right away. “None” turns that moment off. Only the plan sound is off by default; the manual-stop sound uses the bundled clip.',
       pickHint: 'Pick one: the sound is selected and played right away. Back returns to the four moments.',
       back: 'Back',
       previewFailed: 'Could not play the preview. Try again.',
@@ -104,7 +104,7 @@ window.__ModuleLoader__.load({
       nav: '提示音',
       title: '提示音',
       intro:
-        '选择任务结束、DSH 等待你输入、计划被退回修改、手动终止任务时播放的提示音。点一行进入该时机的播放列表：点一项即选中并试听，点「返回」回来。「无」表示这个时机不播放；计划被退回与手动终止默认不响。',
+        '选择任务结束、DSH 等待你输入、计划被退回修改、手动终止任务时播放的提示音。点一行进入该时机的播放列表：点一项即选中并试听，点「返回」回来。「无」表示这个时机不播放；计划被退回默认静音，手动终止默认播放插件自带的「你干嘛~哎哟」。',
       pickHint: '单选：选中哪个就试听哪个；点「返回」回到上一页。',
       back: '返回',
       previewFailed: '试听失败，请重试。',

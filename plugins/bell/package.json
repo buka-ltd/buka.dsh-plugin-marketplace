@@ -1,6 +1,6 @@
 {
   "name": "@buka/dsh-plugin-bell",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Play a system notification sound when a DSH agent finishes a task, waits for user input, has a plan sent back for changes, or is stopped manually; every sound is chosen in Settings and can be set to none",
   "type": "module",
   "main": "lib/index.js",

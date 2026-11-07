@@ -61,17 +61,28 @@ test('macOS 上系统声音名播系统音，未知名回退到该时机的默�
     ['afplay', ['/System/Library/Sounds/Basso.aiff']],
   ])
   assert.deepEqual(commandFor('wait', 'NotASound'), [
-    ['afplay', ['/System/Library/Sounds/Ping.aiff']],
+    ['afplay', ['/System/Library/Sounds/Submarine.aiff']],
   ])
-  // 计划被退回、手动终止默认是「无」，没有退路
+  // 手动终止默认是自带 mp3：未知音的退路也是文件播放器，不能拼系统声音路径
+  assert.deepEqual(commandFor('abort', 'NotASound'), [
+    ['afplay', [fileURLToPath(new URL('assets/voice.mp3', PACKAGE_ROOT))]],
+  ])
+  // 计划被退回默认是「无」，没有退路
   assert.deepEqual(commandFor('plan', 'NotASound'), [])
 })
 
 test('volatile 配置选中自带音频时原样读回，读不到时用默认值', () => {
   assert.equal(selectedSound({ finish: { get: () => 'ikun' } }, 'finish'), 'ikun')
-  assert.equal(selectedSound({ finish: { get: () => 'ikun' } }, 'wait'), 'Ping')
+  assert.equal(selectedSound({ finish: { get: () => 'ikun' } }, 'wait'), 'Submarine')
   assert.equal(selectedSound({ finish: 'ikun' }, 'finish'), 'ikun')
   assert.equal(selectedSound({}, 'plan'), SILENT)
+})
+
+test('默认音取常用设置：任务结束 Basso、等待输入 Submarine、手动终止梗语音、计划静音', () => {
+  assert.equal(selectedSound({}, 'finish'), 'Basso')
+  assert.equal(selectedSound({}, 'wait'), 'Submarine')
+  assert.equal(selectedSound({}, 'plan'), SILENT)
+  assert.equal(selectedSound({}, 'abort'), 'ikun')
 })
 
 test('浏览器一半的候选列表包含 Host 侧每个自带候选', () => {

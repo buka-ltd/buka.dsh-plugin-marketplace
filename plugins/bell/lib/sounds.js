@@ -89,10 +89,12 @@ const FILE_PLAYERS = {
 /**
  * 四个提示音的默认选择。
  *
- * 计划被退回、手动终止默认静音：这两种时机都是用户刚操作完、人就在屏幕前，
- * 默认响铃只会打扰；想要提示的人可以在设置页单独打开。
+ * 取常用配置：任务结束 `Basso`、等待输入 `Submarine` 都是 macOS 系统声音；
+ * 手动终止播放插件自带的「你干嘛~哎哟」（`ikun`），没装 ffplay / mpv 的平台
+ * 会静音。计划被退回默认静音：用户点「要求修改」时人就在屏幕前，默认响铃
+ * 只会打扰，想要提示的人可以在设置页单独打开。
  */
-export const DEFAULT_SOUND = { finish: 'Glass', wait: 'Ping', plan: SILENT, abort: SILENT }
+export const DEFAULT_SOUND = { finish: 'Basso', wait: 'Submarine', plan: SILENT, abort: 'ikun' }
 
 /** 提示音种类；顺序与设置页下拉框一致。 */
 export const CUES = ['finish', 'wait', 'plan', 'abort']
@@ -159,12 +161,24 @@ export function selectedSound(config, cue) {
 }
 
 /**
+ * 自带音频的播放命令：按平台给文件播放器，环境里没有播放器时启动失败、静音。
+ *
+ * @param {string} relative `CUSTOM_SOUNDS` 里的值
+ * @returns {Array<[string, string[]]>}
+ */
+function fileCommands(relative) {
+  const players = FILE_PLAYERS[process.platform] ?? FILE_PLAYERS.linux
+  return players(assetPath(relative))
+}
+
+/**
  * 一种提示音的候选播放命令；选中「无」时没有候选。
  *
  * 自带音频（`CUSTOM_SOUNDS`）优先：它不在 macOS 系统声音表里，任何平台都
  * 交给 `FILE_PLAYERS` 的文件播放器。系统声音在 macOS 上按名字播放
  * `/System/Library/Sounds/<name>.aiff`，名字不认识时退回该时机的默认声音
- * （默认静音的种类没有退路）；Windows / Linux 上没有系统声音表，用平台默认音。
+ * （默认音是自带音频时同样走文件播放器，默认静音的种类没有退路）；
+ * Windows / Linux 上没有系统声音表，用平台默认音。
  *
  * 导出是为了让单测能直接检查候选命令，运行时不经过它以外的入口。
  *
@@ -175,14 +189,14 @@ export function selectedSound(config, cue) {
 export function commandFor(cue, sound) {
   if (sound === SILENT) return []
   const custom = Object.hasOwn(CUSTOM_SOUNDS, sound) ? CUSTOM_SOUNDS[sound] : undefined
-  if (custom !== undefined) {
-    const players = FILE_PLAYERS[process.platform] ?? FILE_PLAYERS.linux
-    return players(assetPath(custom))
-  }
+  if (custom !== undefined) return fileCommands(custom)
   if (process.platform === 'darwin') {
-    const fallback = DEFAULT_SOUND[cue] === SILENT ? undefined : DEFAULT_SOUND[cue]
-    const name = SYSTEM_SOUNDS.includes(sound) ? sound : fallback
-    return name === undefined ? [] : [['afplay', [`/System/Library/Sounds/${name}.aiff`]]]
+    const name = SYSTEM_SOUNDS.includes(sound) ? sound : DEFAULT_SOUND[cue]
+    if (name === SILENT) return []
+    // 默认音也可能是插件自带的音频（手动终止默认 `ikun`），不能拼系统声音路径。
+    const fallbackFile = Object.hasOwn(CUSTOM_SOUNDS, name) ? CUSTOM_SOUNDS[name] : undefined
+    if (fallbackFile !== undefined) return fileCommands(fallbackFile)
+    return [['afplay', [`/System/Library/Sounds/${name}.aiff`]]]
   }
   return PLATFORM_COMMANDS[process.platform]?.[cue] ?? PLATFORM_COMMANDS.linux[cue]
 }

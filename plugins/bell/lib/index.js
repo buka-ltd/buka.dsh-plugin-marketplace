@@ -10,7 +10,7 @@
  *   `agent.cancel({ kind: 'user' })`，这一轮会以 `turn/end` 的
  *   `reason.kind === 'aborted'` 收尾，随后才是 `agent/status` idle。
  *   完成音监听会话日志里的 `turn/end` 记住最近一轮的结束原因，aborted 时
- *   改由手动终止音处理（默认静音）。
+ *   改由手动终止音处理（默认播放插件自带的「你干嘛~哎哟」）。
  * - 等待音：`user-questions/request`（`ask_user_question`、plan review）
  *   与 `approval/request`（审批）这两个 waterfall 事件，都是 DSH 正在
  *   等用户回复时才会派发。监听器只旁听，必须调用 `next()` 把决定交给

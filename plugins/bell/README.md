@@ -2,7 +2,7 @@
 
 任务结束、DSH 停下来等你操作、计划被退回修改、或你手动终止任务时，播放一声提示音。**设置 → 提示音** 里点一行就进入该时机的独立声音列表，点一项即选中并试听，听完点「返回」回到四行总览；候选是 macOS 系统自带音与插件自带的「你干嘛~哎哟」梗语音，每个时机都可以设成「无」表示不播放。
 
-装好以后你就不必盯着屏幕等模型跑完：Agent 一轮任务真正结束会响**完成音**，DSH 弹出问题或审批等待你回复时会响**等待音**。计划被退回修改、手动终止默认静音——这两个时机人通常就在屏幕前，想要提示的人可以单独打开。
+装好以后你就不必盯着屏幕等模型跑完：Agent 一轮任务真正结束会响**完成音**，DSH 弹出问题或审批等待你回复时会响**等待音**。计划被退回修改默认静音——这个时机人通常就在屏幕前，想要提示的人可以单独打开；手动终止默认播放插件自带的「你干嘛~哎哟」。
 
 ## 什么时候响
 
@@ -13,7 +13,7 @@
 | 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型 | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因 |
 | 手动终止音 | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务 | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user` |
 
-**手动终止不响完成音**：点终止按钮会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因：`aborted` 且取消来源是 `user` 时改播手动终止音（默认「无」）；会话归档、父级取消、插件卸载同样以 aborted 收尾，但它们不是手动停止，保持静音。记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然按那一轮的原因响。
+**手动终止不响完成音**：点终止按钮会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因：`aborted` 且取消来源是 `user` 时改播手动终止音（默认「你干嘛~哎哟」）；会话归档、父级取消、插件卸载同样以 aborted 收尾，但它们不是手动停止，保持静音。记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然按那一轮的原因响。
 
 **计划被退回不算任务完成**：plan review 卡片上的「要求修改」不会回答批准/拒绝选项，而是由 Web UI 以 `ASK_CANCELLED` 取消这次提问。`dsh-plan-mode` 收到取消后调用 `concludeTurn()`，这一轮随即以 `turn/end` `completed` 收尾，因此看起来和任务完成一模一样。插件在旁听 `user-questions/request` 时接住 `next()` 的拒绝结果：看到 `ASK_CANCELLED` 且请求带 `plan-review` 意图，就记下这个会话；等 idle 时改播计划被退回音（默认「无」），而不是完成音。如果退回后用户紧接着发消息、DSH 在同一驱动里直接开下一轮（中间没有 idle），标记会在 `turn/start` 时清掉，避免把下一轮真正的完成错当成计划退回。
 
@@ -30,10 +30,10 @@
 第一级是四行，对应四个时机（任务结束 / 等待输入 / 计划被退回修改 / 手动终止），行上显示当前声音：
 
 ```text
-任务结束              Glass  ›
-等待输入              Ping   ›
-计划被退回修改          无     ›
-手动终止               无     ›
+任务结束              Basso      ›
+等待输入              Submarine  ›
+计划被退回修改          无         ›
+手动终止               你干嘛~哎哟  ›
 ```
 
 点一行就**整页进入该时机的独立声音列表页**（这一级替换掉四行，不是弹窗、也不是行内展开）。列表是该时机的完整候选：
@@ -43,12 +43,12 @@
 任务结束
 单选：选中哪个就试听哪个；点「返回」回到上一页。
 ──────────────────────────────
-◉ 无
+○ 无
 ○ 你干嘛~哎哟                    ← 插件自带：assets/voice.mp3
-○ Basso
+◉ Basso
 ○ Blow
 ...
-◉ Glass
+○ Glass
 ```
 
 在列表页里：
@@ -60,9 +60,9 @@
 
 试听路由沿用 web 组合的信任栅栏（`connection.requestRejection`），只接受本机、已认证的浏览器请求；Host 侧再用 `isPlayableSound` 校验声音名，不认识的直接返回 400，不把浏览器发来的任意字符串交给播放器。
 
-默认：任务结束 `Glass`，等待输入 `Ping`，计划被退回 `无`，手动终止 `无`。
+默认：任务结束 `Basso`，等待输入 `Submarine`，计划被退回 `无`，手动终止 `你干嘛~哎哟`（`ikun`）。
 
-这些名字是 macOS 的 `/System/Library/Sounds/<name>.aiff`；Windows / Linux 上会回退到平台默认提示音（Windows `SystemSounds`，Linux `paplay` / `canberra-gtk-play` / `aplay`）。找不到播放器时只在日志里警告一次，不影响任务执行。
+系统声音名对应 macOS 的 `/System/Library/Sounds/<name>.aiff`；Windows / Linux 上没有系统声音表，未选自带音频时回退到平台默认提示音（Windows `SystemSounds`，Linux `paplay` / `canberra-gtk-play` / `aplay`）。找不到播放器时只在日志里警告一次，不影响任务执行。
 
 「你干嘛~哎哟」不走系统声音表，直接播放包里的 mp3（`import.meta.url` 定位，随包发布）：macOS 用 `afplay`；Windows / Linux 依次试 `ffplay`、`mpv`（Linux 先试 `paplay`），都没装时这个选项静音，同一时机换回系统声音即可。
 
@@ -70,11 +70,11 @@
 
 | 平台 | 完成音 | 等待音 | 计划被退回音 | 手动终止音 |
 | --- | --- | --- | --- | --- |
-| macOS | 设置页选中的声音（默认 `Glass`） | 设置页选中的声音（默认 `Ping`） | 设置页选中的声音（默认「无」） | 设置页选中的声音（默认「无」） |
-| Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` | `SystemSounds.Question` | `SystemSounds.Hand` |
-| Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） | `dialog-information.oga`（同上） | `dialog-warning.oga`（同上） |
+| macOS | 设置页选中的声音（默认 `Basso`） | 设置页选中的声音（默认 `Submarine`） | 设置页选中的声音（默认「无」） | 设置页选中的声音（默认「你干嘛~哎哟」） |
+| Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` | `SystemSounds.Question` | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
+| Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） | `dialog-information.oga`（同上） | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
 
-Windows / Linux 那两行是**没选**「你干嘛~哎哟」时的平台默认声音；选中梗语音时改由上面说的文件播放器播放，与系统声音表无关。
+Windows / Linux 的完成 / 等待 / 计划三列是**没选**「你干嘛~哎哟」时的平台默认声音；选中梗语音时（手动终止的默认就是它）改由上面说的文件播放器播放，与系统声音表无关，播放器都没装时静音。
 
 ## 素材版权
 
