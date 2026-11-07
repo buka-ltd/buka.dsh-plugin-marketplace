@@ -24,7 +24,7 @@ pnpm run build --source-url https://github.com/buka-ltd/buka.dsh-plugin-marketpl
 pnpm run serve --port 4180 --dir dist
 ```
 
-`--source-url` 一般不用给：默认取 `origin` 并归一成 https（`git@` / `ssh://` 都认）。CI 里用环境变量 `DSH_MARKET_SOURCE_URL` 固定成公司仓库，避免 PR 的 fork 地址混进索引。这个变量只由 `scripts/build.mjs`、`scripts/check.mjs` 两个入口读，生成器只认显式 `sourceUrl`——所以 `pnpm test` 不受 CI 环境变量影响，改生成器时不要让它去读 `process.env`。
+`--source-url` 一般不用给：默认取 `origin` 并归一成 https（`git@` / `ssh://` 都认）。CI 里用环境变量 `DSH_MARKET_SOURCE_URL` 固定成上游仓库，避免 PR 的 fork 地址混进索引。这个变量只由 `scripts/build.mjs`、`scripts/check.mjs` 两个入口读，生成器只认显式 `sourceUrl`——所以 `pnpm test` 不受 CI 环境变量影响，改生成器时不要让它去读 `process.env`。
 
 > 空仓库第一次跑 `pnpm run check` 会报「目录还没有提交」：索引要钉住插件目录的提交。先 `git commit` 再跑。
 

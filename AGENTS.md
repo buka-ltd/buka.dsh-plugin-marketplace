@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是 Buka Ltd 的 DSH 插件市场：把公司自己的 bundle 插件登记成一份 format 1 索引，DSH 用户在 **Plugins → Discover** 里添加索引地址即可浏览与安装。规则正文统一在 `docs/agent-rules/`；本文件只做索引，每条给出建议阅读时机。
+本仓库是 DSH 插件市场：把 bundle 插件登记成一份 format 1 索引，DSH 用户在 **Plugins → Discover** 里添加索引地址即可浏览与安装。规则正文统一在 `docs/agent-rules/`；本文件只做索引，每条给出建议阅读时机。
 
 - [项目结构](docs/agent-rules/project-structure.md)：新增插件、调整目录、判断某个文件该放哪前阅读。
 - [索引格式](docs/agent-rules/index-format.md)：改 `market.json`、动发布地址、排查「Discover 里看不到 / 装不上」前阅读。

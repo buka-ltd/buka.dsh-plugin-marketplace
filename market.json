@@ -4,8 +4,8 @@
     "zh-cn": "Buka DSH 插件市场"
   },
   "description": {
-    "en": "Plugins for DeepSeek Harness published by Buka Ltd: one bundle per capability, installable from the Discover tab.",
-    "zh-cn": "Buka Ltd 维护的 DeepSeek Harness 插件：每个 bundle 一项能力，可在 Plugins 的 Discover 页直接安装。"
+    "en": "Plugins for DeepSeek Harness: one bundle per capability, installable from the Discover tab.",
+    "zh-cn": "DeepSeek Harness 插件：每个 bundle 一项能力，可在 Plugins 的 Discover 页直接安装。"
   },
   "publicUrl": "https://buka-ltd.github.io/buka.dsh-plugin-marketplace/index.json",
   "packageScope": "@buka",

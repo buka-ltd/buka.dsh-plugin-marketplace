@@ -1,6 +1,6 @@
 # Buka DSH Plugin Marketplace
 
-Buka Ltd 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件市场：把公司自己的插件登记成一份 **format 1 索引**（`index.json`），DSH 用户在 **Plugins → Discover** 里填一次索引地址，就能浏览、安装、卸载这些插件。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件市场：把插件登记成一份 **format 1 索引**（`index.json`），DSH 用户在 **Plugins → Discover** 里填一次索引地址，就能浏览、安装、卸载这些插件。
 
 仓库里没有服务端：索引是构建产物，交给 GitHub Pages 静态托管；安装由 DSH 自己的 `pluginManager` 完成，直接指向本仓库某个提交里的包目录。
 

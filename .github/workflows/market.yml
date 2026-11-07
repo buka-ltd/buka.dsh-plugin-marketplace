@@ -29,7 +29,7 @@ jobs:
           node-version: '22.20'
       - run: pnpm run check
         env:
-          # 索引里的安装地址必须指向公司仓库，不能是 PR 的 fork
+          # 索引里的安装地址必须指向上游仓库，不能是 PR 的 fork
           DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
       # 单测自己造 fixture，不该读这个变量，所以这一步不设它
       - run: pnpm test

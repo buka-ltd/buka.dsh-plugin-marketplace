@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Buka Ltd 的 DeepSeek Harness 插件市场：校验插件 bundle 并生成/发布 format 1 索引",
+  "description": "DeepSeek Harness 插件市场：校验插件 bundle 并生成/发布 format 1 索引",
   "engines": {
     "node": ">=22.20"
   },
