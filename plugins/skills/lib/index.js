@@ -5,15 +5,21 @@
  *
  * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
  *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个；
- *   `GET /buka-skills/repos` 列出用户收藏的 npx skills 仓库，
+ *   `GET /buka-skills/repos` 列出用户收藏的仓库，
  *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
- *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存）。
- *   列表数据来自同一份磁盘扫描（`lib/skill-store.js`），收藏来自
- *   `lib/repo-store.js` 的 JSON 文件，仓库 skills 由 `lib/repo-skills.js`
- *   按 TTL 缓存 GitHub 的仓库树；
+ *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
+ *   `probe=1` 时只探测仓库类型：npx skills / Claude Code marketplace / 不可用）。
+ *   收藏的仓库既可以是 npx skills 仓库，也可以是 Claude Code marketplace 仓库：
+ *   前者按 `npx skills` 的发现规则列 SKILL.md，后者只列 marketplace 里各本地
+ *   插件子树中的 SKILL.md（commands / agents 不列）。列表数据来自同一份磁盘
+ *   扫描（`lib/skill-store.js`），收藏来自 `lib/repo-store.js` 的 JSON 文件，
+ *   仓库 skills 由 `lib/repo-skills.js` 按 TTL 缓存 GitHub 的仓库树；
  * - 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
  *   是不是 npx skills 装的」。卸载是破坏性操作，只留给页面上的用户按钮，
  *   不开放给模型。
+ * - 一个 Host Service `ctx.bukaSkills`（`lib/service.js`）：把收藏的仓库、
+ *   仓库里的 skill 列表与 marketplace 插件列表开放给其他插件。页面与工具
+ *   也复用同一个服务实例，因此两处的缓存与并发请求是同一份。
  *
  * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
  * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -25,7 +31,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { createNpxRunner } from './npx.js'
 import { addSavedRepo, listSavedRepos, removeSavedRepo } from './repo-store.js'
-import { fetchRepoSkills } from './repo-skills.js'
+import { SERVICE_NAME, SkillsCatalogService } from './service.js'
 import { collectGlobalSkills, resolveHomes, uninstallGlobalSkill } from './skill-store.js'
 
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
@@ -61,6 +67,11 @@ export function apply(ctx) {
   const homes = resolveHomes()
   const runNpx = createNpxRunner(homes)
 
+  // 对外服务：其他插件的 `inject: ['bukaSkills']` 拿到的就是这个实例。
+  // 服务本身不注册 effect，会随本插件 fiber 卸载自动从 ctx 上摘除。
+  const catalog = new SkillsCatalogService({ homes })
+  ctx.provide(SERVICE_NAME, catalog)
+
   /**
    * 读取快照。skills 注册表读取失败时仍然返回磁盘扫描结果，只是描述为空：
    * 页面不该因为注册表故障而看不到已安装的 skill。
@@ -75,24 +86,8 @@ export function apply(ctx) {
     return collectGlobalSkills({ homes, summaries })
   }
 
-  // 同一个仓库的树并发请求共用一次网络拉取：展开多张卡片时不会重复打 GitHub。
-  // refresh 请求不合并，保证用户点的「刷新」真的重新拉。
-  const treeInFlight = new Map()
-  function fetchRepoSkillTree({ source, refresh }) {
-    if (!refresh) {
-      const pending = treeInFlight.get(String(source))
-      if (pending !== undefined) return pending
-    }
-    const work = fetchRepoSkills({ homes, source, refresh })
-    if (!refresh) {
-      treeInFlight.set(String(source), work)
-      work.then(
-        () => treeInFlight.delete(String(source)),
-        () => treeInFlight.delete(String(source)),
-      )
-    }
-    return work
-  }
+  // 仓库级请求的并发合并与 TTL 缓存都在服务里：页面路由与外部插件调服务时
+  // 共用同一份在途请求，同一仓库不会重复打 GitHub。
 
   // npx skills 会整份重写共享的 lockfile，两个卸载并发执行可能互相覆盖条目；
   // 这里把卸载请求排成一条队列，页面上的并发点击也安全。
@@ -179,7 +174,7 @@ export function apply(ctx) {
       `buka-skills: POST ${UNINSTALL_ROUTE}`,
     )
 
-    // ---- 收藏的 npx skills 仓库 -------------------------------------------
+    // ---- 收藏的仓库（npx skills 与 Claude Code marketplace）----------------
     // 收藏是用户自己的书签：写入同一个 JSON 文件，和已安装列表互不影响。
     // 写操作排成队列，避免两次「添加」互相覆盖整个文件。
 
@@ -270,8 +265,12 @@ export function apply(ctx) {
             const query = parseQuery(req)
             const source = query.get('source') ?? ''
             const refresh = query.get('refresh') === '1'
+            // probe=1 只探测仓库类型（收藏卡片徽标用），不拉 SKILL.md。
+            const probe = query.get('probe') === '1'
             try {
-              const result = await fetchRepoSkillTree({ source, refresh })
+              const result = probe
+                ? await catalog.probeRepositoryKind({ source, refresh })
+                : await catalog.fetchRepositorySkills({ source, refresh })
               sendJson(res, result.ok ? 200 : repoSkillsStatusFor(result.code), result)
             } catch (error) {
               sendJson(res, 500, { ok: false, message: describeError(error) })
@@ -392,13 +391,16 @@ function repoStatusFor(code) {
  * 仓库 skills 路由的失败码 → HTTP 状态码。
  *
  * `unsupported-source` 用 400：来源本身合法，但这个来源（包名 / 非 GitHub
- * 链接）没有可以让 Host 列举的仓库树，请求方不该重试。
+ * 链接）没有可以让 Host 列举的仓库树，请求方不该重试。`repo-unavailable`
+ * 用 422：请求格式没问题，只是这个仓库既不是 npx skills 也不是 Claude Code
+ * marketplace，改来源才有意义。
  *
  * @param {string | undefined} code
  * @returns {number}
  */
 function repoSkillsStatusFor(code) {
   if (code === 'invalid-source' || code === 'unsupported-source') return 400
+  if (code === 'repo-unavailable') return 422
   if (code === 'repo-not-found') return 404
   if (code === 'rate-limited') return 429
   return 502

@@ -14,7 +14,10 @@
  *   管理，并提供按来源选择的卸载入口；
  * - 「收藏」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub 链接
  *   或包名），用于以后 `npx skills add` 时随手取用；点标题打开仓库，卡片右侧
- *   的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。
+ *   的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。来源既可以是
+ *   npx skills 仓库，也可以是 Claude Code marketplace 仓库：打开收藏页后会对
+ *   每个 GitHub 收藏静默探测仓库类型（`probe=1`，只读 tree，不阻塞列表），
+ *   标题行标出「npx skills」「Claude Code 市场」或「不可用」。
  *
  * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
  * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
@@ -28,7 +31,9 @@
  *
  * 页面只做展示与触发：列表、卸载、收藏的读写都走 Host 一半注册的包内路由
  * （`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
- * 这样「怎么卸载」「收藏存在哪」都只有一份实现。
+ * 这样「怎么卸载」「收藏存在哪」都只有一份实现。收藏页的展开状态与上次拿到
+ * 的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
+ * 关闭 DSH 再打开时先按上次的样子渲染，再找 Host 校正，不用干等网络。
  *
  * 客户端模块格式固定为 `window.__ModuleLoader__.load({ id, factory })`，
  * `id` 必须等于包名；React 与基座模块由浏览器模块表提供，不重复安装。
@@ -68,6 +73,17 @@ window.__ModuleLoader__.load({
     const REPOS_ROUTE = '/buka-skills/repos'
     const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
     const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
+
+    /**
+     * 收藏页本地缓存的键：展开过哪些仓库、收起了哪些目录、每个仓库上次拿到的
+     * skills 树。放在浏览器 localStorage 里（和 DSH 自己的 `dsh.sessions.current`
+     * 等页面状态同一个 origin），这样关掉 DSH 再打开时能先按上次的样子渲染，
+     * 不用等 Host 重新拉 GitHub。键名沿用 DSH 的 `dsh.` 前缀并带版本号。
+     */
+    const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'
+
+    /** 本地缓存的格式版本；版本不符就当没有缓存，不做迁移。 */
+    const VIEW_CACHE_VERSION = 1
 
     /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
     const SAVE_FORM_ID = 'buka-skills-save-form'
@@ -133,6 +149,10 @@ window.__ModuleLoader__.load({
       treeNotFound: 'Repository not found or not accessible.',
       treeRateLimited: 'GitHub API rate limit reached. Try again later.',
       treeUnsupported: 'Only GitHub repositories can be listed.',
+      treeUnavailable: 'This repository is neither an npx skills repository nor a Claude Code marketplace.',
+      kindNpx: 'npx skills',
+      kindMarketplace: 'Claude Code marketplace',
+      kindUnavailable: 'unavailable',
       retry: 'Retry',
     }
 
@@ -190,6 +210,10 @@ window.__ModuleLoader__.load({
       treeNotFound: '仓库不存在或无权访问。',
       treeRateLimited: 'GitHub 接口限流，稍后再试。',
       treeUnsupported: '只有 GitHub 仓库可以列出 skills。',
+      treeUnavailable: '这个仓库不可用：既不是 npx skills 仓库，也不是 Claude Code marketplace。',
+      kindNpx: 'npx skills',
+      kindMarketplace: 'Claude Code 市场',
+      kindUnavailable: '不可用',
       retry: '重试',
     }
 
@@ -294,6 +318,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 收藏卡片标题行的仓库类型徽标：npx skills / Claude Code 市场 / 不可用。
+     *
+     * kind 由 Host 给出：展开后拿到的完整结果与轻量探测都带它。两处都没有
+     * （还没探测完、探测失败）时不显示徽标，也不渲染占位的「…」。
+     *
+     * @param {unknown} kind Host 返回的仓库类型
+     * @param {function(string): string} t 翻译函数
+     * @returns {{ text: string, tone: 'neutral' | 'info' | 'warning' } | null}
+     */
+    function kindTagOf(kind, t) {
+      switch (kind) {
+        case 'npx-skills':
+          return { text: t('kindNpx'), tone: 'neutral' }
+        case 'claude-code-marketplace':
+          return { text: t('kindMarketplace'), tone: 'info' }
+        case 'unavailable':
+          return { text: t('kindUnavailable'), tone: 'warning' }
+        default:
+          return null
+      }
+    }
+
+    /**
      * 把各种 npx 来源写法收敛成可比较的键：`https://github.com/a/b.git`、
      * `github.com/a/b` 与 `a/b` 都是 `a/b`。Host 写进收藏文件的 `id` 也是
      * 这个键的小写形式，所以可以直接用来判断「收藏的仓库是否已安装」。
@@ -351,6 +398,138 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 取 localStorage；隐私模式、没有 window 或 storage 被禁用时返回 null。
+     * 缓存是可重建的页面状态，任何访问失败都不该让页面挂掉。
+     *
+     * @returns {Storage | null}
+     */
+    function viewStorage() {
+      try {
+        if (typeof window === 'undefined') return null
+        return window.localStorage ?? null
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * 读收藏页的本地缓存。
+     *
+     * 形状不对、版本不符、JSON 坏了都直接当没有缓存：这里只恢复「看起来对」
+     * 的状态，不尝试修数据。树的校验只到 `root` 是数组为止，渲染层本来就容忍
+     * 缺字段（描述、children 都有兜底）。
+     *
+     * @returns {null | {
+     *   expandedRepos: Record<string, true>,
+     *   collapsedDirs: Record<string, Record<string, true>>,
+     *   trees: Record<string, { status: 'ready', data: object, error: null }>,
+     * }}
+     */
+    function readViewCache() {
+      const storage = viewStorage()
+      if (storage === null) return null
+      let raw
+      try {
+        raw = storage.getItem(VIEW_CACHE_KEY)
+      } catch {
+        return null
+      }
+      if (raw === null) return null
+
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return null
+      }
+      if (parsed === null || typeof parsed !== 'object' || parsed.version !== VIEW_CACHE_VERSION) return null
+
+      const expandedRepos = {}
+      if (Array.isArray(parsed.expanded)) {
+        for (const id of parsed.expanded) {
+          if (typeof id === 'string' && id !== '') expandedRepos[id] = true
+        }
+      }
+
+      const collapsedDirs = {}
+      if (parsed.collapsedDirs !== null && typeof parsed.collapsedDirs === 'object' && !Array.isArray(parsed.collapsedDirs)) {
+        for (const [id, dirs] of Object.entries(parsed.collapsedDirs)) {
+          if (dirs === null || typeof dirs !== 'object' || Array.isArray(dirs)) continue
+          const kept = {}
+          for (const [dir, collapsed] of Object.entries(dirs)) {
+            if (collapsed === true) kept[dir] = true
+          }
+          if (Object.keys(kept).length > 0) collapsedDirs[id] = kept
+        }
+      }
+
+      const trees = {}
+      if (parsed.trees !== null && typeof parsed.trees === 'object' && !Array.isArray(parsed.trees)) {
+        for (const [id, data] of Object.entries(parsed.trees)) {
+          if (data === null || typeof data !== 'object' || !Array.isArray(data.root)) continue
+          trees[id] = { status: 'ready', data, error: null }
+        }
+      }
+
+      return { expandedRepos, collapsedDirs, trees }
+    }
+
+    /**
+     * 写收藏页的本地缓存。
+     *
+     * 只缓存当前展开着的仓库的树：收起的卡片重开 DSH 后仍按原来的路径重新取，
+     * 不会拿一份旧树冒充新数据；恢复出来的展开卡片也一定带内容，不会展开成
+     * 一片空白。配额写不下时直接丢掉整份缓存——下次打开只是回到默认的收起
+     * 状态，不影响功能。
+     *
+     * @param {{
+     *   expandedRepos: Record<string, true>,
+     *   collapsedDirs: Record<string, Record<string, true>>,
+     *   trees: Record<string, { status: string, data: object | null }>,
+     * }} state
+     * @returns {void}
+     */
+    function writeViewCache({ expandedRepos, collapsedDirs, trees }) {
+      const storage = viewStorage()
+      if (storage === null) return
+
+      const cachedTrees = {}
+      for (const [id, state] of Object.entries(trees)) {
+        if (expandedRepos[id] !== true) continue
+        if (state?.data === null || state?.data === undefined) continue
+        cachedTrees[id] = state.data
+      }
+      // 没有树就不恢复展开：否则重开 DSH 会看到一张「展开着但什么都没有」的卡片。
+      const expanded = Object.keys(expandedRepos).filter(
+        (id) => expandedRepos[id] === true && cachedTrees[id] !== undefined,
+      )
+      const cachedCollapsed = {}
+      for (const id of expanded) {
+        if (collapsedDirs[id] !== undefined) cachedCollapsed[id] = collapsedDirs[id]
+      }
+
+      const remove = () => {
+        try {
+          storage.removeItem(VIEW_CACHE_KEY)
+        } catch {
+          // 缓存删不掉也不影响页面。
+        }
+      }
+      if (expanded.length === 0) {
+        remove()
+        return
+      }
+
+      const payload = { version: VIEW_CACHE_VERSION, expanded, collapsedDirs: cachedCollapsed, trees: cachedTrees }
+      try {
+        storage.setItem(VIEW_CACHE_KEY, JSON.stringify(payload))
+      } catch {
+        // 配额不够（树最占地方）：整份缓存丢掉，下次打开回到默认收起状态。
+        remove()
+      }
+    }
+
+    /**
      * 一个树节点里的 skill 数；目录节点用它显示数量。
      *
      * @param {object} node Host 返回的树节点
@@ -375,6 +554,8 @@ window.__ModuleLoader__.load({
       switch (failure?.code) {
         case 'repo-not-found':
           return t('treeNotFound')
+        case 'repo-unavailable':
+          return t('treeUnavailable')
         case 'rate-limited':
           return t('treeRateLimited')
         case 'unsupported-source':
@@ -515,9 +696,16 @@ window.__ModuleLoader__.load({
       const [removing, setRemoving] = React.useState(null)
       // 收藏仓库的树：哪些卡片展开、各仓库拿到（或正在拿）的树、哪些目录收起来。
       // 按仓库 id 存，删除收藏后由下面的 prune 清掉，避免留下孤儿状态。
-      const [expandedRepos, setExpandedRepos] = React.useState({})
-      const [trees, setTrees] = React.useState({})
-      const [collapsedDirs, setCollapsedDirs] = React.useState({})
+      // 初始值来自 localStorage 里的上一份缓存：重开 DSH 后先按上次的样子渲染，
+      // 再在后台用 Host 的缓存校正（见下面的 revalidate）。
+      const [restored] = React.useState(readViewCache)
+      const [expandedRepos, setExpandedRepos] = React.useState(restored?.expandedRepos ?? {})
+      const [trees, setTrees] = React.useState(restored?.trees ?? {})
+      const [collapsedDirs, setCollapsedDirs] = React.useState(restored?.collapsedDirs ?? {})
+      // 每个 GitHub 收藏的仓库类型探测结果（npx skills / Claude Code 市场 /
+      // 不可用），只用来渲染标题行的徽标。纯页面状态、不进 localStorage：
+      // 重开 DSH 重新探测一次即可。删除收藏时由下面的 prune 一起清掉。
+      const [probes, setProbes] = React.useState({})
 
       // 每次刷新（或首次挂载）重新读一次 Host 的扫描结果与收藏；两个 Tab 的
       // 数据一起刷新，切 Tab 时不再发请求。
@@ -581,16 +769,50 @@ window.__ModuleLoader__.load({
         setExpandedRepos(prune)
         setTrees(prune)
         setCollapsedDirs(prune)
+        setProbes(prune)
       }, [savedData])
+
+      // 展开状态、收起的目录与拿到的树都写回 localStorage：关掉 DSH 再打开时
+      // 能立刻恢复上次的收藏页，不用先等 Host 重新拉 GitHub。
+      React.useEffect(() => {
+        writeViewCache({ expandedRepos, collapsedDirs, trees })
+      }, [expandedRepos, collapsedDirs, trees])
+
+      // 从本地缓存恢复出来的树可能已经过期：切到「收藏」Tab 后，用 Host 的磁盘
+      // 缓存（必要时才重新拉 GitHub）在后台校正。请求期间保留旧树，不会从
+      // 「有列表」退回「加载中」。只做一次，之后由展开动作与「刷新」按钮触发。
+      const revalidatedRef = React.useRef(false)
+      React.useEffect(() => {
+        if (tab !== 'repos' || savedData === null || revalidatedRef.current) return
+        revalidatedRef.current = true
+        for (const repo of repos) {
+          if (expandedRepos[repo.id] === true) loadTree(repo)
+        }
+      }, [tab, savedData])
+
+      // 切到「收藏」Tab 后静默探测每个 GitHub 收藏的仓库类型：这是轻量请求
+      // （Host 只拉 tree，必要时拉 marketplace.json），不阻塞列表渲染，结果只
+      // 影响标题行的徽标。已经探测过（含探测中、探测失败）的卡片不重复发请求，
+      // 想强制重探走顶部「刷新」。
+      React.useEffect(() => {
+        if (tab !== 'repos' || savedData === null) return
+        for (const repo of repos) {
+          if (!isGitHubRepo(repo.source)) continue
+          if (probes[repo.id] !== undefined) continue
+          probeRepo(repo)
+        }
+      }, [tab, savedData, probes])
 
       /**
        * 页面「刷新」：重读列表与收藏，并强制刷新已展开仓库的树；没展开的
        * 仓库继续用 Host 缓存，等下次展开再取，避免一次刷新打十几个请求。
+       * 所有可列出的收藏同时强制重探仓库类型（刷新徽标），失败保留旧徽标。
        */
       function reload() {
         setReloadKey((key) => key + 1)
         for (const repo of repos) {
           if (expandedRepos[repo.id] === true) loadTree(repo, { refresh: true })
+          if (isGitHubRepo(repo.source)) probeRepo(repo, { refresh: true })
         }
       }
 
@@ -613,6 +835,40 @@ window.__ModuleLoader__.load({
           setTrees((prev) => ({ ...prev, [repo.id]: { status: 'ready', data: body, error: null } }))
         } catch (failure) {
           setTrees((prev) => ({
+            ...prev,
+            [repo.id]: { status: 'error', data: prev[repo.id]?.data ?? null, error: failure },
+          }))
+        }
+      }
+
+      /**
+       * 探测一个仓库的类型（npx skills / Claude Code 市场 / 不可用）。Host 只拉
+       * tree（必要时再拉 marketplace.json），比展开轻得多，所以收藏页打开后可以
+       * 对所有 GitHub 收藏各发一次。
+       *
+       * 「不可用」是正常结论而不是错误：Host 返回 `repo-unavailable` 时转成
+       * `{ kind: 'unavailable' }` 的 ready 数据，让卡片显示「不可用」徽标，不弹
+       * 错误；其它失败保留旧徽标、静默，等用户展开时再看完整的错误信息。
+       *
+       * @param {{ id: string, source: string }} repo 一条收藏
+       * @param {{ refresh?: boolean }} [options] 是否绕过 Host 缓存
+       */
+      async function probeRepo(repo, options = {}) {
+        const refresh = options.refresh === true
+        setProbes((prev) => ({
+          ...prev,
+          [repo.id]: { status: 'loading', data: prev[repo.id]?.data ?? null, error: null },
+        }))
+        try {
+          const query = `?source=${encodeURIComponent(repo.source)}&probe=1${refresh ? '&refresh=1' : ''}`
+          const body = await requestJson(`${REPO_SKILLS_ROUTE}${query}`)
+          setProbes((prev) => ({ ...prev, [repo.id]: { status: 'ready', data: body, error: null } }))
+        } catch (failure) {
+          if (failure?.code === 'repo-unavailable') {
+            setProbes((prev) => ({ ...prev, [repo.id]: { status: 'ready', data: { kind: 'unavailable' }, error: null } }))
+            return
+          }
+          setProbes((prev) => ({
             ...prev,
             [repo.id]: { status: 'error', data: prev[repo.id]?.data ?? null, error: failure },
           }))
@@ -1005,6 +1261,10 @@ window.__ModuleLoader__.load({
           const listable = isGitHubRepo(repo.source)
           const installedAlready = installedRepos.has(repo.id)
           const expanded = expandedRepos[repo.id] === true
+          // 徽标优先用展开后拿到的完整结果（也带 kind），其次用轻量探测结果；
+          // 两处都没有（还在探测、探测失败）时不渲染徽标，也不显示占位。
+          const kind = trees[repo.id]?.data?.kind ?? probes[repo.id]?.data?.kind
+          const kindTag = kindTagOf(kind, t)
           return h(
             'li',
             { className: 'buka-skills-card', key: repo.id },
@@ -1044,6 +1304,8 @@ window.__ModuleLoader__.load({
                         },
                         repo.source,
                       ),
+                  // 仓库类型徽标：标题之后、已安装标记之前。
+                  kindTag === null ? null : h(Tag, { tone: kindTag.tone }, kindTag.text),
                   installedAlready ? h(Tag, { tone: 'success' }, t('installedBadge')) : null,
                 ),
                 h(

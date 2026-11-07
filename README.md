@@ -24,7 +24,7 @@ Buka Ltd 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 | --- | --- | --- |
 | [plugins/hello](plugins/hello) | `@buka/dsh-plugin-hello` | 冒烟模板：注册 `buka_hello` 工具，验证市场 → 安装 → composition 链路 |
 | [plugins/bell](plugins/bell) | `@buka/dsh-plugin-bell` | 任务结束、等待你输入、计划被退回修改、手动终止时播放提示音；四个声音可在 设置 → 提示音 里选择（macOS 系统自带音或插件自带的「你干嘛~哎哟」梗语音，「无」表示不播） |
-| [plugins/skills](plugins/skills) | `@buka/dsh-plugin-skills` | 侧边栏新增「Skills」页面：「已安装」列出全局 skills 并识别哪些由 `npx skills` 管理、按来源选择卸载方式；「收藏」记录常用的 npx skills 来源，点「刷新」旁边的「收藏」按钮在对话框里填仓库与备注，标题即仓库链接，GitHub 仓库可展开成带缓存的 skills 树，关掉 DSH 再打开仍保留展开状态 |
+| [plugins/skills](plugins/skills) | `@buka/dsh-plugin-skills` | 侧边栏新增「Skills」页面：「已安装」列出全局 skills 并识别哪些由 `npx skills` 管理、按来源选择卸载方式；「收藏」记录常用的 npx skills 来源，点「刷新」旁边的「收藏」按钮在对话框里填仓库与备注，标题即仓库链接，GitHub 仓库会自动判定是 `npx skills` 仓库、Claude Code marketplace 仓库还是不可用并显示徽标，可展开成带缓存的 skills 树，关掉 DSH 再打开仍保留展开状态；并通过 `ctx.bukaSkills` 服务把收藏、仓库里的 skills 与 marketplace 插件列表开放给其他插件 |
 | [plugins/robots](plugins/robots) | `@buka/dsh-plugin-robots` | 侧边栏新增「机器人」页面：机器人是本插件在 `~/.cache/dsh-plugin-robots/robots` 下创建并挂载成 DSH 工作区的目录（只管理自己创建的）；每个机器人可用 `npx skills` 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话，工作区被删后还可重新挂载 |
 
 ## 仓库结构

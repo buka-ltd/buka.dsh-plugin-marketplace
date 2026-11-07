@@ -3,7 +3,9 @@
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`npx skills`](https://github.com/vercel-labs/skills) 安装和管理，并按来源决定卸载方式；
-- **收藏**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub 链接、npm 包名），属于用户自己的书签；标题行右侧「刷新」旁边的「收藏」按钮打开对话框，填「仓库」与「备注」后提交；点仓库标题直接打开仓库页，卡片右侧的「删除」按钮（与已安装列表的卸载按钮同款样式）移除收藏；GitHub 仓库还能展开成一棵 skills 树（Host 拉取并缓存），看清仓库里有哪些可安装的 skill。
+- **收藏**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub 链接、npm 包名），属于用户自己的书签；标题行右侧「刷新」旁边的「收藏」按钮打开对话框，填「仓库」与「备注」后提交；点仓库标题直接打开仓库页，卡片右侧的「删除」按钮（与已安装列表的卸载按钮同款样式）移除收藏；GitHub 仓库还会自动判定来源类型并在卡片上标出 —— `npx skills` 仓库、Claude Code marketplace 仓库，或都不可用的「不可用」；前两种还能展开成一棵 skills 树（Host 拉取并缓存，展开状态跨重启保留），看清仓库里有哪些可安装的 skill。
+
+页面之外，插件还把收藏与仓库内容开放成一个 Host Service `ctx.bukaSkills`：其他插件用 `inject: ['bukaSkills']` 就能列出收藏的仓库、某个仓库里的 skill 列表，或某个 Claude Code marketplace 里的插件列表，见下方[对外服务](#对外服务host-service)。
 
 ## 列出什么
 
@@ -53,13 +55,24 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 - 数据存在 DSH home 下：`<DSH_HOME 或 ~/.dsh>/buka-skills/repos.json`。写入是原子的（临时文件 + rename），文件权限 `0600`；
 - 文件存在却解析不了（不是 JSON、结构不对、版本比插件新）时，页面提示、禁用「收藏」按钮并**拒绝写入**——否则「收藏一条」会悄悄清掉其它收藏。
 
-### 仓库 skills 树
+### 仓库判定、徽标与 skills 树
 
-GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里可安装的 skills 列成一棵树：
+收藏页打开后，Host 会对每个 GitHub 收藏做一次判定，卡片标题行显示结果徽标（`npx skills` / `Claude Code 市场` / `不可用`）。判定按下面的顺序进行，命中即停：
 
-- 发现规则与 `npx skills add` 一致：拉 GitHub 的递归仓库树，找 `SKILL.md`，按官方 CLI 的优先级前缀（`skills/`、`.agents/skills/` 等）过滤，目录层级直接变成树的分组；skill 名字与描述取自各自 `SKILL.md` 的 frontmatter；
-- 树会缓存：`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`，TTL 30 分钟，页面顶部「刷新」会绕过缓存重拉已展开的仓库；缓存文件坏了直接重建（它是易失数据，和收藏文件不同，不需要用户修）；
-- 只列 GitHub 的 `owner/repo`：包名、非 GitHub 链接照样收藏，但没有仓库树；
+1. **npx skills 仓库（标准布局）**：拉 GitHub 的递归仓库树，按 `npx skills add` 的**优先级前缀**在标准目录（`skills/`、`.agents/skills/`、`skills/.curated/` 等，见 CLI 的 `PRIORITY_PREFIXES`）里找 `SKILL.md`。命中至少一个就按 npx skills 仓库处理，不再拉 marketplace 文件；
+2. **Claude Code marketplace 仓库**：没有优先级命中时，看仓库根有没有 `.claude-plugin/marketplace.json`。文件存在且能解析成合法 marketplace，就按 marketplace 仓库处理；
+3. **npx skills 仓库（兜底布局）**：没有可用的 marketplace 文件（没有、JSON 不合法或结构不对）时，npx 的兜底规则仍然生效 —— 树里任意不超过 6 段的 `SKILL.md` 都算发现，按 npx skills 仓库处理；
+4. **不可用**：以上都不是，卡片标「不可用」，展开时提示原因。
+
+第 2 步先于第 3 步，是因为 npx 的兜底规则非常宽松：Claude Code marketplace 的 `plugins/<plugin>/skills/<name>/SKILL.md` 正好是 5 段，会被兜底命中；若兜底也算 npx 且排在前，marketplace 仓库就永远显示成 npx。把顺序拆成「标准 npx 布局 → marketplace → npx 兜底」后，标准 npx 仓库仍然优先，marketplace 也能被正确识别并分组。
+
+展开可用的仓库才拉每个 `SKILL.md` 的 frontmatter 并建树：
+
+- **npx skills 仓库**：目录层级直接变成树的分组，skill 名字与描述取自各自 `SKILL.md` 的 frontmatter；
+- **Claude Code marketplace 仓库**：按 `.claude-plugin/marketplace.json` 的 `plugins` 逐个插件分组，目录节点就是插件名，只列该插件目录下的 `SKILL.md`（`skills/` 默认目录、插件根的单文件 skill、以及 manifest 里自定义的 skills 目录都能覆盖）；`source` 指向仓库外（github / url / git-subdir / npm 等）的插件无法在本仓库里列出，直接跳过；marketplace 里没有任何可列 skill 时展开为空树，但仍算有效市场；
+- 判定与树都会缓存：`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 3），TTL 30 分钟；探测只记判定结果（不写整棵树），展开时补全；marketplace 的清单也随完整树一起缓存，所以「列出市场里有哪些插件」不必重拉，没有 skill 的插件也能列出来。缓存写入是串行的「读最新内容 → 改 → 原子写」，并发探测不会互相覆盖条目；页面顶部「刷新」会绕过缓存：重新判定全部 GitHub 收藏、重拉已展开仓库的树；缓存文件坏了直接重建（它是易失数据，和收藏文件不同，不需要用户修）；
+- 页面状态也会缓存：展开过哪些仓库、收起了哪些目录、每个仓库上次拿到的树都存在浏览器 localStorage（键 `dsh.buka-skills.view.v1`）。关掉 DSH 再打开时，收藏页先按上次的样子渲染（不显示加载中、不等网络），切到「收藏」后后台再向 Host 校正一次，Host 磁盘缓存过期才会重新拉 GitHub；徽标来自探测，不进 localStorage，重启后会先短暂不显示；localStorage 不可用或写满时自动退回不缓存，功能不受影响；
+- 只列 GitHub 的 `owner/repo`：包名、非 GitHub 链接照样收藏，但没有判定徽标、也没有仓库树；
 - 私有仓库与 GitHub 接口限流：可用 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量给 Host 提供 token（提高限额、访问私有仓库）；匿名请求限额用尽时页面提示稍后再试。
 
 ## 页面
@@ -67,13 +80,48 @@ GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里�
 侧边栏导航里（Plugins、Automation tasks 之后）出现一个「Skills」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `Modal` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」与「收藏」两个同尺寸按钮 + 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
 
 - **已安装**：标题行是名称 + 两个标签 —— 第一个是来源根（`agents` / `dsh`），第二个是安装来源（npx 管理时显示来源仓库，如 `vercel-labs/skills`；否则显示 `manual`）；卸载按钮在标题行右侧，点开后先二次确认再按上表选择方式执行。下面展示 skill 自己的 description（最多三行，超出显示 `…`），不展示安装时间；空列表会提示两个全局根目录的位置；
-- **收藏**：标题行右侧常驻的「收藏」按钮（两个 Tab 都有，与「刷新」同尺寸）打开对话框，填「仓库」与「备注」后提交；页面本身只有卡片列表（标题可点开仓库页；标题行右侧是「删除」按钮，已安装的会带标记；GitHub 仓库左侧箭头展开 skills 树，目录可再折叠）；操作结果用页面底部的 Toast 提示，对话框里的失败留在对话框内提示。
+- **收藏**：标题行右侧常驻的「收藏」按钮（两个 Tab 都有，与「刷新」同尺寸）打开对话框，填「仓库」与「备注」后提交；页面本身只有卡片列表（标题可点开仓库页，标题行还会标出 `npx skills` / `Claude Code 市场` / `不可用`；右侧是「删除」按钮，已安装的会带标记；可用仓库左侧箭头展开 skills 树，目录可再折叠）；操作结果用页面底部的 Toast 提示，对话框里的失败留在对话框内提示。
 
-页面只做展示与触发，列表、卸载、收藏与仓库树的读写都走 Host 一半注册的包内路由（`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…&refresh=1`），沿用 web 组合的信任栅栏，只接受本机同源请求。
+页面只做展示与触发：列表、卸载、收藏、仓库判定与仓库树的读写都走 Host 一半注册的包内路由（`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`），沿用 web 组合的信任栅栏，只接受本机同源请求。`probe=1` 是轻量判定（只回仓库类型与 skill 数量，不拉 `SKILL.md`），收藏页打开时对每张卡片各发一次。例外只有收藏页自己的展开状态与上次拿到的树：它们是纯页面状态，缓存在浏览器 localStorage（`dsh.buka-skills.view.v1`），重开 DSH 时先用它恢复视图，再找 Host 校正。
 
 ## 模型工具
 
 `buka_skills`（只读）：返回全局 skills 的 `name` / `description` / `scope` / `managedByNpx` / `source`。模型可以用它回答「本机装了哪些全局 skill、它们是怎么装的」，卸载仍由用户在页面上完成。
+
+## 对外服务（Host Service）
+
+插件在 Host 一侧注册一个 Cordis 服务 `ctx.bukaSkills`（服务名常量 `SERVICE_NAME = 'bukaSkills'`，定义在 `lib/service.js`）。页面与 `buka_skills` 工具用的是同一个实例，所以页面展开过的树、另一个插件随后调服务，命中的是同一份缓存与同一批在途请求。
+
+消费方声明依赖即可，不要 `import` 本包的实现：
+
+```js
+export const inject = ['bukaSkills']
+
+export function apply(ctx) {
+  ctx.effect(() => ctx.bukaSkills.listRepositories(), 'my-plugin: saved repos')
+}
+```
+
+服务实例本身不注册 effect：插件卸载时 Cordis 自动把它从 `ctx` 上摘除，并唤醒/重载依赖它的插件。
+
+### 方法
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `listRepositories({ refresh? })` | `{ file, exists, corrupt, repositories }` | 收藏的仓库，按收藏文件顺序；每条带 `kind`（`npx-skills` / `claude-code-marketplace` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因 |
+| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path, plugin }`，`plugin` 只在 marketplace 里有值 |
+| `listPlugins({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, plugins }` | Claude Code marketplace 里声明的插件，每个 `{ name, root, description, skills }`；没有 skill 的插件也会出现（`skills: []`） |
+
+失败统一返回 `{ ok: false, code, message }`，`code` 与仓库层一致：`invalid-source`、`unsupported-source`、`repo-not-found`、`rate-limited`、`fetch-failed`、`repo-unavailable`；`listPlugins()` 对非 marketplace 仓库另加 `not-a-marketplace`。`listRepositories()` 不会整体失败：单条探测失败降级为 `kind: 'unknown'`，`code` / `error` 带上原因。
+
+### 语义
+
+- 只读：收藏的增删仍是页面上的用户操作，不通过服务暴露；
+- 网络访问复用 `lib/repo-skills.js` 的 TTL 缓存（30 分钟），`refresh: true` 绕过；同一来源的并发调用合并成一次请求；
+- `listPlugins()` 的完整插件列表来自 `.claude-plugin/marketplace.json`，`listSkills()` 与页面展开的树来自同一次拉取；
+- 收藏文件损坏时 `listRepositories()` 如实返回 `corrupt: true` 与空列表，不猜测、不写回。
+
+需要类型提示时可以从子路径导入导出的类：`import { SkillsCatalogService } from '@buka/dsh-plugin-skills/service'`（仅用于 JSDoc/类型；运行时请用 `ctx.bukaSkills`）。
 
 ## 结构
 
@@ -81,12 +129,13 @@ GitHub 仓库的标题左侧有展开箭头，点开后 Host 会把该仓库里�
 | --- | --- |
 | `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client` 与 `locale` / `icon` 导出 |
 | `cordis.patch.yml` | bundle 层唯一的一行：把自己作为 `skill-buka-skills` 插入组成 |
-| `lib/index.js` | Host 一半：注册列表 / 卸载 / 收藏 / 仓库 skills 树路由与 `buka_skills` 工具 |
+| `lib/index.js` | Host 一半：注册列表 / 卸载 / 收藏 / 仓库 skills 树路由与 `buka_skills` 工具，并把 `ctx.bukaSkills` 服务注册进 composition |
+| `lib/service.js` | 对外服务 `ctx.bukaSkills`：`listRepositories()` / `listSkills()` / `listPlugins()`；持有仓库请求的并发合并与 TTL 缓存入口，不依赖 DSH 包，便于单独测试 |
 | `lib/skill-store.js` | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试 |
 | `lib/npx.js` | 定位 `npx`（PATH → mise/nvm/Volta/Homebrew → npm 自带 `npx-cli.js`）并执行 `npx skills remove` |
 | `lib/repo-store.js` | 收藏来源的规范化 / 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包 |
-| `lib/repo-skills.js` | 拉 GitHub 仓库树、按 `npx skills` 的规则找 `SKILL.md`、读 frontmatter 建树，并把结果按 TTL 缓存到 DSH home |
-| `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏）都通过 Host 路由取数与操作，收藏用 `Modal` 对话框录入仓库与备注；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
+| `lib/repo-skills.js` | 拉 GitHub 仓库树，按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
+| `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏）都通过 Host 路由取数与操作，收藏用 `Modal` 对话框录入仓库与备注；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage，重开 DSH 时先恢复再校正；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
 | `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
 | `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`（插件安装卡片），不需要激活插件 |
@@ -110,4 +159,8 @@ dsh plugin --profile <profile> add "link:$PWD/plugins/skills"
 - 收藏页只记录来源，不会替你安装、也不生成安装命令：安装仍要自己执行 `npx skills add <来源> -g`，安装范围与 skill 选择由该命令决定。
 - 收藏文件损坏时页面只读不写，修复或删除 `buka-skills/repos.json` 后刷新即可恢复。
 - 仓库树只支持 GitHub；要访问私有仓库或避开匿名限额，给 Host 进程设置 `GITHUB_TOKEN` / `GH_TOKEN`。
-- 仓库树按 30 分钟 TTL 缓存，仓库里的 skill 刚更新时可能还是旧列表；点顶部「刷新」可以强制重拉已展开的仓库。
+- marketplace 判定优先于 npx 的宽松兜底：仓库根有合法的 `.claude-plugin/marketplace.json` 时，`plugins/**` 下的 skills 会按插件分组展示，而不是平铺成 npx 树。
+- Claude Code marketplace 只列 skills（插件的 `SKILL.md`），不列 commands / agents；`source` 指向仓库外（github / url / git-subdir / npm 等）的插件不会展开。
+- marketplace 只认仓库根目录的 `.claude-plugin/marketplace.json`：放在别处、或通过 `extraKnownMarketplaces` 的 `path` 指到子目录的市场不会被识别。
+- 判定结果也按 30 分钟 TTL 缓存：仓库刚变成可用/不可用时，点顶部「刷新」可以立刻重新判定。
+- 仓库树按 30 分钟 TTL 缓存，仓库里的 skill 刚更新时可能还是旧列表；点顶部「刷新」可以强制重拉已展开的仓库。重开 DSH 后看到的是上次缓存在浏览器里的列表，后台校正完成前可能短暂显示旧内容。

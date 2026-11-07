@@ -1,11 +1,12 @@
 {
   "name": "@buka/dsh-plugin-skills",
-  "version": "0.1.0",
-  "description": "In a sidebar page, lists the skills installed globally for every DSH session, flags the ones the npx skills CLI manages, uninstalls each through the right path, and keeps a personal list of npx skills repositories to install later",
+  "version": "0.3.0",
+  "description": "In a sidebar page, lists the skills installed globally for every DSH session, flags the ones the npx skills CLI manages, uninstalls each through the right path, keeps a personal list of skill repositories to install later, and exposes them to other plugins through the ctx.bukaSkills service, detecting whether each saved GitHub repository is an npx skills repository or a Claude Code marketplace and flagging the ones that are neither",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./service": "./lib/service.js",
     "./client": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
@@ -18,6 +19,7 @@
     "lib/npx.js",
     "lib/repo-store.js",
     "lib/repo-skills.js",
+    "lib/service.js",
     "client.js",
     "cordis.patch.yml",
     "icon.svg",
