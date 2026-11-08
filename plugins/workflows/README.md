@@ -193,7 +193,7 @@ runs/<runId>/
 
 ## 依赖与限制
 
-- robot 节点需要先安装并启用 [`@buka/dsh-plugin-robots`](../robots)；它提供 `ctx.bukaRobots`（`list()`、`avatarMap()`、`startSession()`）。默认创建**普通顶层会话**并挂到机器人自己的工作区：`cwd` 是机器人目录，机器人的 AGENTS.md 与项目 skills 生效，侧边栏能看到、能直接打开；同一个机器人整个运行共用一个会话（按「运行目标 · 机器人」命名），后续进入用 `agents.resume()` 续接并先 compact，不再新开会话。普通会话创建失败时才退回 subagents 的 spawn 子会话（不会出现在侧边栏）。
+- robot 节点需要先安装并启用 [`@buka/dsh-plugin-robots`](../robots)；它提供 `ctx.bukaRobots`（`list()`、`avatarMap()`、`startSession()`）。编排器通过 robots 插件的只读工具 `buka_robots` 取机器人清单，其中每个机器人带一句职责（`description` 字段）；按职责选择节点用哪个机器人，不要凭空造机器人名。清单最后可能带「通用型机器人」（启用时才有，字段与普通机器人相同）：它跑在当前工作区、没有自己的 AGENTS.md/skills，职责里写明没有专用机器人时使用，停用后不会出现、也不能被调用。默认创建**普通顶层会话**并挂到机器人自己的工作区：`cwd` 是机器人目录，机器人的 AGENTS.md 与项目 skills 生效，侧边栏能看到、能直接打开；同一个机器人整个运行共用一个会话（按「运行目标 · 机器人」命名），后续进入用 `agents.resume()` 续接并先 compact，不再新开会话。普通会话创建失败时才退回 subagents 的 spawn 子会话（不会出现在侧边栏）。
 - 含 `gate` 的定义是**同步**的工具调用：整条流程（含等待门禁授权）占着编排器会话的这一轮 turn，因为原生审批要求会话有活跃 turn。长流程不要放进这一轮；用户点停止会取消运行。不含 `gate` 的定义走后台，工具立刻返回 `runId`，用 `buka_workflow_status` 或侧边栏页面跟进，`buka_workflow_cancel` 可以停。
 - 编排 preset 的根会话才能创建工作流；机器人节点会话显式使用 `robotPreset`（默认 `standard`），因此不会继承编排 persona、也不会看到工作流工具。
 - 运行数据只用于回看，不支持恢复；每个机器人的会话日志由 DSH 持久化，仍然可以在侧边栏或运行页的「打开会话」里打开。续接前的 compact 依赖宿主 `compaction` 服务（`@deepseek-ai/dsh-compaction-basic`，桌面 profile 默认禁用）；服务缺失时节点照常继续，但页签会提示“压缩服务不可用”，启用后才会真正压缩历史。

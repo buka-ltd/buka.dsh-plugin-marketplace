@@ -700,6 +700,20 @@ test('client: robot capsules and the inspector show the robot avatar', async () 
   )
 })
 
+test('client: the general-purpose robot renders its fixed 🤖 avatar', async () => {
+  const client = await loadClient()
+  const data = loopFixture()
+  data.graph = {
+    ...data.graph,
+    nodes: data.graph.nodes.map((node) => ({
+      ...node,
+      avatar: node.robot === null ? null : 'robot',
+    })),
+  }
+  const { texts } = collect(client.render(detailStates(data, 'check')))
+  assert.ok(texts.includes('🤖'), 'avatarMap 里的机器人头像 id 要画成固定 🤖')
+})
+
 test('client: a node the run did not reach is a gray dashed capsule', async () => {
   const client = await loadClient()
   const data = fixture()

@@ -74,6 +74,12 @@ window.__ModuleLoader__.load({
       mushroom: { emoji: '🍄', color: '#EB5757' },
     }
 
+    /**
+     * 通用型机器人的固定头像：它不在普通预设表里，但 robots 服务的
+     * `avatarMap()` 会返回 `robot`，节点图需要照常画 🤖。
+     */
+    const GENERAL_AVATAR = { emoji: '🤖', color: '#3B82F6' }
+
     /** 英文文案。 */
     const en = {
       panel: 'Workflows',
@@ -617,6 +623,7 @@ window.__ModuleLoader__.load({
      * @returns {{ emoji: string, color: string } | null}
      */
     function avatarPreset(id) {
+      if (id === 'robot') return GENERAL_AVATAR
       return typeof id === 'string' && Object.hasOwn(AVATARS, id) ? AVATARS[id] : null
     }
 
