@@ -1,0 +1,204 @@
+# @buka/dsh-plugin-workflows
+
+由**编排 preset** 现场创建的一次性工作流：编排 agent 审视任务后写一份节点图，直接交给插件调度，跑到终止状态或异常为止。
+
+设计的边界：
+
+- **创建入口收窄到一个 preset**：`buka_workflow_*` 工具只对配置点名的 agent preset（默认是随插件发布的 `workflow-orchestrator`）的**根会话**可见，其他会话连工具都看不到；由该 preset 会话 spawn 出来的子会话同样看不到，避免机器人节点自己再开工作流。
+- **不是流程市场**：没有可复用的流程列表、编辑器或按流程生成的自定义工具。每次运行的定义都来自编排 agent 的那一次工具调用，侧边栏页面只是观测点。
+- **运行数据落盘**：定义快照、运行状态、事件流、节点结果都写到插件目录，供回看和排查；但**不做断点续跑**，DSH 重启后未结束的运行标成 `interrupted`。
+- **一个机器人一个会话，重复进入先 compact**：同一次运行里，同一个 `robot` 只在第一次进入时通过 `ctx.bukaRobots.startSession()` 新开会话；之后任何节点再次进入这个机器人时都传回已记录的 `sessionId`，插件先对该会话执行一次 compact，再把这次边上的 prompt 发进同一个会话。这样机器人跨节点 / 循环保留上下文，又不会让会话无限膨胀。会话还会按「运行目标 · 机器人」显式命名（`startSession({ title })`），侧边栏里能直接认出是哪次运行的哪段对话。机器人会话显式落到普通工作 preset（Config `robotPreset`，默认 `standard`），不继承编排器的 persona 与工具集；会话不弹审批。
+- **门禁是独立节点**：`gate` 节点不建会话，执行到它时调用 `ctx.approval.request()` 弹一次原生审批框；批准 / 拒绝各走一条出边，也可以直接终止。
+- **允许循环**：`next` 可以指回前面的节点（或自己）。引擎用 `maxSteps` 与机器人节点的 `maxVisits` 兜底，防止环不退出；页面上回边绕到轨道右侧、连线带箭头，重复进入的胶囊显示 `×N`。
+- **图调度会话**：不含 `gate` 的定义在后台运行——工具立刻返回 `runId`，节点会话由引擎继续调度，不占编排器会话的 turn；含 `gate` 的定义必须在本次调用内跑完，因为原生审批要求会话有活跃的 turn。
+
+## 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `buka_workflow_plan` | 只校验定义，返回规范化节点图或精确错误；建议在 `buka_workflow_start` 之前调用 |
+| `buka_workflow_start` | 校验并启动一次运行。不含 `gate` 时后台执行：立即返回 `runId`，引擎继续按图调度节点会话；含 `gate` 时在本次调用内执行到终止状态并返回逐节点摘要 |
+| `buka_workflow_status` | 按 `run_id` 读一次运行（后台运行会持续前进）；省略 `run_id` 时列出最近运行 |
+| `buka_workflow_cancel` | 取消仍在运行的后台运行；已结束的运行是无操作 |
+
+没有向模型暴露“门禁决策”工具：授权只能由用户在原生审批框里做出。
+
+## 谁能创建工作流
+
+工具注册在 Host 上，但可见性由 [`lib/access.js`](lib/access.js) 按会话收窄：
+
+1. 取调用者会话记录的 agent preset（`ctx.agentPresets.presetForSession`）；
+2. 只有配置 `orchestratorPresets` 里点名的 preset **根会话**能看到工具；
+3. 子会话（机器人节点）、其他 preset 的会话一律看不到，也调用不了。
+
+随插件的 bundle 补丁会插入一个 `workflow-orchestrator` preset（`id: workflow-orchestrator`，显示为「工作流编排」）：它带一段编排 persona，以及 bash / fs / fs-search / ask-user 等基础工具，但**不做具体工作**，只负责计划节点图并启动。新建会话时选择这个 preset 即可创建工作流。想换成自己的 preset，把 `orchestratorPresets` 改成对应 id；留空表示不做收窄（所有会话可见，不推荐）。
+
+
+## 定义格式
+
+```jsonc
+{
+  "goal": "为 v1.2 写发布说明并完成发布",
+  "maxSteps": 64,
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "next": [{
+        "to": "collect",
+        "name": "开始",
+        "prompt": "目标：{{goal}}\n收集 v1.2 的变更，结束时交出 {status, summary} 两个字段。"
+      }]
+    },
+    {
+      "id": "collect",
+      "type": "robot",
+      "robot": "researcher",
+      "summary": "收集 v1.2 的变更并整理成三点结论",
+      "report": true,
+      "timeoutMs": 600000,
+      "next": [
+        { "when": { "field": "status", "equals": "ok" }, "to": "publish_gate", "name": "调研完成" },
+        { "to": "abort", "name": "调研失败" }
+      ]
+    },
+    {
+      "id": "publish_gate",
+      "type": "gate",
+      "title": "发布确认",
+      "detail": "调研已完成，是否同意发布 v1.2？",
+      "onApprove": {
+        "to": "publish",
+        "name": "同意发布",
+        "prompt": "执行发布：{{nodes.collect.data.summary}}"
+      },
+      "onReject": {
+        "to": "revise",
+        "name": "需要修改",
+        "prompt": "根据调研结果修改发布说明：{{nodes.collect.data.summary}}"
+      }
+    },
+    {
+      "id": "revise",
+      "type": "robot",
+      "robot": "writer",
+      "summary": "按调研结论修改发布说明",
+      "next": [{ "to": "publish_gate", "name": "再次确认" }]
+    },
+    {
+      "id": "publish",
+      "type": "robot",
+      "robot": "publisher",
+      "summary": "发布 v1.2",
+      "next": [{ "to": "done", "name": "发布完成" }]
+    },
+    { "id": "done", "type": "end", "status": "completed" },
+    { "id": "abort", "type": "end", "status": "rejected" }
+  ]
+}
+```
+
+节点字段：
+
+| 节点 | 字段 |
+| --- | --- |
+| `start` | `id`、`type: "start"`、`next`；恰好一个，不执行、不占步数。它只有一条出边，出边上的 `prompt` 就是真正的第一个机器人节点首次进入时的提示词 |
+| `robot` | `id`、`type: "robot"`、`robot`、`summary`（可选，创建者写的一行步骤概要）、`report`（布尔）、`agentOptions`、`timeoutMs`、`maxVisits`、`next`；**不再有 `prompt`** |
+| `gate` | `id`、`type: "gate"`、`title`、`detail`、`onApprove`、`onReject`（目标是门禁 / 终止时可用节点 id；目标是机器人时必须是 `{ to, name?, prompt? }` 边对象并带 prompt；省略表示终止） |
+| `end` | `id`、`type: "end"`、`status`（`completed` / `rejected` / `failed`）；终止节点不写交付物，它在页面上的「最终交付物」取这次运行最后一次**有正文**的机器人执行 |
+
+`next` 是边规则数组：`{ "to": "...", "when"?: { "field": "...", "equals"?: ..., "in"?: [...] }, "name"?: "...", "prompt"?: "..." }`。每条规则就是图上的一条边：第一条命中生效；没有 `when` 的规则是默认出口；都不命中则按 `completed` 结束。单出口且目标是门禁 / 终止节点时也可以用字符串 `"next": "done"`；字符串边不能带名字或 prompt，所以不能进入机器人节点。
+
+**所有 prompt 都定义在边上**：每个进入机器人节点的边都必须有 `prompt`，包括 start 节点的第一条边、门禁的出边和循环回边；节点本身不再写 prompt。`prompt` 在**这条边被走到时**渲染，并成为目标节点这一次执行的完整提示词。于是同一个 `dev` 节点可以由 start 边给出“首次开发”的指令，由 `test → dev` 回边给出“测试打回、按以下问题修复”的指令，而图上仍然只有一个开发者节点、右侧按 `#1 / #2` 分开每次执行。边 prompt 进入门禁 / 终止节点没有意义，写了会在校验时报错；它按模板渲染，引用不存在的路径会直接失败。
+
+`name` 是给观察者看的短名字（例如「测试通过」「测试打回」），运行页鼠标悬停到连线上时显示：这条线变成实线、略粗一点，其余连线压暗，名字以小标签钉在线中段右侧、两行胶囊之间（不跟着鼠标跑，也不压住节点）；页面上不展示 `when` / `prompt` 等边配置。门禁边没有自定义名字时，悬停按「批准 / 拒绝」显示；指向同一目标的多条规则在图上合并为一条线，名字按定义顺序并列。
+
+**所有节点都必须能从 start 节点走到**：走不到的节点没有任何入边，永远不会执行，画到运行图上还会被当成第二个起点。校验阶段直接报错（`buka_workflow_plan` 会指出具体是哪个节点），不再只是一条 warning。边也不能指回 start 节点。只有修复前落盘的旧运行里才可能出现不可达节点，页面会在它的详情里标注「不可达」。
+
+旧格式（没有 start 节点、用顶层 `"start"` 指定入口、prompt 写在机器人节点上）仍然可以运行，用于兼容已经落盘或已在用的定义；新定义应当使用上面的 start 节点格式。
+
+**结构化结果**：机器人节点设置 `report: true` 时，该节点会话被要求交回**一个 JSON 对象**。默认路径（普通顶层会话）由服务注册 scoped 工具 `structured_output` 收集；subagent 兜底路径由 DSH 的结构化输出通道提供同名工具。引擎把它存进这次执行的 `data`，后续 `next` 的 `when` 条件就是拿这些字段做匹配（`field` 支持点号路径）；没有 `report` 的节点没有 `data`，条件规则不会命中，只能走默认出口。这些字段只用于路由，运行页只展示节点交付的正文，不把它们铺成 key/value。
+
+如果会话结束时**没有交回 JSON**（没调用结构化工具，或者回复正文里不是 JSON 对象），插件不会直接判失败，而是往**同一个会话**里再发一条消息，要求它按要求的格式重新回复；最多重试 `reportRetries` 次（robots 插件的配置，默认 2）。如果最后一条回复本身就是一个 JSON 对象（也接受 ```json 代码块），同样算交回；只有重试用尽仍没有结果时，节点才以 `error` 结束并在详情里说明原因。续接同一个机器人会话时，服务会补装同名的 `structured_output` 工具，report 节点在续接轮次里仍然能交回结构化结果。
+
+prompt 只做占位符替换，不求值：`{{goal}}`、`{{step}}`、`{{nodes.<id>.text}}`、`{{nodes.<id>.data.<path>}}`、`{{nodes.<门禁 id>.decision}}`。路径不存在时该节点直接失败，而不是静默变空。
+
+## 门禁语义
+
+- 执行到 `gate` 时：运行状态置为 `waiting`，调用 `ctx.approval.request({ agent: 创建者, toolName: 'buka_workflow_gate', reason })`，用户看到 DSH 的原生审批框；
+- `allowed-once` → `approved` → 走 `onApprove`，省略则按 `completed` 结束；
+- `rejected` → 走 `onReject`，省略则按 `rejected` 结束；
+- 用户停止这一轮 / 取消 → 运行 `cancelled`；审批服务不可用 → 运行 `failed`；
+- 创建者 agent 自身是 delegated child 或审批策略为 `never` 时，审批会被自动拒绝（fail closed），所以工作流应由根会话 agent 创建。
+
+## 循环
+
+定义里允许成环：`next` 可以指回前面的节点，甚至指回自己。引擎不把环当错误，而是靠两道上限兜底：
+
+- `maxSteps`：本次运行的节点执行总次数（默认 64，部署侧上限 256）；
+- 机器人节点的 `maxVisits`：同一个机器人节点最多被进入几次（`gate` 不计入）。
+
+超出任一项时运行以 `failed` 结束并记录原因（`exceeded its N-step limit` / `exceeded its N-visit limit`），已经产生的步骤与交付物都会保留。
+
+循环在页面上这样表达：回边 / 自环走轨道右侧的竖线 lane（两端圆角转弯），lane 从里往外分配，循环作为内层套在被它包住的分支里，不会和别的线交叉；两条边各带一个方向箭头，一进一出围成环，不再额外画循环图标。被重复进入的胶囊右侧显示 `×N` 访问次数（详情里也会写「执行次数」）。一次运行没走到的节点（例如条件分支里没选中的那条路）是**灰色虚线胶囊**，仍留在它的拓扑位置（在结束节点之前），不会被排到结束节点后面。
+
+循环里需要给“再次进入”的节点不同指令时，把完整提示词写在回到它的那条边上（该边的 `prompt`，见「边」）。节点本身不再有 prompt，每次进入由被走到的那条边给出，所以首次进入和测试打回可以读起来完全是两件事。
+
+## 页面
+
+侧边栏新增「工作流」条目（只读）：
+
+- 列表：最近运行的状态、目标、runId 与开始时间；
+- 详情以**纵向节点图**为核心（类似 `git log`）：图没有外框，宽度由节点内容决定；节点从上到下排列，左侧轨道用圆点颜色表示运行状态，节点本身是一个**胶囊**——开始节点显示「开始」、机器人节点显示创建者写的步骤概要（旧定义没有 `summary` 时退回机器人名）、门禁显示标题、终止节点显示 id；机器人节点的胶囊前还会显示该机器人的**预设头像**（来自 robots 服务的 `avatarMap()`；插件没装或机器人已删除时不画头像，图照常显示）；胶囊颜色区分节点类型（开始 / 机器人 / 门禁 / 终止），没有字母角标；这次运行没走到的节点是灰色虚线胶囊，重复进入的节点在胶囊右侧显示 `×N`；
+- **线之间不交叉**：跨行分支、回边、自环都走轨道右侧的竖线 lane，lane 按「内层靠里、外层被挤到外面」分配——嵌套的区间就分到不同的层，不会在中途交叉；所有连线都带方向箭头，箭头画在各自竖段的中点，而不是几个箭头挤在圆点旁边；指向同一目标的多条规则合并成一条线（条件数量在右侧详情里展开），走过的连线高亮；**鼠标悬停到连线上会把这条线变成实线并略粗一点、压暗其余连线，名字以小标签钉在线中段右侧（不跟着鼠标跑）**（创建者写在边 `name` 里的短名字；只显示名字，不展示条件 / 提示词等配置；门禁边按「批准 / 拒绝」显示），没写名字的机器人边不显示；正在执行的胶囊带呼吸边框，等待授权的门禁胶囊为告警色；
+- 点击胶囊，右侧展示该节点的详细信息（机器人节点的标题旁同样带这个头像）：**标题就是步骤概要**（创建者写在 `summary` 里的那一行；旧定义没有时退回提示词第一行），节点 id 只作为标题旁的小号代码标签；下面是**执行人**（机器人名）、节点配置与门禁说明；终止节点的详情展示**终止状态**与**最终交付物**——最终交付物不是定义里写死的文案，而是这次运行**最后一次有正文的机器人执行**，下面标出来源节点与第几次执行，点一下回到那次执行。机器人节点的详情顶部固定展示该机器人的**会话**（运行中的节点在进入后就能看到 sessionId），可直接「打开会话」跳到对话；每个机器人在一次运行里只有一个会话，会话按「运行目标 · 机器人」命名，所以侧边栏里能直接认出是哪次运行的哪段对话；重复进入时页签会标出「已压缩历史」（续接本来就是常态，不再单独标注），压缩失败会在页签里提示但不阻断执行，续接失败退回新会话时会说明原因。其余节点按**执行拆分的 Tab**——每次进入节点一个 `#N` 页签，页签里依次是这一次的任务信息（渲染后的提示词）、输出结果（交付物全文）、状态 / 时间 / 时长，并可以「打开会话」跳到对应会话；页签底部是**上一步 / 下一步**两个方向：左侧回到运行里的上一次执行（本次运行的第一次执行在新格式里回到开始节点），右侧到这次执行把运行带到的下一次执行（最后一次执行则指向运行结束的终止节点），点一下就会切到那个节点并打开那一次执行。进入运行详情时自动聚焦：有正在执行 / 等待授权的节点就选中它；运行已完成则选中它最后走到的终止节点（一进来就展示最终交付物）；其他状态打开最近一次执行。没执行过的机器人节点在旧格式里显示定义里的提示词模板，新格式里只有概要（prompt 在边上，第一次执行时才看得到）。出口只在图上表达，详情里不再重复列一遍。**输出结果只展示交付物正文**：结构化结果字段是给 `when` 条件做路由用的数据，不按 key/value 铺在页面上，也不展示原始 JSON。start 节点在标题旁标「起点」，它的详情只说明自己不执行、第一条边的 prompt 在目标节点的第一次执行里，没有执行 Tab；旧记录里从入口不可达的节点会额外说明「没有任何连线能到达它，所以不会执行」；
+- 默认选中正在执行或最近执行过的节点；
+- 页面底部的 footer 放图例（节点类型 / 状态色 / 连线含义）与交互提示；它固定在页面底部、不参与内容滚动，内容再长也不会把它顶下去；
+- 页面本身不创建、不启动工作流——定义由编排 agent 在会话里现场生成，页面只负责观测。打开页面期间会定时刷新：有运行在跑（`running` / `waiting`）时每 1.5 秒，否则每 5 秒，所以后台运行的节点进度和节点会话也能实时看到。
+
+图模型由 Host 侧纯函数 [`lib/graph.js`](lib/graph.js) 生成：把定义快照（节点、出口、门禁分支）与状态快照（`steps`、`current`、`pendingGate`、`result`）合成节点状态、连线的「是否走过 / 走了几次 / 是否循环边 / 条件列表 / 边名字」，再算好行序（拓扑排序：不成环的连线一律从上往下，只有环内的返回边向上）、lane 分配、SVG 路径与方向箭头；浏览器一半只负责渲染。节点上还有一个 `unreachable` 标记（从 `start` 出发没有路径到达），只可能出现在修复前的旧记录里，页面据此解释它为什么不会执行。运行详情接口在构建图模型时还会把 robots 服务的 `avatarMap()` 合进来，给 robot 节点填 `avatar`（只是展示信息，取不到时是 null）。这样布局与状态推导都能直接单测（含循环的访问次数、lane 嵌套与「不交叉」的几何断言、自环与合并的重复连线、合并边的名字）。
+
+节点结果文件（`nodes/<seq>-<node id>.json`）除了输出文本与结构化数据，还会保存那一次的**渲染后提示词**（`prompt`），所以页面上的每次执行都能回看自己的输入；旧记录没有这个字段时退回展示定义里的提示词模板。
+
+页面通过 Host 的两条只读路由取数：`GET /buka-workflows/runs` 与 `GET /buka-workflows/run?runId=...`（后者返回 `run`、`definition`、`nodeResults` 与算好坐标的 `graph`），沿用 web 组合的信任栅栏。
+
+## 落盘位置
+
+默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workflows/runs`，可用 Config `runsDir` 覆盖：
+
+```yaml
+- id: tool-buka-workflows
+  name: '@buka/dsh-plugin-workflows'
+  config:
+    runsDir: ~/workflow-runs
+    maxRuns: 200
+    maxRunAgeDays: 30
+    nodeTimeoutMs: 600000
+    maxSteps: 64
+    orchestratorPresets: [workflow-orchestrator]
+    robotPreset: standard
+```
+
+每次运行一个目录：
+
+```text
+runs/<runId>/
+  definition.json  本次一次性定义的快照
+  run.json         权威状态快照（原子写）
+  events.jsonl     追加事件：node/start、node/end、gate/decided、run/end …
+  nodes/<seq>-<nodeId>.json  节点结果全文
+```
+
+启动时会：把 `running` / `waiting` 的遗留运行标成 `interrupted`，并按 `maxRuns` / `maxRunAgeDays` 清理旧目录。
+
+## 依赖与限制
+
+- robot 节点需要先安装并启用 [`@buka/dsh-plugin-robots`](../robots)；它提供 `ctx.bukaRobots`（`list()`、`avatarMap()`、`startSession()`）。默认创建**普通顶层会话**并挂到机器人自己的工作区：`cwd` 是机器人目录，机器人的 AGENTS.md 与项目 skills 生效，侧边栏能看到、能直接打开；同一个机器人整个运行共用一个会话（按「运行目标 · 机器人」命名），后续进入用 `agents.resume()` 续接并先 compact，不再新开会话。普通会话创建失败时才退回 subagents 的 spawn 子会话（不会出现在侧边栏）。
+- 含 `gate` 的定义是**同步**的工具调用：整条流程（含等待门禁授权）占着编排器会话的这一轮 turn，因为原生审批要求会话有活跃 turn。长流程不要放进这一轮；用户点停止会取消运行。不含 `gate` 的定义走后台，工具立刻返回 `runId`，用 `buka_workflow_status` 或侧边栏页面跟进，`buka_workflow_cancel` 可以停。
+- 编排 preset 的根会话才能创建工作流；机器人节点会话显式使用 `robotPreset`（默认 `standard`），因此不会继承编排 persona、也不会看到工作流工具。
+- 运行数据只用于回看，不支持恢复；每个机器人的会话日志由 DSH 持久化，仍然可以在侧边栏或运行页的「打开会话」里打开。续接前的 compact 依赖宿主 `compaction` 服务（`@deepseek-ai/dsh-compaction-basic`，桌面 profile 默认禁用）；服务缺失时节点照常继续，但页签会提示“压缩服务不可用”，启用后才会真正压缩历史。
+- 不引入第三方状态机/工作流库：三种节点、条件路由和等待 Promise 的引擎足够小，接入 DSH 会话才是主要工作。
+
+## 单测
+
+纯逻辑模块（定义校验、模板、路由、存储、执行器、图模型、工具可见性）不 import DSH 包，由仓库根 `test/workflows-plugin.test.mjs`、`test/workflows-graph.test.mjs` 与 `test/workflows-access.test.mjs` 直接用 `node --test` 覆盖。
