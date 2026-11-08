@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Buka Robots",
-    "description": "Adds a Robots page to the sidebar. A robot is a directory the plugin creates under ~/.cache/dsh-plugin-robots/robots and mounts as a DSH workspace; only robots created here are managed. For each robot you can install project-level skills through npx skills, edit its AGENTS.md, open its conversation, or re-mount it after the workspace was removed."
+    "description": "Adds a Robots page to the sidebar. A robot is a directory the plugin creates under ~/.cache/dsh-plugin-robots/robots and mounts as a DSH workspace; only robots created here are managed. For each robot you can install project-level skills through npx skills, edit its AGENTS.md, open its conversation, or re-mount it after the workspace was removed. Every robot also has a preset avatar (assigned on creation, changeable from the page), and the plugin exposes the ctx.bukaRobots service (list, avatarMap, startSession) for other plugins such as Buka Workflows. Installing the plugin also adds the robot-builder mode: new sessions can pick 机器人构建, which asks what the robot should do, drafts its AGENTS.md, then creates and mounts the robot with the preset-only buka_robot_build tool; creating, editing and skill installation on the page keep working. A general-purpose robot sits at the top of the list (fixed 🤖 avatar, standard mode, enters any existing workspace); a toggle in the page's Settings dialog, persisted in settings.json, decides whether it is shown."
   }
 }

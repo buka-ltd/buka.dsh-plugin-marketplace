@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Buka 机器人",
-    "description": "在侧边栏新增「机器人」页面。机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，只有这里创建的机器人才归插件管理。每个机器人可以用 npx skills 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话；工作区被删掉后还能重新挂载。"
+    "description": "在侧边栏新增「机器人」页面。机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，只有这里创建的机器人才归插件管理。每个机器人可以用 npx skills 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话；工作区被删掉后还能重新挂载。每个机器人还带一个预设头像（新建时自动分配，页面里可更换），并通过 ctx.bukaRobots 服务向其他插件开放 list()、avatarMap() 与 startSession()（新会话是挂到机器人工作区的普通会话、侧边栏可见；可传 sessionId 续接同一个会话，续接前先 compact 历史）。安装插件还会多出一个「机器人构建」模式：新建会话时可选，它先问清机器人要做什么，起草 AGENTS.md，再用只对该模式可见的 buka_robot_build 工具创建并挂载机器人；页面上的新建、编辑 AGENTS.md 与安装 skills 照常可用。列表顶部还有一个通用型机器人：固定使用 🤖 头像、标准模式、可进入任意已有工作区；页面「设置」对话框里的开关决定它是否显示（开关存 settings.json）。"
   }
 }

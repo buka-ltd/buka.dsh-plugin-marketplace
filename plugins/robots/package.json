@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-robots",
-  "version": "0.1.0",
-  "description": "Adds a Robots page to the sidebar that creates and manages its own robots: a robot is a directory under ~/.cache/dsh-plugin-robots/robots mounted as a DSH workspace, with project-level skills installed through npx skills, an editable AGENTS.md, and a one-click session",
+  "version": "0.5.0",
+  "description": "Adds a Robots page to the sidebar that creates and manages its own robots: a robot is a directory under ~/.cache/dsh-plugin-robots/robots mounted as a DSH workspace, with project-level skills installed through npx skills, an editable AGENTS.md, and a one-click session. Every robot has a preset avatar (assigned on creation, changeable from the page), and the ctx.bukaRobots service exposes list(), avatarMap() and a robot session that can be continued by session id (its history is compacted before the next prompt); new robot sessions are normal conversations in the robot workspace and appear in the sidebar to other plugins. Installing the plugin also ships the robot-builder mode (an agent preset carried by its bundle patch): new sessions can pick 机器人构建, which interviews the user, drafts the robot's AGENTS.md, then creates and mounts the robot through the preset-gated buka_robot_build tool, while the page remains the manual path. A general-purpose robot is always listed first: fixed 🤖 avatar, standard mode, enters any existing workspace, and can be enabled or disabled from the page's Settings dialog (stored in settings.json next to robots.json).",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -15,6 +15,12 @@
   "files": [
     "lib/index.js",
     "lib/robot-store.js",
+    "lib/avatar.js",
+    "lib/service.js",
+    "lib/settings.js",
+    "lib/access.js",
+    "lib/builder.js",
+    "lib/build-tool.js",
     "lib/npx.js",
     "lib/reveal.js",
     "client.js",

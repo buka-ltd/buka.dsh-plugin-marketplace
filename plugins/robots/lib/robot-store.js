@@ -9,7 +9,7 @@
  *   默认机器人根目录是它下面的 `robots`，登记文件是它与根目录同级的
  *   `robots.json`（原子写、权限 0600）；
  * - 登记表读写与增删：`readRobotRegistry` / `writeRobotRegistry` /
- *   `addRobot` / `removeRobot`；
+ *   `addRobot` / `setRobotAvatar` / `removeRobot`；
  * - 工作区挂载状态：`listRobots` 用 `workspaceRegistry.list()` 按规范路径
  *   join 出 `mounted` / `workspaceId`；
  * - 扫描工作区里的**项目级** skills：`<path>/.agents/skills`、
@@ -27,6 +27,8 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+import { isAvatarId, pickDefaultAvatar, resolveAvatar } from './avatar.js'
 
 /** 每个机器人工作区里的协作说明文件名。 */
 export const AGENTS_FILE = 'AGENTS.md'
@@ -221,11 +223,13 @@ function requireRegistryFile(file) {
  * - 读不了 / 不是合法 JSON / 版本不是 1 / `robots` 不是数组：`corrupt: true`
  *   且 `robots: []`（写操作必须据此拒绝，绝不覆盖原文件）；
  * - 条目必须同时有合法 `name` 与非空 `path`，否则过滤掉；同名条目只保留第一个。
+ * - `avatar` 是预设头像 id；旧登记表没有这个字段（或在别处被改坏）时留空，
+ *   展示 / 写入时由 `resolveAvatar` 按名字兜底成一个确定的预设。
  *
  * @param {{ file: string }} options 登记文件绝对路径
  * @returns {Promise<{
  *   version: number,
- *   robots: Array<{ name: string, path: string, createdAt: string }>,
+ *   robots: Array<{ name: string, path: string, createdAt: string, avatar: string }>,
  *   corrupt?: true,
  *   file: string,
  * }>}
@@ -266,6 +270,7 @@ export async function readRobotRegistry({ file } = {}) {
       name,
       path: entry.path,
       createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : '',
+      avatar: typeof entry.avatar === 'string' ? entry.avatar.trim() : '',
     })
   }
   return { version: ROBOT_REGISTRY_VERSION, robots, file: target }
@@ -276,7 +281,7 @@ export async function readRobotRegistry({ file } = {}) {
  *
  * 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。
  *
- * @param {{ file: string, robots: Array<{ name: string, path: string, createdAt: string }> }} options
+ * @param {{ file: string, robots: Array<{ name: string, path: string, createdAt: string, avatar?: string }> }} options
  * @returns {Promise<{ file: string }>}
  */
 export async function writeRobotRegistry({ file, robots } = {}) {
@@ -290,6 +295,8 @@ export async function writeRobotRegistry({ file, robots } = {}) {
       name: robot.name,
       path: robot.path,
       createdAt: robot.createdAt,
+      // 写法上总是落下具体 id，旧记录在第一次写回时顺带补齐头像。
+      avatar: resolveAvatar(robot.avatar, robot.name),
     })),
   }
   const temporary = `${target}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.tmp`
@@ -335,6 +342,28 @@ function invalidNameError(name) {
 function registryUnreadableError(file) {
   const error = new Error(`机器人登记文件无法读取：${file}。请修复或删除该文件后重试。`)
   return Object.assign(error, { code: 'registry-unreadable' })
+}
+
+/**
+ * 生成「头像不合法」错误。
+ *
+ * @param {unknown} avatar
+ * @returns {Error & { code: string }}
+ */
+function invalidAvatarError(avatar) {
+  const error = new Error(`头像不合法：${String(avatar)}`)
+  return Object.assign(error, { code: 'invalid-avatar' })
+}
+
+/**
+ * 生成「机器人不在登记表里」错误。
+ *
+ * @param {string} name
+ * @returns {Error & { code: string }}
+ */
+function unknownRobotError(name) {
+  const error = new Error(`机器人不在登记表里：${name}`)
+  return Object.assign(error, { code: 'unknown-robot' })
 }
 
 /**
@@ -450,16 +479,18 @@ export async function ensureClaudeLink(directory) {
 /**
  * 新建（或复用）一个机器人：建目录、补 AGENTS.md 模板、把条目插到登记表最前。
  *
+ * - 头像：传入合法 id 就用它，否则按名字挑一个还被占用的预设；新建的机器人
+ *   一定带头像；
  * - 同名已登记：不重复建条目，`created: false`；目录被外部删掉时重新建目录；
  * - 名称不合法抛 `code = 'invalid-name'`；登记文件损坏抛
  *   `code = 'registry-unreadable'`（不覆盖原文件）；
  * - 新条目的 `path` 是创建后的规范绝对路径（`fs.realpath`，失败回退解析值），
  *   这样和工作区注册表里的路径能直接对齐。
  *
- * @param {{ robotsDir: string, file: string, name: string }} options
- * @returns {Promise<{ robot: { name: string, path: string, createdAt: string }, created: boolean }>}
+ * @param {{ robotsDir: string, file: string, name: string, avatar?: string }} options
+ * @returns {Promise<{ robot: { name: string, path: string, createdAt: string, avatar: string }, created: boolean }>}
  */
-export async function addRobot({ robotsDir, file, name } = {}) {
+export async function addRobot({ robotsDir, file, name, avatar } = {}) {
   const registryFile = requireRegistryFile(file)
   if (!isValidRobotName(name)) throw invalidNameError(name)
 
@@ -470,23 +501,58 @@ export async function addRobot({ robotsDir, file, name } = {}) {
   const existing = registry.robots.find((robot) => robot.name === trimmed)
   if (existing !== undefined) {
     await ensureRobotDirectory(existing.path, trimmed)
-    return { robot: existing, created: false }
+    return {
+      robot: { ...existing, avatar: resolveAvatar(existing.avatar, existing.name) },
+      created: false,
+    }
   }
 
   const target = robotDirectory(robotsDir, trimmed)
   if (target === null) throw invalidNameError(trimmed)
   const canonical = await ensureRobotDirectory(target, trimmed)
 
+  const used = registry.robots.map((robot) => resolveAvatar(robot.avatar, robot.name))
   const robot = {
     name: trimmed,
     path: canonical,
     createdAt: new Date().toISOString(),
+    avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(trimmed, used),
   }
   await writeRobotRegistry({
     file: registryFile,
     robots: [robot, ...registry.robots.filter((entry) => entry.name !== trimmed)],
   })
   return { robot, created: true }
+}
+
+/**
+ * 改一个机器人的头像：只动登记表里的 `avatar` 字段，不碰目录与工作区。
+ *
+ * - 头像 id 不属于预设集合抛 `code = 'invalid-avatar'`；
+ * - 名字不在登记表里抛 `code = 'unknown-robot'`；
+ * - 登记文件损坏抛 `code = 'registry-unreadable'`。
+ *
+ * @param {{ file: string, name: string, avatar: string }} options
+ * @returns {Promise<{ robot: { name: string, path: string, createdAt: string, avatar: string } }>}
+ */
+export async function setRobotAvatar({ file, name, avatar } = {}) {
+  const registryFile = requireRegistryFile(file)
+  if (!isValidRobotName(name)) throw invalidNameError(name)
+  if (!isAvatarId(avatar)) throw invalidAvatarError(avatar)
+
+  const registry = await readRobotRegistry({ file: registryFile })
+  if (registry.corrupt) throw registryUnreadableError(registryFile)
+
+  const trimmed = name.trim()
+  const current = registry.robots.find((robot) => robot.name === trimmed)
+  if (current === undefined) throw unknownRobotError(trimmed)
+
+  const robot = { ...current, avatar }
+  await writeRobotRegistry({
+    file: registryFile,
+    robots: registry.robots.map((entry) => (entry.name === trimmed ? robot : entry)),
+  })
+  return { robot }
 }
 
 /**
@@ -534,6 +600,7 @@ export async function removeRobot({ file, name } = {}) {
  *     name: string,
  *     path: string,
  *     createdAt: string,
+ *     avatar: string,
  *     exists: boolean,
  *     mounted: boolean,
  *     workspaceId: string | null,
@@ -585,6 +652,7 @@ export async function listRobots({ file, workspaceRegistry, robotsDir } = {}) {
       name: entry.name,
       path: entry.path,
       createdAt: entry.createdAt,
+      avatar: resolveAvatar(entry.avatar, entry.name),
       exists,
       mounted: workspace !== undefined,
       workspaceId: workspace === undefined ? null : String(workspace.id),
@@ -594,6 +662,37 @@ export async function listRobots({ file, workspaceRegistry, robotsDir } = {}) {
     })
   }
   return { root, registry: registryFile, corrupt: false, robots }
+}
+
+// ---- 工作区清单（通用型机器人「进入工作区」对话框用） ----------------------
+
+/**
+ * 把 DSH 的工作区注册表投影成页面用的紧凑清单，保留注册表顺序。
+ *
+ * 通用型机器人的「进入工作区」对话框用它列出现有工作区；页面不自己排序，
+ * 标题缺省时回落到路径（与 DSH 侧边栏一致）。注册表不可用时返回空表。
+ *
+ * @param {{ list?: () => Array<Record<string, unknown>> } | undefined} workspaceRegistry
+ * @returns {Array<{ id: string, title: string, path: string, sessions: number }>}
+ */
+export function summarizeWorkspaces(workspaceRegistry) {
+  let snapshot
+  try {
+    snapshot = workspaceRegistry?.list?.()
+  } catch {
+    snapshot = undefined
+  }
+  return (Array.isArray(snapshot) ? snapshot : [])
+    .filter((workspace) => workspace !== null && typeof workspace === 'object')
+    .map((workspace) => ({
+      id: String(workspace.id),
+      title:
+        typeof workspace.title === 'string' && workspace.title.trim() !== ''
+          ? workspace.title
+          : String(workspace.path ?? ''),
+      path: String(workspace.path ?? ''),
+      sessions: Array.isArray(workspace.sessionIds) ? workspace.sessionIds.length : 0,
+    }))
 }
 
 /**
