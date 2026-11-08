@@ -74,10 +74,13 @@ export async function runWorkflow(input) {
 
   const now = () => Date.now()
   const runId = createRunId()
+  // 运行序号在创建运行前分配：它是持久递增的，删除旧记录也不会回退。
+  const runSeq = await store.allocateSeq()
   /** @type {Record<string, any>} */
   const run = {
     version: 1,
     runId,
+    seq: runSeq,
     goal: plan.goal,
     status: 'running',
     createdAt: now(),
@@ -691,6 +694,7 @@ export function gateReason(node) {
 export function toToolRun(run) {
   return {
     runId: run.runId,
+    seq: Number.isInteger(run.seq) ? run.seq : null,
     status: run.status,
     goal: run.goal,
     createdAt: run.createdAt,

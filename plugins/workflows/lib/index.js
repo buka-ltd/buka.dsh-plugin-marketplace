@@ -14,6 +14,9 @@
  *
  * 运行数据落盘到插件目录下的 `runs/`（定义快照、状态快照、事件流、节点结果），
  * 供回看与排查；但不做断点续跑——宿主重启后未结束的运行标成 `interrupted`。
+ * 每次运行有一个持久递增的序号（`runs/sequence.json` 计数器），页面与工具输出
+ * 都显示 `#N`；结束的运行按自动归档设置（`runs/` 同级的 `settings.json`，默认
+ * 24 小时归档、168 小时删除）自动隐藏或删除，运行中的记录不会被处理。
  *
  * 跨插件依赖只走服务：`ctx.get('bukaRobots')`；取不到时在启动 robot 节点前
  * 报一条明确的安装提示。运行页的节点图还会用它提供的 `avatarMap()` 画出机器人
@@ -33,6 +36,13 @@ import { describePlan, validateDefinition } from './definition.js'
 import { runWorkflow } from './engine.js'
 import { buildRunGraph, layoutRunGraph } from './graph.js'
 import { WorkflowRunStore } from './run-store.js'
+import {
+  defaultSettings,
+  readSettings,
+  resolveSettingsFile,
+  validateSettingsInput,
+  writeSettings,
+} from './settings.js'
 
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 不是一回事。 */
 export const name = 'tool-buka-workflows'
@@ -49,11 +59,19 @@ const RUNS_ROUTE = '/buka-workflows/runs'
 /** 浏览器一半读取单次运行详情的路由。 */
 const RUN_ROUTE = '/buka-workflows/run'
 
+/** 浏览器一半读 / 写自动归档设置的路由。 */
+const SETTINGS_ROUTE = '/buka-workflows/settings'
+
+/** 自动归档的巡检间隔：设置按小时计，每小时扫一次足够。 */
+const SWEEP_INTERVAL_MS = 60 * 60 * 1000
+
+/** 设置请求体上限：只有几个字段。 */
+const MAX_BODY_BYTES = 8 * 1024
+
 /** 默认配置。 */
 const DEFAULTS = {
   runsDir: defaultRunsDir(),
   maxRuns: 200,
-  maxRunAgeDays: 30,
   nodeTimeoutMs: 10 * 60 * 1000,
   maxSteps: 64,
   maxNodeTextBytes: 64 * 1024,
@@ -69,12 +87,12 @@ export const Config = z.object({
     .string()
     .default(DEFAULTS.runsDir)
     .description('运行记录目录；每次运行在它下面建一个子目录。支持 ~ 前缀。'),
-  maxRuns: z.number().step(1).min(1).default(DEFAULTS.maxRuns).description('最多保留多少次运行记录。'),
-  maxRunAgeDays: z
+  maxRuns: z
     .number()
+    .step(1)
     .min(1)
-    .default(DEFAULTS.maxRunAgeDays)
-    .description('运行记录最长保留天数。'),
+    .default(DEFAULTS.maxRuns)
+    .description('已归档运行最多保留多少条；超出时从最旧的已归档运行开始删除。未归档记录不受这个上限影响。'),
   nodeTimeoutMs: z
     .number()
     .step(1)
@@ -138,13 +156,13 @@ const PLAN_DESCRIPTION = `Validate a one-off workflow definition without running
 /** "启动"工具的描述。 */
 const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt, and the graph decides the next node; gate nodes wait for the normal approval dialog. The definition is stored under the plugin run directory together with the run record and node results, and the read-only sidebar page observes them live.
 
-A definition WITHOUT gate nodes starts in the background: the call returns immediately with a runId while the engine keeps scheduling node sessions, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH gate nodes must run inside this call, because the native approval dialog needs an active turn: the call returns only after the run reaches a terminal state.
+Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT gate nodes starts in the background: the call returns immediately with a runId and that seq while the engine keeps scheduling node sessions, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH gate nodes must run inside this call, because the native approval dialog needs an active turn: the call returns only after the run reaches a terminal state.
 
 Only the workflow-orchestrator preset can see this tool; robot node sessions run in the worker preset and cannot start nested workflows. Requires the Buka Robots plugin for robot nodes.\n\n${DEFINITION_HELP}`
 
 /** "状态"工具的描述。 */
 const STATUS_DESCRIPTION =
-  'Read one persisted workflow run by id, or list the most recent runs. Runs are recorded on disk by buka_workflow_start but are not resumed after a host restart. Background runs keep advancing while you poll.'
+  'Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start but are not resumed after a host restart. Background runs keep advancing while you poll.'
 
 /** "取消"工具的描述。 */
 const CANCEL_DESCRIPTION =
@@ -154,23 +172,59 @@ const CANCEL_DESCRIPTION =
  * 注册工具。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx 提供 `tools` 的上下文
- * @param {{ runsDir?: string, maxRuns?: number, maxRunAgeDays?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number } | undefined} [config]
+ * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number } | undefined} [config]
  */
 export function apply(ctx, config) {
   const options = resolveOptions(config)
+  const settingsFile = resolveSettingsFile(options.runsDir)
   const store = new WorkflowRunStore({
     dir: options.runsDir,
     maxRuns: options.maxRuns,
-    maxAgeDays: options.maxRunAgeDays,
+    retention: defaultSettings().archive,
     logger: ctx.logger,
   })
 
-  /** 存储初始化（建目录、恢复中断运行、清理旧记录）只做一次。 */
+  /** 自动归档巡检定时器；存储初始化完成后启动，插件卸载时停掉。 */
+  /** @type {NodeJS.Timeout | null} */
+  let sweepTimer = null
+  ctx.effect(
+    () => () => {
+      if (sweepTimer !== null) clearInterval(sweepTimer)
+      sweepTimer = null
+    },
+    'buka-workflows: stop archive sweeper',
+  )
+
+  /** 启动每小时巡检：自动归档 / 删除只依赖这一个定时器与启动时的一次扫描。 */
+  function startSweeper() {
+    if (sweepTimer !== null) return
+    sweepTimer = setInterval(() => {
+      store.sweep().catch((error) => {
+        ctx.logger?.warn?.(`buka-workflows: 自动归档巡检失败：${describeError(error)}`)
+      })
+    }, SWEEP_INTERVAL_MS)
+    // 定时器不应该阻止宿主退出。
+    sweepTimer.unref?.()
+  }
+
+  /**
+   * 存储初始化（建目录、恢复中断运行、回填序号、按设置清理）只做一次；
+   * 归档设置从设置文件读取，页面保存后会立即更新策略并再扫一次。
+   */
   let ready
   function ensureReady() {
-    ready ??= store.init()
+    ready ??= (async () => {
+      const settings = await readSettings({ file: settingsFile })
+      store.setRetention(settings.archive)
+      await store.init()
+      startSweeper()
+    })()
     return ready
   }
+  // 插件加载后就开始巡检，不必等到第一次打开页面或调用工具。
+  void ensureReady().catch((error) => {
+    ctx.logger?.warn?.(`buka-workflows: 初始化运行记录失败：${describeError(error)}`)
+  })
 
   /** 进行中的后台运行：runId → 取消控制器。 */
   /** @type {Map<string, AbortController>} */
@@ -300,6 +354,11 @@ export function apply(ctx, config) {
           properties: {
             run: { type: 'json', required: true, description: 'The final run record when the call ran the workflow itself; null for a background run.' },
             runId: { type: 'string', required: true, description: 'Run id used for buka_workflow_status / buka_workflow_cancel.' },
+            seq: {
+              type: 'number',
+              required: true,
+              description: 'Persistent run sequence number (starts at 1 and never goes back when old runs are deleted).',
+            },
             mode: {
               type: 'string',
               required: true,
@@ -352,7 +411,12 @@ export function apply(ctx, config) {
             options: runOptions,
             logger: ctx.logger,
           })
-          return { run, runId: run.runId ?? '', mode: 'foreground' }
+          return {
+            run,
+            runId: run.runId ?? '',
+            seq: Number.isInteger(run.seq) ? run.seq : 0,
+            mode: 'foreground',
+          }
         }
 
         const controller = new AbortController()
@@ -396,7 +460,13 @@ export function apply(ctx, config) {
             `workflow failed to start${startError === undefined ? '' : `: ${describeError(startError)}`}`,
           )
         }
-        return { run: null, runId, mode: 'background' }
+        const createdRun = await store.readRun(runId)
+        return {
+          run: null,
+          runId,
+          seq: Number.isInteger(createdRun?.seq) ? createdRun.seq : 0,
+          mode: 'background',
+        }
       },
     }),
     { when: visibleWhen },
@@ -473,10 +543,11 @@ export function apply(ctx, config) {
     { when: visibleWhen },
   )
 
-  // ---- 浏览器一半的只读路由 ------------------------------------------------
+  // ---- 浏览器一半的路由 ----------------------------------------------------
   //
   // 页面只读取落盘的运行记录，不提供“运行工作流”：workflow 由 agent 在会话里
-  // 现场创建。路由沿用 web 组合的信任栅栏，只接受本机、已认证的浏览器请求。
+  // 现场创建；唯一的写入口是自动归档设置（settings 文件）。路由沿用 web 组合
+  // 的信任栅栏，只接受本机、已认证的浏览器请求。
 
   ctx.inject(['webServer', 'connection'], (webCtx) => {
     /**
@@ -522,8 +593,15 @@ export function apply(ctx, config) {
             }
             try {
               await ensureReady()
-              const limit = parseLimit(requestUrl(req).searchParams.get('limit'))
-              sendJson(res, 200, { ok: true, runs: await store.listRuns(limit) })
+              const params = requestUrl(req).searchParams
+              const limit = parseLimit(params.get('limit'))
+              // 默认只看未归档的运行；?archived=1 是页面「查看已归档」用的。
+              const archived = params.get('archived') === '1'
+              const [runs, archivedCount] = await Promise.all([
+                store.listRuns(limit, { archived }),
+                store.countArchived(),
+              ])
+              sendJson(res, 200, { ok: true, runs, archivedCount })
             } catch (error) {
               webCtx.logger?.warn?.('buka-workflows: 读取运行列表失败：%s', describeError(error))
               sendError(res, 500, 'list-failed', `读取运行列表失败：${describeError(error)}`)
@@ -531,6 +609,63 @@ export function apply(ctx, config) {
           },
         }),
       `buka-workflows: GET ${RUNS_ROUTE}`,
+    )
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: SETTINGS_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method === 'GET') {
+              try {
+                const settings = await readSettings({ file: settingsFile })
+                sendJson(res, 200, { ok: true, settings: settingsPayload(settings) })
+              } catch (error) {
+                webCtx.logger?.warn?.('buka-workflows: 读取归档设置失败：%s', describeError(error))
+                sendError(res, 500, 'settings-failed', `读取归档设置失败：${describeError(error)}`)
+              }
+              return
+            }
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'GET, POST')
+              return
+            }
+            const body = await readJsonBody(req, res)
+            if (body === undefined) return
+            const parsed = validateSettingsInput(body)
+            if (!parsed.ok) {
+              sendError(res, 400, 'invalid-settings', parsed.message)
+              return
+            }
+            try {
+              await ensureReady()
+              const saved = await writeSettings({
+                file: settingsFile,
+                settings: { version: 1, archive: parsed.archive },
+              })
+              // 保存后立即生效：更新存储策略并马上扫一次，页面刷新就能看到归档结果。
+              store.setRetention(saved.settings.archive)
+              await store.sweep()
+              webCtx.logger?.info?.(
+                'buka-workflows: 自动归档设置已更新（%s，归档 %s 小时，删除 %s 小时）',
+                saved.settings.archive.enabled ? '启用' : '停用',
+                saved.settings.archive.archiveAfterHours,
+                saved.settings.archive.deleteAfterHours,
+              )
+              sendJson(res, 200, {
+                ok: true,
+                settings: settingsPayload(saved.settings),
+                archivedCount: await store.countArchived(),
+              })
+            } catch (error) {
+              webCtx.logger?.warn?.('buka-workflows: 保存归档设置失败：%s', describeError(error))
+              sendError(res, 500, 'settings-failed', `保存归档设置失败：${describeError(error)}`)
+            }
+          },
+        }),
+      `buka-workflows: GET/POST ${SETTINGS_ROUTE}`,
     )
 
     webCtx.effect(
@@ -585,8 +720,8 @@ export function apply(ctx, config) {
 /**
  * 合并配置与默认值，并解析 runs 目录。
  *
- * @param {{ runsDir?: string, maxRuns?: number, maxRunAgeDays?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number, orchestratorPresets?: string[], robotPreset?: string } | undefined} config
- * @returns {{ runsDir: string, maxRuns: number, maxRunAgeDays: number, nodeTimeoutMs: number, maxSteps: number, maxNodeTextBytes: number, orchestratorPresets: string[], robotPreset: string }}
+ * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number, orchestratorPresets?: string[], robotPreset?: string } | undefined} config
+ * @returns {{ runsDir: string, maxRuns: number, nodeTimeoutMs: number, maxSteps: number, maxNodeTextBytes: number, orchestratorPresets: string[], robotPreset: string }}
  */
 function resolveOptions(config) {
   const orchestratorPresets = Array.isArray(config?.orchestratorPresets)
@@ -596,7 +731,6 @@ function resolveOptions(config) {
   return {
     runsDir: resolveRunsDir(config?.runsDir),
     maxRuns: positive(config?.maxRuns) ?? DEFAULTS.maxRuns,
-    maxRunAgeDays: positive(config?.maxRunAgeDays) ?? DEFAULTS.maxRunAgeDays,
     nodeTimeoutMs: positive(config?.nodeTimeoutMs) ?? DEFAULTS.nodeTimeoutMs,
     maxSteps: positive(config?.maxSteps) ?? DEFAULTS.maxSteps,
     maxNodeTextBytes: positive(config?.maxNodeTextBytes) ?? DEFAULTS.maxNodeTextBytes,
@@ -692,13 +826,24 @@ export function renderPlanResult(value) {
 }
 
 /**
+ * 运行的序号标签：`#12 `；旧记录没有序号时是空串。
+ *
+ * @param {Record<string, any> | null | undefined} run
+ * @returns {string}
+ */
+function runSeqLabel(run) {
+  return Number.isInteger(run?.seq) && run.seq > 0 ? `#${run.seq} ` : ''
+}
+
+/**
  * 一次运行的展示文本。
  *
  * @param {Record<string, any> | null | undefined} run
  * @returns {string}
  */
-export function renderRun(run) {  if (run === null || run === undefined) return 'No workflow run was recorded.'
-  const lines = [`workflow ${run.runId} — ${run.status}`]
+export function renderRun(run) {
+  if (run === null || run === undefined) return 'No workflow run was recorded.'
+  const lines = [`workflow ${runSeqLabel(run)}${run.runId} — ${run.status}`]
   if (typeof run.goal === 'string' && run.goal !== '') lines.push(`goal: ${run.goal}`)
   const steps = Array.isArray(run.steps) ? run.steps : []
   if (steps.length === 0) lines.push('no steps completed')
@@ -726,8 +871,9 @@ export function renderRun(run) {  if (run === null || run === undefined) return 
  */
 export function renderStart(value) {
   if (value?.mode === 'background') {
+    const label = Number.isInteger(value?.seq) && value.seq > 0 ? `#${value.seq} ` : ''
     return [
-      `workflow ${value.runId} started in the background`,
+      `workflow ${label}${value.runId} started in the background`,
       'the engine keeps scheduling node sessions; follow it with buka_workflow_status or the sidebar page',
     ].join('\n')
   }
@@ -759,7 +905,7 @@ export function renderStatus(value) {
   const lines = ['recent workflow runs:']
   for (const run of runs) {
     const finished = run.finishedAt === null || run.finishedAt === undefined ? 'running' : new Date(run.finishedAt).toISOString()
-    lines.push(`- ${run.runId} ${run.status} (${finished})${run.goal ? ` — ${run.goal}` : ''}`)
+    lines.push(`- ${runSeqLabel(run)}${run.runId} ${run.status} (${finished})${run.goal ? ` — ${run.goal}` : ''}`)
   }
   return lines.join('\n')
 }
@@ -783,6 +929,70 @@ async function robotAvatars(ctx) {
   } catch {
     return null
   }
+}
+
+/**
+ * 设置对象 → 浏览器用的平铺字段。页面不关心 `version` 与内部包装。
+ *
+ * @param {{ archive: { enabled: boolean, archiveAfterHours: number, deleteAfterHours: number } }} settings
+ * @returns {{ enabled: boolean, archiveAfterHours: number, deleteAfterHours: number }}
+ */
+function settingsPayload(settings) {
+  return {
+    enabled: settings.archive.enabled,
+    archiveAfterHours: settings.archive.archiveAfterHours,
+    deleteAfterHours: settings.archive.deleteAfterHours,
+  }
+}
+
+/**
+ * 读取 JSON 请求体；content-type 不对、太大或不是合法 JSON 时已经写好响应，
+ * 返回 undefined。
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @returns {Promise<unknown>}
+ */
+async function readJsonBody(req, res) {
+  const mediaType = String(req.headers['content-type'] ?? '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase()
+  if (mediaType !== 'application/json') {
+    sendError(res, 415, 'invalid-content-type', 'content-type 必须是 application/json')
+    return undefined
+  }
+  const text = await readBoundedBody(req)
+  if (text === null) {
+    sendError(res, 413, 'too-large', '请求体过大')
+    return undefined
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    sendError(res, 400, 'invalid-json', '请求体不是合法 JSON')
+    return undefined
+  }
+}
+
+/**
+ * 读取有上限的请求体；超过上限时丢弃剩余流并返回 null。
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {Promise<string | null>}
+ */
+async function readBoundedBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.byteLength
+    if (size > MAX_BODY_BYTES) {
+      req.resume()
+      return null
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks, size).toString('utf8')
 }
 
 /**

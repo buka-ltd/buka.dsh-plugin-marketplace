@@ -126,6 +126,12 @@ class MemoryStore {
     this.runs = new Map()
     this.events = []
     this.nodes = []
+    this.nextSeq = 0
+  }
+
+  async allocateSeq() {
+    this.nextSeq += 1
+    return this.nextSeq
   }
 
   async create({ run }) {
@@ -427,17 +433,21 @@ test('routing: equals, in, default and no match', () => {
   assert.equal(matchesWhen({ field: 'x', equals: 1 }, {}), false)
 })
 
-test('store: persists, reads and lists runs', async () => {
+test('store: persists, reads and lists runs with their sequence number', async () => {
   const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
   const store = new WorkflowRunStore({ dir })
   await store.init()
+  const seq = await store.allocateSeq()
+  assert.equal(seq, 1)
   const run = {
     version: 1,
     runId: 'wf-test',
+    seq,
     goal: 'g',
-    status: 'running',
-    createdAt: Date.now(),
+    status: 'completed',
+    createdAt: Date.now() - 60_000,
     updatedAt: Date.now(),
+    finishedAt: Date.now(),
     createdBy: { sessionId: 'root' },
     steps: [],
   }
@@ -447,18 +457,219 @@ test('store: persists, reads and lists runs', async () => {
 
   const stored = await store.readRun('wf-test')
   assert.equal(stored.runId, 'wf-test')
-  assert.equal(stored.status, 'running')
+  assert.equal(stored.status, 'completed')
+  assert.equal(stored.seq, 1)
 
   const runs = await store.listRuns(10)
   assert.equal(runs.length, 1)
   assert.equal(runs[0].runId, 'wf-test')
+  assert.equal(runs[0].seq, 1)
+  assert.equal(runs[0].archivedAt, null)
 
   const files = await fs.readdir(store.runDirectory('wf-test'))
   assert.deepEqual(files.sort(), ['definition.json', 'events.jsonl', 'nodes', 'run.json'])
+  // 序号计数器是 runs 目录里的文件，不会被当成一次运行。
+  assert.deepEqual(await store.listRunIds(), ['wf-test'])
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('store: marks stale running/waiting runs interrupted on init and prunes old runs', async () => {
+test('store: sequence numbers keep growing across restarts and deletions', async () => {
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
+  const first = new WorkflowRunStore({ dir })
+  await first.init()
+  assert.equal(await first.allocateSeq(), 1)
+  assert.equal(await first.allocateSeq(), 2)
+  assert.equal(await first.allocateSeq(), 3)
+
+  // 重开存储：计数器还在，编号继续往后。
+  const second = new WorkflowRunStore({ dir })
+  await second.init()
+  assert.equal(await second.allocateSeq(), 4)
+
+  // 删掉所有运行目录（例如超期自动删除）后编号也不回退。
+  for (const runId of await second.listRunIds()) await fs.rm(second.runDirectory(runId), { recursive: true, force: true })
+  const third = new WorkflowRunStore({ dir })
+  await third.init()
+  assert.equal(await third.allocateSeq(), 5)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('store: backfills sequence numbers for old runs by creation time', async () => {
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
+  // 用「刚刚」的时间：init 里的清扫按真实时间跑，太旧的记录会被自动删除。
+  const base = Date.now() - 10 * 60 * 1000
+  for (const [runId, createdAt] of [['wf-late', base + 2000], ['wf-early', base]]) {
+    await fs.mkdir(path.join(dir, runId), { recursive: true })
+    await fs.writeFile(
+      path.join(dir, runId, 'run.json'),
+      `${JSON.stringify({
+        version: 1,
+        runId,
+        goal: '',
+        status: 'completed',
+        createdAt,
+        updatedAt: createdAt,
+        finishedAt: createdAt,
+        createdBy: { sessionId: 'root' },
+        steps: [],
+      })}\n`,
+    )
+  }
+
+  const store = new WorkflowRunStore({ dir })
+  await store.init()
+  assert.equal((await store.readRun('wf-early')).seq, 1)
+  assert.equal((await store.readRun('wf-late')).seq, 2)
+  // 回填后计数器接在最大值后面。
+  assert.equal(await store.allocateSeq(), 3)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('store: sweep archives old runs, deletes expired runs and never touches live ones', async () => {
+  const HOUR = 60 * 60 * 1000
+  const base = 1_700_000_000_000
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
+  const store = new WorkflowRunStore({
+    dir,
+    retention: { enabled: true, archiveAfterHours: 24, deleteAfterHours: 168 },
+  })
+  await store.init()
+
+  /** 写一条指定结束时间的运行。 */
+  async function writeRun(runId, status, finishedAt) {
+    await store.create({
+      run: {
+        version: 1,
+        runId,
+        goal: runId,
+        status,
+        createdAt: finishedAt - HOUR,
+        updatedAt: finishedAt,
+        finishedAt,
+        createdBy: { sessionId: 'root' },
+        steps: [],
+      },
+      definition: {},
+    })
+  }
+
+  await writeRun('wf-recent', 'completed', base - 2 * HOUR)
+  await writeRun('wf-old', 'completed', base - 25 * HOUR)
+  await writeRun('wf-expired', 'completed', base - 200 * HOUR)
+  await writeRun('wf-live', 'running', base - 200 * HOUR)
+
+  await store.sweep({ now: base })
+
+  // 超过删除时间：目录被删掉。
+  assert.equal(await store.readRun('wf-expired'), null)
+  // 超过归档时间但还在保留期内：写 archivedAt，默认列表不再显示。
+  const archived = await store.readRun('wf-old')
+  assert.equal(archived.archivedAt, base)
+  assert.equal(await store.countArchived(), 1)
+  assert.deepEqual(
+    (await store.listRuns(10)).map((run) => run.runId),
+    ['wf-recent', 'wf-live'],
+  )
+  assert.deepEqual(
+    (await store.listRuns(10, { archived: true })).map((run) => run.runId),
+    ['wf-old'],
+  )
+  // 运行中的记录即使很旧也不会被归档或删除。
+  const live = await store.readRun('wf-live')
+  assert.equal(Object.hasOwn(live, 'archivedAt'), false)
+  // 最近结束的记录保持未归档。
+  assert.equal(Object.hasOwn(await store.readRun('wf-recent'), 'archivedAt'), false)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('store: disabling auto archive keeps old runs', async () => {
+  const HOUR = 60 * 60 * 1000
+  const base = 1_700_000_000_000
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
+  const store = new WorkflowRunStore({
+    dir,
+    retention: { enabled: false, archiveAfterHours: 24, deleteAfterHours: 168 },
+  })
+  await store.init()
+  await store.create({
+    run: {
+      version: 1,
+      runId: 'wf-ancient',
+      goal: '',
+      status: 'completed',
+      createdAt: base - 500 * HOUR,
+      updatedAt: base - 500 * HOUR,
+      finishedAt: base - 500 * HOUR,
+      createdBy: { sessionId: 'root' },
+      steps: [],
+    },
+    definition: {},
+  })
+  await store.sweep({ now: base })
+  const run = await store.readRun('wf-ancient')
+  assert.ok(run, '关闭自动归档后不按时间删除')
+  assert.equal(Object.hasOwn(run, 'archivedAt'), false)
+  assert.equal(await store.countArchived(), 0)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('store: maxRuns only caps archived runs, not records still in retention', async () => {
+  const HOUR = 60 * 60 * 1000
+  const base = 1_700_000_000_000
+  const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
+  const store = new WorkflowRunStore({
+    dir,
+    maxRuns: 2,
+    retention: { enabled: true, archiveAfterHours: 24, deleteAfterHours: 168 },
+  })
+  await store.init()
+
+  /** 写一条已归档运行；anchor 越小越旧。 */
+  async function writeArchived(runId, ageHours) {
+    const finishedAt = base - ageHours * HOUR
+    await store.create({
+      run: {
+        version: 1,
+        runId,
+        goal: '',
+        status: 'completed',
+        createdAt: finishedAt - HOUR,
+        updatedAt: finishedAt,
+        finishedAt,
+        archivedAt: base - HOUR,
+        createdBy: { sessionId: 'root' },
+        steps: [],
+      },
+      definition: {},
+    })
+  }
+
+  await writeArchived('wf-archived-old', 10)
+  await writeArchived('wf-archived-mid', 8)
+  await writeArchived('wf-archived-new', 6)
+  // 一条仍在保留期内、没有归档的运行：不参与这个上限。
+  await store.create({
+    run: {
+      version: 1,
+      runId: 'wf-active',
+      goal: '',
+      status: 'completed',
+      createdAt: base - HOUR,
+      updatedAt: base,
+      finishedAt: base,
+      createdBy: { sessionId: 'root' },
+      steps: [],
+    },
+    definition: {},
+  })
+
+  await store.sweep({ now: base })
+  const ids = (await store.listRunIds()).sort()
+  assert.deepEqual(ids, ['wf-active', 'wf-archived-new'])
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('store: marks stale running/waiting runs interrupted on init without deleting them', async () => {
   const dir = await fs.mkdtemp(path.join(tmpdir(), 'buka-workflows-'))
   const first = new WorkflowRunStore({ dir })
   await first.init()
@@ -478,10 +689,11 @@ test('store: marks stale running/waiting runs interrupted on init and prunes old
     })
   }
 
+  // maxRuns 只限制已归档记录：刚中断的记录还在保留期内，一条都不能少。
   const second = new WorkflowRunStore({ dir, maxRuns: 1 })
   await second.init()
   const runs = await second.listRuns(10)
-  assert.equal(runs.length, 1)
+  assert.equal(runs.length, 2)
   for (const id of await second.listRunIds()) {
     const run = await second.readRun(id)
     assert.equal(run.status, 'interrupted')
@@ -648,6 +860,38 @@ test('engine: reports the run id as soon as the run record exists', async () => 
   })
   assert.equal(run.status, 'completed')
   assert.deepEqual(created, [run.runId])
+})
+
+test('engine: assigns persistent sequence numbers to runs', async () => {
+  const definition = sampleDefinition()
+  const store = new MemoryStore()
+  const robots = () =>
+    fakeRobots([
+      { text: '调研完成', structured: { status: 'ok', summary: '三点' }, stopReason: 'completed' },
+      { text: '写好了', stopReason: 'completed' },
+    ])
+
+  const first = await runWorkflow({
+    plan: planOf(definition),
+    definition,
+    store,
+    robots: robots(),
+    approval: fakeApproval(['allowed-once']),
+    agent: { id: 'root' },
+  })
+  assert.equal(first.seq, 1)
+  assert.equal(store.runs.get(first.runId).seq, 1)
+
+  const second = await runWorkflow({
+    plan: planOf(definition),
+    definition,
+    store,
+    robots: robots(),
+    approval: fakeApproval(['allowed-once']),
+    agent: { id: 'root' },
+  })
+  assert.equal(second.seq, 2)
+  assert.equal(store.runs.get(second.runId).seq, 2)
 })
 
 test('engine: robot nodes start in the configured worker preset', async () => {

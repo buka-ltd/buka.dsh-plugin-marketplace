@@ -90,6 +90,22 @@ function findByClass(tree, className) {
 }
 
 /**
+ * 找到第一个满足条件的元素。
+ *
+ * @param {any} tree
+ * @param {(node: Record<string, any>) => boolean} predicate
+ * @returns {Record<string, any> | null}
+ */
+function findBy(tree, predicate) {
+  let found = null
+  walk(tree, (node) => {
+    if (found !== null) return
+    if (predicate(node)) found = node
+  })
+  return found
+}
+
+/**
  * 载入客户端模块，返回注册到 `main` 的页面组件与它注入的样式文本。
  *
  * @returns {Promise<{ Page: Function, apply: Function, css: () => string }>}
@@ -468,7 +484,7 @@ function startFixture() {
  */
 function detailStates(data, selectedNodeId, executionIndex = null) {
   return [
-    { status: 'ready', runs: [], error: null },
+    { status: 'ready', runs: [], archivedCount: 0, error: null },
     data.run.runId,
     {
       status: 'ready',
@@ -655,6 +671,7 @@ test('client: the run list renders cards when no run is selected', async () => {
     {
       status: 'ready',
       runs: [{ runId: 'wf-list', goal: 'list smoke', status: 'completed', createdAt: 1 }],
+      archivedCount: 0,
       error: null,
     },
     null,
@@ -1138,4 +1155,233 @@ test('client: the first dev execution comes from the start edge, the rework one 
   assert.ok(rework.texts.includes('测试打回：发现 2 个问题'))
   assert.ok(rework.texts.some((text) => text.includes('按需求实现导出功能。') === false))
   assert.ok(rework.texts.includes('#2'))
+})
+
+test('client: the run list shows sequence numbers and the archived entry', async () => {
+  const client = await loadClient()
+  const tree = client.render([
+    {
+      status: 'ready',
+      runs: [
+        { runId: 'wf-1', seq: 5, goal: 'one', status: 'completed', createdAt: 1, archivedAt: null },
+        { runId: 'wf-2', seq: 6, goal: 'two', status: 'completed', createdAt: 2, archivedAt: 3 },
+      ],
+      archivedCount: 2,
+      error: null,
+    },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+    null,
+    null,
+  ])
+  const { classes, texts } = collect(tree)
+
+  assert.equal(classes.filter((name) => name === 'buka-workflows-seq').length, 2)
+  assert.ok(texts.includes('#5'), 'the first run shows its sequence number')
+  assert.ok(texts.includes('#6'), 'the second run shows its sequence number')
+  assert.ok(texts.includes('archived'), 'the archived run carries an archived tag')
+  // 卡片头分成「序号 + 标题」与「标签组」两段，整卡仍是可点按钮。
+  assert.equal(classes.filter((name) => name === 'buka-workflows-cardTitleGroup').length, 2)
+  assert.equal(classes.filter((name) => name === 'buka-workflows-cardTags').length, 2)
+  const card = findByClass(tree, 'buka-workflows-card')
+  assert.ok(card, 'the whole card stays a button')
+  assert.equal(typeof card.props.onClick, 'function')
+
+  // 归档入口在标题右侧的工具栏里，按钮带归档数量；列表下方不再有归档入口。
+  const toolbar = findByClass(tree, 'buka-workflows-toolbar')
+  assert.ok(toolbar, 'the title row has a toolbar')
+  const archivedButton = findByClass(tree, 'buka-workflows-toolbarButton')
+  assert.ok(archivedButton, 'the archived entry lives in the toolbar')
+  assert.deepEqual(collect(archivedButton).texts, ['archiveView (2)'])
+  assert.equal(typeof archivedButton.props.onClick, 'function')
+  assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
+  const heading = findByClass(tree, 'buka-workflows-title')
+  assert.ok(heading, 'the list has a page title')
+  assert.deepEqual(collect(heading).texts, ['title'], 'the normal list keeps the workflows title')
+
+  // 标题行与工具栏同一行：标题列可收缩，工具栏不换行、不缩小；按钮用 32px 的
+  // 工具栏尺寸（与 Robots 页一致），比执行面板里的 28px 小按钮更大。
+  const toolbarClasses = collect(toolbar).classes
+  assert.equal(
+    toolbarClasses.filter((name) => name === 'buka-workflows-toolbarButton').length,
+    3,
+    'the archived, settings and refresh buttons use the toolbar size',
+  )
+  // 标题与工具栏是同一个 titleRow 的两个子元素，行内不换行；标题列可收缩，
+  // 工具栏固定宽度，所以窗口再窄按钮也不会掉到下一行。
+  const titleRow = findByClass(tree, 'buka-workflows-titleRow')
+  assert.ok(titleRow, 'the header has one title row')
+  const titleRowChildren = titleRow.children.filter((child) => typeof child === 'object' && child !== null)
+  assert.ok(
+    titleRowChildren.some((child) => child.props?.className === 'buka-workflows-titleCluster'),
+    'the title is the first cell of the row',
+  )
+  assert.ok(
+    titleRowChildren.includes(toolbar),
+    'the toolbar is the second cell of the same row',
+  )
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-titleRow\{[^}]*flex-wrap:nowrap/u)
+  assert.match(css, /\.buka-workflows-titleCluster\{[^}]*flex:1 1 auto/u)
+  assert.match(css, /\.buka-workflows-toolbar\{[^}]*flex:none/u)
+  assert.match(css, /\.buka-workflows-toolbarButton\{[^}]*height:32px/u)
+})
+
+test('client: the archived view marks its filter and can go back', async () => {
+  const client = await loadClient()
+  const tree = client.render([
+    {
+      status: 'ready',
+      runs: [{ runId: 'wf-2', seq: 6, goal: 'two', status: 'completed', createdAt: 2, archivedAt: 3 }],
+      archivedCount: 1,
+      error: null,
+    },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+    null,
+    null,
+    true,
+  ])
+  const { texts } = collect(tree)
+
+  // 归档视图里只有卡片带「已归档」标签，右上角工具栏不再放这个 tag，只剩归档设置与刷新；
+  // 页面标题改成「已归档的工作流」。
+  assert.ok(texts.includes('archived'), 'archived runs keep their tag')
+  const heading = findByClass(tree, 'buka-workflows-title')
+  assert.ok(heading, 'the archived list has a page title')
+  assert.deepEqual(collect(heading).texts, ['archiveTitle'], 'the archived list has its own title')
+  const toolbar = findByClass(tree, 'buka-workflows-toolbar')
+  assert.ok(toolbar, 'the title row keeps a toolbar')
+  assert.equal(collect(toolbar).texts.includes('archived'), false, 'the toolbar has no archived tag')
+  assert.equal(collect(toolbar).texts.includes('archiveBack'), false, 'the back entry is not in the toolbar')
+  assert.equal(
+    collect(toolbar).classes.filter((name) => name === 'buka-workflows-toolbarButton').length,
+    2,
+    'only the settings and refresh buttons stay in the toolbar',
+  )
+
+  // 返回按钮在标题左侧（标题列里），通过它会回到普通运行列表。
+  const backButton = findByClass(tree, 'buka-workflows-backButton')
+  assert.ok(backButton, 'the back entry sits next to the title')
+  assert.equal(backButton.props['aria-label'], 'archiveBack')
+  const titleCluster = findByClass(tree, 'buka-workflows-titleCluster')
+  assert.ok(titleCluster, 'the header has a title cluster')
+  let backInsideTitle = false
+  walk(titleCluster, (node) => {
+    if (node === backButton) backInsideTitle = true
+  })
+  assert.ok(backInsideTitle, 'the back button is on the left of the title')
+  assert.equal(typeof backButton.props.onClick, 'function')
+  backButton.props.onClick()
+  assert.deepEqual(client.updates().slice(-1), [false], 'clicking back leaves the archived view')
+
+  assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
+  assert.equal(texts.includes('welcome'), false, 'the archive empty state is not the welcome copy')
+})
+
+test('client: the archive settings dialog renders the switch and hour fields', async () => {
+  const client = await loadClient()
+  const tree = client.render([
+    { status: 'ready', runs: [], archivedCount: 0, error: null },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+    null,
+    null,
+    false,
+    true,
+    { enabled: true, archiveHours: '24', deleteHours: '168' },
+    false,
+    false,
+    null,
+  ])
+  const { classes } = collect(tree)
+
+  // 对话框标题与底部按钮是 Modal 的 props，不在子节点里，直接读出来。
+  const dialog = findBy(tree, (node) => node.props?.title === 'archiveSettingsTitle')
+  assert.ok(dialog, 'the settings dialog is rendered')
+  assert.equal(dialog.props.open, true)
+  assert.equal(dialog.props.closeLabel, 'close')
+  const { texts } = collect(dialog)
+
+  for (const key of [
+    'archiveEnabled',
+    'archiveAfterHours',
+    'deleteAfterHours',
+    'hoursUnit',
+    'archiveDefaultsHint',
+  ]) {
+    assert.ok(texts.includes(key), `${key} is in the settings dialog`)
+  }
+  const numberInputs = []
+  walk(tree, (node) => {
+    if (node.props?.type === 'number') numberInputs.push(node)
+  })
+  assert.equal(numberInputs.length, 2, 'the dialog has an archive and a delete hour field')
+  assert.equal(numberInputs[0].props.value, '24')
+  assert.equal(numberInputs[1].props.value, '168')
+  assert.equal(numberInputs[0].props.disabled, false)
+  assert.equal(numberInputs[1].props.disabled, false)
+  assert.ok(classes.includes('buka-workflows-switch'))
+  assert.ok(classes.includes('is-on'), 'the enabled switch is on')
+  const toggle = findBy(tree, (node) => node.props?.role === 'switch')
+  assert.ok(toggle, 'the setting is a switch')
+  assert.equal(toggle.props['aria-checked'], true)
+  const saveButton = findBy(dialog.props.footer, (node) => (node.children ?? []).includes('save'))
+  assert.ok(saveButton, 'the save button is rendered')
+  assert.equal(saveButton.props.disabled, false, 'a valid draft can be saved')
+})
+
+test('client: the settings dialog validates hours and disables fields when archive is off', async () => {
+  const client = await loadClient()
+  const states = [
+    { status: 'ready', runs: [], archivedCount: 0, error: null },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+    null,
+    null,
+    false,
+    true,
+  ]
+
+  const invalid = client.render([
+    ...states,
+    { enabled: true, archiveHours: '0', deleteHours: '168' },
+    false,
+    false,
+    null,
+  ])
+  assert.ok(collect(invalid).texts.includes('archiveInvalid'), 'an out-of-range archive hour is rejected')
+  const invalidDialog = findBy(invalid, (node) => node.props?.title === 'archiveSettingsTitle')
+  assert.ok(invalidDialog)
+  const invalidSave = findBy(invalidDialog.props.footer, (node) => (node.children ?? []).includes('save'))
+  assert.ok(invalidSave)
+  assert.equal(invalidSave.props.disabled, true, 'an invalid draft cannot be saved')
+
+  const disabled = client.render([
+    ...states,
+    { enabled: false, archiveHours: '24', deleteHours: '168' },
+    false,
+    false,
+    null,
+  ])
+  /** @type {Array<Record<string, any>>} */
+  const inputs = []
+  walk(disabled, (node) => {
+    if (node.props?.type === 'number') inputs.push(node)
+  })
+  assert.equal(inputs.length, 2)
+  assert.equal(inputs[0].props.disabled, true, 'hours are not editable while the archive is off')
+  assert.equal(inputs[1].props.disabled, true)
 })

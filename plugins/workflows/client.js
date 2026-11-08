@@ -27,9 +27,13 @@ window.__ModuleLoader__.load({
       Tag,
       Toast,
       StateDot,
+      Input,
+      Modal,
       IconChevronRightOutlineRegular,
+      IconFolderOpenOutlineRegular,
       IconNewChatOutlineRegular,
       IconRefreshOutlineRegular,
+      IconSettingsOutlineRegular,
       IconWarningOutlineRegular,
     } = require('@deepseek-ai/dsh-client-ui-primitives')
 
@@ -43,6 +47,11 @@ window.__ModuleLoader__.load({
     /** 与 Host 一半（`lib/index.js`）的路由常量保持一致。 */
     const RUNS_ROUTE = '/buka-workflows/runs'
     const RUN_ROUTE = '/buka-workflows/run'
+    const SETTINGS_ROUTE = '/buka-workflows/settings'
+
+    /** 自动归档默认值：运行结束 24 小时后归档、168 小时后删除。 */
+    const DEFAULT_ARCHIVE_HOURS = 24
+    const DEFAULT_DELETE_HOURS = 168
 
     /** 页面刷新间隔：正在跑的运行也能看到节点进度。 */
     const REFRESH_MS = 5000
@@ -84,8 +93,6 @@ window.__ModuleLoader__.load({
     const en = {
       panel: 'Workflows',
       title: 'Workflows',
-      intro:
-        'One-off workflows created by the workflow-orchestrator preset. Each persisted run is drawn as a node graph; this page only observes — background runs keep updating while it is open.',
       welcome: 'No workflow runs yet.',
       welcomeHint:
         'Start a session with the workflow-orchestrator preset and ask it to run a workflow. Gate-free runs continue in the background after the tool call returns; their node sessions appear here as the graph advances.',
@@ -93,8 +100,6 @@ window.__ModuleLoader__.load({
       loading: 'Loading…',
       loadFailed: 'Request failed:',
       empty: 'No workflow runs have been recorded yet.',
-      detailHint:
-        'This page only reads the run record. To start another workflow, ask the agent in a conversation.',
       back: 'Back to runs',
       error: 'Error',
       stopReason: 'Stop reason',
@@ -165,14 +170,41 @@ window.__ModuleLoader__.load({
       promptTruncated: 'The prompt is truncated for display.',
       noGraph: 'This run has no saved definition snapshot, so the node graph cannot be drawn.',
       graphEmpty: 'The saved definition has no nodes.',
+      settings: 'Archive settings',
+      archiveSettingsTitle: 'Automatic archive',
+      archiveEnabled: 'Automatic archive',
+      archiveEnabledDesc:
+        'Finished runs leave the list after the archive time, and are deleted with their record after the delete time. Runs that are still going are never archived or deleted.',
+      settingsEnabled: 'On',
+      settingsDisabled: 'Off',
+      settingsLoading: 'Reading settings…',
+      settingsLoadFailed: 'Could not read settings:',
+      save: 'Save',
+      saving: 'Saving…',
+      cancel: 'Cancel',
+      saved: 'Settings saved.',
+      archiveAfterHours: 'Archive after',
+      archiveAfterHoursHint: 'In hours, counted from when the run finished. Default 24 hours (1 day).',
+      deleteAfterHours: 'Delete after',
+      deleteAfterHoursHint:
+        'In hours, counted from when the run finished; it must be later than the archive time. Default 168 hours (7 days).',
+      hoursUnit: 'hours',
+      archiveDefaultsHint:
+        'Defaults: archive after 1 day (24 hours), delete after 7 days (168 hours). Whole hours only.',
+      archiveInvalid: 'The archive time must be a whole number of hours between 1 and 720.',
+      deleteInvalid: 'The delete time must be a whole number of hours between 2 and 8760.',
+      deleteBeforeArchive: 'The delete time must be later than the archive time.',
+      archiveView: 'Archived',
+      archiveTitle: 'Archived workflows',
+      archiveBack: 'Back to list',
+      archiveEmpty: 'No archived runs yet.',
+      archived: 'Archived',
     }
 
     /** 简体中文文案。 */
     const zh = {
       panel: '工作流',
       title: '工作流',
-      intro:
-        '由 workflow-orchestrator preset 现场创建的一次性工作流。每次已落盘的运行都画成一张节点图，页面只负责观测——后台运行在页面打开期间会持续更新。',
       welcome: '还没有运行过工作流。',
       welcomeHint:
         '用 workflow-orchestrator preset 新建一个会话，让它跑一个工作流；不含门禁的运行在工具返回后仍在后台调度节点会话，图会随执行推进。',
@@ -180,7 +212,6 @@ window.__ModuleLoader__.load({
       loading: '正在读取…',
       loadFailed: '请求失败：',
       empty: '还没有记录任何工作流运行。',
-      detailHint: '这个页面只读取运行记录；要启动新的工作流，请在会话里告诉 agent。',
       back: '返回运行列表',
       error: '错误',
       stopReason: '停止原因',
@@ -251,6 +282,32 @@ window.__ModuleLoader__.load({
       promptTruncated: '提示词过长，仅展示前面一部分。',
       noGraph: '这次运行没有保存定义快照，无法绘制节点图。',
       graphEmpty: '保存的定义里没有节点。',
+      settings: '归档设置',
+      archiveSettingsTitle: '自动归档设置',
+      archiveEnabled: '自动归档',
+      archiveEnabledDesc: '结束的运行超过归档时间后从列表里隐藏；超过删除时间后连同记录一起删除。仍在运行的运行不会被归档或删除。',
+      settingsEnabled: '已启用',
+      settingsDisabled: '已停用',
+      settingsLoading: '正在读取设置…',
+      settingsLoadFailed: '读取设置失败：',
+      save: '保存',
+      saving: '正在保存…',
+      cancel: '取消',
+      saved: '设置已保存。',
+      archiveAfterHours: '归档时间',
+      archiveAfterHoursHint: '按小时计，从运行结束算起。默认 24 小时（1 天）。',
+      deleteAfterHours: '删除时间',
+      deleteAfterHoursHint: '按小时计，从运行结束算起，必须晚于归档时间。默认 168 小时（7 天）。',
+      hoursUnit: '小时',
+      archiveDefaultsHint: '默认：超过 1 天（24 小时）自动归档，超过 7 天（168 小时）自动删除。时间按整小时填写。',
+      archiveInvalid: '归档时间需为 1–720 之间的整数小时。',
+      deleteInvalid: '删除时间需为 2–8760 之间的整数小时。',
+      deleteBeforeArchive: '删除时间必须晚于归档时间。',
+      archiveView: '已归档',
+      archiveTitle: '已归档的工作流',
+      archiveBack: '返回列表',
+      archiveEmpty: '还没有已归档的运行。',
+      archived: '已归档',
     }
 
     /** 页面样式：沿用 Robots / Skills 页的标题行 + 960px 内容区 + 卡片结构。 */
@@ -258,12 +315,11 @@ window.__ModuleLoader__.load({
 .buka-workflows-page{--buka-workflows-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-workflows-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden}
 @media (width<=767px){.buka-workflows-page{--buka-workflows-inset:20px}}
 .buka-workflows-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-workflows-inset));max-width:none;margin-inline:calc(-1 * var(--buka-workflows-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-workflows-inset) 0;background:var(--dsw-alias-bg-base);z-index:1;position:sticky;top:0}
-.buka-workflows-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:16px}
-.buka-workflows-heading{order:1;flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:6px}
-.buka-workflows-headingRow{display:flex;align-items:center;gap:6px;min-width:0}
-.buka-workflows-title{margin:0;font-size:20px;font-weight:500;line-height:28px;overflow-wrap:anywhere}
-.buka-workflows-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
-.buka-workflows-toolbar{order:2;display:flex;align-items:center;gap:8px;flex:none}
+.buka-workflows-headInner{width:100%;max-width:960px;margin-inline:auto}
+.buka-workflows-titleRow{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:center;gap:16px;min-width:0}
+.buka-workflows-titleCluster{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px}
+.buka-workflows-title{margin:0;font-size:20px;font-weight:500;line-height:28px;overflow-wrap:anywhere;min-width:0}
+.buka-workflows-toolbar{flex:none;display:flex;align-items:center;gap:8px}
 .buka-workflows-body{box-sizing:border-box;width:100%;max-width:960px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;display:flex;flex-direction:column;padding:32px 0 24px}
 .buka-workflows-pageBody{display:flex;flex-direction:column;gap:20px}
 .buka-workflows-detail{display:flex;flex-direction:column;gap:28px}
@@ -274,12 +330,16 @@ window.__ModuleLoader__.load({
 .buka-workflows-failure{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px;overflow-wrap:anywhere}
 .buka-workflows-warn{color:var(--dsw-alias-state-warn-primary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-workflows-cards{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
+.buka-workflows-listPane{display:flex;flex-direction:column;gap:16px}
 .buka-workflows-card{display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;text-align:left;border:0;background:0 0;border-radius:var(--dsw-radius-xl);padding:12px 8px;margin:0 -8px;font:inherit;color:inherit;cursor:pointer}
 @media (hover:hover){.buka-workflows-card:hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .buka-workflows-card:active{background:var(--dsw-alias-interactive-bg-active)}
 .buka-workflows-card:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
 .buka-workflows-cardHead{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 .buka-workflows-cardTitle{font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere;min-width:0}
+.buka-workflows-cardTitleGroup{display:flex;align-items:center;gap:6px;min-width:0}
+.buka-workflows-cardTags{display:flex;align-items:center;gap:6px;flex:none}
+.buka-workflows-seq{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-tertiary);padding:1px 5px}
 .buka-workflows-meta{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-workflows-label{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
 .buka-workflows-steps{display:flex;flex-direction:column;gap:12px;margin:0;padding:0;list-style:none}
@@ -291,6 +351,7 @@ window.__ModuleLoader__.load({
 .buka-workflows-inlineCode{font-family:var(--ds-font-family-code);font-size:11px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-secondary);padding:1px 5px;overflow-wrap:anywhere;word-break:break-all}
 .buka-workflows-pre{margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-family:var(--ds-font-family-code);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;width:100%;box-sizing:border-box}
 .buka-workflows-smallButton{border-radius:var(--dsw-radius-md);height:28px;padding:0 10px;font-size:12px;line-height:18px}
+.buka-workflows-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
 .buka-workflows-iconButton{border-radius:var(--dsw-radius-sm);width:28px;height:28px;color:var(--dsw-alias-label-caption);cursor:pointer;background:0 0;border:0;justify-content:center;align-items:center;display:inline-flex;padding:0}
 @media (hover:hover){.buka-workflows-iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
 .buka-workflows-iconButton:active{background:var(--dsw-alias-interactive-bg-active)}
@@ -408,6 +469,26 @@ window.__ModuleLoader__.load({
 .buka-workflows-prevArrow,.buka-workflows-nextArrow{color:var(--dsw-alias-label-tertiary)}
 .buka-workflows-prevTitle,.buka-workflows-nextTitle{font-size:12px;font-weight:500}
 .buka-workflows-prevVisit,.buka-workflows-nextVisit{color:var(--dsw-alias-label-secondary)}
+.buka-workflows-dialogForm{display:flex;flex-direction:column;gap:16px}
+.buka-workflows-settingRow{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:2px 0}
+.buka-workflows-settingText{display:flex;flex-direction:column;gap:4px;min-width:0}
+.buka-workflows-settingHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.buka-workflows-settingTitle{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
+.buka-workflows-settingDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workflows-switch{box-sizing:border-box;flex:none;width:36px;height:20px;padding:2px;margin:2px 0 0;border:0;border-radius:999px;background:var(--dsw-alias-border-l4);cursor:pointer;display:inline-flex;align-items:center;transition:background .16s ease}
+.buka-workflows-switch.is-on{background:var(--dsw-alias-brand-primary)}
+.buka-workflows-switch:disabled{cursor:default;opacity:.6}
+.buka-workflows-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.buka-workflows-switchThumb{width:16px;height:16px;border-radius:999px;background:var(--dsw-alias-bg-base);box-shadow:0 1px 2px rgba(17,20,28,.24);transition:transform .16s ease}
+.buka-workflows-switch.is-on .buka-workflows-switchThumb{transform:translateX(16px)}
+@media (prefers-reduced-motion:reduce){.buka-workflows-switch,.buka-workflows-switchThumb{transition:none}}
+.buka-workflows-hoursField{display:flex;flex-direction:column;gap:6px}
+.buka-workflows-hoursControl{display:flex;align-items:center;gap:8px}
+.buka-workflows-hoursInput{width:88px}
+.buka-workflows-hoursUnit{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.buka-workflows-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:500;line-height:20px}
+.buka-workflows-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workflows-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px;overflow-wrap:anywhere}
 `
 
     /**
@@ -819,7 +900,7 @@ window.__ModuleLoader__.load({
       const getService = typeof props.getService === 'function' ? props.getService : () => null
 
       /** 列表状态。 */
-      const [list, setList] = React.useState({ status: 'loading', runs: [], error: null })
+      const [list, setList] = React.useState({ status: 'loading', runs: [], archivedCount: 0, error: null })
 
       /** 当前查看的 runId；null 表示列表视图。 */
       const [selectedId, setSelectedId] = React.useState(null)
@@ -845,14 +926,40 @@ window.__ModuleLoader__.load({
        */
       const [edgeTip, setEdgeTip] = React.useState(null)
 
-      // 列表：首次加载与每次刷新。
+      /** 列表是否只看已归档的运行。 */
+      const [showArchived, setShowArchived] = React.useState(false)
+
+      /** 自动归档设置对话框是否打开。 */
+      const [settingsOpen, setSettingsOpen] = React.useState(false)
+
+      /** 设置草稿；小时存字符串，输入框直接绑它。null 表示还没读到设置。 */
+      const [settingsDraft, setSettingsDraft] = React.useState(null)
+
+      /** 正在读取设置。 */
+      const [settingsLoading, setSettingsLoading] = React.useState(false)
+
+      /** 正在保存设置。 */
+      const [settingsSaving, setSettingsSaving] = React.useState(false)
+
+      /** 设置相关的错误文案。 */
+      const [settingsError, setSettingsError] = React.useState(null)
+
+      // 列表：首次加载与每次刷新；归档视图只取已归档的运行。
       React.useEffect(() => {
         let cancelled = false
-        setList((previous) => ({ ...previous, status: previous.runs.length > 0 ? previous.status : 'loading' }))
-        requestJson(RUNS_ROUTE).then(
+        setList((previous) => ({
+          ...previous,
+          status: previous.runs.length > 0 ? previous.status : 'loading',
+        }))
+        requestJson(RUNS_ROUTE + (showArchived ? '?archived=1' : '')).then(
           (body) => {
             if (cancelled) return
-            setList({ status: 'ready', runs: Array.isArray(body.runs) ? body.runs : [], error: null })
+            setList({
+              status: 'ready',
+              runs: Array.isArray(body.runs) ? body.runs : [],
+              archivedCount: typeof body.archivedCount === 'number' ? body.archivedCount : 0,
+              error: null,
+            })
           },
           (failure) => {
             if (cancelled) return
@@ -862,7 +969,7 @@ window.__ModuleLoader__.load({
         return () => {
           cancelled = true
         }
-      }, [tick])
+      }, [tick, showArchived])
 
       // 详情：选中 run 后加载，并随刷新更新。
       React.useEffect(() => {
@@ -937,6 +1044,93 @@ window.__ModuleLoader__.load({
       /** 手动刷新。 */
       function reload() {
         setTick((value) => value + 1)
+      }
+
+      /**
+       * 校验设置草稿里的两个小时数：必须是整数、落在范围内，且删除晚于归档。
+       *
+       * @param {{ enabled: boolean, archiveHours: string, deleteHours: string }} draft
+       * @returns {string | null} 错误文案；null 表示通过
+       */
+      function settingsValidationError(draft) {
+        const archiveText = String(draft.archiveHours ?? '').trim()
+        const deleteText = String(draft.deleteHours ?? '').trim()
+        if (!/^\d+$/u.test(archiveText)) return t('archiveInvalid')
+        const archiveHours = Number(archiveText)
+        if (archiveHours < 1 || archiveHours > 720) return t('archiveInvalid')
+        if (!/^\d+$/u.test(deleteText)) return t('deleteInvalid')
+        const deleteHours = Number(deleteText)
+        if (deleteHours < 2 || deleteHours > 8760) return t('deleteInvalid')
+        if (deleteHours <= archiveHours) return t('deleteBeforeArchive')
+        return null
+      }
+
+      /**
+       * 打开自动归档设置对话框：先清空草稿，再读 Host 的当前设置。读失败时留在
+       * 对话框里说明原因；读取期间显示 loading。
+       */
+      async function openSettingsDialog() {
+        setSettingsOpen(true)
+        setSettingsError(null)
+        setSettingsDraft(null)
+        setSettingsLoading(true)
+        try {
+          const body = await requestJson(SETTINGS_ROUTE)
+          const settings = body.settings ?? {}
+          setSettingsDraft({
+            enabled: settings.enabled === true,
+            archiveHours: String(settings.archiveAfterHours ?? DEFAULT_ARCHIVE_HOURS),
+            deleteHours: String(settings.deleteAfterHours ?? DEFAULT_DELETE_HOURS),
+          })
+        } catch (failure) {
+          setSettingsError(`${t('settingsLoadFailed')} ${messageOf(failure)}`)
+        } finally {
+          setSettingsLoading(false)
+        }
+      }
+
+      /** 关闭设置对话框；保存中不响应关闭。 */
+      function closeSettingsDialog() {
+        if (settingsSaving) return
+        setSettingsOpen(false)
+        setSettingsError(null)
+        setSettingsDraft(null)
+      }
+
+      /**
+       * 保存自动归档设置：校验通过后写回 Host，成功后关闭对话框并刷新列表（归档
+       * 结果可能刚刚变化）。
+       */
+      async function saveSettings() {
+        const draft = settingsDraft
+        if (draft === null || settingsValidationError(draft) !== null) return
+        setSettingsSaving(true)
+        setSettingsError(null)
+        try {
+          const response = await fetch(SETTINGS_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({
+              enabled: draft.enabled,
+              archiveAfterHours: Number(draft.archiveHours),
+              deleteAfterHours: Number(draft.deleteHours),
+            }),
+          })
+          const body = await response.json().catch(() => null)
+          if (!response.ok || body === null || body.ok !== true) {
+            const error = new Error(body?.message ?? `HTTP ${response.status}`)
+            error.code = body?.code
+            throw error
+          }
+          setSettingsOpen(false)
+          setSettingsDraft(null)
+          flash('success', t('saved'))
+          reload()
+        } catch (failure) {
+          setSettingsError(`${t('settingsSaveFailed')} ${messageOf(failure)}`)
+        } finally {
+          setSettingsSaving(false)
+        }
       }
 
       /**
@@ -1762,50 +1956,82 @@ window.__ModuleLoader__.load({
        */
       function renderList() {
         if (list.error !== null && list.runs.length === 0) {
-          return h('p', { className: 'buka-workflows-failure', role: 'alert' }, `${t('loadFailed')} ${list.error}`)
+          return h(
+            'div',
+            { className: 'buka-workflows-listPane' },
+            h(
+              'p',
+              { className: 'buka-workflows-failure', role: 'alert' },
+              `${t('loadFailed')} ${list.error}`,
+            ),
+          )
         }
         if (list.status === 'loading' && list.runs.length === 0) {
           return h(
-            'p',
-            { className: 'buka-workflows-statusWithDot', role: 'status' },
-            h(StateDot, { state: 'ongoing' }),
-            t('loading'),
+            'div',
+            { className: 'buka-workflows-listPane' },
+            h(
+              'p',
+              { className: 'buka-workflows-statusWithDot', role: 'status' },
+              h(StateDot, { state: 'ongoing' }),
+              t('loading'),
+            ),
           )
         }
         if (list.runs.length === 0) {
           return h(
             'div',
-            { className: 'buka-workflows-emptyBox' },
-            h('p', { className: 'buka-workflows-empty' }, t('welcome')),
-            h('p', { className: 'buka-workflows-hint' }, t('welcomeHint')),
+            { className: 'buka-workflows-listPane' },
+            h(
+              'div',
+              { className: 'buka-workflows-emptyBox' },
+              h('p', { className: 'buka-workflows-empty' }, showArchived ? t('archiveEmpty') : t('welcome')),
+              showArchived ? null : h('p', { className: 'buka-workflows-hint' }, t('welcomeHint')),
+            ),
           )
         }
         return h(
-          'ul',
-          { className: 'buka-workflows-cards' },
-          ...list.runs.map((run) =>
-            h(
-              'li',
-              { key: run.runId },
+          'div',
+          { className: 'buka-workflows-listPane' },
+          h(
+            'ul',
+            { className: 'buka-workflows-cards' },
+            ...list.runs.map((run) =>
               h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'buka-workflows-card',
-                  onClick: () => setSelectedId(run.runId),
-                },
+                'li',
+                { key: run.runId },
                 h(
-                  'span',
-                  { className: 'buka-workflows-cardHead' },
-                  h('span', { className: 'buka-workflows-cardTitle' }, run.goal || run.runId),
-                  h(Tag, { tone: statusTone(run.status) }, statusLabel(t, run.status)),
-                ),
-                h(
-                  'span',
-                  { className: 'buka-workflows-meta' },
-                  `${run.runId} · ${formatTime(run.createdAt)}${
-                    typeof run.error === 'string' && run.error !== '' ? ` · ${run.error}` : ''
-                  }`,
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'buka-workflows-card',
+                    onClick: () => setSelectedId(run.runId),
+                  },
+                  h(
+                    'span',
+                    { className: 'buka-workflows-cardHead' },
+                    h(
+                      'span',
+                      { className: 'buka-workflows-cardTitleGroup' },
+                      typeof run.seq === 'number'
+                        ? h('span', { className: 'buka-workflows-seq' }, `#${run.seq}`)
+                        : null,
+                      h('span', { className: 'buka-workflows-cardTitle' }, run.goal || run.runId),
+                    ),
+                    h(
+                      'span',
+                      { className: 'buka-workflows-cardTags' },
+                      typeof run.archivedAt === 'number' ? h(Tag, { tone: 'neutral' }, t('archived')) : null,
+                      h(Tag, { tone: statusTone(run.status) }, statusLabel(t, run.status)),
+                    ),
+                  ),
+                  h(
+                    'span',
+                    { className: 'buka-workflows-meta' },
+                    `${run.runId} · ${formatTime(run.createdAt)}${
+                      typeof run.error === 'string' && run.error !== '' ? ` · ${run.error}` : ''
+                    }`,
+                  ),
                 ),
               ),
             ),
@@ -1883,7 +2109,153 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /**
+       * 自动归档设置对话框：启用开关 + 归档 / 删除小时数 + 保存。打开时先读 Host
+       * 的当前设置，输入按整小时校验；读 / 存失败都留在框里说明原因。
+       *
+       * @returns {object} React 元素
+       */
+      function renderSettingsDialog() {
+        const draft = settingsDraft
+        const validation = draft === null ? null : settingsValidationError(draft)
+        const saving = settingsSaving
+        const canSave = !saving && !settingsLoading && draft !== null && validation === null
+        /** @param {string} text */
+        const formError = (text) => h('p', { className: 'buka-workflows-formError', role: 'alert' }, text)
+        const body = []
+        if (settingsLoading) {
+          body.push(h('p', { className: 'buka-workflows-hint' }, t('settingsLoading')))
+        }
+        if (draft === null) {
+          if (!settingsLoading && settingsError !== null) body.push(formError(settingsError))
+        } else {
+          body.push(
+            h(
+              'div',
+              { className: 'buka-workflows-settingRow' },
+              h(
+                'div',
+                { className: 'buka-workflows-settingText' },
+                h(
+                  'div',
+                  { className: 'buka-workflows-settingHead' },
+                  h('span', { className: 'buka-workflows-settingTitle' }, t('archiveEnabled')),
+                  h(
+                    Tag,
+                    { tone: draft.enabled ? 'success' : 'neutral' },
+                    draft.enabled ? t('settingsEnabled') : t('settingsDisabled'),
+                  ),
+                ),
+                h('span', { className: 'buka-workflows-settingDesc' }, t('archiveEnabledDesc')),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  role: 'switch',
+                  'aria-checked': draft.enabled,
+                  'aria-label': t('archiveEnabled'),
+                  className: `buka-workflows-switch${draft.enabled ? ' is-on' : ''}`,
+                  disabled: saving,
+                  onClick: () =>
+                    setSettingsDraft((current) =>
+                      current === null ? current : { ...current, enabled: !current.enabled },
+                    ),
+                },
+                h('span', { className: 'buka-workflows-switchThumb', 'aria-hidden': true }),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'buka-workflows-hoursField' },
+              h('span', { className: 'buka-workflows-fieldLabel' }, t('archiveAfterHours')),
+              h(
+                'div',
+                { className: 'buka-workflows-hoursControl' },
+                h(Input, {
+                  type: 'number',
+                  min: 1,
+                  max: 720,
+                  step: 1,
+                  value: draft.archiveHours,
+                  disabled: saving || !draft.enabled,
+                  className: 'buka-workflows-hoursInput',
+                  onChange: (event) =>
+                    setSettingsDraft((current) =>
+                      current === null ? current : { ...current, archiveHours: String(event.target.value) },
+                    ),
+                }),
+                h('span', { className: 'buka-workflows-hoursUnit' }, t('hoursUnit')),
+              ),
+              h('span', { className: 'buka-workflows-fieldHint' }, t('archiveAfterHoursHint')),
+            ),
+            h(
+              'div',
+              { className: 'buka-workflows-hoursField' },
+              h('span', { className: 'buka-workflows-fieldLabel' }, t('deleteAfterHours')),
+              h(
+                'div',
+                { className: 'buka-workflows-hoursControl' },
+                h(Input, {
+                  type: 'number',
+                  min: 2,
+                  max: 8760,
+                  step: 1,
+                  value: draft.deleteHours,
+                  disabled: saving || !draft.enabled,
+                  className: 'buka-workflows-hoursInput',
+                  onChange: (event) =>
+                    setSettingsDraft((current) =>
+                      current === null ? current : { ...current, deleteHours: String(event.target.value) },
+                    ),
+                }),
+                h('span', { className: 'buka-workflows-hoursUnit' }, t('hoursUnit')),
+              ),
+              h('span', { className: 'buka-workflows-fieldHint' }, t('deleteAfterHoursHint')),
+            ),
+            h('p', { className: 'buka-workflows-hint' }, t('archiveDefaultsHint')),
+          )
+          if (validation !== null) body.push(formError(validation))
+          if (settingsError !== null) body.push(formError(settingsError))
+        }
+        return h(
+          Modal,
+          {
+            open: settingsOpen,
+            onClose: closeSettingsDialog,
+            title: t('archiveSettingsTitle'),
+            closeLabel: t('close'),
+            footer: h(
+              React.Fragment,
+              null,
+              h(Button, { variant: 'outline', onClick: closeSettingsDialog, disabled: saving }, t('cancel')),
+              h(
+                Button,
+                { variant: 'primary', type: 'button', onClick: saveSettings, disabled: !canSave },
+                saving ? t('saving') : t('save'),
+              ),
+            ),
+          },
+          h('div', { className: 'buka-workflows-dialogForm' }, ...body),
+        )
+      }
+
       const selectedRun = selectedId !== null ? detail.data?.run ?? null : null
+
+      /**
+       * 标题：普通列表用「工作流」，归档列表用「已归档的工作流」；详情标题在
+       * 有运行序号时是「#N · 目标」，否则退回目标或 runId。
+       */
+      const headingText =
+        selectedId === null
+          ? showArchived
+            ? t('archiveTitle')
+            : t('title')
+          : selectedRun === null
+            ? String(selectedId)
+            : typeof selectedRun.seq === 'number'
+              ? `#${selectedRun.seq} · ${selectedRun.goal || selectedRun.runId}`
+              : String(selectedRun.goal || selectedRun.runId)
 
       return h(
         'div',
@@ -1896,23 +2268,30 @@ window.__ModuleLoader__.load({
             { className: 'buka-workflows-headInner' },
             h(
               'div',
-              { className: 'buka-workflows-heading' },
+              { className: 'buka-workflows-titleRow' },
               h(
                 'div',
-                { className: 'buka-workflows-headingRow' },
-                selectedId === null
+                { className: 'buka-workflows-titleCluster' },
+                selectedId === null && !showArchived
                   ? null
                   : h(
                       Tooltip,
-                      { label: t('back'), side: 'top', delayMs: 400 },
+                      {
+                        label: selectedId === null ? t('archiveBack') : t('back'),
+                        side: 'top',
+                        delayMs: 400,
+                      },
                       h(
                         'button',
                         {
                           type: 'button',
                           className:
                             'buka-workflows-iconButton buka-workflows-back buka-workflows-backButton',
-                          'aria-label': t('back'),
-                          onClick: () => setSelectedId(null),
+                          'aria-label': selectedId === null ? t('archiveBack') : t('back'),
+                          onClick: () => {
+                            if (selectedId === null) setShowArchived(false)
+                            else setSelectedId(null)
+                          },
                         },
                         h(IconChevronRightOutlineRegular, { size: 16 }),
                       ),
@@ -1920,41 +2299,70 @@ window.__ModuleLoader__.load({
                 h(
                   'h1',
                   { className: 'buka-workflows-title' },
-                  selectedId === null ? t('title') : String(selectedRun?.runId ?? selectedId),
+                  headingText,
                 ),
               ),
               h(
-                'p',
-                { className: 'buka-workflows-intro' },
-                selectedId === null ? t('intro') : t('detailHint'),
-              ),
-            ),
-            h(
-              'div',
-              { className: 'buka-workflows-toolbar' },
-              selectedId === null
-                ? null
-                : h(
-                    Tag,
-                    { tone: statusTone(selectedRun?.status ?? '') },
-                    statusLabel(t, selectedRun?.status ?? ''),
-                  ),
-              h(
-                Button,
-                {
-                  variant: 'outline',
-                  size: 'sm',
-                  className: 'buka-workflows-smallButton',
-                  icon: h(IconRefreshOutlineRegular, { size: 13 }),
-                  onClick: reload,
-                },
-                t('refresh'),
+                'div',
+                { className: 'buka-workflows-toolbar' },
+                ...(selectedId === null
+                  ? [
+                      showArchived
+                        ? null
+                        : h(
+                            Button,
+                            {
+                              variant: 'outline',
+                              size: 'sm',
+                              className: 'buka-workflows-toolbarButton',
+                              icon: h(IconFolderOpenOutlineRegular, { size: 13 }),
+                              onClick: () => setShowArchived(true),
+                            },
+                            list.archivedCount > 0
+                              ? `${t('archiveView')} (${list.archivedCount})`
+                              : t('archiveView'),
+                          ),
+                      h(
+                        Button,
+                        {
+                          variant: 'outline',
+                          size: 'sm',
+                          className: 'buka-workflows-toolbarButton',
+                          icon: h(IconSettingsOutlineRegular, { size: 13 }),
+                          onClick: openSettingsDialog,
+                        },
+                        t('settings'),
+                      ),
+                    ]
+                  : [
+                      typeof selectedRun?.archivedAt === 'number'
+                        ? h(Tag, { tone: 'neutral' }, t('archived'))
+                        : null,
+                      h('code', { className: 'buka-workflows-inlineCode' }, selectedRun?.runId ?? selectedId),
+                      h(
+                        Tag,
+                        { tone: statusTone(selectedRun?.status ?? '') },
+                        statusLabel(t, selectedRun?.status ?? ''),
+                      ),
+                    ]),
+                h(
+                  Button,
+                  {
+                    variant: 'outline',
+                    size: 'sm',
+                    className: 'buka-workflows-toolbarButton',
+                    icon: h(IconRefreshOutlineRegular, { size: 13 }),
+                    onClick: reload,
+                  },
+                  t('refresh'),
+                ),
               ),
             ),
           ),
         ),
         h('div', { className: 'buka-workflows-body' }, selectedId === null ? renderList() : renderDetail()),
         selectedId === null ? null : renderFooter(),
+        renderSettingsDialog(),
         notice === null
           ? null
           : h(Toast, {
