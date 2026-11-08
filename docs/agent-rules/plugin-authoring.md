@@ -53,6 +53,7 @@ DSH 的插件就是 Cordis 插件；能被市场安装还要求它同时是一�
 - `id` 在整个 composition 里唯一，用 `<用途>-<插件>` 的形式，便于在 `--dump-config` 输出里检索
 - `name` 必须是包名，由 profile 的依赖解析；不要写相对路径或 `link:`
 - 需要改其他行的配置用 `config`；需要插多个插件就写多条（官方就是用一个 bundle 插 Host 服务与 UI 两行）
+- 想随插件发布一个 agent preset（新建会话时可选里的「模式」）：再插一行 `name: '@deepseek-ai/dsh-agent-preset'`，`config.id` 是 preset 身份、`config.plugins` 列它挂的子插件（persona 与工具），界面上的名字与说明写 `config.name` / `config.description`。仓库里的两个例子：[plugins/workflows](../../plugins/workflows/cordis.patch.yml)、[plugins/robots](../../plugins/robots/cordis.patch.yml)
 - 补丁层只能声明「有哪些行」，不能声明「依赖哪些包」；依赖仍由 `package.json` 表达
 
 ## 浏览器一半（可选）
@@ -92,6 +93,8 @@ export function apply(ctx) {
 - `output`：`{ schema, render }`，`schema` 的 `required: true` 写在属性对象里，`render` 把结构化结果转成对话里的文本
 
 `apply` 里不要做耗时初始化（网络、扫描大目录）；需要的话挂在事件或首次调用时做，避免拖慢 DSH 启动。
+
+要把工具只开放给随插件发布的 preset，用 `ctx.tools.register(tool, { when })`：`when` 收到 `{ agent }`，用 `ctx.get('sessions')` 拿到会话、再用 `ctx.get('agentPresets').presetForSession(session)` 读出它的 preset，只放行点名的 preset 根会话。写操作在 `sessions` / `agentPresets` 缺失时应**收紧为不可见**（不能因为判不出来就放行）；参考 [plugins/workflows/lib/access.js](../../plugins/workflows/lib/access.js) 与 [plugins/robots/lib/access.js](../../plugins/robots/lib/access.js)。`when` 之外还要在 `execute` 里再校验一次，避免绕过可见性直接调用。
 
 ## market.json
 
