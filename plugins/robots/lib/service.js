@@ -34,6 +34,12 @@ import {
   readRobotRegistry,
 } from './robot-store.js'
 import { resolveAvatar } from './avatar.js'
+import {
+  GENERAL_ROBOT_AVATAR_ID,
+  GENERAL_ROBOT_NAME,
+  isGeneralRobotName,
+} from './general-robot.js'
+import { readSettings, resolveSettingsFile } from './settings.js'
 
 /** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaRobots`。 */
 export const SERVICE_NAME = 'bukaRobots'
@@ -86,6 +92,7 @@ export class RobotSessionService {
    *   ctx: import('@deepseek-ai/cordis').Context,
    *   robotsDir: string,
    *   registryFile: string,
+   *   settingsFile?: string,
    *   defineTool?: Function,
    *   subagentProvider?: string,
    *   reportRetries?: number,
@@ -96,6 +103,10 @@ export class RobotSessionService {
     this.ctx = options.ctx
     this.robotsDir = options.robotsDir
     this.registryFile = options.registryFile
+    this.settingsFile =
+      typeof options.settingsFile === 'string' && options.settingsFile.trim() !== ''
+        ? options.settingsFile
+        : resolveSettingsFile(options.robotsDir)
     this.defineTool = options.defineTool
     this.subagentProvider =
       typeof options.subagentProvider === 'string' && options.subagentProvider.trim() !== ''
@@ -139,16 +150,24 @@ export class RobotSessionService {
    * 机器人名 → 头像 id。给工作流这类只关心「谁在执行」的消费方用：只读登记表，
    * 不扫描每个机器人目录里的 skills / AGENTS.md，所以可以频繁调用。
    *
-   * 旧登记表里缺头像的机器人按名字兜底成一个确定的预设；登记表损坏时返回空表。
+   * 旧登记表里缺头像的机器人按名字兜底成一个确定的预设。通用型机器人启用时
+   * 额外返回 `通用型机器人: 'robot'`（工作流节点图画固定 🤖）；登记表损坏时
+   * 只返回这一项（或空表）。
    *
    * @returns {Promise<Record<string, string>>}
    */
   async avatarMap() {
     const registry = await readRobotRegistry({ file: this.registryFile })
-    if (registry.corrupt) return {}
+    const settings = await readSettings({ file: this.settingsFile })
     /** @type {Record<string, string>} */
     const map = {}
-    for (const robot of registry.robots) map[robot.name] = resolveAvatar(robot.avatar, robot.name)
+    if (!registry.corrupt) {
+      for (const robot of registry.robots) map[robot.name] = resolveAvatar(robot.avatar, robot.name)
+    }
+    // 通用型机器人启用时也暴露给工作流节点图；同名登记机器人优先，避免撞名字。
+    if (settings.generalRobot.enabled && !Object.hasOwn(map, GENERAL_ROBOT_NAME)) {
+      map[GENERAL_ROBOT_NAME] = GENERAL_ROBOT_AVATAR_ID
+    }
     return map
   }
 
@@ -186,7 +205,7 @@ export class RobotSessionService {
     if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
       throw new Error('startSession requires a non-empty prompt')
     }
-    const robot = await this.#resolveRobot(request.robot)
+    const robot = await this.#resolveRobot(request.robot, request)
     const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions)
     if (typeof agentOptions.provider !== 'string' || typeof agentOptions.model !== 'string') {
       throw new Error(
@@ -1029,31 +1048,70 @@ export class RobotSessionService {
   /**
    * 解析机器人名称并在登记表 / 磁盘上确认。
    *
+   * 通用型机器人不在登记表里：启用时它的会话落在调用方所在的工作区（标准模式），
+   * 停用时直接拒绝。同名登记机器人优先，避免用户自建的机器人被内置项顶掉。
+   *
    * @param {unknown} name
-   * @returns {Promise<{ name: string, path: string }>}
+   * @param {Record<string, any>} [request] 调用方的请求；用来取 `agent.session.header.cwd`
+   * @returns {Promise<{ name: string, path: string, general?: true }>}
    */
-  async #resolveRobot(name) {
+  async #resolveRobot(name, request = {}) {
     const trimmed = typeof name === 'string' ? name.trim() : ''
     if (!isValidRobotName(trimmed)) {
       throw new Error(`invalid robot name: ${String(name)}`)
     }
     const registry = await readRobotRegistry({ file: this.registryFile })
+    if (!registry.corrupt) {
+      const robot = registry.robots.find((entry) => entry.name === trimmed)
+      if (robot !== undefined) {
+        let stat
+        try {
+          stat = await fs.stat(robot.path)
+        } catch {
+          stat = undefined
+        }
+        if (stat === undefined || !stat.isDirectory()) {
+          throw new Error(`robot directory does not exist: ${robot.path}`)
+        }
+        return { name: robot.name, path: robot.path }
+      }
+    }
+
+    if (isGeneralRobotName(trimmed)) return await this.#resolveGeneralRobot(request)
     if (registry.corrupt) {
       throw new Error(`robot registry is unreadable: ${this.registryFile}`)
     }
-    const robot = registry.robots.find((entry) => entry.name === trimmed)
-    if (robot === undefined) throw new Error(`unknown robot: ${trimmed}`)
+    throw new Error(`unknown robot: ${trimmed}`)
+  }
 
-    let stat
-    try {
-      stat = await fs.stat(robot.path)
-    } catch {
-      stat = undefined
+  /**
+   * 解析通用型机器人：确认启用，并选一个「调用方所在工作区」当 cwd。
+   *
+   * 它没有自己的目录，所以在工作流里跑在编排器会话的 cwd（也就是工作流所在的
+   * 工作区）；没有调用方会话时退回宿主的默认工作目录。
+   *
+   * @param {Record<string, any>} request
+   * @returns {Promise<{ name: string, path: string }>}
+   */
+  async #resolveGeneralRobot(request) {
+    const settings = await readSettings({ file: this.settingsFile })
+    if (!settings.generalRobot.enabled) {
+      throw new Error('the general-purpose robot is disabled; enable it on the Robots page first')
     }
-    if (stat === undefined || !stat.isDirectory()) {
-      throw new Error(`robot directory does not exist: ${robot.path}`)
+
+    const sessionCwd = request?.agent?.session?.header?.cwd
+    const working = this.ctx?.get?.('workingDirectory')
+    const fallback = working?.defaultDirectory
+    const cwd =
+      typeof sessionCwd === 'string' && sessionCwd.trim() !== ''
+        ? sessionCwd
+        : typeof fallback === 'string' && fallback.trim() !== ''
+          ? fallback
+          : ''
+    if (cwd === '') {
+      throw new Error('the general-purpose robot needs a workspace directory, but none is available')
     }
-    return { name: robot.name, path: robot.path }
+    return { name: GENERAL_ROBOT_NAME, path: cwd }
   }
 
   /**
@@ -1086,6 +1144,7 @@ export function summarizeRobot(robot) {
     path: robot?.path ?? '',
     createdAt: robot?.createdAt ?? null,
     avatar: resolveAvatar(robot?.avatar, robot?.name),
+    description: typeof robot?.description === 'string' ? robot.description : '',
     exists: robot?.exists === true,
     mounted: robot?.mounted === true,
     workspaceId: robot?.workspaceId ?? null,

@@ -45,6 +45,9 @@ export const AGENTS_MAX_READ_BYTES = 256 * 1024
 /** 允许通过页面写回 AGENTS.md 的上限（512 KiB）；超出由路由返回 413。 */
 export const AGENTS_MAX_WRITE_BYTES = 512 * 1024
 
+/** 机器人描述上限（UTF-16 长度）；描述是给工作流选择机器人看的一行摘要。 */
+export const ROBOT_DESCRIPTION_MAX_LENGTH = 500
+
 /** 插件全局目录名；位于 `${XDG_CACHE_HOME:-~/.cache}` 下。 */
 export const PLUGIN_CACHE_DIR = 'dsh-plugin-robots'
 
@@ -271,6 +274,7 @@ export async function readRobotRegistry({ file } = {}) {
       path: entry.path,
       createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : '',
       avatar: typeof entry.avatar === 'string' ? entry.avatar.trim() : '',
+      description: normalizeRobotDescription(entry.description).slice(0, ROBOT_DESCRIPTION_MAX_LENGTH),
     })
   }
   return { version: ROBOT_REGISTRY_VERSION, robots, file: target }
@@ -297,6 +301,8 @@ export async function writeRobotRegistry({ file, robots } = {}) {
       createdAt: robot.createdAt,
       // 写法上总是落下具体 id，旧记录在第一次写回时顺带补齐头像。
       avatar: resolveAvatar(robot.avatar, robot.name),
+      // 旧登记表没有描述：第一次写回时补成空串，之后由页面 / 构建工具维护。
+      description: normalizeRobotDescription(robot.description).slice(0, ROBOT_DESCRIPTION_MAX_LENGTH),
     })),
   }
   const temporary = `${target}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.tmp`
@@ -331,6 +337,42 @@ export async function writeRobotRegistry({ file, robots } = {}) {
 function invalidNameError(name) {
   const error = new Error(`机器人名称不合法：${String(name)}`)
   return Object.assign(error, { code: 'invalid-name' })
+}
+
+/**
+ * 生成「描述不合法」错误。
+ *
+ * @param {unknown} description
+ * @returns {Error & { code: string }}
+ */
+function invalidDescriptionError(description) {
+  const error = new Error(
+    `机器人描述不合法：需要不超过 ${ROBOT_DESCRIPTION_MAX_LENGTH} 个字符的单行文本（收到 ${String(description)}）`,
+  )
+  return Object.assign(error, { code: 'invalid-description' })
+}
+
+/**
+ * 规范化机器人描述：把换行 / 连续空白折叠成一个空格并 trim。描述是给工作流
+ * 选择机器人看的「一行摘要」（与 skill 的 description 类似），所以不保留排版。
+ * 非字符串按空描述处理。
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function normalizeRobotDescription(value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * 描述是否合法：字符串（含空串）且规范化后不超过上限。
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidRobotDescription(value) {
+  return typeof value === 'string' && normalizeRobotDescription(value).length <= ROBOT_DESCRIPTION_MAX_LENGTH
 }
 
 /**
@@ -481,18 +523,24 @@ export async function ensureClaudeLink(directory) {
  *
  * - 头像：传入合法 id 就用它，否则按名字挑一个还被占用的预设；新建的机器人
  *   一定带头像；
+ * - 描述可选，存成一行摘要（空白折叠）；新建时写进条目，同名已登记时保留原描述；
  * - 同名已登记：不重复建条目，`created: false`；目录被外部删掉时重新建目录；
  * - 名称不合法抛 `code = 'invalid-name'`；登记文件损坏抛
  *   `code = 'registry-unreadable'`（不覆盖原文件）；
  * - 新条目的 `path` 是创建后的规范绝对路径（`fs.realpath`，失败回退解析值），
  *   这样和工作区注册表里的路径能直接对齐。
  *
- * @param {{ robotsDir: string, file: string, name: string, avatar?: string }} options
- * @returns {Promise<{ robot: { name: string, path: string, createdAt: string, avatar: string }, created: boolean }>}
+ * @param {{ robotsDir: string, file: string, name: string, avatar?: string, description?: string }} options
+ * @returns {Promise<{ robot: { name: string, path: string, createdAt: string, avatar: string, description: string }, created: boolean }>}
  */
-export async function addRobot({ robotsDir, file, name, avatar } = {}) {
+export async function addRobot({ robotsDir, file, name, avatar, description } = {}) {
   const registryFile = requireRegistryFile(file)
   if (!isValidRobotName(name)) throw invalidNameError(name)
+
+  const rawDescription = description === undefined || description === null ? '' : description
+  if (typeof rawDescription !== 'string') throw invalidDescriptionError(rawDescription)
+  const cleanDescription = normalizeRobotDescription(rawDescription)
+  if (cleanDescription.length > ROBOT_DESCRIPTION_MAX_LENGTH) throw invalidDescriptionError(rawDescription)
 
   const registry = await readRobotRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
@@ -517,6 +565,7 @@ export async function addRobot({ robotsDir, file, name, avatar } = {}) {
     path: canonical,
     createdAt: new Date().toISOString(),
     avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(trimmed, used),
+    description: cleanDescription,
   }
   await writeRobotRegistry({
     file: registryFile,
@@ -548,6 +597,37 @@ export async function setRobotAvatar({ file, name, avatar } = {}) {
   if (current === undefined) throw unknownRobotError(trimmed)
 
   const robot = { ...current, avatar }
+  await writeRobotRegistry({
+    file: registryFile,
+    robots: registry.robots.map((entry) => (entry.name === trimmed ? robot : entry)),
+  })
+  return { robot }
+}
+
+/**
+ * 改一个机器人的描述：只动登记表里的 `description` 字段，不碰目录与工作区。
+ *
+ * 描述是给工作流选择机器人看的一行摘要（类似 skill 的 description），存储前
+ * 会折叠空白；空串表示清空。超过上限抛 `code = 'invalid-description'`。
+ *
+ * @param {{ file: string, name: string, description: string }} options
+ * @returns {Promise<{ robot: { name: string, path: string, createdAt: string, avatar: string, description: string } }>}
+ */
+export async function setRobotDescription({ file, name, description } = {}) {
+  const registryFile = requireRegistryFile(file)
+  if (!isValidRobotName(name)) throw invalidNameError(name)
+  if (typeof description !== 'string') throw invalidDescriptionError(description)
+  const clean = normalizeRobotDescription(description)
+  if (clean.length > ROBOT_DESCRIPTION_MAX_LENGTH) throw invalidDescriptionError(description)
+
+  const registry = await readRobotRegistry({ file: registryFile })
+  if (registry.corrupt) throw registryUnreadableError(registryFile)
+
+  const trimmed = name.trim()
+  const current = registry.robots.find((robot) => robot.name === trimmed)
+  if (current === undefined) throw unknownRobotError(trimmed)
+
+  const robot = { ...current, description: clean }
   await writeRobotRegistry({
     file: registryFile,
     robots: registry.robots.map((entry) => (entry.name === trimmed ? robot : entry)),
@@ -653,6 +733,7 @@ export async function listRobots({ file, workspaceRegistry, robotsDir } = {}) {
       path: entry.path,
       createdAt: entry.createdAt,
       avatar: resolveAvatar(entry.avatar, entry.name),
+      description: entry.description,
       exists,
       mounted: workspace !== undefined,
       workspaceId: workspace === undefined ? null : String(workspace.id),

@@ -37,8 +37,10 @@ import {
   defaultRobotsRoot,
   emptyAgentsFile,
   ensureClaudeLink,
+  isValidRobotDescription,
   isValidRobotName,
   listRobots,
+  normalizeRobotDescription,
   parseFrontmatter,
   pluginCacheDir,
   readAgentsFile,
@@ -49,7 +51,9 @@ import {
   setRobotAvatar,
   resolveRobotsDir,
   robotDirectory,
+  ROBOT_DESCRIPTION_MAX_LENGTH,
   scanProjectSkills,
+  setRobotDescription,
   summarizeWorkspaces,
   writeAgentsFile,
   writeRobotRegistry,
@@ -328,7 +332,7 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
     ]
     await writeRobotRegistry({ file, robots: entries })
     // 写回时一定会落下具体头像：没有指定就按名字分配。
-    const written = entries.map((entry) => ({ ...entry, avatar: defaultAvatarFor(entry.name) }))
+    const written = entries.map((entry) => ({ ...entry, avatar: defaultAvatarFor(entry.name), description: '' }))
     assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: written, file })
 
     if (process.platform !== 'win32') {
@@ -399,7 +403,7 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
     const filtered = await readRobotRegistry({ file })
     assert.equal(filtered.corrupt, undefined)
     assert.deepEqual(filtered.robots, [
-      { name: 'ok', path: '/abs/ok', createdAt: '2026-01-01T00:00:00.000Z', avatar: '' },
+      { name: 'ok', path: '/abs/ok', createdAt: '2026-01-01T00:00:00.000Z', avatar: '', description: '' },
     ])
   } finally {
     await removeRoot(root)
@@ -907,4 +911,91 @@ test('通用型机器人的工作区清单：保留注册表顺序、标题回�
     }),
     [],
   )
+})
+
+test('机器人描述：空白折叠、上限、登记表与列表读写', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    // 创建时带描述：空白折叠成一行。
+    const writer = await addRobot({
+      robotsDir,
+      file,
+      name: 'writer',
+      description: '  把会议记录\n整理成三点结论  ',
+    })
+    assert.equal(writer.robot.description, '把会议记录 整理成三点结论')
+    assert.equal((await readRobotRegistry({ file })).robots[0].description, '把会议记录 整理成三点结论')
+
+    // listRobots 把描述带给页面。
+    const listed = await listRobots({ file, robotsDir })
+    assert.equal(listed.robots[0].description, '把会议记录 整理成三点结论')
+
+    // 改描述；换头像不影响描述。
+    const changed = await setRobotDescription({ file, name: 'writer', description: '写发布说明' })
+    assert.equal(changed.robot.description, '写发布说明')
+    await setRobotAvatar({ file, name: 'writer', avatar: 'owl' })
+    assert.equal((await readRobotRegistry({ file })).robots[0].description, '写发布说明')
+
+    // 空串 / 纯空白表示清空。
+    await setRobotDescription({ file, name: 'writer', description: '   ' })
+    assert.equal((await readRobotRegistry({ file })).robots[0].description, '')
+
+    // 上限与非字符串都拒绝，未知机器人 404 语义。
+    await assert.rejects(
+      () =>
+        setRobotDescription({
+          file,
+          name: 'writer',
+          description: 'x'.repeat(ROBOT_DESCRIPTION_MAX_LENGTH + 1),
+        }),
+      (error) => error.code === 'invalid-description',
+    )
+    await assert.rejects(
+      () => setRobotDescription({ file, name: 'writer', description: 42 }),
+      (error) => error.code === 'invalid-description',
+    )
+    await assert.rejects(
+      () => setRobotDescription({ file, name: 'nobody', description: 'x' }),
+      (error) => error.code === 'unknown-robot',
+    )
+
+    // 新建时不传描述：空串；旧登记表缺字段读出来也是空串。
+    const plain = await addRobot({ robotsDir, file, name: 'plain' })
+    assert.equal(plain.robot.description, '')
+    await writeRobotRegistry({
+      file,
+      robots: [{ name: 'legacy', path: path.join(robotsDir, 'legacy'), createdAt: '2026-01-01T00:00:00.000Z' }],
+    })
+    assert.equal((await readRobotRegistry({ file })).robots[0].description, '')
+
+    // 纯函数边界。
+    assert.equal(normalizeRobotDescription(' a\n\n  b '), 'a b')
+    assert.equal(normalizeRobotDescription(undefined), '')
+    assert.equal(normalizeRobotDescription(null), '')
+    assert.equal(isValidRobotDescription('x'), true)
+    assert.equal(isValidRobotDescription(42), false)
+
+    // 超长值写到文件里也在读取时截断，页面/工具不会拿到超大文本。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        robots: [
+          {
+            name: 'long',
+            path: path.join(robotsDir, 'long'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            description: 'x'.repeat(ROBOT_DESCRIPTION_MAX_LENGTH + 50),
+          },
+        ],
+      }),
+    )
+    assert.equal((await readRobotRegistry({ file })).robots[0].description.length, ROBOT_DESCRIPTION_MAX_LENGTH)
+  } finally {
+    await removeRoot(root)
+  }
 })

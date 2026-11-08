@@ -12,6 +12,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { defaultAvatarFor } from '../plugins/robots/lib/avatar.js'
+import { GENERAL_ROBOT_AVATAR_ID, GENERAL_ROBOT_NAME } from '../plugins/robots/lib/general-robot.js'
 import {
   addRobot,
   resolveRobotRegistryFile,
@@ -36,6 +37,7 @@ test('robots service: summarizeRobot strips AGENTS.md bodies and keeps orchestra
     exists: true,
     mounted: true,
     workspaceId: 'ws-1',
+    description: '把会议记录整理成三点结论',
     skills: [{ name: 'convex', description: 'db' , content: 'x' }],
     agents: { exists: true, bytes: 42, modifiedAt: '2026-01-02T00:00:00.000Z', content: '# big' },
     claude: { exists: true, symlink: true, mode: 'symlink', target: 'AGENTS.md' },
@@ -44,6 +46,7 @@ test('robots service: summarizeRobot strips AGENTS.md bodies and keeps orchestra
   assert.equal(summary.avatar, defaultAvatarFor('writer'), 'missing avatar falls back deterministically')
   assert.equal(summary.mounted, true)
   assert.equal(summary.workspaceId, 'ws-1')
+  assert.equal(summary.description, '把会议记录整理成三点结论')
   assert.deepEqual(summary.skills, [{ name: 'convex', description: 'db' }])
   assert.deepEqual(summary.agents, {
     exists: true,
@@ -349,6 +352,7 @@ test('robots service: list returns summarized registry robots', async () => {
     assert.equal(listed.corrupt, false)
     assert.equal(listed.robots.length, 1)
     assert.equal(listed.robots[0].name, 'writer')
+    assert.equal(listed.robots[0].description, '')
     assert.ok(typeof listed.robots[0].avatar === 'string' && listed.robots[0].avatar !== '')
     assert.equal(listed.robots[0].agents.exists, true)
     assert.equal('content' in listed.robots[0].agents, false)
@@ -364,10 +368,11 @@ test('robots service: avatarMap is a lightweight name -> avatar lookup', async (
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
-    // 新建的机器人一定有头像。
+    // 新建的机器人一定有头像；通用型机器人默认启用，排在最后。
     const first = await service.avatarMap()
-    assert.deepEqual(Object.keys(first), ['writer'])
+    assert.deepEqual(Object.keys(first), ['writer', GENERAL_ROBOT_NAME])
     assert.ok(typeof first.writer === 'string' && first.writer !== '')
+    assert.equal(first[GENERAL_ROBOT_NAME], GENERAL_ROBOT_AVATAR_ID)
 
     // 旧登记表里缺 avatar 的那条按名字兜底；显式设置过的用设置值。
     await fs.writeFile(
@@ -383,11 +388,12 @@ test('robots service: avatarMap is a lightweight name -> avatar lookup', async (
     assert.deepEqual(await service.avatarMap(), {
       writer: 'panda',
       legacy: defaultAvatarFor('legacy'),
+      [GENERAL_ROBOT_NAME]: GENERAL_ROBOT_AVATAR_ID,
     })
 
-    // 登记表损坏：返回空表，不抛错（调用方只是不画头像）。
+    // 登记表损坏：只保留通用型机器人（调用方仍能画兜底项），不抛错。
     await fs.writeFile(home.registryFile, '{broken')
-    assert.deepEqual(await service.avatarMap(), {})
+    assert.deepEqual(await service.avatarMap(), { [GENERAL_ROBOT_NAME]: GENERAL_ROBOT_AVATAR_ID })
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -1118,3 +1124,83 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   assert.equal(structuredSubmittedSince({ ownEvents: () => [] }), false)
 })
 
+
+test('robots service: 通用型机器人仅在启用时暴露，停用后不能调用', async () => {
+  const home = await makeRobotHome()
+  try {
+    const settingsFile = path.join(path.dirname(home.registryFile), 'settings.json')
+    const service = new RobotSessionService({
+      ctx: { workspaceRegistry: { list: () => [] } },
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+      settingsFile,
+    })
+
+    // 启用（默认）：avatarMap 带兜底项；没有调用方 cwd 时给出明确错误。
+    assert.equal((await service.avatarMap())[GENERAL_ROBOT_NAME], GENERAL_ROBOT_AVATAR_ID)
+    await assert.rejects(
+      () => service.startSession({ robot: GENERAL_ROBOT_NAME, prompt: 'x' }),
+      /workspace directory/,
+    )
+
+    // 有调用方会话时用会话 cwd 起步（这里会在模型路由处停下，说明已经解析成功）。
+    await assert.rejects(
+      () =>
+        service.startSession({
+          robot: GENERAL_ROBOT_NAME,
+          prompt: 'x',
+          agent: { id: 'root', session: { header: { cwd: '/tmp/general-workspace' } } },
+        }),
+      /no model route/,
+    )
+
+    // 停用后：avatarMap 不再出现，调用会明确报错。
+    await fs.writeFile(
+      settingsFile,
+      JSON.stringify({ version: 1, generalRobot: { enabled: false } }),
+    )
+    assert.equal(Object.hasOwn(await service.avatarMap(), GENERAL_ROBOT_NAME), false)
+    await assert.rejects(
+      () => service.startSession({ robot: GENERAL_ROBOT_NAME, prompt: 'x' }),
+      /disabled/,
+    )
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: 通用型机器人跑在调用方工作区，使用标准模式', async () => {
+  const home = await makeRobotHome()
+  try {
+    const { ctx, state } = makeFakeContext()
+    const service = new RobotSessionService({
+      ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    // 模拟工作流编排器的会话：它所在的工作区就是通用型机器人的 cwd。
+    const agent = { id: 'root', session: { header: { cwd: '/tmp/general-workspace' } } }
+    const session = await service.startSession({
+      robot: GENERAL_ROBOT_NAME,
+      prompt: 'do the general work',
+      agent,
+      agentPreset: 'standard',
+      title: '运行目标 · 通用型机器人',
+      report: true,
+      timeoutMs: 5000,
+    })
+
+    assert.equal(session.robot, GENERAL_ROBOT_NAME)
+    assert.equal(state.createOptions.meta.cwd, '/tmp/general-workspace')
+    assert.deepEqual(state.mountedPresets, ['standard'])
+    assert.equal(state.attachedSessions.length, 1)
+
+    await state.registered[0].execute({ ok: true })
+    state.finishIdle()
+    const result = await session.result
+    assert.deepEqual(result.structured, { ok: true })
+    assert.equal(result.stopReason, 'completed')
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})

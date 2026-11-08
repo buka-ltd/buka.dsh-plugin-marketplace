@@ -24,16 +24,20 @@
  *
  * 页面有两个视图，共用同一个标题行与工具栏：
  *
- * - 列表视图：最上面是固定的「通用型机器人」卡片（🤖 头像、标准模式；唯一动作
- *   「进入工作区」会列出 DSH 里已有的工作区，选中一个就以标准模式打开它），
+ * - 列表视图：最上面是固定的「通用型机器人」卡片（🤖 头像；职责写明它是没有
+ *   其他更合适机器人时的兜底；唯一动作「进入工作区」会列出 DSH 里已有的工作区，
+ *   选中一个就以标准模式打开它），
  *   下面是登记表里的机器人：逐个「新会话 / 挂载 / 配置 / 删除」。删除先摘掉
  *   工作区注册、再删插件记录，目录与文件保留；登记文件损坏时只允许刷新，
  *   新建/删除/挂载都会禁用。列表**不展示目录**（机器人根目录与各机器人路径
- *   都只在详情页出现）；新建不再占页面里的常驻输入行：标题行「刷新」右侧的
- *   「创建机器人」按钮打开对话框填名称后提交；「设置」按钮打开设置对话框，
- *   里面的开关决定通用型机器人是否出现在列表里（设置存 Host 的 settings.json）；
+ *   都只在详情页出现）；每张卡片显示机器人的一行描述（工作流靠它决定是否
+ *   选用该机器人）；新建不再占页面里的常驻输入行：标题行「刷新」右侧的
+ *   「创建机器人」按钮打开对话框填名称与描述后提交；「设置」按钮打开设置
+ *   对话框，里面的开关决定通用型机器人是否出现在列表里（设置存 Host 的
+ *   settings.json）；
  * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
  *   正文用可切换的页签分成
+ *   「描述」（一句话摘要，工作流用它决定是否选用这个机器人）、
  *   「AGENTS.md」（编辑目录下的 AGENTS.md，Host 同时维护 CLAUDE.md 软链接）
  *   与「Skills」（列出已安装的项目级 skills，并通过对话框选择来源里要安装的
  *   skills；来源可以直接用 Skills 插件的收藏仓库，该插件没装时这一块不显示）。
@@ -87,6 +91,7 @@ window.__ModuleLoader__.load({
     const LIST_ROUTE = '/buka-robots/list'
     const CREATE_ROUTE = '/buka-robots/create'
     const AVATAR_ROUTE = '/buka-robots/avatar'
+    const DESCRIPTION_ROUTE = '/buka-robots/description'
     const REMOVE_ROUTE = '/buka-robots/remove'
     const AGENTS_ROUTE = '/buka-robots/agents'
     const REVEAL_ROUTE = '/buka-robots/reveal'
@@ -105,8 +110,9 @@ window.__ModuleLoader__.load({
      */
     const SKILLS_REPOS_ROUTE = '/buka-skills/repos'
 
-    /** 详情页的两个页签；id / panelId 与 `SegmentedTabs` 的 ARIA 契约一致。 */
+    /** 详情页的三个页签；id / panelId 与 `SegmentedTabs` 的 ARIA 契约一致。 */
     const TABS = [
+      { value: 'description', id: 'buka-robots-tab-description', panelId: 'buka-robots-panel-description' },
       { value: 'agents', id: 'buka-robots-tab-agents', panelId: 'buka-robots-panel-agents' },
       { value: 'skills', id: 'buka-robots-tab-skills', panelId: 'buka-robots-panel-skills' },
     ]
@@ -116,6 +122,12 @@ window.__ModuleLoader__.load({
 
     /** 「更换头像」对话框里表单的 id：页脚「保存」按钮通过 `form` 属性提交它。 */
     const AVATAR_FORM_ID = 'buka-robots-avatar-form'
+
+    /**
+     * 描述长度上限（UTF-16 长度），与 Host 的 `ROBOT_DESCRIPTION_MAX_LENGTH`
+     * 保持一致：描述是一行摘要，工作流靠它决定是否把节点交给这个机器人。
+     */
+    const ROBOT_DESCRIPTION_MAX_LENGTH = 500
 
     /**
      * 预设头像：id 与 Host 的 `lib/avatar.js` 一一对应（插件之间不互相 import，
@@ -172,6 +184,13 @@ window.__ModuleLoader__.load({
       changeAvatar: 'Change avatar',
       avatarUpdated: 'Avatar updated.',
       avatarSaveFailed: 'Could not update the avatar:',
+      descriptionLabel: 'Responsibilities',
+      descriptionPlaceholder: 'e.g. Turns meeting notes into a three-point summary',
+      descriptionHint:
+        'Workflows read this line to decide whether to hand a node to this robot. State in one sentence what the robot is responsible for.',
+      tabDescription: 'Responsibilities',
+      descriptionSaved: 'Responsibilities saved.',
+      descriptionSaveFailed: 'Could not save the responsibilities:',
       created: 'Created robot:',
       createExisting: 'Robot already existed:',
       createFailed: 'Could not create the robot:',
@@ -186,7 +205,7 @@ window.__ModuleLoader__.load({
       configure: 'Configure',
       generalTitle: 'General-purpose robot',
       generalIntro:
-        'Enters any existing workspace in standard mode. It has no directory, AGENTS.md or skills of its own.',
+        'Runs general tasks in any existing workspace in standard mode; it has no directory, AGENTS.md or skills of its own, and is used when no specialized robot is available.',
       enterWorkspace: 'Enter workspace',
       chooseWorkspace: 'Choose a workspace',
       chooseWorkspaceHint: 'The general-purpose robot uses standard mode. Pick an existing workspace to enter.',
@@ -198,7 +217,7 @@ window.__ModuleLoader__.load({
       settingsTitle: 'Settings',
       generalSetting: 'General-purpose robot',
       generalSettingDesc:
-        'Pinned to the 🤖 avatar and standard mode. It can enter any existing workspace; turn it off to hide it from the robot list.',
+        'Pinned to the 🤖 avatar and standard mode. It can enter any existing workspace and also appears in the workflow robot list (its responsibility says when to use it); turn it off to hide it from the robot list and from workflows.',
       settingsEnabled: 'Enabled',
       settingsDisabled: 'Disabled',
       settingsSaveFailed: 'Could not save the settings:',
@@ -320,6 +339,12 @@ window.__ModuleLoader__.load({
       changeAvatar: '更换头像',
       avatarUpdated: '已更换头像。',
       avatarSaveFailed: '更换头像失败：',
+      descriptionLabel: '职责',
+      descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
+      descriptionHint: '工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。',
+      tabDescription: '职责',
+      descriptionSaved: '职责已保存。',
+      descriptionSaveFailed: '保存职责失败：',
       created: '已创建机器人：',
       createExisting: '机器人已存在：',
       createFailed: '创建失败：',
@@ -332,7 +357,8 @@ window.__ModuleLoader__.load({
       openUnmounted: '这个机器人还没有挂载到工作区，先点「挂载」。',
       configure: '配置',
       generalTitle: '通用型机器人',
-      generalIntro: '可以以标准模式进入任意一个已存在的工作区；它没有自己的目录、AGENTS.md 或 skills。',
+      generalIntro:
+        '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
       enterWorkspace: '进入工作区',
       chooseWorkspace: '选择工作区',
       chooseWorkspaceHint: '通用型机器人使用标准模式，选一个已有的工作区进入。',
@@ -344,7 +370,7 @@ window.__ModuleLoader__.load({
       settingsTitle: '设置',
       generalSetting: '通用型机器人',
       generalSettingDesc:
-        '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区；关掉后它不会出现在机器人列表里。',
+        '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区，并会出现在工作流的机器人清单里（职责里写明没有专用机器人时使用）；关掉后它既不会出现在机器人列表里，也不会暴露给工作流。',
       settingsEnabled: '启用',
       settingsDisabled: '停用',
       settingsSaveFailed: '保存设置失败：',
@@ -491,7 +517,7 @@ window.__ModuleLoader__.load({
 @media (hover:hover){.buka-robots-avatarOption:hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .buka-robots-avatarOption.is-selected{border-color:var(--dsw-alias-brand-primary);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
 .buka-robots-avatarOption:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.buka-robots-cardDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere;word-break:break-word}
+.buka-robots-cardDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;padding-left:34px}
 .buka-robots-workspaces{display:flex;flex-direction:column;gap:2px;max-height:320px;overflow:auto;overscroll-behavior:contain;margin:0 -4px;padding:0}
 .buka-robots-workspace{box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;margin:0;border:0;border-radius:var(--dsw-radius-md);background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit}
 @media (hover:hover){.buka-robots-workspace:hover{background:var(--dsw-alias-interactive-bg-hover)}}
@@ -546,6 +572,11 @@ window.__ModuleLoader__.load({
 .buka-robots-headingRow{display:flex;align-items:center;gap:6px;min-width:0}
 .buka-robots-headingRow .buka-robots-title{flex:0 1 auto;min-width:0}
 .buka-robots-headingTag{flex:none;display:inline-flex;align-items:center;margin-left:2px}
+.buka-robots-descriptionInput{box-sizing:border-box;width:100%;min-height:60px;resize:vertical;border:0.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:8px 10px;tab-size:2}
+.buka-robots-descriptionInput.is-tall{min-height:140px}
+.buka-robots-descriptionInput::placeholder{color:var(--dsw-alias-label-caption)}
+.buka-robots-descriptionInput:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+.buka-robots-descriptionInput:disabled{opacity:.65}
 .buka-robots-backButton{flex:none;margin-left:-4px}
 .buka-robots-tabs{flex:100%;order:3;display:flex}
 .buka-robots-tabList{width:fit-content;min-width:240px}
@@ -818,6 +849,8 @@ window.__ModuleLoader__.load({
 
       /** 列表页状态。 */
       const [name, setName] = React.useState('')
+      /** 创建对话框里的描述草稿；提交时随名字一起写入登记表。 */
+      const [draftDescription, setDraftDescription] = React.useState('')
       const [dialogOpen, setDialogOpen] = React.useState(false)
       const [createError, setCreateError] = React.useState(null)
       const [creating, setCreating] = React.useState(false)
@@ -834,6 +867,14 @@ window.__ModuleLoader__.load({
       const [avatarSaving, setAvatarSaving] = React.useState(false)
       /** 「更换头像」对话框里的失败提示：请求失败时留在框里，不靠会被遮住的 Toast。 */
       const [avatarError, setAvatarError] = React.useState(null)
+
+      /**
+       * 「描述」页签的草稿与保存状态；草稿在进入详情时从机器人当前描述初始化，
+       * 列表刷新不会覆盖用户正在编辑的内容。
+       */
+      const [descriptionDraft, setDescriptionDraft] = React.useState('')
+      const [descriptionSaving, setDescriptionSaving] = React.useState(false)
+      const [descriptionError, setDescriptionError] = React.useState(null)
 
       /** 详情页状态：`selectedName` 非空时显示配置视图，`tab` 是页签。 */
       const [selectedName, setSelectedName] = React.useState(null)
@@ -937,7 +978,13 @@ window.__ModuleLoader__.load({
 
       /** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
       const mutating =
-        creating || busy !== null || installing || removing !== null || agentsSaving || avatarSaving
+        creating ||
+        busy !== null ||
+        installing ||
+        removing !== null ||
+        agentsSaving ||
+        avatarSaving ||
+        descriptionSaving
 
       /**
        * 新建机器人时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
@@ -1016,6 +1063,8 @@ window.__ModuleLoader__.load({
         setSelectedName(robot.name)
         setTab('agents')
         setAgentsDraft(agentsOf(robot).content)
+        setDescriptionDraft(typeof robot.description === 'string' ? robot.description : '')
+        setDescriptionError(null)
         setSkillError(null)
         setConfirmingSkill(null)
         setInstallOpen(false)
@@ -1026,6 +1075,7 @@ window.__ModuleLoader__.load({
       /** 返回列表页，并清掉详情页临时状态。 */
       function backToList() {
         setSelectedName(null)
+        setDescriptionError(null)
         setSkillError(null)
         setConfirmingSkill(null)
         setInstallOpen(false)
@@ -1201,6 +1251,7 @@ window.__ModuleLoader__.load({
       function openCreateDialog() {
         if (creating || corrupt) return
         setName('')
+        setDraftDescription('')
         setDraftAvatar(nextAvatarId())
         setCreateError(null)
         setDialogOpen(true)
@@ -1257,6 +1308,41 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 描述草稿的规范化（与 Host 一致：折叠空白并 trim）；用来判断有没有改动。
+       *
+       * @param {unknown} value
+       * @returns {string}
+       */
+      function normalizedDescription(value) {
+        return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''
+      }
+
+      /**
+       * 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `buka_robots`
+       * 工具读它，决定是否把节点交给这个机器人；保存成功后只局部更新列表。
+       */
+      async function saveDescription() {
+        if (selectedName === null || descriptionSaving) return
+        setDescriptionSaving(true)
+        setDescriptionError(null)
+        try {
+          const body = await requestJson(DESCRIPTION_ROUTE, {
+            method: 'POST',
+            body: JSON.stringify({ name: selectedName, description: descriptionDraft }),
+          })
+          const saved = body?.robot?.description
+          const next = typeof saved === 'string' ? saved : normalizedDescription(descriptionDraft)
+          patchRobot(selectedName, { description: next })
+          setDescriptionDraft(next)
+          flash('success', t('descriptionSaved'))
+        } catch (failure) {
+          setDescriptionError(`${t('descriptionSaveFailed')} ${failureText(t, failure)}`)
+        } finally {
+          setDescriptionSaving(false)
+        }
+      }
+
+      /**
        * 新建机器人：Host 先建目录并写入登记表，浏览器再把它挂载成工作区。
        * 挂载失败不会撤销机器人 —— 它会以「未挂载」留在列表里，可稍后点「挂载」。
        * 创建请求本身的失败留在对话框里原地提示，不用关掉重开。
@@ -1276,7 +1362,7 @@ window.__ModuleLoader__.load({
         try {
           const body = await requestJson(CREATE_ROUTE, {
             method: 'POST',
-            body: JSON.stringify({ name: value, avatar: draftAvatar }),
+            body: JSON.stringify({ name: value, avatar: draftAvatar, description: draftDescription }),
           })
           setName('')
           setDialogOpen(false)
@@ -1781,6 +1867,10 @@ window.__ModuleLoader__.load({
               ),
               h('div', { className: 'buka-robots-titleActions' }, ...actions.filter(Boolean)),
             ),
+            // 描述是工作流选择机器人的依据，列表里直接展示，避免必须点进详情才能比较。
+            typeof robot.description === 'string' && robot.description !== ''
+              ? h('p', { className: 'buka-robots-cardDesc' }, robot.description)
+              : null,
             missing ? h('p', { className: 'buka-robots-hint' }, t('missingDirHint')) : null,
             confirmingThis ? h('p', { className: 'buka-robots-hint' }, t('deleteHint')) : null,
           ),
@@ -2032,7 +2122,54 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 配置视图：缺目录提示 + 页签面板（AGENTS.md / Skills）。
+       * 「描述」页签：一句话摘要 + 保存按钮。工作流通过 `buka_robots` 读这一行，
+       * 决定是否把节点交给这个机器人；没有改动时保存按钮不可用。
+       *
+       * @param {object} robot 一条机器人记录
+       * @returns {object} React 元素
+       */
+      function renderDescription(robot) {
+        const current = typeof robot.description === 'string' ? robot.description : ''
+        const dirty = normalizedDescription(descriptionDraft) !== current
+        return h(
+          'section',
+          { className: 'buka-robots-section', 'aria-busy': descriptionSaving ? true : undefined },
+          h(
+            'div',
+            { className: 'buka-robots-sectionHead' },
+            h('h2', { className: 'buka-robots-sectionTitle' }, t('descriptionLabel')),
+            h(
+              Button,
+              {
+                variant: 'primary',
+                size: 'sm',
+                type: 'button',
+                className: 'buka-robots-submit',
+                disabled: !dirty || mutating,
+                onClick: saveDescription,
+              },
+              descriptionSaving ? t('saving') : t('save'),
+            ),
+          ),
+          h('p', { className: 'buka-robots-fieldHint' }, t('descriptionHint')),
+          h('textarea', {
+            className: 'buka-robots-descriptionInput is-tall',
+            value: descriptionDraft,
+            placeholder: t('descriptionPlaceholder'),
+            maxLength: ROBOT_DESCRIPTION_MAX_LENGTH,
+            rows: 4,
+            disabled: descriptionSaving,
+            'aria-label': t('descriptionLabel'),
+            onChange: (event) => setDescriptionDraft(event.target.value),
+          }),
+          descriptionError === null
+            ? null
+            : h('p', { className: 'buka-robots-formError', role: 'alert' }, descriptionError),
+        )
+      }
+
+      /**
+       * 配置视图：缺目录提示 + 页签面板（AGENTS.md / Skills / 描述）。
        *
        * @param {object} robot 一条机器人记录
        * @returns {object} React 元素
@@ -2058,7 +2195,11 @@ window.__ModuleLoader__.load({
               id: activeTab.panelId,
               'aria-labelledby': activeTab.id,
             },
-            tab === 'skills' ? renderSkills(robot) : renderAgents(robot),
+            tab === 'skills'
+              ? renderSkills(robot)
+              : tab === 'description'
+                ? renderDescription(robot)
+                : renderAgents(robot),
           ),
         )
       }
@@ -2464,15 +2605,21 @@ window.__ModuleLoader__.load({
                     items: [
                       {
                         value: TABS[0].value,
-                        label: t('tabAgents'),
+                        label: t('tabDescription'),
                         id: TABS[0].id,
                         panelId: TABS[0].panelId,
                       },
                       {
                         value: TABS[1].value,
-                        label: t('tabSkills'),
+                        label: t('tabAgents'),
                         id: TABS[1].id,
                         panelId: TABS[1].panelId,
+                      },
+                      {
+                        value: TABS[2].value,
+                        label: t('tabSkills'),
+                        id: TABS[2].id,
+                        panelId: TABS[2].panelId,
                       },
                     ],
                   }),
@@ -2540,6 +2687,21 @@ window.__ModuleLoader__.load({
                 'data-modal-autofocus': '',
                 onChange: (event) => setName(event.target.value),
               }),
+            ),
+            h(
+              'label',
+              { className: 'buka-robots-field' },
+              h('span', { className: 'buka-robots-fieldLabel' }, t('descriptionLabel')),
+              h('textarea', {
+                className: 'buka-robots-descriptionInput',
+                value: draftDescription,
+                placeholder: t('descriptionPlaceholder'),
+                maxLength: ROBOT_DESCRIPTION_MAX_LENGTH,
+                rows: 2,
+                disabled: creating,
+                onChange: (event) => setDraftDescription(event.target.value),
+              }),
+              h('span', { className: 'buka-robots-fieldHint' }, t('descriptionHint')),
             ),
             createError === null ? null : h('p', { className: 'buka-robots-formError', role: 'alert' }, createError),
           ),

@@ -7,8 +7,9 @@
  * 保存会把文件重建成合法内容。
  *
  * 通用型机器人本身不写进登记表：它没有目录、没有 AGENTS.md，也不是插件在
- * `robots.json` 里管理的对象，只是页面里的一个固定入口。所以它也不出现在
- * `ctx.bukaRobots.list()` 的 `robots` 里，工作流不会把它当成可运行的机器人。
+ * `robots.json` 里管理的对象，只是页面里的一个固定入口。启用时它由插件以
+ * 固定名字暴露给工作流（`buka_robots` 清单的兜底项、`avatarMap()` 与
+ * `startSession()`）；停用后这三处都不再提供它。
  *
  * 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
  *

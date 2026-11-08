@@ -269,12 +269,13 @@ const zh = {
   settings: '设置',
   settingsTitle: '设置',
   generalSetting: '通用型机器人',
-  generalSettingDesc: '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区；关掉后它不会出现在机器人列表里。',
+  generalSettingDesc:
+    '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区，并会出现在工作流的机器人清单里（职责里写明没有专用机器人时使用）；关掉后它既不会出现在机器人列表里，也不会暴露给工作流。',
   settingsEnabled: '启用',
   settingsDisabled: '停用',
   settingsDone: '完成',
   generalTitle: '通用型机器人',
-  generalIntro: '可以以标准模式进入任意一个已存在的工作区；它没有自己的目录、AGENTS.md 或 skills。',
+  generalIntro: '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
   enterWorkspace: '进入工作区',
   chooseWorkspace: '选择工作区',
   chooseWorkspaceHint: '通用型机器人使用标准模式，选一个已有的工作区进入。',
@@ -289,6 +290,15 @@ const zh = {
   noAgentsBadge: '无 AGENTS.md',
   newSession: '新会话',
   configure: '配置',
+  descriptionLabel: '职责',
+  descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
+  descriptionHint: '工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。',
+  tabDescription: '职责',
+  descriptionSaved: '职责已保存。',
+  descriptionSaveFailed: '保存职责失败：',
+  save: '保存',
+  saving: '保存中…',
+  cancel: '取消',
   mount: '挂载',
   delete: '删除',
   tabsLabel: '机器人详情页签',
@@ -303,11 +313,12 @@ const zh = {
  * @param {string} avatar
  * @returns {Record<string, any>}
  */
-function robot(name, avatar) {
+function robot(name, avatar, description = '') {
   return {
     name,
     path: `/Users/x/.cache/dsh-plugin-robots/robots/${name}`,
     avatar,
+    description,
     createdAt: '2026-11-06T00:00:00.000Z',
     exists: true,
     mounted: true,
@@ -331,7 +342,7 @@ function listData(generalEnabled) {
     registry: '/Users/x/.cache/dsh-plugin-robots/robots.json',
     corrupt: false,
     general: { enabled: generalEnabled },
-    robots: [robot('writer', 'panda')],
+    robots: [robot('writer', 'panda', '写发布说明与测试报告')],
   }
 }
 
@@ -341,6 +352,10 @@ function listData(generalEnabled) {
  * @param {{
  *   data?: Record<string, any>,
  *   selectedName?: string | null,
+ *   dialogOpen?: boolean,
+ *   draftDescription?: string,
+ *   descriptionDraft?: string,
+ *   tab?: string,
  *   settingsOpen?: boolean,
  *   workspacesOpen?: boolean,
  *   workspaces?: Array<Record<string, any>> | null,
@@ -350,6 +365,10 @@ function listData(generalEnabled) {
 function states({
   data = listData(true),
   selectedName = null,
+  dialogOpen = false,
+  draftDescription = '',
+  descriptionDraft = '',
+  tab = 'agents',
   settingsOpen = false,
   workspacesOpen = false,
   workspaces = null,
@@ -358,7 +377,8 @@ function states({
     { data, error: null, loading: false }, // list
     0, // reloadKey
     '', // name
-    false, // dialogOpen
+    draftDescription, // draftDescription
+    dialogOpen, // dialogOpen
     null, // createError
     false, // creating
     null, // confirming
@@ -368,8 +388,11 @@ function states({
     null, // avatarTarget
     false, // avatarSaving
     null, // avatarError
+    descriptionDraft, // descriptionDraft
+    false, // descriptionSaving
+    null, // descriptionError
     selectedName, // selectedName
-    'agents', // tab
+    tab, // tab
     '', // agentsDraft
     false, // agentsSaving
     null, // removing
@@ -400,8 +423,18 @@ test('机器人页：通用型机器人卡片固定在列表最前，停用后�
   const { texts, nodes } = collect(tree)
 
   assert.ok(texts.includes('通用型机器人'), '列表顶部应有通用型机器人')
+  assert.ok(
+    texts.includes(
+      '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
+    ),
+    '通用型机器人说明里要写清职责与兜底定位',
+  )
   assert.equal(texts.includes('通用型 · 标准模式'), false, '标准模式写在说明里，不再单独做标签')
-  assert.ok(texts.includes('可以以标准模式进入任意一个已存在的工作区；它没有自己的目录、AGENTS.md 或 skills。'))
+  assert.ok(
+    texts.includes(
+      '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
+    ),
+  )
   assert.ok(texts.includes('进入工作区'))
 
   const generalButton = findNode(
@@ -486,4 +519,50 @@ test('机器人页：头像预设里没有 🤖，通用型机器人卡片自己
   const client = await loadClient()
   const { texts } = collect(client.render(states({ data: listData(true) })))
   assert.ok(texts.includes('🤖'), '通用型机器人卡片应显示 🤖')
+})
+
+test('机器人页：卡片与职责页签展示职责，创建对话框带职责字段', async () => {
+  const client = await loadClient()
+  const description = '写发布说明与测试报告'
+
+  // 列表卡片直接展示职责，便于比较机器人。
+  const list = collect(client.render(states({ data: listData(true) })))
+  assert.ok(list.texts.includes(description))
+
+  // 职责是详情页的独立页签：说明 + textarea + 保存按钮。
+  const tabStates = {
+    data: listData(true),
+    selectedName: 'writer',
+    descriptionDraft: description,
+    tab: 'description',
+  }
+  const detail = collect(client.render(states(tabStates)))
+  assert.ok(detail.texts.includes('职责'))
+  assert.ok(
+    detail.texts.indexOf('职责') < detail.texts.indexOf('AGENTS.md'),
+    '职责页签排在 AGENTS.md 之前',
+  )
+  assert.ok(
+    detail.texts.includes('工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。'),
+  )
+  assert.ok(detail.texts.includes('保存'), '有改动时显示保存按钮')
+  const draftField = findNode(
+    client.render(states(tabStates)),
+    (node) => node.type === 'textarea' && node.props?.value === description,
+  )
+  assert.ok(draftField)
+
+  // 默认 AGENTS.md 页签不显示职责编辑器。
+  const agentsTab = client.render(states({ data: listData(true), selectedName: 'writer' }))
+  assert.equal(
+    findNode(agentsTab, (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责'),
+    null,
+  )
+
+  // 创建对话框里也能直接填职责。
+  const createField = findNode(
+    client.render(states({ data: listData(true), dialogOpen: true })),
+    (node) => node.type === 'textarea' && node.props?.placeholder === '例如：负责把会议记录整理成三点结论',
+  )
+  assert.ok(createField)
 })

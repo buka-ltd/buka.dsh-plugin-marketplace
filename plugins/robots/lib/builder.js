@@ -27,8 +27,11 @@ import {
   addRobot,
   ensureClaudeLink,
   isValidRobotName,
+  normalizeRobotDescription,
   readRobotRegistry,
+  ROBOT_DESCRIPTION_MAX_LENGTH,
   setRobotAvatar,
+  setRobotDescription,
   writeAgentsFile,
 } from './robot-store.js'
 
@@ -36,6 +39,7 @@ import {
 export const BUILD_ERROR_CODES = Object.freeze({
   invalidName: 'invalid-name',
   invalidAvatar: 'invalid-avatar',
+  invalidDescription: 'invalid-description',
   invalidAgents: 'invalid-agents',
   invalidUpdate: 'invalid-update',
   agentsTooLarge: 'agents-too-large',
@@ -59,11 +63,12 @@ function buildError(code, message) {
  *
  * - `name` 先 trim 再按机器人名称规则校验；
  * - `avatar` 缺省 / 空串表示「不指定」（新建时自动分配）；给了就必须是预设 id；
+ * - `description` 是一行摘要，空白会折叠；缺省 / 空串表示「不改」（新建时为空）；
  * - `agents` 是完整 AGENTS.md 文本，只有全空白时视为「不写」，避免误清空；
  * - `update` 必须是布尔值，缺省按 `false` 处理。
  *
- * @param {{ name?: unknown, avatar?: unknown, agents?: unknown, update?: unknown }} [input]
- * @returns {{ name: string, avatar: string, agents: string, agentsBytes: number, update: boolean }}
+ * @param {{ name?: unknown, avatar?: unknown, description?: unknown, agents?: unknown, update?: unknown }} [input]
+ * @returns {{ name: string, avatar: string, description: string, agents: string, agentsBytes: number, update: boolean }}
  */
 export function normalizeBuildRequest(input = {}) {
   const name = typeof input.name === 'string' ? input.name.trim() : ''
@@ -83,6 +88,20 @@ export function normalizeBuildRequest(input = {}) {
       )
     }
     avatar = input.avatar
+  }
+
+  let description = ''
+  if (input.description !== undefined && input.description !== null && typeof input.description !== 'string') {
+    throw buildError(BUILD_ERROR_CODES.invalidDescription, 'description must be a single-line string.')
+  }
+  if (typeof input.description === 'string') {
+    description = normalizeRobotDescription(input.description)
+    if (description.length > ROBOT_DESCRIPTION_MAX_LENGTH) {
+      throw buildError(
+        BUILD_ERROR_CODES.invalidDescription,
+        `description is ${description.length} characters; the limit is ${ROBOT_DESCRIPTION_MAX_LENGTH}. Shorten it to one sentence.`,
+      )
+    }
   }
 
   if (input.agents !== undefined && input.agents !== null && typeof input.agents !== 'string') {
@@ -105,7 +124,7 @@ export function normalizeBuildRequest(input = {}) {
     throw buildError(BUILD_ERROR_CODES.invalidUpdate, 'update must be a boolean.')
   }
 
-  return { name, avatar, agents, agentsBytes, update: input.update === true }
+  return { name, avatar, description, agents, agentsBytes, update: input.update === true }
 }
 
 /**
@@ -187,8 +206,8 @@ export async function mountRobot({ workspaceRegistry, robotPath } = {}) {
  * 创建或修改一个机器人，并确保它已挂到工作区。
  *
  * - 名字已存在且没有传 `update: true`：拒绝，避免模型顺手覆盖用户的机器人；
- * - 已存在且 `update: true`：只改传了的字段（头像 / AGENTS.md），目录与
- *   `createdAt` 不变；
+ * - 已存在且 `update: true`：只改传了的字段（头像 / 描述 / AGENTS.md），目录与
+ *   `createdAt` 不变；描述为空串表示保留原描述；
  * - 新建：建目录、写默认模板（没给 `agents` 时）、登记、按需写 AGENTS.md；
  * - 两种情况都补 `CLAUDE.md` 链接，再确保工作区挂载。
  *
@@ -197,12 +216,13 @@ export async function mountRobot({ workspaceRegistry, robotPath } = {}) {
  *   file: string,
  *   name?: unknown,
  *   avatar?: unknown,
+ *   description?: unknown,
  *   agents?: unknown,
  *   update?: unknown,
  *   workspaceRegistry?: { list?: () => Array<{ id?: unknown, path?: unknown }>, create?: (directory: string) => Promise<{ id?: unknown }> } | null,
  * }} options
  * @returns {Promise<{
- *   robot: { name: string, path: string, avatar: string, createdAt: string },
+ *   robot: { name: string, path: string, avatar: string, description: string, createdAt: string },
  *   created: boolean,
  *   updated: boolean,
  *   agentsBytes: number,
@@ -211,8 +231,8 @@ export async function mountRobot({ workspaceRegistry, robotPath } = {}) {
  *   mountError: string | null,
  * }>}
  */
-export async function buildRobot({ robotsDir, file, name, avatar, agents, update, workspaceRegistry } = {}) {
-  const request = normalizeBuildRequest({ name, avatar, agents, update })
+export async function buildRobot({ robotsDir, file, name, avatar, description, agents, update, workspaceRegistry } = {}) {
+  const request = normalizeBuildRequest({ name, avatar, description, agents, update })
 
   const registry = await readRobotRegistry({ file })
   if (registry.corrupt) {
@@ -232,13 +252,24 @@ export async function buildRobot({ robotsDir, file, name, avatar, agents, update
 
   // 两种情况都走 addRobot：新建时建目录并登记；已存在时它会确保目录还在、
   // 补 AGENTS.md 模板（不覆盖已有文件）并复用条目，目录被外部删掉后也能重建。
-  const added = await addRobot({ robotsDir, file, name: request.name, avatar: request.avatar })
+  const added = await addRobot({
+    robotsDir,
+    file,
+    name: request.name,
+    avatar: request.avatar,
+    description: request.description,
+  })
   let robot = added.robot
   const created = added.created
   let updated = false
 
   if (!created && request.avatar !== '' && request.avatar !== robot.avatar) {
     robot = (await setRobotAvatar({ file, name: request.name, avatar: request.avatar })).robot
+    updated = true
+  }
+
+  if (!created && request.description !== '' && request.description !== robot.description) {
+    robot = (await setRobotDescription({ file, name: request.name, description: request.description })).robot
     updated = true
   }
 
@@ -250,7 +281,13 @@ export async function buildRobot({ robotsDir, file, name, avatar, agents, update
 
   const mount = await mountRobot({ workspaceRegistry, robotPath: robot.path })
   return {
-    robot: { name: robot.name, path: robot.path, avatar: robot.avatar, createdAt: robot.createdAt },
+    robot: {
+      name: robot.name,
+      path: robot.path,
+      avatar: robot.avatar,
+      description: robot.description ?? '',
+      createdAt: robot.createdAt,
+    },
     created,
     updated,
     agentsBytes: request.agents === '' ? 0 : request.agentsBytes,

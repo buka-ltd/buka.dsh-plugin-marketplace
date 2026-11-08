@@ -22,7 +22,7 @@ export const ROBOT_BUILD_TOOL_NAME = 'buka_robot_build'
  *   defineTool: Function,
  *   avatarIds: readonly string[],
  *   runBuild: (args: Record<string, unknown>) => Promise<{
- *     robot: { name: string, path: string, avatar: string, createdAt: string },
+ *     robot: { name: string, path: string, avatar: string, description: string, createdAt: string },
  *     created: boolean,
  *     updated: boolean,
  *     agentsBytes: number,
@@ -43,7 +43,7 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
   return defineTool({
     name: ROBOT_BUILD_TOOL_NAME,
     description:
-      'Create or update one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Avatar ids: ' +
+      'Create or update one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ' +
       `${avatars}.`,
     parameters: {
       name: {
@@ -56,6 +56,12 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
         type: 'string',
         description:
           'Optional avatar id from the list in the description. Omit to let the plugin pick one that is not used yet.',
+      },
+      description: {
+        type: 'string',
+        required: true,
+        description:
+          'One sentence describing what this robot does and when to use it; a workflow orchestrator reads it to pick robots for nodes. Empty string keeps the current description when update: true (and leaves it empty on create).',
       },
       agents: {
         type: 'string',
@@ -76,6 +82,11 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
           name: { type: 'string', required: true, description: 'Robot name.' },
           path: { type: 'string', required: true, description: 'Absolute robot directory.' },
           avatar: { type: 'string', required: true, description: 'Avatar id stored for the robot.' },
+          description: {
+            type: 'string',
+            required: true,
+            description: 'One-sentence description stored for the robot; empty when none was set.',
+          },
           created: { type: 'boolean', required: true, description: 'Whether this call created the robot.' },
           updated: { type: 'boolean', required: true, description: 'Whether this call changed an existing robot.' },
           agentsBytes: {
@@ -103,8 +114,10 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
       render: (_args, value) => {
         const action =
           value?.created === true ? 'Created robot' : value?.updated === true ? 'Updated robot' : 'Robot ready'
+        const description = String(value?.description ?? '')
         const lines = [
           `${action}: ${String(value?.name ?? '')} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`,
+          `Description: ${description === '' ? '(none)' : description}`,
         ]
         if (typeof value?.agentsBytes === 'number' && value.agentsBytes > 0) {
           lines.push(`AGENTS.md written: ${value.agentsBytes} bytes.`)
@@ -128,6 +141,7 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
         name: result.robot.name,
         path: result.robot.path,
         avatar: result.robot.avatar,
+        description: result.robot.description,
         created: result.created,
         updated: result.updated,
         agentsBytes: result.agentsBytes,

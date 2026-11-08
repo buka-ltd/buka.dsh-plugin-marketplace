@@ -9,8 +9,9 @@
  * | 路由 | 作用 |
  * | --- | --- |
  * | `GET /buka-robots/list` | 列出登记表里的机器人、挂载状态、skills 与 AGENTS.md |
- * | `POST /buka-robots/create` | 建目录 + AGENTS.md 模板，并把机器人插到登记表最前 |
+ * | `POST /buka-robots/create` | 建目录 + AGENTS.md 模板，并把机器人（含可选描述）插到登记表最前 |
  * | `POST /buka-robots/avatar` | 只改登记表里的头像 id |
+ * | `POST /buka-robots/description` | 只改登记表里的一行描述（工作流用它选机器人） |
  * | `POST /buka-robots/remove` | 从登记表移除（目录、文件与会话保留） |
  * | `POST /buka-robots/agents` | 写入某机器人的 AGENTS.md，并补 CLAUDE.md 链接 |
  * | `POST /buka-robots/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
@@ -51,6 +52,7 @@ import { normalizePresets, resolveRobotBuildAccess } from './access.js'
 import { AVATAR_IDS } from './avatar.js'
 import { buildRobot } from './builder.js'
 import { createRobotBuildTool } from './build-tool.js'
+import { GENERAL_ROBOT_NAME, generalRobotEntry } from './general-robot.js'
 import { NPX_TIMEOUT_MS, createNpxRunner, parseSkillList } from './npx.js'
 import { revealDirectory } from './reveal.js'
 import { readSettings, resolveSettingsFile, setGeneralRobotEnabled } from './settings.js'
@@ -63,7 +65,9 @@ import {
   listRobots,
   readRobotRegistry,
   removeRobot,
+  ROBOT_DESCRIPTION_MAX_LENGTH,
   setRobotAvatar,
+  setRobotDescription,
   resolveRobotRegistryFile,
   resolveRobotsDir,
   scanProjectSkills,
@@ -86,6 +90,9 @@ const CREATE_ROUTE = '/buka-robots/create'
 
 /** 页面给机器人换头像用的路由。 */
 const AVATAR_ROUTE = '/buka-robots/avatar'
+
+/** 页面编辑机器人描述用的路由。 */
+const DESCRIPTION_ROUTE = '/buka-robots/description'
 
 /** 页面删除机器人（只删登记）用的路由。 */
 const REMOVE_ROUTE = '/buka-robots/remove'
@@ -230,6 +237,7 @@ export function apply(ctx, config) {
       ctx,
       robotsDir,
       registryFile,
+      settingsFile,
       defineTool,
       subagentProvider: config?.subagentProvider,
       reportRetries: config?.reportRetries,
@@ -503,16 +511,30 @@ export function apply(ctx, config) {
             }
             // 头像可选：不传 / 传了非法 id 时由 addRobot 按名字分配默认头像。
             const avatar = typeof body?.avatar === 'string' ? body.avatar.trim() : ''
+            if (body?.description !== undefined && typeof body.description !== 'string') {
+              sendError(res, 400, 'invalid-description', 'description 必须是字符串')
+              return
+            }
+            const description = typeof body?.description === 'string' ? body.description : ''
 
             try {
               const result = await serializeRegistry(() =>
-                addRobot({ robotsDir, file: registryFile, name, avatar }),
+                addRobot({ robotsDir, file: registryFile, name, avatar, description }),
               )
               webCtx.logger?.info?.('buka-robots: 已登记机器人 %s（%s）', result.robot.name, result.robot.path)
               sendJson(res, 200, { ok: true, robot: result.robot, created: result.created })
             } catch (error) {
               if (error?.code === 'invalid-name') {
                 sendError(res, 400, 'invalid-name', describeError(error))
+                return
+              }
+              if (error?.code === 'invalid-description') {
+                sendError(
+                  res,
+                  400,
+                  'invalid-description',
+                  `描述需要不超过 ${ROBOT_DESCRIPTION_MAX_LENGTH} 个字符的单行文本。`,
+                )
                 return
               }
               if (error?.code === 'registry-unreadable') {
@@ -577,6 +599,66 @@ export function apply(ctx, config) {
           },
         }),
       `buka-robots: POST ${AVATAR_ROUTE}`,
+    )
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: DESCRIPTION_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'POST')
+              return
+            }
+            const body = await readJsonBody(req, res)
+            if (body === undefined) return
+
+            const name = typeof body?.name === 'string' ? body.name.trim() : ''
+            if (!isValidRobotName(name)) {
+              sendError(res, 400, 'invalid-name', `机器人名称不合法：${String(body?.name)}`)
+              return
+            }
+            if (typeof body?.description !== 'string') {
+              sendError(res, 400, 'invalid-description', 'description 必须是字符串')
+              return
+            }
+
+            try {
+              const result = await serializeRegistry(() =>
+                setRobotDescription({ file: registryFile, name, description: body.description }),
+              )
+              webCtx.logger?.info?.('buka-robots: 已更新机器人 %s 的描述', name)
+              sendJson(res, 200, { ok: true, robot: result.robot })
+            } catch (error) {
+              if (error?.code === 'invalid-description') {
+                sendError(
+                  res,
+                  400,
+                  'invalid-description',
+                  `描述需要不超过 ${ROBOT_DESCRIPTION_MAX_LENGTH} 个字符的单行文本。`,
+                )
+                return
+              }
+              if (error?.code === 'invalid-name') {
+                sendError(res, 400, 'invalid-name', describeError(error))
+                return
+              }
+              if (error?.code === 'unknown-robot') {
+                sendError(res, 404, 'unknown-robot', describeError(error))
+                return
+              }
+              if (error?.code === 'registry-unreadable') {
+                sendError(res, 409, 'registry-unreadable', describeError(error))
+                return
+              }
+              webCtx.logger?.warn?.('buka-robots: 更新机器人描述失败：%s', describeError(error))
+              sendError(res, 500, 'description-failed', `更新机器人描述失败：${describeError(error)}`)
+            }
+          },
+        }),
+      `buka-robots: POST ${DESCRIPTION_ROUTE}`,
     )
 
     webCtx.effect(
@@ -919,7 +1001,7 @@ export function apply(ctx, config) {
       defineTool({
         name: 'buka_robots',
         description:
-          'List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Use it when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md. This tool is read-only: creating or updating a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.',
+          'List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md. This tool is read-only: creating or updating a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.',
         parameters: {},
         output: {
           schema: {
@@ -947,6 +1029,12 @@ export function apply(ctx, config) {
                   properties: {
                     name: { type: 'string', required: true, description: 'Robot name.' },
                     path: { type: 'string', required: true, description: 'Absolute robot directory.' },
+                    description: {
+                      type: 'string',
+                      required: true,
+                      description:
+                        'One-sentence description of what the robot does and when to use it; empty when none was set.',
+                    },
                     mounted: {
                       type: 'boolean',
                       required: true,
@@ -1003,31 +1091,77 @@ export function apply(ctx, config) {
                     const mounted = robot.mounted
                       ? `mounted as ${String(robot.workspaceId)}`
                       : 'not mounted'
-                    return `- ${robot.name} (${robot.path}) · ${skills} · ${agents} · ${mounted}`
+                    const description = typeof robot.description === 'string' && robot.description !== ''
+                      ? robot.description
+                      : '(no description)'
+                    const location = typeof robot.path === 'string' && robot.path !== '' ? ` (${robot.path})` : ''
+                    return `- ${robot.name} — ${description}${location} · ${skills} · ${agents} · ${mounted}`
                   })
                   .join('\n'),
               },
             ]
           },
         },
-        async execute() {
+        async execute(_args, exec) {
           const snapshot = await listRobots({
             file: registryFile,
             workspaceRegistry: ctx.workspaceRegistry,
             robotsDir,
           })
+          const robots = snapshot.robots.map((robot) => ({
+            name: robot.name,
+            path: robot.path,
+            description: robot.description ?? '',
+            mounted: robot.mounted,
+            workspaceId: robot.workspaceId,
+            skills: robot.skills.map((skill) => ({ name: skill.name })),
+            agentsFile: robot.agents.exists,
+          }))
+
+          // 通用型机器人启用时排在最后；对外字段与普通机器人完全同形（没有标记位）。
+          // 它没有固定目录，这里用调用方会话所在的工作区当 path / workspaceId，让它在
+          // 清单里看起来就是一个普通机器人。
+          const settings = await readSettings({ file: settingsFile })
+          if (
+            settings.generalRobot.enabled &&
+            !snapshot.robots.some((robot) => robot.name === GENERAL_ROBOT_NAME)
+          ) {
+            const cwd = exec?.agent?.session?.header?.cwd
+            let workspaceId = null
+            if (typeof cwd === 'string' && cwd !== '' && typeof ctx.workspaceRegistry?.list === 'function') {
+              try {
+                const workspaces = ctx.workspaceRegistry.list()
+                const match = Array.isArray(workspaces)
+                  ? workspaces.find((workspace) => workspace?.path === cwd)
+                  : undefined
+                if (match !== undefined && match !== null && typeof match.id === 'string') {
+                  workspaceId = match.id
+                }
+              } catch {
+                workspaceId = null
+              }
+            }
+            const general = generalRobotEntry({
+              path: typeof cwd === 'string' ? cwd : '',
+              workspaceId,
+              mounted: workspaceId !== null,
+            })
+            robots.push({
+              name: general.name,
+              path: general.path,
+              description: general.description,
+              mounted: general.mounted,
+              workspaceId: general.workspaceId,
+              skills: [],
+              agentsFile: false,
+            })
+          }
+
           return {
             root: snapshot.root,
             registry: snapshot.registry,
             corrupt: snapshot.corrupt,
-            robots: snapshot.robots.map((robot) => ({
-              name: robot.name,
-              path: robot.path,
-              mounted: robot.mounted,
-              workspaceId: robot.workspaceId,
-              skills: robot.skills.map((skill) => ({ name: skill.name })),
-              agentsFile: robot.agents.exists,
-            })),
+            robots,
           }
         },
       }),
@@ -1048,6 +1182,7 @@ export function apply(ctx, config) {
             file: registryFile,
             name: args?.name,
             avatar: args?.avatar,
+            description: args?.description,
             agents: args?.agents,
             update: args?.update,
             workspaceRegistry: ctx.workspaceRegistry,

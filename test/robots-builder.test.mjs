@@ -83,17 +83,28 @@ test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界',
   assert.deepEqual(normalizeBuildRequest({ name: '  writer  ' }), {
     name: 'writer',
     avatar: '',
+    description: '',
     agents: '',
     agentsBytes: 0,
     update: false,
   })
-  assert.deepEqual(normalizeBuildRequest({ name: '新闻-机器人', avatar: 'owl', agents: '# 角色\n', update: true }), {
-    name: '新闻-机器人',
-    avatar: 'owl',
-    agents: '# 角色\n',
-    agentsBytes: Buffer.byteLength('# 角色\n', 'utf8'),
-    update: true,
-  })
+  assert.deepEqual(
+    normalizeBuildRequest({
+      name: '新闻-机器人',
+      avatar: 'owl',
+      description: '  把新闻\n整理成简报  ',
+      agents: '# 角色\n',
+      update: true,
+    }),
+    {
+      name: '新闻-机器人',
+      avatar: 'owl',
+      description: '把新闻 整理成简报',
+      agents: '# 角色\n',
+      agentsBytes: Buffer.byteLength('# 角色\n', 'utf8'),
+      update: true,
+    },
+  )
   // 全空白的 AGENTS.md 视为「不写」，避免模型误清空。
   assert.equal(normalizeBuildRequest({ name: 'writer', agents: ' \n\t ' }).agents, '')
 
@@ -107,6 +118,14 @@ test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界',
       error.code === BUILD_ERROR_CODES.invalidAvatar &&
       error.message.includes('sprout') &&
       error.message.includes(DEFAULT_AVATAR_ID),
+  )
+  assert.throws(
+    () => normalizeBuildRequest({ name: 'writer', description: 42 }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidDescription,
+  )
+  assert.throws(
+    () => normalizeBuildRequest({ name: 'writer', description: 'x'.repeat(501) }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidDescription,
   )
   assert.throws(
     () => normalizeBuildRequest({ name: 'writer', agents: 42 }),
@@ -390,6 +409,7 @@ function toolOutput(overrides = {}) {
     name: 'writer',
     path: '/tmp/robots/writer',
     avatar: 'owl',
+    description: '把会议记录整理成三点结论',
     created: true,
     updated: false,
     agentsBytes: 12,
@@ -408,7 +428,13 @@ function toolOutput(overrides = {}) {
  */
 function buildResult(overrides = {}) {
   return {
-    robot: { name: 'writer', path: '/tmp/robots/writer', avatar: 'owl', createdAt: '2026-01-01T00:00:00.000Z' },
+    robot: {
+      name: 'writer',
+      path: '/tmp/robots/writer',
+      avatar: 'owl',
+      description: '把会议记录整理成三点结论',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
     created: true,
     updated: false,
     agentsBytes: 12,
@@ -437,6 +463,7 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
   assert.equal(tool.name, ROBOT_BUILD_TOOL_NAME)
   assert.equal(tool.name, 'buka_robot_build')
   assert.equal(tool.parameters.name.required, true)
+  assert.equal(tool.parameters.description.required, true)
   assert.equal(tool.parameters.update.type, 'boolean')
   assert.ok(tool.description.includes('sprout'), '描述里列出可选头像 id')
   assert.ok(tool.description.includes('update: true'), '描述里说明覆盖要先 update')
@@ -450,6 +477,7 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     name: 'writer',
     path: '/tmp/robots/writer',
     avatar: 'owl',
+    description: '把会议记录整理成三点结论',
     created: true,
     updated: false,
     agentsBytes: 12,
@@ -470,6 +498,7 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     name: 'writer',
     path: '/tmp/robots/writer',
     avatar: 'owl',
+    description: '把会议记录整理成三点结论',
     created: false,
     updated: true,
     agentsBytes: 12,
@@ -481,6 +510,8 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
   // 渲染结果覆盖「已创建 / 已更新 / 未挂载」三种提示。
   const render = (value) => tool.output.render({}, value)[0].text
   assert.match(render(toolOutput()), /^Created robot: writer/)
+  assert.match(render(toolOutput()), /Description: 把会议记录整理成三点结论/)
+  assert.match(render(toolOutput({ description: '' })), /Description: \(none\)/)
   assert.match(render(toolOutput()), /Mounted as a workspace workspace-1\./)
   assert.match(render(toolOutput({ created: false, updated: true, agentsBytes: 0 })), /^Updated robot: writer/)
   assert.match(render(toolOutput({ mountError: 'boom', mounted: false })), /Not mounted: boom/)
@@ -535,4 +566,48 @@ test('package.json 的 files 覆盖 lib 下全部模块，避免发布时漏文�
   }
   assert.ok(pkg.files.includes('cordis.patch.yml'))
   assert.ok(pkg.files.includes('client.js'))
+})
+
+test('buildRobot：description 随创建写入，update 可改、空串保留原值', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    const registry = fakeWorkspaceRegistry()
+
+    const first = await buildRobot({
+      ...store,
+      name: 'writer',
+      description: '  写发布说明  ',
+      workspaceRegistry: registry,
+    })
+    assert.equal(first.created, true)
+    assert.equal(first.robot.description, '写发布说明')
+    assert.equal((await readRobotRegistry({ file: store.file })).robots[0].description, '写发布说明')
+
+    const second = await buildRobot({
+      ...store,
+      name: 'writer',
+      description: '写发布说明与测试报告',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(second.updated, true)
+    assert.equal(second.robot.description, '写发布说明与测试报告')
+    assert.equal((await readRobotRegistry({ file: store.file })).robots[0].description, '写发布说明与测试报告')
+
+    // 不传 / 传空串都保留原描述，避免 update 顺手清空。
+    const third = await buildRobot({ ...store, name: 'writer', update: true, workspaceRegistry: registry })
+    assert.equal(third.robot.description, '写发布说明与测试报告')
+    const fourth = await buildRobot({
+      ...store,
+      name: 'writer',
+      description: '   ',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(fourth.updated, false, '空描述不算一次更新')
+    assert.equal(fourth.robot.description, '写发布说明与测试报告')
+  } finally {
+    await removeRoot(root)
+  }
 })
