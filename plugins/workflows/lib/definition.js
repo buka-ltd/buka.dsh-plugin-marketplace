@@ -1,5 +1,5 @@
 /**
- * 一次性工作流定义的校验与规范化。
+ * 一次性工作流定义的校验与规范化（workflow format 2）。
  *
  * 工作流由 agent 在运行时现场生成：一份 JSON，包含目标、起始节点与节点表。
  * 本模块只做纯校验（不读盘、不依赖 DSH），返回可直接执行的 plan，以及给
@@ -7,22 +7,24 @@
  *
  * - `start`：唯一的开始节点，不建会话、不执行；它只有一条出边，出边上的
  *   `prompt` 就是真正的第一个机器人节点首次进入时的提示词；
- * - `robot`：交给某个机器人执行；同一个机器人一次运行共用一个可续接的会话，节点只带一句给运行页
- *   展示的 `summary`，不再带提示词——每次进入它的边各自定义 prompt；
+ * - `robot`：交给某个机器人执行；同一个机器人一次运行共用一个可续接的会话，
+ *   节点只带一句给运行页展示的 `summary`，不带提示词——每次进入它的边各自
+ *   定义 prompt。机器人节点总是交回一个 JSON 对象，其中的 `next` 是出边
+ *   `name`（路由键）；
  * - `gate`：不建会话，等待用户做一次原生审批，批准 / 拒绝各走一条出边；
  * - `end`：终止节点，带最终状态（completed / rejected / failed）。
  *
- * 路由只有两种：固定 `next`，或按机器人回报的 `data` 字段做条件匹配。
+ * 路由只有一种：机器人结果里的 `next` 必须精确匹配某一条出边的 `name`。
  * 这里不做任何表达式求值，避免让模型生成可执行代码。
  *
- * `next` 里的每条规则就是一条「边」：`to` 是目标，`when` 是条件，`name` 是给
- * 运行页悬停看的短名字，`prompt` 是进入目标机器人节点时使用的提示词。**每个进入
- * 机器人节点的边都必须有 `prompt`**，所以同一个节点首次进入和被循环打回时可以
- * 用两条不同的边给出完全不同的指令。门禁的两条出边也支持同样的 `{ to, name,
- * prompt }` 对象。
+ * `next` 里的每条规则就是一条「边」：`to` 是目标，`name` 是路由键（离开机器人
+ * 节点时必须唯一且非空，也是运行页悬停看到的短名字），`prompt` 是进入目标
+ * 机器人节点时使用的提示词。**每个进入机器人节点的边都必须有 `prompt`**，
+ * 所以同一个节点首次进入和被循环打回时可以用两条不同的边给出完全不同的
+ * 指令。门禁的两条出边也支持同样的 `{ to, name, prompt }` 对象。
  *
- * 兼容旧格式：没有 `start` 节点、用顶层 `start` 指定入口、提示词写在机器人节点
- * 上的定义仍然可以运行；新定义应使用 `start` 节点，并把所有 prompt 放在边上。
+ * 旧格式（顶层 `start`、节点 prompt、`report`、`when` 条件）在 format 2 里
+ * 全部移除：出现即报错，不做兼容。
  *
  * @module @buka/dsh-plugin-workflows/definition
  */
@@ -38,9 +40,6 @@ export const DEFAULT_MAX_STEPS = 64
 
 /** 节点 id 的合法字符集。 */
 const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u
-
-/** 条件字段路径：点号分隔的简单路径。 */
-const FIELD_PATH_PATTERN = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u
 
 /** 机器名称的最大长度。 */
 const MAX_ROBOT_NAME_LENGTH = 128
@@ -60,6 +59,15 @@ const END_STATUSES = new Set(['completed', 'failed', 'rejected'])
 /** 节点类型。 */
 const NODE_TYPES = new Set(['start', 'robot', 'gate', 'end'])
 
+/** format 2 的移除提示：机器人节点不再有 `report`。 */
+const REPORT_REMOVED = 'report was removed in workflow format 2; every robot node always returns JSON'
+
+/** format 2 的移除提示：边不再有 `when`。 */
+const WHEN_REMOVED = 'when was removed; select the next edge with the JSON "next" route'
+
+/** 机器人节点 prompt 移除提示。 */
+const NODE_PROMPT_REMOVED = 'robot nodes no longer carry a prompt; define it on the edge entering this node'
+
 /**
  * 判断一个值是不是普通对象。
  *
@@ -68,16 +76,6 @@ const NODE_TYPES = new Set(['start', 'robot', 'gate', 'end'])
  */
 export function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * 判断一个值是不是 JSON 标量（条件比较只支持标量）。
- *
- * @param {unknown} value
- * @returns {boolean}
- */
-function isJsonScalar(value) {
-  return value === null || ['string', 'number', 'boolean'].includes(typeof value)
 }
 
 /**
@@ -117,6 +115,9 @@ export function validateDefinition(input, options = {}) {
   const goal = readGoal(input.goal, fail)
   const maxSteps = readMaxSteps(input.maxSteps, ceiling, fail)
   const declaredStart = typeof input.start === 'string' ? input.start.trim() : ''
+  if (declaredStart !== '') {
+    fail('start', 'the legacy top-level "start" format was removed; add a node with type "start"')
+  }
 
   /** @type {Map<string, object>} */
   const nodes = new Map()
@@ -141,29 +142,26 @@ export function validateDefinition(input, options = {}) {
     })
   }
 
-  // 新格式：唯一 start 节点，所有 prompt 都在边上；旧格式：顶层 start + 节点 prompt。
+  // format 2：恰好一个 start 节点；所有 prompt 都在边上。
   const startIds = order.filter((id) => nodes.get(id).type === 'start')
-  const hasStartNode = startIds.length > 0
   /** @type {string} */
-  let start = declaredStart
-
-  if (hasStartNode) {
+  let start = ''
+  if (startIds.length === 0) {
+    if (declaredStart === '') fail('start', 'a workflow definition needs exactly one node with type "start"')
+  } else {
     if (startIds.length > 1) {
       for (const id of startIds.slice(1)) {
         fail(`nodes[${order.indexOf(id)}]`, 'the definition may contain exactly one start node')
       }
     }
-    if (declaredStart !== '') fail('start', 'is not used when the definition has a start node')
     start = startIds[0]
     const startIndex = order.indexOf(start)
     const startNode = nodes.get(start)
     if (startNode !== undefined) {
       if (!Array.isArray(startNode.next) || startNode.next.length !== 1) {
         fail(`nodes[${startIndex}].next`, 'a start node needs exactly one outgoing edge')
-      }
-      const rule = startNode.next?.[0]
-      if (rule !== undefined) {
-        if (rule.when !== undefined) fail(`nodes[${startIndex}].next[0].when`, 'a start edge cannot have a condition')
+      } else {
+        const rule = startNode.next[0]
         const target = nodes.get(rule.to)
         if (target !== undefined && target.type !== 'robot') {
           fail(`nodes[${startIndex}].next[0].to`, 'the start edge must enter a robot node')
@@ -173,34 +171,10 @@ export function validateDefinition(input, options = {}) {
         }
       }
     }
-    // start 节点存在时，机器人节点上的 prompt 是旧格式残留，必须搬到边上。
-    for (const [index, id] of order.entries()) {
-      const node = nodes.get(id)
-      if (node.type !== 'robot') continue
-      if (typeof node.prompt === 'string' && node.prompt !== '') {
-        fail(
-          `nodes[${index}].prompt`,
-          'robot nodes no longer carry a prompt; define it on the edge entering this node',
-        )
-        node.prompt = ''
-      }
-    }
-  } else {
-    if (declaredStart === '') fail('start', 'must be a non-empty node id, or add a start node')
-    else if (!NODE_ID_PATTERN.test(declaredStart)) fail('start', 'must be a valid node id')
-    else if (!nodes.has(declaredStart)) fail('start', `unknown start node "${declaredStart}"`)
-    // 旧格式必须保留机器人节点自己的 prompt。
-    for (const [index, id] of order.entries()) {
-      const node = nodes.get(id)
-      if (node.type !== 'robot') continue
-      if (typeof node.prompt !== 'string' || node.prompt.trim() === '') {
-        fail(`nodes[${index}].prompt`, 'must be a non-empty prompt string')
-      }
-    }
   }
 
   // 所有出边必须在节点表里存在；同一份定义里允许环，由 maxSteps / maxVisits 兜底。
-  // 新格式下每个进入机器人节点的边都必须带 prompt；旧格式允许退回节点 prompt。
+  // 每个进入机器人节点的边都必须带 prompt；进入 gate / end 的边不能带 prompt。
   /** @type {Array<{ edge: Record<string, any>, path: string }>} */
   const edges = []
   for (const [index, id] of order.entries()) {
@@ -226,7 +200,7 @@ export function validateDefinition(input, options = {}) {
       continue
     }
     if (target.type === 'robot') {
-      if (hasStartNode && (typeof edge.prompt !== 'string' || edge.prompt.trim() === '')) {
+      if (typeof edge.prompt !== 'string' || edge.prompt.trim() === '') {
         fail(`${path}.prompt`, 'an edge entering a robot node must carry its prompt')
       }
     } else if (typeof edge.prompt === 'string' && edge.prompt !== '') {
@@ -235,19 +209,6 @@ export function validateDefinition(input, options = {}) {
   }
 
   if (errors.length === 0) {
-    // 一条分支上的多条出边在图上无法只凭位置区分，名字是观察者唯一的线索；
-    // 单出口的线性边不需要名字，所以这里只提醒多出口的情况。
-    for (const [index, id] of order.entries()) {
-      const node = nodes.get(id)
-      const rules = Array.isArray(node.next) ? node.next : []
-      if (rules.length < 2) continue
-      for (const [ruleIndex, rule] of rules.entries()) {
-        if (typeof rule.name === 'string' && rule.name !== '') continue
-        warnings.push(
-          `node "${id}" has multiple exits; add a "name" to nodes[${index}].next[${ruleIndex}] so the run page can label that edge`,
-        )
-      }
-    }
     // 从 start 走不到的节点永远不会执行；它没有入边，画到图上还会被当成第二个
     // 起点，所以这里直接报错，而不是留一条 warning 让运行图出现歧义。
     const reachable = reachableNodes(nodes, start)
@@ -258,6 +219,21 @@ export function validateDefinition(input, options = {}) {
     const hasRobot = order.some((id) => nodes.get(id).type === 'robot')
     if (errors.length === 0 && !hasRobot) {
       warnings.push('the workflow has no robot node, so nothing will be delegated')
+    }
+  }
+
+  if (errors.length === 0) {
+    // 成环的机器人节点如果没有 maxVisits，只能靠 maxSteps 兜底；提醒创建者补上
+    // 访问次数上限，避免「一直不离开环」的循环跑到步数上限才停。
+    const cyclic = cyclicNodes(nodes, order)
+    for (const id of order) {
+      const node = nodes.get(id)
+      if (node.type !== 'robot') continue
+      if (node.maxVisits !== undefined) continue
+      if (!cyclic.has(id)) continue
+      warnings.push(
+        `node "${id}" is part of a cycle and does not set maxVisits; the run is only bounded by maxSteps (${maxSteps}). Add maxVisits to stop a no-progress loop.`,
+      )
     }
   }
 
@@ -280,8 +256,16 @@ export function validateDefinition(input, options = {}) {
 /**
  * 转成给模型看的一份摘要（不包含 prompt 正文）。
  *
+ * 机器人节点额外带 `routes`：离开它的每条边的 `name`，也就是机器人结果里的
+ * `next` 可以取的值。
+ *
  * @param {NonNullable<ReturnType<typeof validateDefinition>['plan']>} plan
- * @returns {{ start: string, maxSteps: number, goal: string, nodes: Array<Record<string, unknown>> }}
+ * @returns {{
+ *   start: string,
+ *   maxSteps: number,
+ *   goal: string,
+ *   nodes: Array<Record<string, unknown>>,
+ * }}
  */
 export function describePlan(plan) {
   return {
@@ -293,6 +277,11 @@ export function describePlan(plan) {
       const summary = { id, type: node.type }
       if (node.robot !== undefined) summary.robot = node.robot
       if (node.type === 'end') summary.status = node.status
+      if (node.type === 'robot') {
+        summary.routes = (Array.isArray(node.next) ? node.next : [])
+          .map((rule) => rule.name)
+          .filter((name) => typeof name === 'string' && name !== '')
+      }
       return summary
     }),
   }
@@ -340,6 +329,35 @@ function reachableNodes(nodes, start) {
     queue.push(...targetsOf(node))
   }
   return seen
+}
+
+/**
+ * 找出所有「在环上」的节点（从自己出发沿出边可以走回自己）。
+ *
+ * @param {Map<string, Record<string, any>>} nodes
+ * @param {string[]} order
+ * @returns {Set<string>}
+ */
+function cyclicNodes(nodes, order) {
+  const cyclic = new Set()
+  for (const id of order) {
+    const node = nodes.get(id)
+    if (node === undefined) continue
+    const queue = [...targetsOf(node)]
+    const seen = new Set()
+    while (queue.length > 0) {
+      const next = queue.shift()
+      if (next === id) {
+        cyclic.add(id)
+        break
+      }
+      if (seen.has(next)) continue
+      seen.add(next)
+      const target = nodes.get(next)
+      if (target !== undefined) queue.push(...targetsOf(target))
+    }
+  }
+  return cyclic
 }
 
 /**
@@ -428,7 +446,7 @@ function parseNode(raw, path, fail) {
  */
 function parseStartNode(raw, id, path, fail) {
   const node = { id, type: 'start' }
-  node.next = parseNext(raw.next, `${path}.next`, fail)
+  node.next = parseEdgeList(raw.next, `${path}.next`, fail, { allowString: false })
   return node
 }
 
@@ -446,14 +464,14 @@ function parseRobotNode(raw, id, path, fail) {
   else if (robot.length > MAX_ROBOT_NAME_LENGTH) fail(`${path}.robot`, `must be at most ${MAX_ROBOT_NAME_LENGTH} characters`)
   node.robot = robot
 
-  if (raw.prompt !== undefined && raw.prompt !== null && typeof raw.prompt !== 'string') {
-    fail(`${path}.prompt`, 'must be a string')
-    node.prompt = ''
-  } else {
-    node.prompt = typeof raw.prompt === 'string' ? raw.prompt : ''
+  // format 2：机器人节点不再携带 prompt，prompt 只写在进入它的边上。
+  if (raw.prompt !== undefined && raw.prompt !== null) {
+    fail(`${path}.prompt`, NODE_PROMPT_REMOVED)
   }
-  if (node.prompt !== '' && Buffer.byteLength(node.prompt, 'utf8') > MAX_PROMPT_BYTES) {
-    fail(`${path}.prompt`, `must be at most ${Math.round(MAX_PROMPT_BYTES / 1024)} KiB`)
+
+  // format 2：机器人始终交回 JSON，不再有 report 开关。
+  if (raw.report !== undefined) {
+    fail(`${path}.report`, REPORT_REMOVED)
   }
 
   if (raw.summary !== undefined && raw.summary !== null && typeof raw.summary !== 'string') {
@@ -465,14 +483,12 @@ function parseRobotNode(raw, id, path, fail) {
   }
   node.summary = summary.slice(0, MAX_SUMMARY_LENGTH)
 
-  if (raw.report !== undefined && typeof raw.report !== 'boolean') {
-    fail(`${path}.report`, 'must be a boolean')
-  }
-  node.report = raw.report === true
   node.agentOptions = parseAgentOptions(raw.agentOptions, `${path}.agentOptions`, fail)
   node.timeoutMs = parsePositiveInteger(raw.timeoutMs, `${path}.timeoutMs`, fail, 24 * 60 * 60 * 1000)
   node.maxVisits = parsePositiveInteger(raw.maxVisits, `${path}.maxVisits`, fail, 1000)
-  node.next = parseNext(raw.next, `${path}.next`, fail)
+  // 机器人节点的 next 必须是边对象数组：每条边的 name 就是机器人 JSON
+  // 结果里 `next` 可以取的路由键。
+  node.next = parseEdgeList(raw.next, `${path}.next`, fail, { allowString: false, requireNames: true })
   return node
 }
 
@@ -555,20 +571,24 @@ function parseAgentOptions(raw, path, fail) {
 }
 
 /**
- * 解析节点出口：字符串、规则数组或省略。
+ * 解析节点出口：边对象数组（省略表示没有出边）。
  *
- * 每条规则是一条边，可带 `name`（运行页悬停时展示）与 `prompt`（只在这条边
- * 被走到时附加给目标节点的入口说明）。边 prompt 的落点由后续校验保证是
- * 机器人节点，这里只做字段本身的校验。
+ * format 2 里机器人节点和 start 节点都不再接受字符串简写；每条边上的 `name`
+ * 是机器人结果 `next` 的路由键，离开机器人节点时必须唯一且非空。
  *
  * @param {unknown} raw
  * @param {string} path
  * @param {(path: string, message: string) => void} fail
+ * @param {{ allowString: boolean, requireNames?: boolean }} options
  * @returns {Array<Record<string, any>>}
  */
-function parseNext(raw, path, fail) {
+function parseEdgeList(raw, path, fail, { allowString, requireNames = false }) {
   if (raw === undefined || raw === null) return []
   if (typeof raw === 'string') {
+    if (!allowString) {
+      fail(path, 'must be an array of edges { to, name, prompt }; the string shorthand was removed in workflow format 2')
+      return []
+    }
     const to = raw.trim()
     if (to === '') {
       fail(path, 'must be a non-empty node id')
@@ -577,28 +597,52 @@ function parseNext(raw, path, fail) {
     return [{ to }]
   }
   if (!Array.isArray(raw)) {
-    fail(path, 'must be a node id, an array of rules, or omitted')
+    fail(path, allowString ? 'must be a node id, an array of edges, or omitted' : 'must be an array of edges { to, name, prompt }')
     return []
   }
+  /** @type {Array<Record<string, any>>} */
   const rules = []
+  const names = new Set()
   raw.forEach((rule, index) => {
     const rulePath = `${path}[${index}]`
     if (!isPlainObject(rule)) {
       fail(rulePath, 'must be an object')
       return
     }
+    if (rule.when !== undefined) {
+      fail(`${rulePath}.when`, WHEN_REMOVED)
+    }
     const to = typeof rule.to === 'string' ? rule.to.trim() : ''
     if (to === '') fail(`${rulePath}.to`, 'must be a non-empty node id')
-    const when = rule.when === undefined ? undefined : parseWhen(rule.when, `${rulePath}.when`, fail)
-    const edge = when === undefined ? { to } : { to, when }
+    /** @type {Record<string, any>} */
+    const edge = { to }
     parseEdgeExtras(edge, rule, rulePath, fail)
+    if (requireNames) {
+      const rawName = rule.name
+      const hasInvalidName = rawName !== undefined && rawName !== null && typeof rawName !== 'string'
+      if (edge.name === undefined && !hasInvalidName) {
+        fail(
+          `${rulePath}.name`,
+          'every edge leaving a robot node needs a unique non-empty name; the robot returns it as the JSON "next" route',
+        )
+      } else if (typeof edge.name === 'string') {
+        if (names.has(edge.name)) {
+          fail(
+            `${rulePath}.name`,
+            `duplicate edge name "${edge.name}" on the same node; the JSON "next" route must be unambiguous`,
+          )
+        } else {
+          names.add(edge.name)
+        }
+      }
+    }
     rules.push(edge)
   })
   return rules
 }
 
 /**
- * 解析边上的可选字段：`name`（悬停展示）与 `prompt`（进入目标节点时的提示词）。
+ * 解析边上的可选字段：`name`（路由键 / 悬停展示）与 `prompt`（进入目标节点时的提示词）。
  *
  * @param {Record<string, any>} edge
  * @param {Record<string, any>} raw
@@ -629,47 +673,9 @@ function parseEdgeExtras(edge, raw, path, fail) {
 }
 
 /**
- * 解析一个条件。
- *
- * @param {unknown} raw
- * @param {string} path
- * @param {(path: string, message: string) => void} fail
- * @returns {Record<string, unknown> | undefined}
- */
-function parseWhen(raw, path, fail) {
-  if (!isPlainObject(raw)) {
-    fail(path, 'must be an object with "field" and one of "equals" / "in"')
-    return undefined
-  }
-  const field = typeof raw.field === 'string' ? raw.field.trim() : ''
-  if (!FIELD_PATH_PATTERN.test(field)) {
-    fail(`${path}.field`, 'must be a dotted path such as "status" or "meta.verdict"')
-    return undefined
-  }
-  const hasEquals = Object.hasOwn(raw, 'equals')
-  const hasIn = Object.hasOwn(raw, 'in')
-  if (hasEquals === hasIn) {
-    fail(path, 'must contain exactly one of "equals" or "in"')
-    return undefined
-  }
-  if (hasEquals) {
-    if (!isJsonScalar(raw.equals)) fail(`${path}.equals`, 'must be a string, number, boolean or null')
-    else return { field, equals: raw.equals }
-  }
-  if (hasIn) {
-    if (!Array.isArray(raw.in) || !raw.in.every(isJsonScalar)) {
-      fail(`${path}.in`, 'must be an array of strings, numbers, booleans or null')
-      return undefined
-    }
-    return { field, in: raw.in }
-  }
-  return undefined
-}
-
-/**
  * 解析门禁的一条出边：节点 id 字符串，或 `{ to, name?, prompt? }` 对象。
  *
- * 门禁的“批准 / 拒绝”本身已经是条件，所以边上不再支持 `when`。
+ * 门禁的“批准 / 拒绝”本身就是分支，所以边上不再支持 `when`。
  *
  * @param {unknown} raw
  * @param {string} path
@@ -690,13 +696,13 @@ function parseGateEdge(raw, path, fail) {
     fail(path, 'must be a node id or an edge object')
     return null
   }
+  if (raw.when !== undefined) {
+    fail(`${path}.when`, WHEN_REMOVED)
+  }
   const to = typeof raw.to === 'string' ? raw.to.trim() : ''
   if (to === '') {
     fail(`${path}.to`, 'must be a non-empty node id')
     return null
-  }
-  if (raw.when !== undefined) {
-    fail(`${path}.when`, 'gate edges do not support "when"; approve / reject is the condition')
   }
   return parseEdgeExtras({ to }, raw, path, fail)
 }

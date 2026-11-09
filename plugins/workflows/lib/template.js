@@ -77,12 +77,18 @@ export function getPath(source, path) {
 /**
  * 把模板值转成文本：字符串原样，对象转 JSON，null 视作空串。
  *
+ * 附件值可能带一个内部错误标记（例如二进制或超过内联上限），此时直接抛出
+ * `TemplateError`，而不是把标记对象 JSON 化后塞进 prompt。
+ *
  * @param {unknown} value
  * @returns {string}
  */
 function formatValue(value) {
   if (typeof value === 'string') return value
   if (value === null) return ''
+  if (typeof value === 'object' && typeof value.__bukaTemplateError === 'string') {
+    throw new TemplateError(value.__bukaTemplateError)
+  }
   if (typeof value === 'object') return JSON.stringify(value, null, 2)
   return String(value)
 }

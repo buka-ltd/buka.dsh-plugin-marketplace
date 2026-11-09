@@ -1,19 +1,24 @@
 /**
  * `@buka/dsh-plugin-workflows`：由编排 preset 现场创建的一次性工作流。
  *
- * 工具注册在 Host 上，但只对配置里点名的 agent preset（默认随插件发布的
- * `workflow-orchestrator`）的根会话可见；其他会话连工具都看不到。编排 agent
- * 审视任务后，把一份节点定义连同目标交给 `buka_workflow_start`，插件现场校验
- * 并顺序执行：同一个 robot 在一次运行里只开一个会话（落到普通工作 preset），
- * 再次进入时先 compact 压缩历史、再把新的边 prompt 发进同一会话；gate 节点
- * 弹一次原生审批。
+ * 创建 / 启动 / 状态 / 取消工具注册在 Host 上，但只对配置里点名的 agent preset
+ * （默认随插件发布的 `workflow-orchestrator`）的根会话可见；机器人节点会话另外
+ * 获得四个只读观测工具（运行总览 / 执行输入 / 执行输出与附件清单 / 附件读取），可见性按运行记录里的
+ * sessionId 判定。编排 agent 审视任务后，把一份节点定义连同目标交给
+ * `buka_workflow_start`，插件现场校验并顺序执行：同一个 robot 在一次运行里只开
+ * 一个会话（落到普通工作 preset），再次进入时先 compact 压缩历史、再把新的边
+ * prompt 发进同一会话；每个 robot 节点交回一个 JSON，`next` 选中的出边就是下一跳；
+ * gate 节点弹一次原生审批。
  *
- * 不含 gate 的定义在后台跑：工具立刻返回 runId，节点会话由引擎继续调度，
- * 浏览器里只读的运行页负责观察。含 gate 的定义必须在调用者的 turn 内跑完，
- * 因为原生审批要求会话有活跃的 turn。
+ * 不含 gate 的定义在后台跑：工具立刻返回 runId，节点会话由 Host 侧观察者继续
+ * 调度，浏览器里只读的运行页负责观察。含 gate 的定义必须在调用者的 turn 内
+ * 跑完，因为原生审批要求会话有活跃的 turn。
  *
- * 运行数据落盘到插件目录下的 `runs/`（定义快照、状态快照、事件流、节点结果），
- * 供回看与排查；但不做断点续跑——宿主重启后未结束的运行标成 `interrupted`。
+ * 运行数据落盘到插件目录下的 `runs/`（定义快照、状态快照、事件流、节点结果、节点附件），
+ * 既是回看依据，也是恢复的权威状态：Host 侧观察者（lib/supervisor.js）订阅全局
+ * 会话事件推进运行，会话中断只续接同一会话，续接失败即终止运行；宿主重启后
+ * 未完成的运行会尝试恢复，无法续接时标成 `interrupted`。等待
+ * 原生审批的门禁运行无法重建审批，也会标成 `interrupted`。
  * 每次运行有一个持久递增的序号（`runs/sequence.json` 计数器），页面与工具输出
  * 都显示 `#N`；结束的运行按自动归档设置（`runs/` 同级的 `settings.json`，默认
  * 24 小时归档、168 小时删除）自动隐藏或删除，运行中的记录不会被处理。
@@ -25,6 +30,7 @@
  * @module @buka/dsh-plugin-workflows
  */
 
+import { createReadStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -32,10 +38,17 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { resolveWorkflowAccess } from './access.js'
+import {
+  DEFAULT_MAX_ATTACHMENT_BYTES,
+  DEFAULT_MAX_ATTACHMENTS_PER_NODE,
+  DEFAULT_MAX_INLINE_ATTACHMENT_BYTES,
+  DEFAULT_MAX_NODE_ATTACHMENTS_BYTES,
+} from './attachments.js'
 import { describePlan, validateDefinition } from './definition.js'
-import { runWorkflow } from './engine.js'
 import { buildRunGraph, layoutRunGraph } from './graph.js'
 import { WorkflowRunStore } from './run-store.js'
+import { createSessionToolVisibility, createWorkflowSessionTools } from './session-tools.js'
+import { WorkflowSupervisor } from './supervisor.js'
 import {
   defaultSettings,
   readSettings,
@@ -59,6 +72,9 @@ const RUNS_ROUTE = '/buka-workflows/runs'
 /** 浏览器一半读取单次运行详情的路由。 */
 const RUN_ROUTE = '/buka-workflows/run'
 
+/** 浏览器一半下载节点附件的路由。 */
+const ATTACHMENT_ROUTE = '/buka-workflows/attachment'
+
 /** 浏览器一半读 / 写自动归档设置的路由。 */
 const SETTINGS_ROUTE = '/buka-workflows/settings'
 
@@ -72,9 +88,15 @@ const MAX_BODY_BYTES = 8 * 1024
 const DEFAULTS = {
   runsDir: defaultRunsDir(),
   maxRuns: 200,
-  nodeTimeoutMs: 10 * 60 * 1000,
+  // 默认不超时：节点耗时取决于模型速度、任务大小与网络，硬截止很容易误杀。
+  // 需要边界的定义可以显式写 robot 节点的 timeoutMs。
+  nodeTimeoutMs: 0,
   maxSteps: 64,
   maxNodeTextBytes: 64 * 1024,
+  maxAttachmentBytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+  maxAttachmentsPerNode: DEFAULT_MAX_ATTACHMENTS_PER_NODE,
+  maxNodeAttachmentsBytes: DEFAULT_MAX_NODE_ATTACHMENTS_BYTES,
+  maxInlineAttachmentBytes: DEFAULT_MAX_INLINE_ATTACHMENT_BYTES,
   orchestratorPresets: ['workflow-orchestrator'],
   robotPreset: 'standard',
 }
@@ -96,9 +118,9 @@ export const Config = z.object({
   nodeTimeoutMs: z
     .number()
     .step(1)
-    .min(1)
+    .min(0)
     .default(DEFAULTS.nodeTimeoutMs)
-    .description('单个机器人节点的默认超时（毫秒）。'),
+    .description('单个机器人节点的默认硬超时（毫秒）；0 表示不超时。默认不超时，建议由定义按节点显式设置 timeoutMs。'),
   maxSteps: z.number().step(1).min(1).default(DEFAULTS.maxSteps).description('单次工作流的最大节点步数。'),
   maxNodeTextBytes: z
     .number()
@@ -106,6 +128,30 @@ export const Config = z.object({
     .min(1)
     .default(DEFAULTS.maxNodeTextBytes)
     .description('每个节点结果全文落盘时的字节上限。'),
+  maxAttachmentBytes: z
+    .number()
+    .step(1)
+    .min(1)
+    .default(DEFAULTS.maxAttachmentBytes)
+    .description('单个节点附件的字节上限。'),
+  maxAttachmentsPerNode: z
+    .number()
+    .step(1)
+    .min(1)
+    .default(DEFAULTS.maxAttachmentsPerNode)
+    .description('每次执行最多允许的附件数量。'),
+  maxNodeAttachmentsBytes: z
+    .number()
+    .step(1)
+    .min(1)
+    .default(DEFAULTS.maxNodeAttachmentsBytes)
+    .description('每次执行的附件总量字节上限。'),
+  maxInlineAttachmentBytes: z
+    .number()
+    .step(1)
+    .min(1)
+    .default(DEFAULTS.maxInlineAttachmentBytes)
+    .description('可在 prompt 中用 .text 内联的单个文本附件字节上限。'),
   orchestratorPresets: z
     .array(z.string())
     .default(DEFAULTS.orchestratorPresets)
@@ -131,38 +177,48 @@ const DEFINITION_HELP = `A one-off workflow definition is a JSON object:
 Node types:
 - start: { "id", "type": "start", "next": [{ "to": "<robot id>", "name": "short edge name", "prompt": "..." }] }
   Exactly one start node. It never executes and does not count as a step; its single outgoing edge carries the prompt for the first real node, which must be a robot node.
-- robot: { "id", "type": "robot", "robot": "<robot name>", "summary": "one-line step summary shown in the run page", "report": true, "agentOptions"?: {...}, "timeoutMs"?, "maxVisits"?, "next"? }
-  Each robot keeps ONE session for the whole run: the first time any node uses that robot, its session is created; every later entry (another node, or a loop back to the same node) first compacts that session's history and then sends the new edge prompt into the same session. The robot keeps continuity across entries while its context stays bounded. It must complete the assigned work itself (no approval prompts).
+- robot: { "id", "type": "robot", "robot": "<robot name>", "summary": "one-line step summary shown in the run page", "agentOptions"?: {...}, "timeoutMs"?, "maxVisits"?, "next"?: [edge, ...] }
+  Each robot keeps ONE session for the whole run: the first time any node uses that robot, its session is created; every later entry (another node, or a loop back to the same node) first compacts that session's history and then sends the new edge prompt into the same session. The robot keeps continuity across entries while its context stays bounded.
   A robot node has NO prompt of its own: every edge entering it carries the prompt for that entry. This is how the same robot node gets a different instruction when a loop sends work back to it.
   Give every robot node a short "summary": the run page shows it as the step's title.
-  "report": true makes the session submit a structured JSON object (used by "when" routing); the session already receives an instruction to submit it, so the prompt only needs to say which JSON fields to return. If the session ends without one, the plugin asks it inside that same session to reply in the required format, retrying a bounded number of times before the node fails.
+  "timeoutMs" is optional and there is NO default timeout: a slow model, a large task or a slow network must not be killed by a guessed deadline. Only set it when the node genuinely has a hard time bound.
+  Every robot node must finish by submitting a JSON object through the structured_output tool (a JSON object in the final text is also accepted). If the node has outgoing edges, that JSON MUST contain "next", whose value is one of the outgoing edge names. The engine reads "next" and follows that edge automatically; no other agent decides the route. A terminal robot node (no outgoing edges) still submits JSON but does not need "next".
+  A node may also return optional "attachments": an array of file paths (relative to its workspace) or { "path", "name"?, "description"? } objects. The workflow copies them into that execution's node directory; later nodes can list/read them through buka_workflow_execution_attachment or reference them in prompts.
+  The node prompt must define the result fields the JSON should contain and explain what each outgoing edge name means, so the robot can choose. The outgoing edge names are the only valid values for "next".
 - gate: { "id", "type": "gate", "title": "...", "detail"?: "...", "onApprove"?: edge, "onReject"?: edge }
   edge is either a node id string, or { "to": "<node id>", "name"?: "...", "prompt"?: "..." }. Waits for one native approval dialog. Approve goes to onApprove; reject goes to onReject; either may be omitted to end the run (approved => completed, rejected => rejected). An edge entering a robot node must carry a prompt.
 - end: { "id", "type": "end", "status"?: "completed" | "failed" | "rejected" }
 
-"next" is an array of edge rules: { "to": "<node id>", "when"?: { "field": "status", "equals": "ok" }, "name"?: "short edge name shown on hover in the run page", "prompt"?: "prompt for the target robot node" }
-Rules may use exactly one of "equals" or "in" (array of scalars); a rule without "when" is the default; no match ends the run as completed.
-Every edge entering a robot node must carry "prompt" (the start edge, the test-failed edge back to dev, gate edges, etc.); edges entering a gate or end node must not. The prompt is rendered only when that edge is taken, and must reference values that already exist on that path.
-Give every edge a short "name": the run page shows it when the reader hovers that edge and hides the rest of the edge configuration. The start node's edge is the prompt for the first robot node; a loop edge back to a robot node is how a revisit gets different instructions (for example, only the test -> dev edge carries the rework notes). Gate edges without a name show as approve / reject.
+"next" is an array of edge rules: { "to": "<node id>", "name": "route key", "prompt"?: "prompt for the target robot node" }
+Every edge leaving a robot node needs a unique "name" within that node; that name is the route value the robot returns in JSON "next". Edges entering a robot node must carry "prompt"; edges entering a gate or end node must not. The prompt is rendered only when that edge is taken and must reference values that already exist on that path.
+The start node's edge is the prompt for the first robot node; a loop edge back to a robot node is how a revisit gets different instructions. Gate edges without a name show as approve / reject.
 Every node must be reachable from the start node: a node nothing leads to would never run, so it is rejected instead of being drawn as a second entry. Edges may not point back at the start node.
+A loop node should set "maxVisits": the run warns when a robot node is on a cycle without it, because then only maxSteps bounds the loop.
+
+"report" and "when" were removed in workflow format 2; the validator rejects them. Routing is driven solely by the JSON "next" route.
 
 Prompt templates only interpolate these paths (no expressions):
-{{goal}}, {{step}}, {{nodes.<node id>.text}}, {{nodes.<node id>.data.<path>}}, {{nodes.<gate id>.decision}}.
-Use buka_robots first to see the available robot names. Use buka_workflow_plan to validate before starting.`
+{{goal}}, {{step}}, {{nodes.<node id>.text}}, {{nodes.<node id>.data.<path>}}, {{nodes.<node id>.route}}, {{nodes.<gate id>.decision}},
+and for an attachment of a completed node: {{nodes.<node id>.attachments.<index>.text}}, .path, .name, .bytes, .description.
+Use .text only for small UTF-8 text files; binary or oversized attachments need .path or buka_workflow_execution_attachment. Use buka_robots first to see the available robot names. Use buka_workflow_plan to validate before starting.`
 
 /** "计划"工具的描述。 */
 const PLAN_DESCRIPTION = `Validate a one-off workflow definition without running it, and return the normalized node graph or precise errors. Use it after buka_robots and before buka_workflow_start. This tool is only visible to the workflow-orchestrator preset; other sessions must not create workflows.\n\n${DEFINITION_HELP}`
 
 /** "启动"工具的描述。 */
-const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt, and the graph decides the next node; gate nodes wait for the normal approval dialog. The definition is stored under the plugin run directory together with the run record and node results, and the read-only sidebar page observes them live.
+const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt. Every robot node submits a JSON result; when it has outgoing edges the JSON carries "next" with the outgoing edge name, and the observer follows that edge automatically. Gate nodes wait for the normal approval dialog. There is no default node timeout: a session is allowed to finish at its own pace, and only an explicit robot timeoutMs creates a hard deadline. The definition is stored under the plugin run directory together with the run record, node results and node attachments, and the read-only sidebar page observes them live. A robot node may return an optional attachments array; the workflow copies those files into that execution's node directory so later nodes can read them without pasting large text into prompts.
 
-Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT gate nodes starts in the background: the call returns immediately with a runId and that seq while the engine keeps scheduling node sessions, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH gate nodes must run inside this call, because the native approval dialog needs an active turn: the call returns only after the run reaches a terminal state.
+Robot sessions are normal sessions: they run as runtime roots, use the deployment's normal approval policy (an explicit approval:'never' is headless only), and may request tool approvals or ask the user questions. The workflow does not inject behavior instructions; it only provides the task prompt, the JSON output contract and the meaning of each route.
+
+A host-level observer (not the robot session itself) watches session events: when the active session finishes its turn, it reads the JSON result and follows "next". If the JSON is missing or "next" is invalid, the observer asks the same session to correct it a bounded number of times, then fails the node. If that session is interrupted or disposed, the observer resumes it with a continuation prompt and continues; if it cannot be resumed, the node and run fail with an explicit error and no substitute session is opened. A run that is still going when DSH restarts is resumed from its persisted state (gate runs waiting for approval are marked interrupted because their approval cannot be recreated). Old-format run data is deleted on startup by WORKFLOW_FORMAT_VERSION.
+
+Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT gate nodes starts in the background: the call returns after the first node is dispatched with a runId and that seq, and the observer keeps the run going, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH gate nodes must run inside this call, because the native approval dialog needs an active turn: the call returns only after the run reaches a terminal state.
 
 Only the workflow-orchestrator preset can see this tool; robot node sessions run in the worker preset and cannot start nested workflows. Requires the Buka Robots plugin for robot nodes.\n\n${DEFINITION_HELP}`
 
 /** "状态"工具的描述。 */
 const STATUS_DESCRIPTION =
-  'Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start but are not resumed after a host restart. Background runs keep advancing while you poll.'
+  'Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start; each robot step shows its JSON route (next) and a pending user question or tool approval is reported as pendingInteraction. Unfinished runs are resumed by the host observer after a restart (except gate runs waiting for approval). Background runs keep advancing while you poll.'
 
 /** "取消"工具的描述。 */
 const CANCEL_DESCRIPTION =
@@ -172,7 +228,7 @@ const CANCEL_DESCRIPTION =
  * 注册工具。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx 提供 `tools` 的上下文
- * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number } | undefined} [config]
+ * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number, maxAttachmentBytes?: number, maxAttachmentsPerNode?: number, maxNodeAttachmentsBytes?: number, maxInlineAttachmentBytes?: number, orchestratorPresets?: string[], robotPreset?: string } | undefined} [config]
  */
 export function apply(ctx, config) {
   const options = resolveOptions(config)
@@ -180,9 +236,36 @@ export function apply(ctx, config) {
   const store = new WorkflowRunStore({
     dir: options.runsDir,
     maxRuns: options.maxRuns,
+    maxAttachmentBytes: options.maxAttachmentBytes,
+    maxAttachmentsPerNode: options.maxAttachmentsPerNode,
+    maxNodeAttachmentsBytes: options.maxNodeAttachmentsBytes,
+    maxInlineAttachmentBytes: options.maxInlineAttachmentBytes,
     retention: defaultSettings().archive,
     logger: ctx.logger,
   })
+
+  // 观察者常驻 Host 生命周期：订阅全局会话事件，驱动后台运行并在启动时恢复。
+  const supervisor = new WorkflowSupervisor({
+    ctx,
+    store,
+    options: {
+      nodeTimeoutMs: options.nodeTimeoutMs,
+      maxNodeTextBytes: options.maxNodeTextBytes,
+      robotPreset: options.robotPreset,
+    },
+    logger: ctx.logger,
+  })
+  ctx.inject(['bukaRobots'], (robotsCtx) => {
+    supervisor.attachRobots(robotsCtx.bukaRobots)
+  })
+  ctx.effect(
+    () => () => {
+      void supervisor.dispose().catch((error) => {
+        ctx.logger?.warn?.(`buka-workflows: 释放观察者失败：${describeError(error)}`)
+      })
+    },
+    'buka-workflows: dispose observer',
+  )
 
   /** 自动归档巡检定时器；存储初始化完成后启动，插件卸载时停掉。 */
   /** @type {NodeJS.Timeout | null} */
@@ -208,8 +291,9 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 存储初始化（建目录、恢复中断运行、回填序号、按设置清理）只做一次；
-   * 归档设置从设置文件读取，页面保存后会立即更新策略并再扫一次。
+   * 存储初始化（建目录、回填序号、按设置清理）只做一次；随后由观察者恢复上次
+   * 进程留下的未完成运行。归档设置从设置文件读取，页面保存后会立即更新策略
+   * 并再扫一次。
    */
   let ready
   function ensureReady() {
@@ -218,26 +302,16 @@ export function apply(ctx, config) {
       store.setRetention(settings.archive)
       await store.init()
       startSweeper()
+      const existing = ctx.get('bukaRobots')
+      if (existing !== undefined && existing !== null) supervisor.attachRobots(existing)
+      await supervisor.resumeAll()
     })()
     return ready
   }
-  // 插件加载后就开始巡检，不必等到第一次打开页面或调用工具。
+  // 插件加载后就开始巡检与恢复，不必等到第一次打开页面或调用工具。
   void ensureReady().catch((error) => {
     ctx.logger?.warn?.(`buka-workflows: 初始化运行记录失败：${describeError(error)}`)
   })
-
-  /** 进行中的后台运行：runId → 取消控制器。 */
-  /** @type {Map<string, AbortController>} */
-  const liveRuns = new Map()
-
-  // 插件被卸载 / 热重载时把还在跑的后台运行停掉，避免孤儿 node 会话。
-  ctx.effect(
-    () => () => {
-      for (const controller of liveRuns.values()) controller.abort('buka-workflows: plugin disposed')
-      liveRuns.clear()
-    },
-    'buka-workflows: cancel live runs',
-  )
 
   /**
    * 判定某个 agent 能否看到 / 调用工作流工具。
@@ -260,7 +334,7 @@ export function apply(ctx, config) {
   const visibleWhen = (context) => accessOf(context?.agent).visible
 
   /**
-   * 调用时兜底再校验一次：即便绕过 `when` 直接调用也要被挡住。
+   * 调用时兜底再校验一次：即便绕过可见性判断直接调用也要被挡住。
    *
    * @param {{ id?: string } | null | undefined} agent
    * @returns {{ visible: boolean, preset: string | null, reason: string }}
@@ -271,13 +345,6 @@ export function apply(ctx, config) {
     throw new Error(
       `workflow tools are only available to the ${options.orchestratorPresets.join(' / ')} preset (reason: ${access.reason})`,
     )
-  }
-
-  /** 运行参数：节点超时、落盘上限与机器人节点使用的 preset。 */
-  const runOptions = {
-    nodeTimeoutMs: options.nodeTimeoutMs,
-    maxNodeTextBytes: options.maxNodeTextBytes,
-    robotPreset: options.robotPreset,
   }
 
   ctx.tools.register(
@@ -362,7 +429,7 @@ export function apply(ctx, config) {
             mode: {
               type: 'string',
               required: true,
-              description: "'background' when the engine keeps scheduling node sessions after this call returns; 'foreground' when the call waited for a terminal state.",
+              description: "'background' when the observer keeps scheduling node sessions after this call returns; 'foreground' when the call waited for a terminal state.",
             },
           },
         },
@@ -384,9 +451,12 @@ export function apply(ctx, config) {
 
         const robots = ctx.get('bukaRobots')
         const needsRobots = parsed.plan.order.some((id) => parsed.plan.nodes[id].type === 'robot')
-        if (needsRobots && (robots === undefined || robots === null)) {
+        if (
+          needsRobots &&
+          (robots === undefined || robots === null || typeof robots.dispatchSession !== 'function')
+        ) {
           throw new Error(
-            'robot nodes need the Buka Robots service (ctx.bukaRobots); install and enable @buka/dsh-plugin-robots first',
+            'robot nodes need a Buka Robots service with dispatchSession(); install or update @buka/dsh-plugin-robots first',
           )
         }
         const approval = ctx.get('approval')
@@ -397,19 +467,16 @@ export function apply(ctx, config) {
 
         await ensureReady()
 
-        // gate 节点要弹原生审批，而审批要求会话里有活跃的 turn：这种定义只能
-        // 在本次调用内跑完。其余定义交给后台，调用立即返回 runId。
+        // 观察者接管执行：gate 节点要弹原生审批，而审批要求会话里有活跃的
+        // turn，所以含 gate 的定义只能前台跑完；其余定义在第一个节点 dispatch
+        // 后立刻返回 runId，后续由观察者按会话事件推进。
         if (needsApproval) {
-          const run = await runWorkflow({
+          const run = await supervisor.start({
             plan: parsed.plan,
             definition: args.definition,
-            store,
-            robots,
-            approval,
             agent,
+            mode: 'foreground',
             signal: exec.signal,
-            options: runOptions,
-            logger: ctx.logger,
           })
           return {
             run,
@@ -419,52 +486,19 @@ export function apply(ctx, config) {
           }
         }
 
-        const controller = new AbortController()
-        /** @type {string} */
-        let runId = ''
-        /** @type {unknown} */
-        let startError
-        /** @type {((runId: string) => void) | undefined} */
-        let resolveCreated
-        const created = new Promise((resolve) => {
-          resolveCreated = resolve
-        })
-        const settled = runWorkflow({
+        const started = await supervisor.start({
           plan: parsed.plan,
           definition: args.definition,
-          store,
-          robots,
-          approval,
           agent,
-          signal: controller.signal,
-          options: runOptions,
-          onRunCreated: (id) => {
-            runId = id
-            liveRuns.set(id, controller)
-            resolveCreated?.(id)
-          },
-          logger: ctx.logger,
+          mode: 'background',
         })
-        settled
-          .catch((error) => {
-            startError = error
-            ctx.logger?.warn?.(`buka-workflows: background run failed: ${describeError(error)}`)
-          })
-          .finally(() => {
-            if (runId !== '') liveRuns.delete(runId)
-          })
-
-        const started = await Promise.race([created, settled.then(() => null, () => null)])
-        if (started === null || runId === '') {
-          throw new Error(
-            `workflow failed to start${startError === undefined ? '' : `: ${describeError(startError)}`}`,
-          )
-        }
+        const runId = typeof started?.runId === 'string' ? started.runId : ''
+        if (runId === '') throw new Error('workflow failed to start')
         const createdRun = await store.readRun(runId)
         return {
           run: null,
           runId,
-          seq: Number.isInteger(createdRun?.seq) ? createdRun.seq : 0,
+          seq: Number.isInteger(createdRun?.seq) ? createdRun.seq : started.seq,
           mode: 'background',
         }
       },
@@ -532,16 +566,30 @@ export function apply(ctx, config) {
         const runId = typeof args.run_id === 'string' ? args.run_id.trim() : ''
         if (runId === '') throw new Error('run_id is required')
         await ensureReady()
-        const controller = liveRuns.get(runId)
-        if (controller !== undefined) {
-          controller.abort('cancelled by the workflow orchestrator')
-          return { cancelled: true, run: await store.readRun(runId) }
-        }
-        return { cancelled: false, run: await store.readRun(runId) }
+        const cancelled = await supervisor.cancel(runId, 'cancelled by the workflow orchestrator')
+        return { cancelled, run: await store.readRun(runId) }
       },
     }),
     { when: visibleWhen },
   )
+
+  // ---- 机器人节点会话里的只读观测工具 -----------------------------------
+  //
+  // 四个工具全局注册，但只对运行记录里出现过的机器人会话可见。会话索引在插件
+  // 启动时从 run.steps / run.sessions 重建，所以运行结束或 DSH 重启后重新打开
+  // 机器人会话时工具仍在；手动机器人会话不属于任何运行，看不到它们。
+  const sessionTools = createWorkflowSessionTools({
+    defineTool,
+    store,
+    resolveSession: (sessionId) => supervisor.sessionRun(sessionId),
+  })
+  const sessionToolVisibleWhen = createSessionToolVisibility({
+    ensureIndex: () => supervisor.ensureSessionIndex(),
+    resolveSession: (sessionId) => supervisor.sessionRun(sessionId),
+  })
+  for (const tool of sessionTools) {
+    ctx.tools.register(tool, { when: sessionToolVisibleWhen })
+  }
 
   // ---- 浏览器一半的路由 ----------------------------------------------------
   //
@@ -714,14 +762,92 @@ export function apply(ctx, config) {
         }),
       `buka-workflows: GET ${RUN_ROUTE}`,
     )
+
+    // 附件下载：只读、只允许清单里的文件。参数非法或文件已删除时返回 404，
+    // 不把 runs 目录里的其它文件暴露出去。
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ATTACHMENT_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'GET') {
+              sendMethodNotAllowed(res, 'GET')
+              return
+            }
+            const params = requestUrl(req).searchParams
+            const runId = (params.get('runId') ?? '').trim()
+            const nodeId = (params.get('nodeId') ?? '').trim()
+            const name = params.get('name') ?? ''
+            const seq = Number.parseInt(params.get('seq') ?? '', 10)
+            if (runId === '' || nodeId === '' || name === '') {
+              sendError(res, 400, 'invalid-attachment', 'runId, seq, nodeId and name are required')
+              return
+            }
+            if (!Number.isInteger(seq) || seq <= 0) {
+              sendError(res, 400, 'invalid-seq', 'seq must be a positive integer')
+              return
+            }
+            if (runId === '.' || runId === '..' || runId.includes('/') || runId.includes('\\')) {
+              sendError(res, 400, 'invalid-run-id', 'runId must be a single path segment')
+              return
+            }
+            try {
+              await ensureReady()
+              let attachment = null
+              try {
+                attachment = await store.openAttachment(runId, seq, nodeId, name)
+              } catch {
+                attachment = null
+              }
+              if (attachment === null) {
+                sendError(res, 404, 'not-found', 'attachment not found')
+                return
+              }
+              res.statusCode = 200
+              res.setHeader('content-type', 'application/octet-stream')
+              res.setHeader('content-length', String(attachment.bytes))
+              res.setHeader('content-disposition', attachmentDisposition(attachment.name))
+              res.setHeader('x-content-type-options', 'nosniff')
+              res.setHeader('cache-control', 'no-store')
+              const stream = createReadStream(attachment.path)
+              res.on('close', () => stream.destroy())
+              stream.on('error', (error) => {
+                webCtx.logger?.warn?.('buka-workflows: 读取附件失败：%s', describeError(error))
+                if (!res.headersSent) sendError(res, 500, 'read-failed', 'attachment could not be read')
+                else res.destroy(error)
+              })
+              stream.pipe(res)
+            } catch (error) {
+              webCtx.logger?.warn?.('buka-workflows: 下载附件失败：%s', describeError(error))
+              if (!res.headersSent) sendError(res, 500, 'read-failed', `attachment could not be read: ${describeError(error)}`)
+              else res.destroy(error)
+            }
+          },
+        }),
+      `buka-workflows: GET ${ATTACHMENT_ROUTE}`,
+    )
   })
+}
+
+/**
+ * 附件的下载头：ASCII 回退 + 完整 UTF-8 文件名。
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function attachmentDisposition(name) {
+  const ascii = name.replace(/[^\x20-\x7e]/gu, '_').replace(/["\\]/gu, '_')
+  const encoded = encodeURIComponent(name).replace(/'/gu, '%27')
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`
 }
 
 /**
  * 合并配置与默认值，并解析 runs 目录。
  *
- * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number, orchestratorPresets?: string[], robotPreset?: string } | undefined} config
- * @returns {{ runsDir: string, maxRuns: number, nodeTimeoutMs: number, maxSteps: number, maxNodeTextBytes: number, orchestratorPresets: string[], robotPreset: string }}
+ * @param {{ runsDir?: string, maxRuns?: number, nodeTimeoutMs?: number, maxSteps?: number, maxNodeTextBytes?: number, maxAttachmentBytes?: number, maxAttachmentsPerNode?: number, maxNodeAttachmentsBytes?: number, maxInlineAttachmentBytes?: number, orchestratorPresets?: string[], robotPreset?: string } | undefined} config
+ * @returns {{ runsDir: string, maxRuns: number, nodeTimeoutMs: number, maxSteps: number, maxNodeTextBytes: number, maxAttachmentBytes: number, maxAttachmentsPerNode: number, maxNodeAttachmentsBytes: number, maxInlineAttachmentBytes: number, orchestratorPresets: string[], robotPreset: string }}
  */
 function resolveOptions(config) {
   const orchestratorPresets = Array.isArray(config?.orchestratorPresets)
@@ -734,6 +860,13 @@ function resolveOptions(config) {
     nodeTimeoutMs: positive(config?.nodeTimeoutMs) ?? DEFAULTS.nodeTimeoutMs,
     maxSteps: positive(config?.maxSteps) ?? DEFAULTS.maxSteps,
     maxNodeTextBytes: positive(config?.maxNodeTextBytes) ?? DEFAULTS.maxNodeTextBytes,
+    maxAttachmentBytes: positive(config?.maxAttachmentBytes) ?? DEFAULTS.maxAttachmentBytes,
+    maxAttachmentsPerNode:
+      positive(config?.maxAttachmentsPerNode) ?? DEFAULTS.maxAttachmentsPerNode,
+    maxNodeAttachmentsBytes:
+      positive(config?.maxNodeAttachmentsBytes) ?? DEFAULTS.maxNodeAttachmentsBytes,
+    maxInlineAttachmentBytes:
+      positive(config?.maxInlineAttachmentBytes) ?? DEFAULTS.maxInlineAttachmentBytes,
     orchestratorPresets,
     robotPreset: robotPreset === '' ? DEFAULTS.robotPreset : robotPreset,
   }
@@ -851,7 +984,12 @@ export function renderRun(run) {
     const robot = typeof step.robot === 'string' && step.robot !== '' ? ` robot=${step.robot}` : ''
     const session = typeof step.sessionId === 'string' && step.sessionId !== '' ? ` session=${step.sessionId}` : ''
     const reason = typeof step.stopReason === 'string' ? ` (${step.stopReason})` : ''
-    lines.push(`- ${step.nodeId} [${step.type}${robot}] ${step.status}${reason}${session}`)
+    const route = typeof step.route === 'string' && step.route !== '' ? ` route=${step.route}` : ''
+    const attachments =
+      Array.isArray(step.attachments) && step.attachments.length > 0
+        ? ` attachments=${step.attachments.length}`
+        : ''
+    lines.push(`- ${step.nodeId} [${step.type}${robot}] ${step.status}${reason}${route}${attachments}${session}`)
   }
   if (run.result !== null && run.result !== undefined) {
     lines.push(`result: ${JSON.stringify(run.result)}`)
@@ -859,6 +997,18 @@ export function renderRun(run) {
   if (typeof run.error === 'string' && run.error !== '') lines.push(`error: ${run.error}`)
   if (run.pendingGate !== null && run.pendingGate !== undefined) {
     lines.push(`waiting at gate: ${run.pendingGate.title ?? run.pendingGate.nodeId}`)
+  }
+  const pending = run.pendingInteraction
+  if (pending !== null && pending !== undefined) {
+    const session = typeof pending.sessionId === 'string' ? ` in session ${pending.sessionId}` : ''
+    if (pending.kind === 'approval') {
+      const reason = typeof pending.reason === 'string' && pending.reason !== '' ? `: ${pending.reason}` : ''
+      lines.push(`waiting for the user to approve ${pending.toolName ?? 'a tool'}${session}${reason}`)
+    } else {
+      const first = Array.isArray(pending.questions) ? pending.questions[0] : null
+      const text = first === null || first === undefined ? '' : first.question || first.header || ''
+      lines.push(`waiting for the user to answer${session}${text === '' ? '' : `: ${text}`}`)
+    }
   }
   return lines.join('\n')
 }
@@ -874,7 +1024,7 @@ export function renderStart(value) {
     const label = Number.isInteger(value?.seq) && value.seq > 0 ? `#${value.seq} ` : ''
     return [
       `workflow ${label}${value.runId} started in the background`,
-      'the engine keeps scheduling node sessions; follow it with buka_workflow_status or the sidebar page',
+      'the host observer keeps scheduling node sessions; follow it with buka_workflow_status or the sidebar page',
     ].join('\n')
   }
   return renderRun(value?.run ?? null)
@@ -905,7 +1055,8 @@ export function renderStatus(value) {
   const lines = ['recent workflow runs:']
   for (const run of runs) {
     const finished = run.finishedAt === null || run.finishedAt === undefined ? 'running' : new Date(run.finishedAt).toISOString()
-    lines.push(`- ${runSeqLabel(run)}${run.runId} ${run.status} (${finished})${run.goal ? ` — ${run.goal}` : ''}`)
+    const waiting = run.waitingForUser === true ? ' · waiting for user' : ''
+    lines.push(`- ${runSeqLabel(run)}${run.runId} ${run.status}${waiting} (${finished})${run.goal ? ` — ${run.goal}` : ''}`)
   }
   return lines.join('\n')
 }

@@ -8,7 +8,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { validateDefinition } from '../plugins/workflows/lib/definition.js'
 import {
   LANE_GAP,
   RAIL_BASE,
@@ -20,15 +19,28 @@ import {
 } from '../plugins/workflows/lib/graph.js'
 
 /**
- * 校验一份定义，返回可以直接喂给图模型的定义快照。
+ * 手工构造落盘的定义快照（不经过 definition.js 校验）。
+ *
+ * 图模型读的就是运行目录里保存的快照；这里只关心节点与出边形状，避免把图模型
+ * 测试和 definition.js 的校验规则演进绑在一起。
  *
  * @param {Record<string, any>} raw
  * @returns {{ plan: Record<string, any>, definition: Record<string, any> }}
  */
 function snapshot(raw) {
-  const parsed = validateDefinition(raw)
-  assert.equal(parsed.ok, true, `definition should be valid: ${JSON.stringify(parsed.errors)}`)
-  return { plan: parsed.plan, definition: raw }
+  const nodes = Array.isArray(raw?.nodes) ? raw.nodes : []
+  const ids = nodes.map((node) => node.id)
+  const startNode = nodes.find((node) => node?.type === 'start')
+  return {
+    plan: {
+      goal: typeof raw?.goal === 'string' ? raw.goal : '',
+      start: typeof raw?.start === 'string' && raw.start !== '' ? raw.start : (startNode?.id ?? ids[0] ?? ''),
+      maxSteps: Number.isInteger(raw?.maxSteps) ? raw.maxSteps : 64,
+      nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
+      order: ids,
+    },
+    definition: raw,
+  }
 }
 
 /**
@@ -91,6 +103,7 @@ test('graph: linear run marks the reached end node and the traversed edge', () =
   assert.equal(work.task, 'do it')
   assert.equal(work.summary, '写一份草稿')
   assert.equal(work.outputText, 'DONE')
+  assert.equal('report' in work, false, 'format 2 removed report; the node model has no such field')
 
   const end = graph.nodes.find((node) => node.id === 'end')
   assert.equal(end.state, 'completed')
@@ -168,7 +181,7 @@ test('graph: robot nodes carry the avatar from the robots avatar map', () => {
   for (const node of bare.nodes) assert.equal(node.avatar, null)
 })
 
-test('graph: conditional routing highlights only the taken branch', () => {
+test('graph: routing highlights only the taken branch', () => {
   const definition = snapshot({
     start: 'work',
     nodes: [
@@ -177,10 +190,9 @@ test('graph: conditional routing highlights only the taken branch', () => {
         type: 'robot',
         robot: 'writer',
         prompt: 'route me',
-        report: true,
         next: [
-          { when: { field: 'status', equals: 'ok' }, to: 'ok_end' },
-          { to: 'bad_end' },
+          { to: 'ok_end', name: 'ok' },
+          { to: 'bad_end', name: 'bad' },
         ],
       },
       { id: 'ok_end', type: 'end', status: 'completed' },
@@ -192,16 +204,19 @@ test('graph: conditional routing highlights only the taken branch', () => {
     status: 'completed',
     current: null,
     pendingGate: null,
-    steps: [{ seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 }],
+    steps: [
+      { seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, route: 'ok', routeTo: 'ok_end' },
+    ],
     result: { status: 'completed', lastNode: 'ok_end' },
   }
 
   const graph = buildRunGraph({ run, definition })
   assert.ok(graph)
-  assert.equal(edgeOf(graph.edges, 'work', 'ok_end').traversed, true)
+  const taken = edgeOf(graph.edges, 'work', 'ok_end')
+  assert.equal(taken.traversed, true)
+  assert.deepEqual(taken.names, ['ok'], 'the edge name is the format-2 route key')
+  assert.equal('when' in taken, false, 'route conditions are gone in format 2')
   assert.equal(edgeOf(graph.edges, 'work', 'bad_end').traversed, false)
-  assert.deepEqual(edgeOf(graph.edges, 'work', 'ok_end').when, { field: 'status', equals: 'ok' })
-  assert.equal(edgeOf(graph.edges, 'work', 'bad_end').when, null)
 
   assert.equal(graph.nodes.find((node) => node.id === 'ok_end').state, 'completed')
   assert.equal(graph.nodes.find((node) => node.id === 'bad_end').state, 'idle')
@@ -468,13 +483,12 @@ test('graph: a loop run counts revisits and marks the back edge', () => {
         type: 'robot',
         robot: 'reviewer',
         prompt: '检查当前稿',
-        report: true,
         maxVisits: 5,
         next: [
-          { when: { field: 'ok', equals: true }, to: 'done' },
-          // 一条不会命中的条件出口：skip 是可达分支，只是这次没走到。
-          { when: { field: 'ok', equals: 'audit' }, to: 'skip' },
-          { to: 'fix' },
+          { to: 'done', name: '检查通过' },
+          // 一条这次没走到的分支：skip 是可达出口，只是这次没走。
+          { to: 'skip', name: '转人工审计' },
+          { to: 'fix', name: '发现问题' },
         ],
       },
       { id: 'fix', type: 'robot', robot: 'fixer', prompt: '修复问题', next: 'check' },
@@ -541,7 +555,8 @@ test('graph: a loop run counts revisits and marks the back edge', () => {
   assert.equal(back.traversed, true)
   assert.equal(back.loop, true)
   const toDone = edgeOf(graph.edges, 'check', 'done')
-  assert.equal(toDone.rules, 1)
+  assert.deepEqual(toDone.names, ['检查通过'])
+  assert.equal('rules' in toDone, false, 'format 2 dropped rule counters')
   assert.equal(toDone.traversals, 1)
   const untouched = edgeOf(graph.edges, 'skip', 'done')
   assert.equal(untouched.traversals, 0)
@@ -573,7 +588,7 @@ test('graph: a loop run counts revisits and marks the back edge', () => {
   assertNoCrossings(layout)
 })
 
-test('graph: rules pointing at the same target merge into one drawn edge', () => {
+test('graph: several named edges pointing at the same target merge into one drawn edge', () => {
   const definition = snapshot({
     start: 'check',
     nodes: [
@@ -582,11 +597,10 @@ test('graph: rules pointing at the same target merge into one drawn edge', () =>
         type: 'robot',
         robot: 'reviewer',
         prompt: '检查',
-        report: true,
         next: [
-          { when: { field: 'ok', equals: true }, to: 'done' },
-          { when: { field: 'step', equals: 5 }, to: 'done' },
-          { to: 'fix' },
+          { to: 'done', name: '通过' },
+          { to: 'done', name: '已是最新' },
+          { to: 'fix', name: '修复' },
         ],
       },
       { id: 'fix', type: 'robot', robot: 'fixer', prompt: '修复', next: 'check' },
@@ -608,15 +622,12 @@ test('graph: rules pointing at the same target merge into one drawn edge', () =>
   })
   assert.ok(graph)
   const toDone = edgeOf(graph.edges, 'check', 'done')
-  assert.equal(toDone.rules, 2, 'two rules with the same target become one edge')
-  assert.deepEqual(toDone.whens, [
-    { field: 'ok', equals: true },
-    { field: 'step', equals: 5 },
-  ])
-  assert.equal(toDone.hasDefault, false)
+  assert.deepEqual(toDone.names, ['通过', '已是最新'], 'two rules with the same target become one edge')
+  assert.equal('rules' in toDone, false)
+  assert.equal('whens' in toDone, false)
+  assert.equal('hasDefault' in toDone, false)
   const toFix = edgeOf(graph.edges, 'check', 'fix')
-  assert.equal(toFix.rules, 1)
-  assert.equal(toFix.hasDefault, true, 'the rule without a condition is the default branch')
+  assert.deepEqual(toFix.names, ['修复'])
   assert.equal(graph.edges.filter((edge) => edge.from === 'check').length, 2, 'one line per target')
 })
 
@@ -722,11 +733,10 @@ test('graph: nested arcs never cross on a loop run', () => {
         type: 'robot',
         robot: 'reviewer',
         prompt: '检查',
-        report: true,
         next: [
-          { when: { field: 'ok', equals: true }, to: 'done' },
-          { when: { field: 'step', equals: 9 }, to: 'audit' },
-          { to: 'fix' },
+          { to: 'done', name: '通过' },
+          { to: 'audit', name: '转审计' },
+          { to: 'fix', name: '修复' },
         ],
       },
       { id: 'fix', type: 'robot', robot: 'fixer', prompt: '修复', next: 'check' },
@@ -795,14 +805,13 @@ test('graph: edges carry their names, merging rules to one target', () => {
         robot: 'worker',
         prompt: 'go',
         next: [
-          { when: { field: 'x', equals: 1 }, to: 'b', name: '快路径' },
-          { when: { field: 'x', equals: 2 }, to: 'b', name: '慢路径' },
-          { to: 'c', name: '  ' },
+          { to: 'b', name: '快路径' },
+          { to: 'b', name: '慢路径' },
+          { to: 'gate', name: '去确认' },
         ],
       },
       { id: 'b', type: 'robot', robot: 'worker', prompt: 'b', next: 'gate' },
-      { id: 'c', type: 'robot', robot: 'worker', prompt: 'c', next: 'done' },
-      { id: 'gate', type: 'gate', title: '确认', onApprove: 'done', onReject: 'c' },
+      { id: 'gate', type: 'gate', title: '确认', onApprove: 'done', onReject: 'b' },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   })
@@ -818,10 +827,10 @@ test('graph: edges carry their names, merging rules to one target', () => {
   assert.ok(graph)
   const merged = edgeOf(graph.edges, 'a', 'b')
   assert.deepEqual(merged.names, ['快路径', '慢路径'])
-  assert.equal(merged.rules, 2)
-  assert.deepEqual(edgeOf(graph.edges, 'a', 'c').names, [], 'blank edge names are dropped')
-  // 图模型只保留名字；条件仍是路由数据，不作为「边配置」暴露给悬停。
-  assert.deepEqual(edgeOf(graph.edges, 'a', 'b').whens.length, 2)
+  assert.equal('rules' in merged, false)
+  // 图模型只保留名字与边 prompt；v1 的 when 不再存在。
+  assert.equal('when' in merged, false)
+  assert.equal('whens' in merged, false)
   for (const edge of graph.edges.filter((item) => item.kind !== 'next')) {
     assert.deepEqual(edge.names, [], 'gate edges have no custom name')
   }
@@ -844,9 +853,8 @@ test('graph: a start node is a completed marker, not a step', () => {
         type: 'robot',
         robot: 'tester',
         summary: '检查导出实现',
-        report: true,
         next: [
-          { when: { field: 'passed', equals: false }, to: 'dev', name: '测试打回', prompt: '测试打回：{{nodes.test.text}}' },
+          { to: 'dev', name: '测试打回', prompt: '测试打回：{{nodes.test.text}}' },
           { to: 'done', name: '测试通过' },
         ],
       },

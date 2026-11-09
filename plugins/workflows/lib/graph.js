@@ -10,13 +10,13 @@
  *
  * ```text
  * { start, order, nodes: [{ id, type, state, visits, … }],
- *   edges: [{ from, to, kind, when, whens, names, rules, hasDefault, traversed, traversals, loop }] }
+ *   edges: [{ from, to, kind, names, prompt, traversed, traversals, loop }] }
  * ```
  *
  * - `kind`：`next`（机器人节点的出口）、`approve` / `reject`（门禁的两条出边）；
- * - 同一个「来源 → 目标」只留一条边：多条规则指向同一目标时合并，`rules` 是
- *   规则数、`whens` 是全部条件、`names` 是规则上写的边名字（给页面悬停展示，
- *   去重后按定义顺序），`hasDefault` 表示其中有没有默认出口；
+ * - 同一个「来源 → 目标」只留一条边：多条边指向同一目标时合并，`names` 是边上
+ *   写的名字（给页面悬停展示，去重后按定义顺序），`prompt` 是进入目标节点时要
+ *   发的提示词（取第一条非空值，只作诊断，不在图上渲染）；
  * - `traversed`：这次运行实际走过这条边（按 steps 的先后顺序推出）；
  * - `traversals`：走过这条边的次数（循环时同一对节点会被走多次）；
  * - `loop`：这条边属于环（从目标还能走回来源），是按拓扑算的，和行序无关；
@@ -142,7 +142,6 @@ function normalizeNode(id, raw) {
     node.robot = typeof raw.robot === 'string' ? raw.robot : ''
     node.summary = typeof raw.summary === 'string' ? raw.summary : ''
     node.task = previewLine(raw.prompt, 160)
-    node.report = raw.report === true
     node.next = normalizeNext(raw.next)
     if (Number.isFinite(raw.timeoutMs)) node.timeoutMs = raw.timeoutMs
     if (Number.isFinite(raw.maxVisits)) node.maxVisits = raw.maxVisits
@@ -160,37 +159,41 @@ function normalizeNode(id, raw) {
 }
 
 /**
- * 规范化门禁的一条出边：旧记录里的字符串目标，或新的 `{ to, name }` 对象。
- * 图模型只保留目标与悬停名字，prompt 属于运行配置，不进图。
+ * 规范化门禁的一条出边：旧记录里的字符串目标，或新的 `{ to, name, prompt }` 对象。
+ * 图模型保留目标、悬停名字与边上的 prompt（prompt 只作诊断，不在图上渲染）。
  *
  * @param {unknown} raw
- * @returns {{ to: string, name: string } | null}
+ * @returns {{ to: string, name: string, prompt: string } | null}
  */
 function normalizeGateEdge(raw) {
-  if (typeof raw === 'string' && raw.trim() !== '') return { to: raw.trim(), name: '' }
+  if (typeof raw === 'string' && raw.trim() !== '') return { to: raw.trim(), name: '', prompt: '' }
   if (!isPlainObject(raw)) return null
   const to = typeof raw.to === 'string' ? raw.to.trim() : ''
   if (to === '') return null
-  return { to, name: typeof raw.name === 'string' ? raw.name.trim() : '' }
+  return {
+    to,
+    name: typeof raw.name === 'string' ? raw.name.trim() : '',
+    prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+  }
 }
 
 /**
- * 规范化节点的 `next`：字符串、规则数组或省略。
+ * 规范化节点的 `next`：边对象数组（新格式）或字符串 / 字符串数组（旧记录）。
  *
- * 图模型只保留给观测者看的 `name`；边的 `when` / `prompt` 属于运行配置，详情
- * 面板不展示，也不进入边模型（`when` 只用于判断是否为默认出口）。
+ * 图模型只保留给观测者看的 `name` 与边的 `prompt`；format 2 不再有路由条件，
+ * 这里也不解析。
  *
  * @param {unknown} raw
- * @returns {Array<{ to: string, when: Record<string, any> | null, name: string }>}
+ * @returns {Array<{ to: string, name: string, prompt: string }>}
  */
 function normalizeNext(raw) {
-  if (typeof raw === 'string' && raw.trim() !== '') return [{ to: raw.trim(), when: null, name: '' }]
+  if (typeof raw === 'string' && raw.trim() !== '') return [{ to: raw.trim(), name: '', prompt: '' }]
   if (!Array.isArray(raw)) return []
-  /** @type {Array<{ to: string, when: Record<string, any> | null, name: string }>} */
+  /** @type {Array<{ to: string, name: string, prompt: string }>} */
   const rules = []
   for (const rule of raw) {
     if (typeof rule === 'string' && rule.trim() !== '') {
-      rules.push({ to: rule.trim(), when: null, name: '' })
+      rules.push({ to: rule.trim(), name: '', prompt: '' })
       continue
     }
     if (!isPlainObject(rule)) continue
@@ -198,25 +201,11 @@ function normalizeNext(raw) {
     if (to === '') continue
     rules.push({
       to,
-      when: isPlainObject(rule.when) ? normalizeWhen(rule.when) : null,
       name: typeof rule.name === 'string' ? rule.name.trim() : '',
+      prompt: typeof rule.prompt === 'string' ? rule.prompt : '',
     })
   }
   return rules
-}
-
-/**
- * 规范化一个条件；字段缺失时视为无条件。
- *
- * @param {Record<string, any>} raw
- * @returns {Record<string, any> | null}
- */
-function normalizeWhen(raw) {
-  const field = typeof raw.field === 'string' ? raw.field.trim() : ''
-  if (field === '') return null
-  if (Object.hasOwn(raw, 'in') && Array.isArray(raw.in)) return { field, in: raw.in.slice(0, 32) }
-  if (Object.hasOwn(raw, 'equals')) return { field, equals: raw.equals ?? null }
-  return null
 }
 
 /**
@@ -458,7 +447,6 @@ export function buildRunGraph(input) {
       title: config.type === 'gate' ? config.title : null,
       detail: config.type === 'gate' ? config.detail : null,
       endStatus: config.type === 'end' ? config.endStatus : null,
-      report: config.type === 'robot' ? config.report === true : false,
       timeoutMs: config.type === 'robot' && Number.isFinite(config.timeoutMs) ? config.timeoutMs : null,
       maxVisits: config.type === 'robot' && Number.isFinite(config.maxVisits) ? config.maxVisits : null,
       next: config.type === 'robot' || config.type === 'start' ? config.next : [],
@@ -510,27 +498,26 @@ export function buildRunGraph(input) {
     return reachable.get(to)?.has(from) === true
   }
 
-  // 同一个「来源 → 目标」只画一条线：多条规则指向同一目标时合并，规则数量
-  // 与条件留在 whens / rules 里给详情面板展示，避免图上出现平行的重复连线。
+  // 同一个「来源 → 目标」只画一条线：多条边指向同一目标时合并成一条，名字按
+  // 定义顺序并列，避免图上出现平行的重复连线。
   /** @type {Map<string, Record<string, any>>} */
   const edgesByKey = new Map()
   /**
    * @param {string} from
    * @param {string} to
    * @param {'next' | 'approve' | 'reject'} kind
-   * @param {Record<string, any> | null} when
-   * @param {string} [name] 规则上写的边名字（只有观察用途，不参与路由）
+   * @param {string} [name] 边上写的名字（v2 里是路由键，同时给页面悬停展示）
+   * @param {string} [prompt] 进入目标节点时要发的提示词（只作诊断，不渲染）
    */
-  function pushEdge(from, to, kind, when, name) {
+  function pushEdge(from, to, kind, name, prompt) {
     if (!configs.has(from) || !configs.has(to)) return
     const key = `${from}->${to}#${kind}`
     const edgeName = typeof name === 'string' ? name.trim() : ''
+    const edgePrompt = typeof prompt === 'string' ? prompt : ''
     const existing = edgesByKey.get(key)
     if (existing !== undefined) {
-      existing.rules += 1
-      if (when === null) existing.hasDefault = true
-      else existing.whens.push(when)
       if (edgeName !== '' && !existing.names.includes(edgeName)) existing.names.push(edgeName)
+      if (existing.prompt === '' && edgePrompt !== '') existing.prompt = edgePrompt
       return
     }
     const traversals = pairCounts.get(`${from}->${to}`) ?? 0
@@ -539,11 +526,8 @@ export function buildRunGraph(input) {
       from,
       to,
       kind,
-      when: when ?? null,
-      whens: when === null ? [] : [when],
       names: edgeName === '' ? [] : [edgeName],
-      hasDefault: kind === 'next' && when === null,
-      rules: 1,
+      prompt: edgePrompt,
       traversed: traversals > 0,
       traversals,
       // 循环边：从目标还能走回来源（自环恒成立）。
@@ -552,19 +536,19 @@ export function buildRunGraph(input) {
   }
   if (synthetic) {
     for (let index = 0; index + 1 < order.length; index += 1) {
-      pushEdge(order[index], order[index + 1], 'next', null)
+      pushEdge(order[index], order[index + 1], 'next')
     }
   } else {
     for (const id of order) {
       const config = configs.get(id)
       if (config.type === 'robot' || config.type === 'start') {
-        for (const rule of config.next) pushEdge(id, rule.to, 'next', rule.when, rule.name)
+        for (const rule of config.next) pushEdge(id, rule.to, 'next', rule.name, rule.prompt)
       } else if (config.type === 'gate') {
         if (config.onApprove !== null) {
-          pushEdge(id, config.onApprove.to, 'approve', null, config.onApprove.name)
+          pushEdge(id, config.onApprove.to, 'approve', config.onApprove.name, config.onApprove.prompt)
         }
         if (config.onReject !== null) {
-          pushEdge(id, config.onReject.to, 'reject', null, config.onReject.name)
+          pushEdge(id, config.onReject.to, 'reject', config.onReject.name, config.onReject.prompt)
         }
       }
     }

@@ -1,12 +1,17 @@
 # `@buka/dsh-plugin-workflows` 的 bundle 层。
 #
 # 两条 insert：
-# - `tool-buka-workflows`：Host 一半注册工作流工具（只对编排 preset 的根会话
-#   可见，见 Config.orchestratorPresets），并按定义调度机器人会话与门禁；
-#   浏览器一半把只读的「工作流」页面注册进侧边栏。
-# - `preset-workflow-orchestrator`：随插件发布的编排 preset。工作流工具默认
-#   只对这个 preset 可见；机器人节点会话由插件显式落到普通工作 preset
-#   （Config.robotPreset，默认 standard），不继承这里的 persona 与工具集。
+# - `tool-buka-workflows`：Host 一半注册工作流工具（创建 / 启动 / 状态 / 取消
+#   只对编排 preset 的根会话可见，见 Config.orchestratorPresets；四个只读观测
+#   工具（总览 / 输入 / 输出与附件清单 / 附件读取）只对运行记录里的机器人会话
+#   可见）；后台运行由 Host 侧的
+#   WorkflowSupervisor 订阅全局会话事件继续调度（默认不设节点超时，会话中断会
+#   续接，插件重新加载时恢复未完成的运行），含门禁的定义仍在调用内跑完；浏览器
+#   一半把只读的「工作流」页面注册进侧边栏。
+# - `preset-workflow-orchestrator`：随插件发布的编排 preset。创建类工作流工具
+#   默认只对这个 preset 可见；机器人节点会话由插件显式落到普通工作 preset
+#   （Config.robotPreset，默认 standard），不继承这里的 persona 与工具集，但会
+#   获得四个只读观测工具（总览 / 执行输入 / 执行输出与附件清单 / 附件读取）。
 #
 # 跨插件依赖只走服务（ctx.bukaRobots），不在补丁层里声明。
 - insert:
@@ -27,9 +32,13 @@
               prefix: |
                 You are a workflow orchestrator. Your job is to turn the user's one-off request into a node graph of independent robot sessions and then run it — not to do the work yourself.
 
-                Read the task, call buka_robots to learn which robots exist — each robot reports a one-sentence description of what it does and when to use it; pick the robots whose responsibilities fit the nodes, never invent a robot name, and do not reuse a robot for a job its responsibility does not cover. If no registered robot fits a node and buka_robots() lists 通用型机器人, use that as a last resort — it runs in this workflow's workspace in standard mode. Then design the graph, validate it with buka_workflow_plan, and start it with buka_workflow_start. Each robot keeps one session for the whole run: later entries into the same robot reuse it, compacting its history before sending the new edge prompt. The robot must complete its part itself; gate nodes are checkpoints where the user decides, and a rejection can jump to another node or end the run.
+                Read the task, call buka_robots to learn which robots exist — each robot reports a one-sentence description of what it does and when to use it; pick the robots whose responsibilities fit the nodes, never invent a robot name, and do not reuse a robot for a job its responsibility does not cover. If no registered robot fits a node and buka_robots() lists 通用型机器人, use that as a last resort — it runs in this workflow's workspace in standard mode. Then design the graph, validate it with buka_workflow_plan, and start it with buka_workflow_start. Each robot keeps one session for the whole run: later entries into the same robot reuse it, compacting its history before sending the new edge prompt.
 
-                Do not implement the task in this conversation and do not start a workflow the user did not ask for. Follow the tool descriptions for the definition format, and prefer a small graph whose prompts live on the edges: the start node's edge supplies the first robot prompt, and every edge entering a robot node carries that entry's prompt (so a test failure can send the same developer node back with a different instruction).
+                Every robot node must return a JSON object. When a robot node has outgoing edges, the JSON must include "next" with the name of exactly one outgoing edge; the engine follows that edge and its prompt automatically, so there is no "when" condition and no extra judging agent. Terminal robot nodes still return JSON but no next. Give every edge leaving a robot node a unique "name" (the route key) and a "prompt"; write the robot prompt so it states the task, the required JSON fields, and what each next value means. Prefer a small graph whose prompts live on the edges: the start node's edge supplies the first robot prompt, and every edge entering a robot node carries that entry's prompt (so a test failure can send the same developer node back with a different instruction). Gate nodes are user checkpoints; a rejection can jump to another node or end the run. Loops are allowed, bounded by maxSteps and per-node maxVisits.
+
+                Robots are normal sessions: do not put behavior rules into prompts (do not tell them to ask questions, request approvals, avoid approval, or report "blocked"). They can ask the user or request tool approvals themselves when the task requires it; those interactions happen inside the robot session and appear on the run page, so just give them the task, the output contract and the meaning of each path.
+
+                Do not implement the task in this conversation and do not start a workflow the user did not ask for. Follow the tool descriptions for the definition format.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:

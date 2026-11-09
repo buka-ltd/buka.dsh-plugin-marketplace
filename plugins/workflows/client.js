@@ -7,11 +7,11 @@
  *
  * - 列表：最近运行的状态、目标、runId、开始时间；
  * - 详情：纵向节点图 + 右侧节点详情；节点详情按「第几次执行」拆成 Tab，每个
- *   Tab 只放那一次的输入（渲染后的提示词）与输出（交付物、结构化数据、会话）；
+ *   Tab 只放那一次的输入（渲染后的提示词）与输出（交付物、附件下载、结构化数据、会话）；
  * - 每个节点可以「打开会话」，复用 DSH 的 `uiWorkspace.openSession(sessionId)`。
  *
  * 运行记录由 Host 的 `/buka-workflows/runs` 与 `/buka-workflows/run` 两条只读
- * 路由提供；有运行在跑时每 1.5 秒刷新一次（否则 5 秒），后台运行也能看到进度。
+ * 路由提供，附件下载走 `/buka-workflows/attachment`；有运行在跑时每 1.5 秒刷新一次（否则 5 秒），后台运行也能看到进度。
  *
  * 客户端模块格式固定为 `window.__ModuleLoader__.load({ id, factory })`，
  * `id` 必须等于包名。工厂函数顶层只有纯声明；所有副作用都在 `apply(ctx)` 里。
@@ -107,8 +107,17 @@ window.__ModuleLoader__.load({
       openSessionFailed: 'Could not open the node session:',
       noUiWorkspace: 'This client has no uiWorkspace service, so the node session cannot be opened.',
       nodeSession: 'Robot session',
+      nodeSessionsLegacy:
+        'This node ran in more than one session (only in an older record); open the one you need.',
+      waitingForAnswer: 'A robot is waiting for your answer',
+      waitingForApproval: 'A robot is waiting for your approval',
+      openAnswerSession: 'Open session to answer',
+      openApprovalSession: 'Open session to approve',
+      waitingForUser: 'Waiting for you',
       sessionLive: 'Current session',
       sessionCompacted: 'History compacted',
+      sessionRecovering: 'Recovering (attempt {n})',
+      sessionRecovered: 'Recovered',
       sessionCompactFailed: 'History compaction failed; the prompt was sent without it:',
       sessionReset: 'Could not resume the old session, so a new one was started:',
       unknown: 'Unknown',
@@ -151,8 +160,16 @@ window.__ModuleLoader__.load({
       execution: 'Execution',
       executionInput: 'Task info',
       executionOutput: 'Output result',
+      executionAttachments: 'Attachments',
+      executionOutputAttachmentsOnly: 'No text output; see the attachments below.',
+      attachmentDownload: 'Download',
+      attachmentCount: '{n} attachments',
+      routeLabel: 'Route',
       executionNoInput: 'This execution recorded no input.',
+      executionInputMissing:
+        'No input was recorded for this execution. Older runs did not persist a per-entry prompt, so the definition template is not shown again.',
       executionNoOutput: 'This execution produced no text deliverable.',
+      executionTimedOut: 'Timed out',
       executionPrev: 'Previous step',
       executionPrevNone: 'This is the first execution in this run.',
       executionNext: 'Next step',
@@ -219,8 +236,16 @@ window.__ModuleLoader__.load({
       openSessionFailed: '打开节点会话失败：',
       noUiWorkspace: '当前客户端没有 uiWorkspace 服务，无法打开节点会话。',
       nodeSession: '机器人会话',
+      nodeSessionsLegacy: '这个节点在多个会话里执行过（仅存在于旧记录）；需要看哪次就打开哪个会话。',
+      waitingForAnswer: '机器人正在等待你回答',
+      waitingForApproval: '机器人正在等待你批准',
+      openAnswerSession: '打开会话回答',
+      openApprovalSession: '打开会话审批',
+      waitingForUser: '等待用户',
       sessionLive: '当前会话',
       sessionCompacted: '已压缩历史',
+      sessionRecovering: '恢复中（第 {n} 次）',
+      sessionRecovered: '已恢复',
       sessionCompactFailed: '历史压缩失败，已直接继续：',
       sessionReset: '旧会话无法续接，已新建会话：',
       unknown: '未知',
@@ -263,8 +288,15 @@ window.__ModuleLoader__.load({
       execution: '执行',
       executionInput: '任务信息',
       executionOutput: '输出结果',
+      executionAttachments: '附件',
+      executionOutputAttachmentsOnly: '这次执行没有文本输出，请查看下面的附件。',
+      attachmentDownload: '下载',
+      attachmentCount: '{n} 个附件',
+      routeLabel: '路由',
       executionNoInput: '这次执行没有记录输入。',
+      executionInputMissing: '这次执行没有记录输入；旧运行没有按次落盘提示词，所以这里不重复展示定义里的模板。',
       executionNoOutput: '这次执行没有文本交付物。',
+      executionTimedOut: '超时',
       executionPrev: '上一步',
       executionPrevNone: '这是本次运行的第一次执行。',
       executionNext: '下一步',
@@ -440,6 +472,14 @@ window.__ModuleLoader__.load({
 .buka-workflows-inspectorId{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-markdown-code-block);border-radius:var(--dsw-radius-sm);padding:1px 5px;overflow-wrap:anywhere}
 .buka-workflows-inspectorClose{margin-left:auto}
 .buka-workflows-inspectorSection{display:flex;flex-direction:column;gap:8px}
+.buka-workflows-attachmentList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.buka-workflows-attachment{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-size:12px;line-height:18px}
+.buka-workflows-attachmentLink{color:var(--dsw-alias-brand-primary);text-decoration:none;font-family:var(--ds-font-family-code);font-size:11px;overflow-wrap:anywhere}
+.buka-workflows-attachmentLink:hover{text-decoration:underline}
+.buka-workflows-attachmentMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:none}
+.buka-workflows-attachmentDescription{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:1;min-width:120px}
+.buka-workflows-attachmentDownload{margin-left:auto;color:var(--dsw-alias-brand-primary);text-decoration:none;font-size:11px;flex:none}
+.buka-workflows-attachmentDownload:hover{text-decoration:underline}
 .buka-workflows-executions{display:flex;flex-direction:column;gap:12px}
 .buka-workflows-tabs{display:flex;flex-wrap:wrap;gap:6px}
 .buka-workflows-tab{display:inline-flex;align-items:center;gap:6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;padding:2px 10px;cursor:pointer}
@@ -457,6 +497,13 @@ window.__ModuleLoader__.load({
 .buka-workflows-kvRow{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:12px;line-height:18px}
 .buka-workflows-sessionBar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
 .buka-workflows-sessionBar .buka-workflows-inlineCode{font-size:12px}
+.buka-workflows-sessionList{display:flex;flex-direction:column;gap:6px;width:100%;min-width:0}
+.buka-workflows-sessionRow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+.buka-workflows-interactionNotice{display:flex;flex-direction:column;gap:8px;box-sizing:border-box;width:100%;padding:12px 14px;border:0.5px solid var(--dsw-alias-state-warn-primary);border-left:3px solid var(--dsw-alias-state-warn-primary);border-radius:var(--dsw-radius-md);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
+.buka-workflows-interactionHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+.buka-workflows-interactionTitle{flex:1 1 auto;min-width:0;color:var(--dsw-alias-state-warn-primary);font-size:13px;font-weight:500;line-height:20px;overflow-wrap:anywhere}
+.buka-workflows-interactionBody{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}
+.buka-workflows-interactionActions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .buka-workflows-kvKey{color:var(--dsw-alias-label-tertiary);min-width:72px}
 .buka-workflows-kvValue{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;min-width:0}
 .buka-workflows-executionNav{margin-top:14px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-secondary);display:flex;justify-content:space-between;gap:16px}
@@ -666,6 +713,85 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 字节数 → 简短的附件大小。
+     *
+     * @param {unknown} value
+     * @returns {string}
+     */
+    function formatBytes(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return ''
+      if (value < 1024) return `${value} B`
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
+      if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`
+      return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`
+    }
+
+    /**
+     * 附件下载地址：只用运行 id、执行序号、节点 id 与清单里的文件名。
+     *
+     * @param {Record<string, any> | null} run
+     * @param {Record<string, any>} step
+     * @param {Record<string, any>} attachment
+     * @returns {string}
+     */
+    function attachmentHref(run, step, attachment) {
+      const params = new URLSearchParams({
+        runId: typeof run?.runId === 'string' ? run.runId : '',
+        seq: String(step?.seq ?? ''),
+        nodeId: typeof step?.nodeId === 'string' ? step.nodeId : '',
+        name: typeof attachment?.name === 'string' ? attachment.name : '',
+      })
+      return `/buka-workflows/attachment?${params.toString()}`
+    }
+
+    /**
+     * 附件清单：文件名、大小、描述与下载入口。
+     *
+     * @param {Record<string, any> | null} run
+     * @param {Record<string, any>} step
+     * @param {Array<Record<string, any>>} attachments
+     * @returns {object | null}
+     */
+    function renderAttachments(t, run, step, attachments) {
+      if (!Array.isArray(attachments) || attachments.length === 0) return null
+      return h(
+        'ul',
+        { className: 'buka-workflows-attachmentList' },
+        attachments.map((attachment, index) =>
+          h(
+            'li',
+            {
+              key: `${String(attachment?.index ?? index)}-${String(attachment?.name ?? '')}`,
+              className: 'buka-workflows-attachment',
+            },
+            h(
+              'a',
+              {
+                className: 'buka-workflows-attachmentLink',
+                href: attachmentHref(run, step, attachment),
+                download: typeof attachment?.name === 'string' ? attachment.name : undefined,
+              },
+              h('span', { className: 'buka-workflows-attachmentName' }, String(attachment?.name ?? 'attachment')),
+            ),
+            h('span', { className: 'buka-workflows-attachmentMeta' }, formatBytes(attachment?.bytes)),
+            typeof attachment?.description === 'string' && attachment.description !== ''
+              ? h('span', { className: 'buka-workflows-attachmentDescription' }, attachment.description)
+              : null,
+            h(
+              'a',
+              {
+                className: 'buka-workflows-attachmentDownload',
+                href: attachmentHref(run, step, attachment),
+                download: typeof attachment?.name === 'string' ? attachment.name : undefined,
+              },
+              t('attachmentDownload'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /**
      * 按字符数截断长文本（prompt 可能有 256 KiB，不能整段渲染）。
      *
      * @param {unknown} value
@@ -831,6 +957,54 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一个节点关联的唯一会话 id 列表（按展示顺序）：
+     *
+     * - 运行中 `run.current.sessionId` 排最前（当前会话优先展示）；
+     * - `run.sessions[].entries` 里记录到这个节点的会话（新格式）；
+     * - 旧记录没有逐次进入的 `entries` 时，退回机器人 / 首末节点归属；
+     * - 该节点各次执行自己记下的 `sessionId`。
+     *
+     * 同一个机器人一次运行通常只有一个会话，所以正常情况下列表长度为 1；只有旧记录
+     * 里一个节点在几个会话中执行过，才会出现多项（每一段历史都要有打开入口）。
+     *
+     * @param {Record<string, any>} node 图模型里的节点
+     * @param {Array<Record<string, any>>} nodeSteps 该节点的执行记录
+     * @param {string} liveSession 运行中节点在 `run.current` 上的会话 id（没有则为空串）
+     * @param {Record<string, any> | null} run 运行记录
+     * @returns {string[]}
+     */
+    function collectNodeSessionIds(node, nodeSteps, liveSession, run) {
+      const ids = []
+      const seen = new Set()
+      /** @param {unknown} value */
+      const add = (value) => {
+        if (typeof value !== 'string' || value === '' || seen.has(value)) return
+        seen.add(value)
+        ids.push(value)
+      }
+      add(liveSession)
+      const sessions = Array.isArray(run?.sessions) ? run.sessions : []
+      for (const session of sessions) {
+        if (session === null || typeof session !== 'object') continue
+        const entries = Array.isArray(session.entries) ? session.entries : []
+        let listedHere = false
+        for (const entry of entries) {
+          if (entry === null || typeof entry !== 'object' || entry.nodeId !== node.id) continue
+          listedHere = true
+          add(typeof entry.sessionId === 'string' ? entry.sessionId : session.sessionId)
+        }
+        if (listedHere) continue
+        // 旧记录没有 entries：会话记录按机器人归属，节点本身也按首末节点兜底。
+        const sameRobot =
+          node.type === 'robot' && typeof node.robot === 'string' && node.robot !== '' && session.robot === node.robot
+        const touchesNode = session.firstNodeId === node.id || session.lastNodeId === node.id
+        if (sameRobot || touchesNode) add(session.sessionId)
+      }
+      for (const step of nodeSteps) add(step?.sessionId)
+      return ids
+    }
+
+    /**
      * 一行「键：值」。
      *
      * @param {string} key
@@ -921,8 +1095,8 @@ window.__ModuleLoader__.load({
       const [executionIndex, setExecutionIndex] = React.useState(null)
 
       /**
-       * 鼠标悬停的边名字：`{ key, kind, text, x, y }`。只展示名字，不展示条件 /
-       * 提示词等运行配置——那些信息对观察运行没有帮助。
+       * 鼠标悬停的边名字：`{ key, kind, text, x, y }`。只展示名字，不展示提示词等
+       * 运行配置——那些信息对观察运行没有帮助。
        */
       const [edgeTip, setEdgeTip] = React.useState(null)
 
@@ -1233,9 +1407,9 @@ window.__ModuleLoader__.load({
       /**
        * 一条边在悬停时展示的名字。
        *
-       * - 机器人节点的规则：创建者写的 `name`；多条规则合并成一条边时按顺序并列；
+       * - 机器人节点的边：创建者写的 `name`；多条规则合并成一条边时按顺序并列；
        * - 门禁边：直接用「批准 / 拒绝」，这已经是这条边的全部含义；
-       * - 没写名字的机器人边：不展示，不拿条件或目标 id 凑数。
+       * - 没写名字的机器人边：不展示，不拿目标 id 凑数。
        *
        * @param {Record<string, any>} edge
        * @returns {string}
@@ -1541,25 +1715,36 @@ window.__ModuleLoader__.load({
        * @param {unknown} definition 定义快照（下一步要拿目标节点的步骤概要）
        * @param {Record<string, any> | null} graph 图模型（同上）
        * @param {Record<string, any> | null} run 运行记录（最后一步用它找到终止节点）
+       * @param {Array<string>} [nodeSessionIds] 节点级已经展示过的会话 id（这里不再重复）
        * @returns {object} React 元素
        */
-      function renderExecution(step, full, config, node, steps, definition, graph, run) {
+      function renderExecution(step, full, config, node, steps, definition, graph, run, nodeSessionIds = []) {
         const decision = typeof step.decision === 'string' && step.decision !== '' ? step.decision : null
-        let promptText =
-          typeof full?.prompt === 'string' && full.prompt !== ''
-            ? full.prompt
-            : typeof config?.prompt === 'string'
-              ? config.prompt
-              : ''
+        const visit = typeof step.visit === 'number' ? step.visit : 1
+        // 这次执行选中的边名字（v2 由机器人 JSON 的 next 决定）；只作为标签展示，
+        // 不把整份 JSON 铺成 key/value。
+        const route = typeof step.route === 'string' ? step.route.trim() : ''
+        // 每次进入的输入优先用那次落盘的渲染后 prompt。定义里的 prompt 只属于第一次
+        // 进入节点时那条边，所以 visit > 1 又没有落盘 prompt 时不能再拿它冒充这次输入。
+        let promptText = typeof full?.prompt === 'string' && full.prompt !== '' ? full.prompt : ''
+        let inputMissing = false
         if (node.type === 'gate') {
           const detail = typeof config?.detail === 'string' ? config.detail : ''
           const title = typeof config?.title === 'string' ? config.title : ''
           promptText = detail !== '' ? detail : title
+        } else if (promptText === '') {
+          if (visit === 1) promptText = typeof config?.prompt === 'string' ? config.prompt : ''
+          else inputMissing = true
         }
         const stepText = typeof step.text === 'string' ? step.text : ''
         const fullText = typeof full?.text === 'string' ? full.text : ''
         let outputText = fullText !== '' ? fullText : stepText
         if (node.type === 'gate' && decision !== null) outputText = statusLabel(t, decision)
+        const attachments = Array.isArray(full?.attachments)
+          ? full.attachments
+          : Array.isArray(step.attachments)
+            ? step.attachments
+            : []
         const duration = formatDuration(step)
         // 运行是按 seq 顺序记下每次执行的，所以「这一次的下一步」就是 seq + 1 的那次执行；
         // 没有下一次执行说明运行到这里就结束了（终止节点本身不产生执行记录）。
@@ -1633,18 +1818,32 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'buka-workflows-tabMeta' },
             h(Tag, { tone: statusTone(step.status) }, statusLabel(t, step.status)),
+            route === '' ? null : h(Tag, { tone: 'neutral' }, `${t('routeLabel')}: ${route}`),
+            attachments.length === 0
+              ? null
+              : h(
+                  Tag,
+                  { tone: 'neutral' },
+                  String(t('attachmentCount')).replace('{n}', String(attachments.length)),
+                ),
             typeof step.startedAt === 'number'
               ? h('span', { className: 'buka-workflows-meta' }, formatTime(step.startedAt))
               : null,
             duration === '' ? null : h('span', { className: 'buka-workflows-meta' }, duration),
             step.compacted === true ? h(Tag, { tone: 'success' }, t('sessionCompacted')) : null,
+            step.recovered === true ? h(Tag, { tone: 'info' }, t('sessionRecovered')) : null,
+            step.timedOut === true ? h(Tag, { tone: 'warning' }, t('executionTimedOut')) : null,
           ),
           h(
             'div',
             { className: 'buka-workflows-inspectorSection' },
             h('span', { className: 'buka-workflows-label' }, t('executionInput')),
             promptText === ''
-              ? h('p', { className: 'buka-workflows-hint' }, t('executionNoInput'))
+              ? h(
+                  'p',
+                  { className: 'buka-workflows-hint' },
+                  t(inputMissing ? 'executionInputMissing' : 'executionNoInput'),
+                )
               : h('pre', { className: 'buka-workflows-pre' }, promptText),
           ),
           h(
@@ -1652,9 +1851,21 @@ window.__ModuleLoader__.load({
             { className: 'buka-workflows-inspectorSection' },
             h('span', { className: 'buka-workflows-label' }, t('executionOutput')),
             outputText === ''
-              ? h('p', { className: 'buka-workflows-hint' }, t('executionNoOutput'))
+              ? h(
+                  'p',
+                  { className: 'buka-workflows-hint' },
+                  t(attachments.length === 0 ? 'executionNoOutput' : 'executionOutputAttachmentsOnly'),
+                )
               : h('pre', { className: 'buka-workflows-pre' }, outputText),
           ),
+          attachments.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-inspectorSection' },
+                h('span', { className: 'buka-workflows-label' }, t('executionAttachments')),
+                renderAttachments(t, run, step, attachments),
+              ),
           typeof step.error === 'string' && step.error !== ''
             ? h('p', { className: 'buka-workflows-failure', role: 'alert' }, `${t('error')}: ${step.error}`)
             : null,
@@ -1667,7 +1878,11 @@ window.__ModuleLoader__.load({
           typeof step.sessionResetReason === 'string' && step.sessionResetReason !== ''
             ? h('p', { className: 'buka-workflows-warn' }, `${t('sessionReset')} ${step.sessionResetReason}`)
             : null,
-          typeof step.sessionId === 'string' && step.sessionId !== ''
+          // 节点级已经展示过这个节点的会话，这里只给不属于节点会话的旧执行保留
+          // 自己的入口，避免历史会话无处可打开。
+          typeof step.sessionId === 'string' &&
+          step.sessionId !== '' &&
+          !nodeSessionIds.includes(step.sessionId)
             ? h(
                 'div',
                 { className: 'buka-workflows-stepActions' },
@@ -1762,29 +1977,43 @@ window.__ModuleLoader__.load({
           rows.push(kvRow(t('nodeEndStatus'), statusLabel(t, node.endStatus ?? 'completed')))
         }
         const template = truncateText(config?.prompt, 4000)
-        const duration = formatMs(node.durationMs)
         const isStart = node.type === 'start'
         const title = isStart ? t('typeStart') : nodeTitle(node, config)
+        const current =
+          run !== null && typeof run === 'object' && run.current !== null && typeof run.current === 'object'
+            ? run.current
+            : null
         // 机器人会话在进入节点后、执行结束前就会落到 run.current 上，所以运行中的
-        // 节点也能看到并打开当前会话；结束后再用最近一次执行的 sessionId。
-        const liveSession =
-          run?.current !== null && run?.current?.nodeId === node.id && typeof run.current.sessionId === 'string'
-            ? run.current.sessionId
+        // 节点也能看到并打开当前会话；它也是这个节点优先展示的会话。
+        const isLiveNode = current !== null && current.nodeId === node.id
+        const liveSession = isLiveNode && typeof current.sessionId === 'string' ? current.sessionId : ''
+        // 节点级只展示一次会话：正常情况一个节点只有一个会话；旧记录里一个节点可能
+        // 在几个会话中执行过，需要逐个列出才能打开每一段历史。
+        const nodeSessionIds = collectNodeSessionIds(node, nodeSteps, liveSession, run)
+        // 运行中的节点还没有 durationMs，直接用 startedAt 算实时耗时；页面 tick 会
+        // 重渲染，所以这个数字会走。已结束的节点继续用 durationMs。
+        const liveStartedAt =
+          isLiveNode && typeof current.startedAt === 'number' && Number.isFinite(current.startedAt)
+            ? current.startedAt
+            : null
+        const liveDuration = liveStartedAt === null ? '' : formatMs(Date.now() - liveStartedAt)
+        const duration = liveDuration !== '' ? liveDuration : formatMs(node.durationMs)
+        // 恢复中的运行在节点标题旁标出第几次恢复尝试。
+        const recoveryAttempts =
+          isLiveNode && typeof current.recoveryAttempts === 'number' && Number.isFinite(current.recoveryAttempts)
+            ? current.recoveryAttempts
+            : 1
+        const recoveringText =
+          isLiveNode && current.recovering === true
+            ? String(t('sessionRecovering')).replace('{n}', String(recoveryAttempts))
             : ''
-        const lastSessionStep =
-          [...nodeSteps].reverse().find((step) => typeof step?.sessionId === 'string' && step.sessionId !== '') ?? null
-        // 同一个机器人整个运行只有一个会话：节点还没执行时，也能从运行记录里
-        // 拿到这个机器人已有的会话并打开。
-        const sharedSession =
-          (Array.isArray(run?.sessions) ? run.sessions : []).find((entry) => entry?.robot === node.robot) ?? null
-        const nodeSession =
-          liveSession !== '' ? liveSession : (lastSessionStep?.sessionId ?? sharedSession?.sessionId ?? '')
 
         // 终止节点自己不执行、没有输出；它代表整个运行结束，所以这里展示这次运行
-        // 最后交出来的机器人正文（按 seq 找最后一次有文本的机器人执行），而不是
-        // 定义里写死的说明文字。来源节点 + 第几次执行可以点回去。
+        // 最后交出来的机器人正文或附件（按 seq 找最后一次有文本或附件的机器人
+        // 执行），而不是定义里写死的说明文字。来源节点 + 第几次执行可以点回去。
         let finalStep = null
         let finalText = ''
+        let finalAttachments = []
         if (node.type === 'end' && node.state !== 'idle') {
           for (let index = steps.length - 1; index >= 0; index -= 1) {
             const candidate = steps[index]
@@ -1796,9 +2025,15 @@ window.__ModuleLoader__.load({
                 : typeof candidate.text === 'string'
                   ? candidate.text
                   : ''
-            if (text === '') continue
+            const attachments = Array.isArray(full?.attachments)
+              ? full.attachments
+              : Array.isArray(candidate.attachments)
+                ? candidate.attachments
+                : []
+            if (text === '' && attachments.length === 0) continue
             finalStep = candidate
             finalText = text
+            finalAttachments = attachments
             break
           }
         }
@@ -1856,7 +2091,61 @@ window.__ModuleLoader__.load({
                     )
                   }),
                 ),
-                renderExecution(activeStep, activeFull, config, node, steps, definition, graph, run),
+                renderExecution(activeStep, activeFull, config, node, steps, definition, graph, run, nodeSessionIds),
+              )
+
+        // 节点级只展示一次会话：只有一个会话时是一个「打开会话」入口；旧记录里有多个
+        // 会话时逐个列出，并说明这是旧记录，避免历史会话没有入口。
+        const sessionBar =
+          node.type !== 'robot' || nodeSessionIds.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-sessionBar' },
+                h('span', { className: 'buka-workflows-label' }, t('nodeSession')),
+                nodeSessionIds.length === 1
+                  ? [
+                      h('code', { key: 'session', className: 'buka-workflows-inlineCode' }, nodeSessionIds[0]),
+                      liveSession !== '' ? h(Tag, { key: 'live', tone: 'info' }, t('sessionLive')) : null,
+                      h(
+                        Button,
+                        {
+                          key: 'open',
+                          variant: 'outline',
+                          size: 'sm',
+                          className: 'buka-workflows-smallButton',
+                          icon: h(IconNewChatOutlineRegular, { size: 13 }),
+                          onClick: () => openSession({ sessionId: nodeSessionIds[0] }),
+                        },
+                        t('openSession'),
+                      ),
+                    ]
+                  : [
+                      h('span', { key: 'hint', className: 'buka-workflows-hint' }, t('nodeSessionsLegacy')),
+                      h(
+                        'span',
+                        { key: 'list', className: 'buka-workflows-sessionList' },
+                        ...nodeSessionIds.map((sessionId) =>
+                          h(
+                            'span',
+                            { key: sessionId, className: 'buka-workflows-sessionRow' },
+                            h('code', { className: 'buka-workflows-inlineCode' }, sessionId),
+                            sessionId === liveSession ? h(Tag, { tone: 'info' }, t('sessionLive')) : null,
+                            h(
+                              Button,
+                              {
+                                variant: 'outline',
+                                size: 'sm',
+                                className: 'buka-workflows-smallButton',
+                                icon: h(IconNewChatOutlineRegular, { size: 13 }),
+                                onClick: () => openSession({ sessionId }),
+                              },
+                              t('openSession'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
               )
 
         return h(
@@ -1871,58 +2160,41 @@ window.__ModuleLoader__.load({
             node.id === graph?.start ? h(Tag, { tone: 'neutral' }, t('nodeStart')) : null,
             isStart ? null : h(Tag, { tone: typeTone(node.type) }, typeLabel(t, node.type)),
             isStart ? null : h(Tag, { tone: statusTone(state) }, statusLabel(t, state)),
+            recoveringText === '' ? null : h(Tag, { tone: 'warning' }, recoveringText),
             node.visits > 1 ? h('span', { className: 'buka-workflows-meta' }, `×${node.visits}`) : null,
             duration === '' ? null : h('span', { className: 'buka-workflows-meta' }, duration),
           ),
           rows.length === 0 ? null : h('div', { className: 'buka-workflows-kv' }, ...rows),
-          node.type === 'robot' && nodeSession !== ''
-            ? h(
-                'div',
-                { className: 'buka-workflows-sessionBar' },
-                h('span', { className: 'buka-workflows-label' }, t('nodeSession')),
-                h('code', { className: 'buka-workflows-inlineCode' }, nodeSession),
-                liveSession !== '' ? h(Tag, { tone: 'info' }, t('sessionLive')) : null,
-                h(
-                  Button,
-                  {
-                    variant: 'outline',
-                    size: 'sm',
-                    className: 'buka-workflows-smallButton',
-                    icon: h(IconNewChatOutlineRegular, { size: 13 }),
-                    onClick: () => openSession({ sessionId: nodeSession }),
-                  },
-                  t('openSession'),
-                ),
-              )
-            : null,
+          sessionBar,
           isStart ? h('p', { className: 'buka-workflows-hint' }, t('startNodeHint')) : null,
           node.type === 'end' && node.state !== 'idle'
             ? h(
                 'div',
                 { className: 'buka-workflows-inspectorSection' },
                 h('span', { className: 'buka-workflows-label' }, t('finalDeliverable')),
-                finalStep === null || finalText === ''
+                finalStep === null
                   ? h('p', { className: 'buka-workflows-hint' }, t('finalDeliverableEmpty'))
+                  : finalText === ''
+                    ? h('p', { className: 'buka-workflows-hint' }, t('executionOutputAttachmentsOnly'))
+                    : h('pre', { className: 'buka-workflows-pre' }, finalText),
+                finalStep === null ? null : renderAttachments(t, run, finalStep, finalAttachments),
+                finalStep === null
+                  ? null
                   : h(
-                      React.Fragment,
-                      null,
-                      h('pre', { className: 'buka-workflows-pre' }, finalText),
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'buka-workflows-nextLink',
+                        title: `${finalTitle} #${String(finalVisit)}`,
+                        onClick: () => focusExecution(finalStep.nodeId, finalStep.seq),
+                      },
+                      h('span', { className: 'buka-workflows-nextArrow', 'aria-hidden': true }, '←'),
                       h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'buka-workflows-nextLink',
-                          title: `${finalTitle} #${String(finalVisit)}`,
-                          onClick: () => focusExecution(finalStep.nodeId, finalStep.seq),
-                        },
-                        h('span', { className: 'buka-workflows-nextArrow', 'aria-hidden': true }, '←'),
-                        h(
-                          'span',
-                          { className: 'buka-workflows-nextTitle' },
-                          `${t('finalDeliverableFrom')} ${finalTitle}`,
-                        ),
-                        h('span', { className: 'buka-workflows-nextVisit' }, `#${String(finalVisit)}`),
+                        'span',
+                        { className: 'buka-workflows-nextTitle' },
+                        `${t('finalDeliverableFrom')} ${finalTitle}`,
                       ),
+                      h('span', { className: 'buka-workflows-nextVisit' }, `#${String(finalVisit)}`),
                     ),
               )
             : null,
@@ -2022,6 +2294,7 @@ window.__ModuleLoader__.load({
                       'span',
                       { className: 'buka-workflows-cardTags' },
                       typeof run.archivedAt === 'number' ? h(Tag, { tone: 'neutral' }, t('archived')) : null,
+                      run.waitingForUser === true ? h(Tag, { tone: 'warning' }, t('waitingForUser')) : null,
                       h(Tag, { tone: statusTone(run.status) }, statusLabel(t, run.status)),
                     ),
                   ),
@@ -2036,6 +2309,74 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+        )
+      }
+
+      /**
+       * 运行在等待用户时（机器人提问 / 请求批准）的提示条：说明在等什么，并提供
+       * 直达当前机器人会话的入口。数据由 supervisor 写在 `run.pendingInteraction`。
+       *
+       * @param {Record<string, any> | null} run 运行记录
+       * @returns {object | null} React 元素；没有等待中的交互时返回 null
+       */
+      function renderInteractionNotice(run) {
+        const interaction =
+          run !== null && typeof run === 'object' && run.pendingInteraction !== null && typeof run.pendingInteraction === 'object'
+            ? run.pendingInteraction
+            : null
+        if (interaction === null) return null
+        const approval = interaction.kind === 'approval'
+        const toolName = typeof interaction.toolName === 'string' ? interaction.toolName.trim() : ''
+        const nodeId = typeof interaction.nodeId === 'string' ? interaction.nodeId : ''
+        const sessionId = typeof interaction.sessionId === 'string' ? interaction.sessionId : ''
+        const askedAt =
+          typeof interaction.askedAt === 'number' && Number.isFinite(interaction.askedAt)
+            ? formatTime(interaction.askedAt)
+            : ''
+        // 批准展示工具/原因；提问展示第一个问题（其余问题在会话里继续回答）。
+        let body = ''
+        if (approval) {
+          const displayReason = typeof interaction.displayReason === 'string' ? interaction.displayReason.trim() : ''
+          const reason = typeof interaction.reason === 'string' ? interaction.reason.trim() : ''
+          body = displayReason !== '' ? displayReason : reason
+        } else {
+          const questions = Array.isArray(interaction.questions) ? interaction.questions : []
+          const first = questions[0] !== null && typeof questions[0] === 'object' ? questions[0] : null
+          const question = typeof first?.question === 'string' ? first.question.trim() : ''
+          const header = typeof first?.header === 'string' ? first.header.trim() : ''
+          body = question !== '' ? question : header
+        }
+        const title = approval
+          ? `${t('waitingForApproval')}${toolName === '' ? '' : ` ${toolName}`}`
+          : t('waitingForAnswer')
+        return h(
+          'div',
+          { className: 'buka-workflows-interactionNotice', role: 'status' },
+          h(
+            'div',
+            { className: 'buka-workflows-interactionHead' },
+            h('span', { className: 'buka-workflows-interactionTitle' }, title),
+            nodeId === '' ? null : h('code', { className: 'buka-workflows-inlineCode' }, nodeId),
+            askedAt === '' ? null : h('span', { className: 'buka-workflows-meta' }, askedAt),
+          ),
+          body === '' ? null : h('p', { className: 'buka-workflows-interactionBody' }, body),
+          sessionId === ''
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-interactionActions' },
+                h(
+                  Button,
+                  {
+                    variant: 'outline',
+                    size: 'sm',
+                    className: 'buka-workflows-smallButton',
+                    icon: h(IconNewChatOutlineRegular, { size: 13 }),
+                    onClick: () => openSession({ sessionId }),
+                  },
+                  t(approval ? 'openApprovalSession' : 'openAnswerSession'),
+                ),
+              ),
         )
       }
 
@@ -2082,6 +2423,7 @@ window.__ModuleLoader__.load({
         return h(
           'div',
           { className: 'buka-workflows-pageBody buka-workflows-detail' },
+          renderInteractionNotice(run),
           h(
             'div',
             { className: 'buka-workflows-split' },

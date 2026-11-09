@@ -1,86 +1,65 @@
 /**
- * 机器人节点结果到下一节点的路由。
+ * 机器人节点结果到下一节点的路由（workflow format 2）。
  *
- * 规则只做字段等值 / 集合匹配：`{ when: { field, equals } }` 或
- * `{ when: { field, in } }`，第一条命中生效；没有 `when` 的规则作为默认出口。
- * 都不命中时返回 null，表示流程正常结束。
+ * 机器人节点总是交回一个 JSON 对象；它其中的 `next` 必须精确匹配某一条出边的
+ * `name`，执行器就沿着那条边走，并渲染该边上的 prompt。没有 `next` 只允许出现在
+ * 没有出边的终止机器人节点上：此时 `resolveRoute` 返回 `{ rule: null }`，流程
+ * 正常结束。缺 `next` 或名字不认识时返回错误与可选路由名，供观察者要求机器人
+ * 在同一会话里重新交回结果。
  *
  * @module @buka/dsh-plugin-workflows/routing
  */
 
 /**
- * 判断一条条件是否成立。
+ * 按机器人结果里的 `next` 选择出边。
  *
- * @param {{ field: string, equals?: unknown, in?: unknown[] } | undefined} when
- * @param {unknown} data 机器人回报的结构化结果
- * @returns {boolean}
- */
-export function matchesWhen(when, data) {
-  if (when === undefined || when === null) return true
-  const value = getPath(data, when.field)
-  if (value === undefined) return false
-  if (Object.hasOwn(when, 'equals')) return sameValue(value, when.equals)
-  if (Array.isArray(when.in)) return when.in.some((candidate) => sameValue(value, candidate))
-  return false
-}
-
-/**
- * 为一个机器人节点选择命中的出边规则。
- *
- * 返回整条规则（而不是只返回目标 id），因为一条边除了目标还可能带 `name`
- * 与 `prompt`；执行器需要在走到这条边时把入口说明拼进目标节点的提示词。
+ * 返回：
+ * - `{ rule }`：命中唯一一条出边；
+ * - `{ rule: null }`：节点没有出边，流程到此结束；
+ * - `{ error, routes }`：缺少 / 未知 `next`，`routes` 是允许的名字列表。
  *
  * @param {Record<string, any>} node 已规范化的节点
- * @param {{ data?: unknown }} [result] 机器人结果
- * @returns {Record<string, any> | null} 命中的规则；null 表示没有出口
+ * @param {unknown} data 机器人交回的 JSON 对象
+ * @returns {{ rule: Record<string, any> } | { rule: null } | { error: string, routes: string[] }}
  */
-export function chooseNextRule(node, result = {}) {
+export function resolveRoute(node, data) {
   const rules = Array.isArray(node?.next) ? node.next : []
+  if (rules.length === 0) return { rule: null }
+
+  const routes = []
   for (const rule of rules) {
-    if (matchesWhen(rule.when, result.data)) return rule
+    if (typeof rule?.name === 'string' && rule.name !== '') routes.push(rule.name)
   }
-  return null
-}
 
-/**
- * 为一个机器人节点选择下一节点。
- *
- * @param {Record<string, any>} node 已规范化的节点
- * @param {{ data?: unknown }} [result] 机器人结果
- * @returns {string | null} 下一节点 id；null 表示结束
- */
-export function chooseNext(node, result = {}) {
-  const rule = chooseNextRule(node, result)
-  return rule === null ? null : rule.to
-}
-
-/**
- * 按点号路径取结构化结果里的字段。
- *
- * @param {unknown} source
- * @param {string} path
- * @returns {unknown}
- */
-export function getPath(source, path) {
-  let current = source
-  for (const key of path.split('.')) {
-    if (current === null || current === undefined) return undefined
-    if (typeof current !== 'object') return undefined
-    current = current[key]
+  const rawNext = typeof data === 'object' && data !== null ? data.next : undefined
+  const next = typeof rawNext === 'string' ? rawNext.trim() : ''
+  if (next === '') {
+    return {
+      error: `the result has no "next" route; set "next" to one of: ${formatRoutes(routes)}`,
+      routes,
+    }
   }
-  return current
+
+  const matches = rules.filter((rule) => rule?.name === next)
+  if (matches.length !== 1) {
+    return {
+      error:
+        matches.length === 0
+          ? `unknown route "${next}"; "next" must be one of: ${formatRoutes(routes)}`
+          : `route "${next}" is ambiguous; "next" must be one of: ${formatRoutes(routes)}`,
+      routes,
+    }
+  }
+
+  return { rule: matches[0] }
 }
 
 /**
- * 标量严格相等；对象 / 数组按 JSON 文本比较。
+ * 把可选路由名拼成给模型看的列表。
  *
- * @param {unknown} left
- * @param {unknown} right
- * @returns {boolean}
+ * @param {string[]} routes
+ * @returns {string}
  */
-function sameValue(left, right) {
-  if (left === right) return true
-  if (left === null || right === null) return false
-  if (typeof left !== 'object' && typeof right !== 'object') return false
-  return JSON.stringify(left) === JSON.stringify(right)
+function formatRoutes(routes) {
+  return routes.length === 0 ? '(none)' : routes.map((route) => JSON.stringify(route)).join(', ')
 }

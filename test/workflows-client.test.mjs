@@ -12,10 +12,34 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { validateDefinition } from '../plugins/workflows/lib/definition.js'
 import { buildRunGraph, layoutRunGraph } from '../plugins/workflows/lib/graph.js'
 
 const CLIENT_PATH = path.resolve('plugins/workflows/client.js')
+
+/**
+ * 手工构造落盘的定义快照（不经过 definition.js 校验）。
+ *
+ * 页面测试只关心「图模型 + 运行记录」怎么渲染；定义形状直接按图模型读取的
+ * 结构给出，避免和 definition.js 的校验规则演进耦合。
+ *
+ * @param {Record<string, any>} raw
+ * @returns {{ plan: Record<string, any>, definition: Record<string, any> }}
+ */
+function definitionSnapshot(raw) {
+  const nodes = Array.isArray(raw?.nodes) ? raw.nodes : []
+  const ids = nodes.map((node) => node.id)
+  const startNode = nodes.find((node) => node?.type === 'start')
+  return {
+    plan: {
+      goal: typeof raw?.goal === 'string' ? raw.goal : '',
+      start: typeof raw?.start === 'string' && raw.start !== '' ? raw.start : (startNode?.id ?? ids[0] ?? ''),
+      maxSteps: Number.isInteger(raw?.maxSteps) ? raw.maxSteps : 64,
+      nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
+      order: ids,
+    },
+    definition: raw,
+  }
+}
 
 /** 每次载入换一个 URL，绕过 ESM 的模块缓存。 */
 let loadSequence = 0
@@ -198,14 +222,15 @@ async function loadClient() {
        * 用预设的 state 顺序渲染一次页面。
        *
        * @param {Array<any>} states
+       * @param {(key: string) => string} [t] 词典函数；默认原样返回 key
        * @returns {any}
        */
-      render(states) {
+      render(states, t = (key) => key) {
         stateQueue.length = 0
         stateQueue.push(...states)
         stateIndex = 0
         stateUpdates.length = 0
-        return components.page({ t: (key) => key, getService: () => null })
+        return components.page({ t, getService: () => null })
       },
       updates: () => stateUpdates,
     }
@@ -226,14 +251,12 @@ function fixture() {
     start: 'gate',
     nodes: [
       { id: 'gate', type: 'gate', title: '发布确认', detail: '是否同意发布？', onApprove: 'publish', onReject: 'revise' },
-      { id: 'publish', type: 'robot', robot: 'publisher', summary: '发布 v1.2 的说明', prompt: '执行发布', report: true, next: 'done' },
+      { id: 'publish', type: 'robot', robot: 'publisher', summary: '发布 v1.2 的说明', prompt: '执行发布', next: 'done' },
       { id: 'revise', type: 'robot', robot: 'writer', prompt: '修改发布说明', next: 'done' },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   }
-  const parsed = validateDefinition(raw)
-  assert.equal(parsed.ok, true)
-  const definition = { plan: parsed.plan, definition: raw }
+  const definition = definitionSnapshot(raw)
   const run = {
     runId: 'wf-render-smoke',
     goal: raw.goal,
@@ -242,6 +265,17 @@ function fixture() {
     finishedAt: 2,
     current: null,
     pendingGate: null,
+    // 一个机器人一次运行只有一个会话；每次进入都记在同一条会话的 entries 里。
+    sessions: [
+      {
+        robot: 'publisher',
+        sessionId: 'session-1',
+        firstNodeId: 'publish',
+        lastNodeId: 'publish',
+        visits: 1,
+        entries: [{ nodeId: 'publish', visit: 1, seq: 2, sessionId: 'session-1', at: 3 }],
+      },
+    ],
     steps: [
       { seq: 1, nodeId: 'gate', type: 'gate', status: 'approved', decision: 'approved', startedAt: 1, finishedAt: 2 },
       {
@@ -300,6 +334,39 @@ function findCapsule(tree, label) {
 }
 
 /**
+ * 按机器人聚合执行记录，生成新格式的 `run.sessions`：一个机器人一次运行只有一个
+ * 会话，`entries` 记下每次进入节点。
+ *
+ * @param {Array<Record<string, any>>} steps
+ * @returns {Array<Record<string, any>>}
+ */
+function sessionsFromSteps(steps) {
+  /** @type {Map<string, Array<Record<string, any>>>} */
+  const byRobot = new Map()
+  for (const step of steps) {
+    if (typeof step?.robot !== 'string') continue
+    if (!byRobot.has(step.robot)) byRobot.set(step.robot, [])
+    byRobot.get(step.robot).push(step)
+  }
+  return [...byRobot.entries()].map(([robot, robotSteps]) => ({
+    robot,
+    sessionId: robotSteps[0].sessionId,
+    firstNodeId: robotSteps[0].nodeId,
+    lastNodeId: robotSteps[robotSteps.length - 1].nodeId,
+    visits: robotSteps.length,
+    entries: robotSteps.map((step) => ({
+      nodeId: step.nodeId,
+      visit: step.visit,
+      seq: step.seq,
+      sessionId: step.sessionId,
+      at: step.startedAt,
+      resumed: step.visit > 1,
+      compacted: step.visit > 1,
+    })),
+  }))
+}
+
+/**
  * 一次带循环的运行：check 失败两次、修复两次、第三次通过，另有一个没走到的审计节点。
  *
  * @returns {{ run: Record<string, any>, definition: Record<string, any>, graph: Record<string, any>, nodeResults: Array<Record<string, any>> }}
@@ -315,11 +382,10 @@ function loopFixture() {
         type: 'robot',
         robot: 'reviewer',
         prompt: '检查当前稿：{{goal}}',
-        report: true,
         maxVisits: 5,
         next: [
-          { when: { field: 'ok', equals: true }, to: 'done', name: '检查通过' },
-          { when: { field: 'ok', equals: 'audit' }, to: 'skip', name: '转人工审计' },
+          { to: 'done', name: '检查通过' },
+          { to: 'skip', name: '转人工审计' },
           { to: 'fix', name: '发现问题' },
         ],
       },
@@ -328,13 +394,21 @@ function loopFixture() {
       { id: 'done', type: 'end', status: 'completed' },
     ],
   }
-  const parsed = validateDefinition(raw)
-  assert.equal(parsed.ok, true)
-  const definition = { plan: parsed.plan, definition: raw }
+  const definition = definitionSnapshot(raw)
   /** @type {Array<Record<string, any>>} */
   const steps = []
   /** @type {Map<string, number>} */
   const visits = new Map()
+  /** 一个机器人一次运行只有一个会话：同机器人的多次执行共用同一个 sessionId。 */
+  const sessionByRobot = new Map()
+  /**
+   * @param {string} robot
+   * @returns {string}
+   */
+  function sessionFor(robot) {
+    if (!sessionByRobot.has(robot)) sessionByRobot.set(robot, `session-${robot}`)
+    return sessionByRobot.get(robot)
+  }
   /**
    * @param {string} nodeId
    * @param {string} robot
@@ -355,7 +429,7 @@ function loopFixture() {
       stopReason: 'completed',
       startedAt: seq * 10,
       finishedAt: seq * 10 + 5,
-      sessionId: `session-${seq}`,
+      sessionId: sessionFor(robot),
       text,
       data,
     })
@@ -373,6 +447,7 @@ function loopFixture() {
     finishedAt: 2,
     current: null,
     pendingGate: null,
+    sessions: sessionsFromSteps(steps),
     steps,
     result: { status: 'completed', lastNode: 'done' },
   }
@@ -414,19 +489,19 @@ function startFixture() {
         type: 'robot',
         robot: 'tester',
         summary: '检查导出实现',
-        report: true,
         next: [
-          { when: { field: 'passed', equals: false }, to: 'dev', name: '测试打回', prompt: '测试打回：{{nodes.test.text}}' },
+          { to: 'dev', name: '测试打回', prompt: '测试打回：{{nodes.test.text}}' },
           { to: 'done', name: '测试通过' },
         ],
       },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   }
-  const parsed = validateDefinition(raw)
-  assert.equal(parsed.ok, true)
-  const definition = { plan: parsed.plan, definition: raw }
+  const definition = definitionSnapshot(raw)
   const texts = ['初版完成', '发现 2 个问题', '修复完成', '复查通过']
+  const robotForNode = { dev: 'coder', test: 'tester' }
+  /** 一个机器人一次运行只有一个会话：dev 的两次执行都用 coder 的会话。 */
+  const sessionForRobot = { coder: 'session-coder', tester: 'session-tester' }
   const steps = [
     { seq: 1, nodeId: 'dev', visit: 1, text: texts[0], data: null },
     { seq: 2, nodeId: 'test', visit: 1, text: texts[1], data: { passed: false } },
@@ -435,12 +510,12 @@ function startFixture() {
   ].map((step, index) => ({
     ...step,
     type: 'robot',
-    robot: step.nodeId === 'dev' ? 'coder' : 'tester',
+    robot: robotForNode[step.nodeId],
     status: 'completed',
     stopReason: 'completed',
     startedAt: index * 10 + 1,
     finishedAt: index * 10 + 5,
-    sessionId: `session-${index + 1}`,
+    sessionId: sessionForRobot[robotForNode[step.nodeId]],
   }))
   const run = {
     runId: 'wf-render-start',
@@ -450,6 +525,7 @@ function startFixture() {
     finishedAt: 2,
     current: null,
     pendingGate: null,
+    sessions: sessionsFromSteps(steps),
     steps,
     result: { status: 'completed', lastNode: 'done' },
   }
@@ -470,6 +546,78 @@ function startFixture() {
     prompt: prompts[index],
     text: step.text,
     structured: step.data,
+  }))
+  return { run, definition, graph, nodeResults }
+}
+
+/**
+ * 旧记录：同一个机器人节点在两个不同会话里执行过，nodeResults 里没有逐次渲染后的
+ * prompt（只有定义里的那一份）。
+ *
+ * @returns {{ run: Record<string, any>, definition: Record<string, any>, graph: Record<string, any>, nodeResults: Array<Record<string, any>> }}
+ */
+function legacyFixture() {
+  const raw = {
+    goal: '回看旧记录',
+    start: 'check',
+    nodes: [
+      { id: 'check', type: 'robot', robot: 'reviewer', summary: '检查旧稿', prompt: '定义里的检查提示', next: 'done' },
+      { id: 'done', type: 'end', status: 'completed' },
+    ],
+  }
+  const definition = definitionSnapshot(raw)
+  const steps = [
+    { seq: 1, nodeId: 'check', visit: 1, sessionId: 'session-old-1', startedAt: 1, finishedAt: 5, text: '旧输出 1' },
+    { seq: 2, nodeId: 'check', visit: 2, sessionId: 'session-old-2', startedAt: 10, finishedAt: 15, text: '旧输出 2' },
+  ].map((step) => ({
+    ...step,
+    type: 'robot',
+    robot: 'reviewer',
+    status: 'completed',
+    stopReason: 'completed',
+    resumed: step.visit > 1,
+    compacted: step.visit > 1,
+  }))
+  const run = {
+    runId: 'wf-render-legacy',
+    goal: raw.goal,
+    status: 'completed',
+    createdAt: 1,
+    finishedAt: 2,
+    current: null,
+    pendingGate: null,
+    // 旧格式：同一个机器人在两个会话里执行过，每次进入仍是自己的一条记录。
+    sessions: [
+      {
+        robot: 'reviewer',
+        sessionId: 'session-old-1',
+        firstNodeId: 'check',
+        lastNodeId: 'check',
+        visits: 1,
+        entries: [{ nodeId: 'check', visit: 1, seq: 1, sessionId: 'session-old-1', at: 1 }],
+      },
+      {
+        robot: 'reviewer',
+        sessionId: 'session-old-2',
+        firstNodeId: 'check',
+        lastNodeId: 'check',
+        visits: 1,
+        entries: [{ nodeId: 'check', visit: 2, seq: 2, sessionId: 'session-old-2', at: 10, resumed: true, compacted: true }],
+      },
+    ],
+    steps,
+    result: { status: 'completed', lastNode: 'done' },
+  }
+  const model = buildRunGraph({ run, definition })
+  assert.ok(model)
+  const graph = { ...model, ...layoutRunGraph(model) }
+  // 旧记录里没有每次进入的渲染后 prompt。
+  const nodeResults = steps.map((step) => ({
+    seq: step.seq,
+    nodeId: step.nodeId,
+    sessionId: step.sessionId,
+    stopReason: step.stopReason,
+    text: step.text,
   }))
   return { run, definition, graph, nodeResults }
 }
@@ -586,41 +734,124 @@ test('client: the selected node shows its session and executions', async () => {
   assert.ok(texts.includes('openSession'), 'the node session can be opened')
   assert.ok(texts.includes('published the release'))
   assert.ok(texts.includes('session-1'))
+  assert.equal(texts.filter((text) => text === 'session-1').length, 1, 'the node session is shown once')
+  // 已结束的节点用 durationMs（publish 执行 10ms）。
+  assert.ok(texts.includes('10ms'), 'a finished node keeps its recorded duration')
 })
 
 test('client: a repeated robot execution shows the shared session and compaction', async () => {
   const client = await loadClient()
   const data = startFixture()
-  const devSession = 'session-dev-shared'
+  const devSession = data.run.sessions.find((session) => session.robot === 'coder').sessionId
   data.run.steps = data.run.steps.map((step) =>
-    step.nodeId === 'dev'
-      ? {
-          ...step,
-          sessionId: devSession,
-          ...(step.visit > 1 ? { resumed: true, compacted: true } : {}),
-        }
-      : step,
+    step.visit > 1 ? { ...step, resumed: true, compacted: true } : step,
   )
   data.nodeResults = data.nodeResults.map((result) =>
-    result.nodeId === 'dev'
-      ? {
-          ...result,
-          sessionId: devSession,
-          ...(result.seq > 1 ? { resumed: true, compacted: true } : {}),
-        }
-      : result,
+    result.seq > 1 ? { ...result, resumed: true, compacted: true } : result,
   )
 
   const tree = client.render(detailStates(data, 'dev', 1))
   const { texts } = collect(tree)
   assert.ok(texts.includes('nodeSession'), 'the robot session is labelled on the node')
   assert.equal(texts.includes('nodeSessionHint'), false, 'the page does not explain the session mechanism')
-  assert.ok(texts.includes(devSession), 'the shared session id is shown')
+  assert.equal(
+    texts.filter((text) => text === devSession).length,
+    1,
+    'the shared session id is shown once at the node, not again in the execution tab',
+  )
   assert.ok(texts.includes('openSession'), 'the shared session can be opened')
   // 「继续同一会话」只是实现细节：一个机器人一次运行只用一个会话，重复进入
   // 本来就是常态，不再作为 tag 展示；压缩历史仍然标出来。
   assert.equal(texts.includes('sessionResumed'), false, 'reusing the same session is not tagged')
   assert.ok(texts.includes('sessionCompacted'), 'the second execution says history was compacted')
+})
+
+test('client: a looped node shows its one robot session once, not per execution', async () => {
+  const client = await loadClient()
+  const data = loopFixture()
+  const tree = client.render(detailStates(data, 'check', 2))
+  const { classLists, texts } = collect(tree)
+  const reviewerSession = data.run.sessions.find((session) => session.robot === 'reviewer').sessionId
+
+  // check 进入了三次，但一个机器人一次运行只有一个会话：节点级只出现一次。
+  const tabs = classLists.filter((list) => list.includes('buka-workflows-tab'))
+  assert.equal(tabs.length, 3, 'check ran three times, so there are three execution tabs')
+  assert.ok(texts.includes('nodeSession'))
+  assert.equal(
+    texts.filter((text) => text === reviewerSession).length,
+    1,
+    'the shared session id is rendered once for the whole node',
+  )
+  assert.equal(texts.filter((text) => text === 'openSession').length, 1, 'one open-session action for the node')
+  assert.equal(texts.includes('nodeSessionsLegacy'), false, 'a normal run is not labelled as a legacy record')
+  // 每次执行自己的输入仍然各在各自的 Tab 里。
+  assert.ok(texts.includes('rendered prompt for check #3'))
+})
+
+test('client: an old record with several sessions lists each one and keeps the definition prompt for the first entry', async () => {
+  const client = await loadClient()
+  const data = legacyFixture()
+  const tree = client.render(detailStates(data, 'check', 1))
+  const { texts } = collect(tree)
+
+  // 节点级列出旧记录里的两个会话，每个都能打开，并说明这是旧记录。
+  assert.ok(texts.includes('nodeSessionsLegacy'), 'several sessions are explained as a legacy record')
+  assert.ok(texts.includes('session-old-1'))
+  assert.ok(texts.includes('session-old-2'))
+  assert.equal(texts.filter((text) => text === 'openSession').length, 2, 'each legacy session has an open action')
+  // 第二次进入没有记录输入，不能拿定义里的 prompt 冒充这一次。
+  assert.ok(texts.includes('executionInputMissing'), 'the missing per-execution input is explained')
+  assert.equal(texts.includes('定义里的检查提示'), false, 'the definition prompt is not reused for visit 2')
+  assert.ok(texts.includes('旧输出 2'))
+
+  // 第一次进入没有 per-execution prompt 时，仍可以回退到定义里的 prompt（旧格式兼容）。
+  const first = collect(client.render(detailStates(data, 'check', 0)))
+  assert.ok(first.texts.includes('定义里的检查提示'), 'visit 1 falls back to the definition prompt')
+  assert.equal(first.texts.includes('executionInputMissing'), false)
+})
+
+test('client: a running node shows recovering and live-duration state, and step tags', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const runningRun = {
+    ...data.run,
+    status: 'running',
+    finishedAt: null,
+    result: null,
+    current: {
+      nodeId: 'publish',
+      visit: 1,
+      type: 'robot',
+      robot: 'publisher',
+      sessionId: 'session-1',
+      startSeq: 2,
+      startedAt: Date.now() - 5000,
+      recovering: true,
+      recoveryAttempts: 2,
+    },
+    steps: data.run.steps.map((step) =>
+      step.seq === 2
+        ? { ...step, status: 'running', finishedAt: null, recovered: true, recoveryAttempts: 2, timedOut: true }
+        : step,
+    ),
+  }
+  const model = buildRunGraph({ run: runningRun, definition: data.definition })
+  assert.ok(model)
+  const graph = { ...model, ...layoutRunGraph(model) }
+  const tree = client.render(
+    detailStates({ ...data, run: runningRun, graph }, 'publish'),
+    (key) => (key === 'sessionRecovering' ? '恢复中（第 {n} 次）' : key),
+  )
+  const { texts } = collect(tree)
+
+  assert.ok(texts.includes('恢复中（第 2 次）'), 'the recovering tag carries the attempt number')
+  assert.ok(texts.some((text) => /^5\.\ds$/u.test(text)), 'a running node shows a live duration')
+  assert.equal(texts.includes('10ms'), false, 'the live node does not fall back to the finished duration')
+  assert.ok(texts.includes('sessionRecovered'), 'a recovered execution is tagged')
+  assert.ok(texts.includes('executionTimedOut'), 'a timed-out execution is tagged')
+  // 运行中的当前会话仍然是节点级唯一的那一次。
+  assert.ok(texts.includes('sessionLive'), 'the live session is marked')
+  assert.equal(texts.filter((text) => text === 'session-1').length, 1, 'the live session is shown once')
 })
 
 test('client: entering a run focuses the running node, or done when completed', async () => {
@@ -645,7 +876,7 @@ test('client: entering a run focuses the running node, or done when completed', 
       visit: 1,
       type: 'robot',
       robot: 'publisher',
-      startedAt: 3,
+      startedAt: Date.now() - 1000,
     },
   }
   const model = buildRunGraph({ run: runningRun, definition: runningData.definition })
@@ -663,6 +894,148 @@ test('client: entering a run focuses the running node, or done when completed', 
   const runningTexts = collect(runningTree).texts
   assert.ok(runningTexts.includes('published the release'), 'the running node is focused')
   assert.equal(runningTexts.includes('finalDeliverable'), false, 'the end node is not focused while running')
+})
+
+test('client: a pending question shows a warning notice with an open-session action', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  data.run = {
+    ...data.run,
+    status: 'waiting',
+    result: null,
+    pendingInteraction: {
+      kind: 'question',
+      nodeId: 'publish',
+      visit: 1,
+      seq: 2,
+      robot: 'publisher',
+      sessionId: 'session-1',
+      askedAt: 1_700_000_000_000,
+      questions: [
+        { id: 'q1', header: '发布范围', question: '要发布到生产环境吗？', options: [{ label: '是' }, { label: '否' }] },
+        { id: 'q2', header: '其它', question: '还有别的吗？', options: [] },
+      ],
+    },
+  }
+  const tree = client.render(detailStates(data, 'publish'))
+  const { classes, texts } = collect(tree)
+
+  assert.ok(classes.includes('buka-workflows-interactionNotice'), 'the notice is rendered above the graph')
+  assert.ok(texts.includes('waitingForAnswer'))
+  assert.ok(texts.includes('要发布到生产环境吗？'), 'the first question is shown')
+  assert.equal(texts.includes('还有别的吗？'), false, 'only the first question is previewed')
+  assert.equal(texts.includes('q1'), false, 'question ids are not dumped')
+  assert.ok(texts.includes('publish'), 'the node id is shown')
+  assert.ok(texts.includes('openAnswerSession'))
+  const body = findByClass(tree, 'buka-workflows-pageBody')
+  assert.ok(body)
+  assert.ok(
+    String(body.children[0]?.props?.className ?? '').includes('buka-workflows-interactionNotice'),
+    'the notice sits above the graph / detail split',
+  )
+
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openAnswerSession'))
+  assert.ok(openButton, 'the notice offers an open-session action')
+  assert.equal(typeof openButton.props.onClick, 'function')
+  openButton.props.onClick() // 桩里没有 uiWorkspace，只会走到错误 Toast，不应抛错
+
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-interactionNotice\{[^}]*border[^}]*state-warn-primary/u)
+  assert.match(css, /\.buka-workflows-interactionNotice\{[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-warn-primary\)/u)
+  assert.match(css, /\.buka-workflows-interactionBody\{[^}]*white-space:pre-wrap/u)
+})
+
+test('client: a pending approval names the tool and prefers the display reason', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  data.run = {
+    ...data.run,
+    status: 'waiting',
+    result: null,
+    pendingInteraction: {
+      kind: 'approval',
+      nodeId: 'publish',
+      visit: 1,
+      seq: 2,
+      robot: 'publisher',
+      sessionId: 'session-1',
+      askedAt: 1_700_000_000_001,
+      toolName: 'shell',
+      reason: 'rm -rf dist',
+      displayReason: '需要清掉旧的构建产物',
+    },
+  }
+  const tree = client.render(detailStates(data, 'publish'))
+  const { texts } = collect(tree)
+
+  assert.ok(texts.includes('waitingForApproval shell'), 'the tool name joins the approval title')
+  assert.ok(texts.includes('需要清掉旧的构建产物'), 'the display reason is preferred')
+  assert.equal(texts.includes('rm -rf dist'), false, 'the raw reason is hidden when a display reason exists')
+  assert.ok(texts.includes('openApprovalSession'))
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openApprovalSession'))
+  assert.ok(openButton)
+  assert.equal(typeof openButton.props.onClick, 'function')
+
+  // 没有 displayReason 时退回 reason。
+  const fallback = fixture()
+  fallback.run = {
+    ...fallback.run,
+    status: 'waiting',
+    result: null,
+    pendingInteraction: {
+      kind: 'approval',
+      nodeId: 'publish',
+      sessionId: 'session-1',
+      askedAt: 1,
+      toolName: 'shell',
+      reason: 'rm -rf dist',
+    },
+  }
+  assert.ok(collect(client.render(detailStates(fallback, 'publish'))).texts.includes('rm -rf dist'))
+})
+
+test('client: an execution shows the selected route as a small label', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  data.run.steps = data.run.steps.map((step) => (step.seq === 2 ? { ...step, route: 'done', routeTo: 'done' } : step))
+  const tree = client.render(detailStates(data, 'publish'))
+  const { texts } = collect(tree)
+
+  assert.ok(texts.includes('routeLabel: done'), 'the route name is shown next to the status')
+  // 路由是标签，不是一份铺开的 JSON / key-value。
+  assert.equal(texts.includes('routeTo'), false)
+  assert.equal(texts.some((text) => text.includes('"next"')), false)
+  assert.equal(texts.some((text) => text.includes('"to"')), false)
+})
+
+test('client: the run list tags a run that is waiting for the user', async () => {
+  const client = await loadClient()
+  const tree = client.render([
+    {
+      status: 'ready',
+      runs: [
+        { runId: 'wf-wait', goal: 'waiting run', status: 'waiting', createdAt: 1, waitingForUser: true },
+        { runId: 'wf-live', goal: 'running run', status: 'running', createdAt: 2, waitingForUser: false },
+      ],
+      archivedCount: 0,
+      error: null,
+    },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+  ])
+
+  /** @type {Array<Record<string, any>>} */
+  const cards = []
+  walk(tree, (node) => {
+    const className = node.props?.className
+    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-card')) cards.push(node)
+  })
+  assert.equal(cards.length, 2)
+  assert.ok(collect(cards[0]).texts.includes('waitingForUser'), 'a run waiting for the user carries the tag')
+  assert.equal(collect(cards[1]).texts.includes('waitingForUser'), false, 'other runs do not')
 })
 
 test('client: the run list renders cards when no run is selected', async () => {
@@ -965,6 +1338,55 @@ test('client: the end node shows the final deliverable, not a definition message
   assert.ok(link, 'the final deliverable links to its source execution')
   assert.equal(typeof link.props.onClick, 'function')
   link.props.onClick()
+})
+
+test('client: an execution with attachments shows a download link', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const attachments = [
+    { index: 0, name: 'report.md', bytes: 16, description: '检查报告' },
+  ]
+  data.run.steps[1].attachments = attachments
+  data.nodeResults[0].attachments = attachments
+  const tree = client.render(
+    detailStates(data, 'publish'),
+    (key) => (key === 'attachmentCount' ? '{n} attachments' : key),
+  )
+  const { texts } = collect(tree)
+
+  assert.ok(texts.includes('executionAttachments'))
+  assert.ok(texts.includes('report.md'))
+  assert.ok(texts.includes('16 B'))
+  assert.ok(texts.includes('1 attachments'))
+  const link = findByClass(tree, 'buka-workflows-attachmentLink')
+  assert.ok(link, 'the attachment has a download link')
+  assert.equal(link.props.download, 'report.md')
+  assert.match(link.props.href, /^\/buka-workflows\/attachment\?/)
+  assert.match(link.props.href, /runId=wf-render-smoke/)
+  assert.match(link.props.href, /seq=2/)
+  assert.match(link.props.href, /nodeId=publish/)
+  assert.match(link.props.href, /name=report\.md/)
+})
+
+test('client: an attachment-only final deliverable is not reported as empty', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const attachments = [
+    { index: 0, name: 'report.md', bytes: 16, description: '检查报告' },
+  ]
+  data.run.steps[1].text = ''
+  data.nodeResults[0].text = ''
+  data.run.steps[1].attachments = attachments
+  data.nodeResults[0].attachments = attachments
+  const tree = client.render(detailStates(data, 'done'))
+  const { texts } = collect(tree)
+
+  assert.ok(texts.includes('finalDeliverable'))
+  assert.equal(texts.includes('finalDeliverableEmpty'), false)
+  assert.ok(texts.includes('executionOutputAttachmentsOnly'))
+  const link = findByClass(tree, 'buka-workflows-attachmentLink')
+  assert.ok(link, 'the final deliverable links to the attachment')
+  assert.equal(link.props.download, 'report.md')
 })
 
 test('client: a loop run shows visit badges and a back edge next to the rail', async () => {
