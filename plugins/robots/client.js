@@ -36,7 +36,9 @@
  *   对话框，里面的开关决定通用型机器人是否出现在列表里（设置存 Host 的
  *   settings.json）；
  * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
- *   正文用可切换的页签分成
+ *   机器人名旁的铅笔按钮打开「重命名机器人」对话框：改的是机器人目录名，Host 会
+ *   在新路径重建 DSH 工作区，已有会话日志保留但不再列在这个机器人下。正文用
+ *   可切换的页签分成
  *   「描述」（一句话摘要，工作流用它决定是否选用这个机器人）、
  *   「AGENTS.md」（编辑目录下的 AGENTS.md，Host 同时维护 CLAUDE.md 软链接）
  *   与「Skills」（列出已安装的项目级 skills，并通过对话框选择来源里要安装的
@@ -69,6 +71,7 @@ window.__ModuleLoader__.load({
       Toast,
       StateDot,
       IconChevronRightOutlineRegular,
+      IconEditOutlineRegular,
       IconFolderOpenOutlineRegular,
       IconNewChatOutlineRegular,
       IconPlusOutlineRegular,
@@ -87,9 +90,16 @@ window.__ModuleLoader__.load({
     /** 「创建机器人」对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
     const CREATE_FORM_ID = 'buka-robots-create-form'
 
+    /**
+     * 「重命名机器人」对话框里表单的 id：页脚「保存」按钮通过 `form` 提交它，
+     * 这样回车与点保存走同一套校验。
+     */
+    const RENAME_FORM_ID = 'buka-robots-rename-form'
+
     /** 与 Host 一半（`plugins/robots/lib/index.js`）的路由常量保持一致。 */
     const LIST_ROUTE = '/buka-robots/list'
     const CREATE_ROUTE = '/buka-robots/create'
+    const RENAME_ROUTE = '/buka-robots/rename'
     const AVATAR_ROUTE = '/buka-robots/avatar'
     const DESCRIPTION_ROUTE = '/buka-robots/description'
     const REMOVE_ROUTE = '/buka-robots/remove'
@@ -197,6 +207,15 @@ window.__ModuleLoader__.load({
       createMountFailed:
         'The robot was created, but mounting it to a workspace failed. Use “Mount” to retry:',
       createEmpty: 'Enter a robot name first.',
+      rename: 'Rename robot',
+      renameLabel: 'Rename',
+      renameFieldLabel: 'New name',
+      renameHint:
+        'Renaming moves the robot directory and re-creates the DSH workspace. Earlier conversations are kept, but they are no longer listed under this robot.',
+      renameEmpty: 'Enter a new name first.',
+      renameSame: 'The new name is the same as the current name.',
+      renameSaveFailed: 'Could not rename the robot:',
+      renamed: 'Renamed robot:',
       newSession: 'New session',
       reveal: 'Open in Finder',
       revealFailed: 'Could not open the folder:',
@@ -310,6 +329,10 @@ window.__ModuleLoader__.load({
       errInvalidAvatar: 'That avatar is not available. Pick one from the list.',
       errNotDirectory: 'A file already exists at that path, so no directory could be created.',
       errUnknownRobot: 'This robot is no longer in the registry. Refresh and try again.',
+      errNameTaken: 'That name is already taken. Pick another one.',
+      errInvalidUpdate: 'This request is missing the update flag, so the name was not changed.',
+      errPathOutsideRoot:
+        'The robot directory is outside the robots folder, so it cannot be renamed. Fix the registry entry first.',
       errMissingDirectory: 'The robot directory does not exist, so this operation cannot run.',
       errRegistryUnreadable:
         'The robot registry cannot be read, so this change was cancelled. Fix or delete the file, then refresh.',
@@ -350,6 +373,14 @@ window.__ModuleLoader__.load({
       createFailed: '创建失败：',
       createMountFailed: '机器人已创建，但挂载到工作区失败，可点「挂载」重试：',
       createEmpty: '先填一个机器人名称。',
+      rename: '重命名机器人',
+      renameLabel: '重命名',
+      renameFieldLabel: '新名称',
+      renameHint: '重命名会改机器人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个机器人下。',
+      renameEmpty: '先填一个新名称。',
+      renameSame: '新名称与当前名称相同。',
+      renameSaveFailed: '重命名失败：',
+      renamed: '已重命名为：',
       newSession: '新会话',
       reveal: '打开 Finder',
       revealFailed: '打开文件夹失败：',
@@ -461,6 +492,9 @@ window.__ModuleLoader__.load({
       errInvalidAvatar: '这个头像不可用，请从列表里重新选一个。',
       errNotDirectory: '目标路径已存在且不是目录，无法创建。',
       errUnknownRobot: '这个机器人已不在登记表里，请刷新后重试。',
+      errNameTaken: '这个名称已被占用，请换一个。',
+      errInvalidUpdate: '请求缺少 update 标记，名称未修改。',
+      errPathOutsideRoot: '机器人目录不在机器人根目录下，无法重命名；请先修复登记表。',
       errMissingDirectory: '机器人目录不存在，无法执行这个操作。',
       errRegistryUnreadable: '机器人登记文件无法读取，本次修改已取消；请修复或删除该文件后刷新。',
       errTooLarge: 'AGENTS.md 超过 512 KiB，无法保存。',
@@ -646,6 +680,12 @@ window.__ModuleLoader__.load({
           return t('errNotDirectory')
         case 'unknown-robot':
           return t('errUnknownRobot')
+        case 'name-taken':
+          return t('errNameTaken')
+        case 'invalid-update':
+          return t('errInvalidUpdate')
+        case 'path-outside-root':
+          return t('errPathOutsideRoot')
         case 'missing-directory':
           return t('errMissingDirectory')
         case 'registry-unreadable':
@@ -876,6 +916,15 @@ window.__ModuleLoader__.load({
       const [descriptionSaving, setDescriptionSaving] = React.useState(false)
       const [descriptionError, setDescriptionError] = React.useState(null)
 
+      /**
+       * 「重命名机器人」对话框：`renameDraft` 是新名称草稿，默认带出当前名称；
+       * 失败提示留在对话框里，提交中不响应关闭。
+       */
+      const [renameOpen, setRenameOpen] = React.useState(false)
+      const [renameDraft, setRenameDraft] = React.useState('')
+      const [renameSaving, setRenameSaving] = React.useState(false)
+      const [renameError, setRenameError] = React.useState(null)
+
       /** 详情页状态：`selectedName` 非空时显示配置视图，`tab` 是页签。 */
       const [selectedName, setSelectedName] = React.useState(null)
       const [tab, setTab] = React.useState('agents')
@@ -984,7 +1033,8 @@ window.__ModuleLoader__.load({
         removing !== null ||
         agentsSaving ||
         avatarSaving ||
-        descriptionSaving
+        descriptionSaving ||
+        renameSaving
 
       /**
        * 新建机器人时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
@@ -1069,6 +1119,8 @@ window.__ModuleLoader__.load({
         setConfirmingSkill(null)
         setInstallOpen(false)
         setInstallError(null)
+        setRenameOpen(false)
+        setRenameError(null)
         setNotice(null)
       }
 
@@ -1080,6 +1132,8 @@ window.__ModuleLoader__.load({
         setConfirmingSkill(null)
         setInstallOpen(false)
         setInstallError(null)
+        setRenameOpen(false)
+        setRenameError(null)
         setNotice(null)
       }
 
@@ -1304,6 +1358,88 @@ window.__ModuleLoader__.load({
           setAvatarError(`${t('avatarSaveFailed')} ${failureText(t, failure)}`)
         } finally {
           setAvatarSaving(false)
+        }
+      }
+
+      /**
+       * 打开「重命名机器人」对话框：草稿从当前名称开始，用户直接改成新名。
+       * 登记文件损坏、目录缺失或写操作进行中时不打开（入口按钮也会禁用）。
+       */
+      function openRenameDialog() {
+        if (selectedRobot === null || mutating || corrupt || selectedRobot.exists === false) return
+        setRenameDraft(selectedRobot.name)
+        setRenameError(null)
+        setRenameOpen(true)
+      }
+
+      /** 关闭「重命名机器人」对话框；保存中不响应关闭。 */
+      function closeRenameDialog() {
+        if (renameSaving) return
+        setRenameOpen(false)
+        setRenameError(null)
+      }
+
+      /**
+       * 重命名机器人：Host 会把目录改到新名并重建 DSH 工作区。
+       *
+       * 成功后只局部更新列表里的这一条（name / path / mounted / workspaceId /
+       * agents），没被用户改过的 AGENTS.md 草稿跟着 Host 同步后的内容走，再把
+       * `selectedName` 切到新名让配置视图留在同一个机器人上，最后用 `reload()`
+       * 对账；标题是旧名的详情页会因此自然刷新。失败留在对话框里提示。
+       *
+       * @param {object} event 表单提交事件
+       */
+      async function renameRobot(event) {
+        event.preventDefault()
+        if (selectedRobot === null || renameSaving) return
+        const previousName = selectedRobot.name
+        const previousAgents = agentsOf(selectedRobot)
+        const nextName = renameDraft.trim()
+        if (nextName === '') {
+          setRenameError(t('renameEmpty'))
+          return
+        }
+        if (nextName === previousName) {
+          setRenameError(t('renameSame'))
+          return
+        }
+        setRenameSaving(true)
+        setRenameError(null)
+        try {
+          const body = await requestJson(RENAME_ROUTE, {
+            method: 'POST',
+            body: JSON.stringify({ name: previousName, newName: nextName }),
+          })
+          const renamed = body?.robot
+          const savedName = typeof renamed?.name === 'string' && renamed.name !== '' ? renamed.name : nextName
+          /** @type {Record<string, any>} */
+          const patch = {
+            name: savedName,
+            mounted: body?.mounted === true,
+            workspaceId: typeof body?.workspaceId === 'string' ? body.workspaceId : null,
+          }
+          if (typeof renamed?.path === 'string' && renamed.path !== '') patch.path = renamed.path
+          const savedAgents = body?.agents
+          if (savedAgents !== null && typeof savedAgents === 'object') patch.agents = savedAgents
+          patchRobot(previousName, patch)
+          // Host 会把未改过的 AGENTS.md 模板同步成新名 / 新路径；用户没有改过草稿
+          // 时跟着换，否则 AGENTS 页签会显示旧模板，点「保存」还会把它写回去。
+          if (
+            typeof savedAgents?.content === 'string' &&
+            agentsDraft === previousAgents.content &&
+            savedAgents.content !== agentsDraft
+          ) {
+            setAgentsDraft(savedAgents.content)
+          }
+          setRenameOpen(false)
+          setRenameDraft('')
+          setSelectedName(savedName)
+          flash('success', `${t('renamed')} ${savedName}`)
+          reload()
+        } catch (failure) {
+          setRenameError(`${t('renameSaveFailed')} ${failureText(t, failure)}`)
+        } finally {
+          setRenameSaving(false)
         }
       }
 
@@ -2585,6 +2721,25 @@ window.__ModuleLoader__.load({
                   { className: 'buka-robots-title' },
                   selectedRobot === null ? t('title') : String(selectedRobot.name ?? ''),
                 ),
+                // 重命名入口紧挨机器人名：改名会移动目录并重建工作区（旧会话不再
+                // 列在这个机器人下），登记文件损坏、目录缺失或写操作进行中时禁用。
+                selectedRobot === null
+                  ? null
+                  : h(
+                      Tooltip,
+                      { label: `${t('renameLabel')} ${selectedRobot.name}`, side: 'top', delayMs: 400 },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'buka-robots-iconButton',
+                          'aria-label': `${t('renameLabel')} ${selectedRobot.name}`,
+                          disabled: mutating || corrupt || selectedRobot.exists === false,
+                          onClick: openRenameDialog,
+                        },
+                        h(IconEditOutlineRegular, { size: 16 }),
+                      ),
+                    ),
                 selectedRobot === null
                   ? null
                   : h('span', { className: 'buka-robots-headingTag' }, renderMountedTag(selectedRobot)),
@@ -2750,6 +2905,63 @@ window.__ModuleLoader__.load({
               ? null
               : h('p', { className: 'buka-robots-formError', role: 'alert' }, avatarError),
           ),
+        ),
+        // 「重命名机器人」对话框：输入新名称后提交，Host 改目录并重建工作区。
+        // 失败提示留在框里；保存中不响应关闭（遮罩点击 / Esc / 右上角都走 onClose）。
+        h(
+          Modal,
+          {
+            open: renameOpen,
+            onClose: closeRenameDialog,
+            title: t('rename'),
+            closeLabel: t('close'),
+            footer: h(
+              React.Fragment,
+              null,
+              h(Button, { variant: 'outline', onClick: closeRenameDialog, disabled: renameSaving }, t('cancel')),
+              h(
+                Button,
+                {
+                  variant: 'primary',
+                  type: 'submit',
+                  form: RENAME_FORM_ID,
+                  disabled:
+                    renameSaving ||
+                    selectedRobot === null ||
+                    renameDraft.trim() === '' ||
+                    renameDraft.trim() === selectedRobot.name,
+                },
+                renameSaving ? t('saving') : t('save'),
+              ),
+            ),
+          },
+          renameOpen && selectedRobot !== null
+            ? h(
+                'form',
+                { id: RENAME_FORM_ID, className: 'buka-robots-dialogForm', onSubmit: renameRobot },
+                h(
+                  'label',
+                  { className: 'buka-robots-field' },
+                  h('span', { className: 'buka-robots-fieldLabel' }, t('renameFieldLabel')),
+                  h(Input, {
+                    className: 'buka-robots-fieldInput',
+                    type: 'text',
+                    value: renameDraft,
+                    placeholder: String(selectedRobot.name ?? ''),
+                    autoComplete: 'off',
+                    spellCheck: false,
+                    maxLength: 64,
+                    disabled: renameSaving,
+                    'data-modal-autofocus': '',
+                    onChange: (event) => setRenameDraft(event.target.value),
+                  }),
+                ),
+                h('p', { className: 'buka-robots-fieldHint' }, t('renameHint')),
+                renameError === null
+                  ? null
+                  : h('p', { className: 'buka-robots-formError', role: 'alert' }, renameError),
+              )
+            : null,
         ),
         // 「安装 skills」对话框：选来源（或收藏仓库）→ 读出候选 → 勾选 → 只安装选中的。
         // 默认全选未安装的；已安装的置灰不可选；安装中不响应关闭。

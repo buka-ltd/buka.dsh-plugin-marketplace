@@ -47,6 +47,7 @@ import {
   readClaudeLink,
   readRobotRegistry,
   removeRobot,
+  renameRobot,
   resolveRobotRegistryFile,
   setRobotAvatar,
   resolveRobotsDir,
@@ -996,6 +997,212 @@ test('机器人描述：空白折叠、上限、登记表与列表读写', async
     )
     assert.equal((await readRobotRegistry({ file })).robots[0].description.length, ROBOT_DESCRIPTION_MAX_LENGTH)
   } finally {
+    await removeRoot(root)
+  }
+})
+
+test('renameRobot：改目录与登记表、保留条目字段、模板只在未改动时同步', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    const writer = await addRobot({ robotsDir, file, name: 'writer', description: '写发布说明' })
+    await addRobot({ robotsDir, file, name: 'painter' })
+    const before = (await readRobotRegistry({ file })).robots.find((robot) => robot.name === 'writer')
+
+    const moved = await renameRobot({ robotsDir, file, name: 'writer', newName: 'author' })
+    assert.equal(moved.renamed, true)
+    assert.equal(moved.previousName, 'writer')
+    assert.equal(moved.agentsRewritten, true)
+    assert.equal(moved.robot.name, 'author')
+    assert.equal(moved.robot.path, await realpathOr(path.join(robotsDir, 'author')))
+    assert.equal(moved.robot.avatar, before.avatar, '头像不随名字漂移')
+    assert.equal(moved.robot.description, '写发布说明')
+    assert.equal(moved.robot.createdAt, before.createdAt)
+    assert.equal(
+      await fs.stat(writer.robot.path).then(
+        () => true,
+        () => false,
+      ),
+      false,
+      '旧目录已不存在',
+    )
+    assert.equal((await fs.stat(moved.robot.path)).isDirectory(), true)
+
+    // 登记表：条目在原位置更新 name / path，其它条目不受影响。
+    const registry = await readRobotRegistry({ file })
+    assert.deepEqual(
+      registry.robots.map((robot) => robot.name),
+      ['painter', 'author'],
+    )
+    assert.equal(registry.robots[1].path, moved.robot.path)
+    assert.equal(registry.robots[1].createdAt, before.createdAt)
+    assert.equal(registry.robots[1].description, '写发布说明')
+
+    // 未改过的 AGENTS.md 模板同步成新名字与新路径。
+    const template = await fs.readFile(path.join(moved.robot.path, 'AGENTS.md'), 'utf8')
+    assert.ok(template.includes('这是「author」机器人的协作说明'))
+    assert.ok(template.includes(`- 路径：\`${moved.robot.path}\``))
+    assert.ok(!template.includes('writer'), '旧名字不再留在模板里')
+
+    // CLAUDE.md 的相对软链接继续有效。
+    assert.deepEqual(await readClaudeLink(moved.robot.path), {
+      exists: true,
+      symlink: true,
+      mode: 'symlink',
+      target: 'AGENTS.md',
+    })
+
+    // 用户改过的 AGENTS.md 不动。
+    const edited = await addRobot({ robotsDir, file, name: 'edited' })
+    await fs.writeFile(path.join(edited.robot.path, 'AGENTS.md'), '# 我自己的说明\n')
+    const editedMoved = await renameRobot({ robotsDir, file, name: 'edited', newName: 'edited-next' })
+    assert.equal(editedMoved.agentsRewritten, false)
+    assert.equal(await fs.readFile(path.join(editedMoved.robot.path, 'AGENTS.md'), 'utf8'), '# 我自己的说明\n')
+
+    // 旧登记表缺头像：按旧名字兜底后写回，改名不会让头像换一个。
+    const legacyPath = await realpathOr(path.join(robotsDir, 'legacy'))
+    await fs.mkdir(legacyPath, { recursive: true })
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        robots: [
+          { name: 'legacy', path: legacyPath, createdAt: '2026-01-01T00:00:00.000Z' },
+          ...(await readRobotRegistry({ file })).robots,
+        ],
+      }),
+    )
+    const legacyMoved = await renameRobot({ robotsDir, file, name: 'legacy', newName: 'legacy-next' })
+    assert.equal(legacyMoved.robot.avatar, resolveAvatar('', 'legacy'))
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('renameRobot：同名 no-op、名称/目录冲突、未知与缺失目录、越界路径与损坏登记表', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    const writer = await addRobot({ robotsDir, file, name: 'writer' })
+    await addRobot({ robotsDir, file, name: 'painter' })
+
+    // 同名：不落盘、不改目录，返回 renamed=false。
+    const same = await renameRobot({ robotsDir, file, name: 'writer', newName: 'writer' })
+    assert.equal(same.renamed, false)
+    assert.equal(same.previousName, 'writer')
+    assert.equal(same.robot.path, writer.robot.path)
+
+    // 新名与登记表里的机器人重名。
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'writer', newName: 'painter' }),
+      (error) => error.code === 'name-taken',
+    )
+    // 新名与 robotsDir 下已存在的目录重名。
+    await fs.mkdir(path.join(robotsDir, 'ghost'))
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'writer', newName: 'ghost' }),
+      (error) => error.code === 'name-taken',
+    )
+    // 非法名字 / 未知机器人 / 目录被外部删掉。
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'writer', newName: '../escape' }),
+      (error) => error.code === 'invalid-name',
+    )
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'nobody', newName: 'author' }),
+      (error) => error.code === 'unknown-robot',
+    )
+    await fs.rm(writer.robot.path, { recursive: true, force: true })
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'writer', newName: 'author' }),
+      (error) => error.code === 'missing-directory',
+    )
+
+    // 登记表被手改到 robotsDir 之外：拒绝移动用户目录。
+    const outside = path.join(root, 'elsewhere', 'robot')
+    await fs.mkdir(outside, { recursive: true })
+    await writeRobotRegistry({
+      file,
+      robots: [{ name: 'outside', path: outside, createdAt: '2026-01-01T00:00:00.000Z' }],
+    })
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'outside', newName: 'inside' }),
+      (error) => error.code === 'path-outside-root',
+    )
+    assert.equal((await fs.stat(outside)).isDirectory(), true)
+
+    // 内置「通用型机器人」的名字保留。
+    await addRobot({ robotsDir, file, name: 'reserved-check' })
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'reserved-check', newName: '通用型机器人' }),
+      (error) => error.code === 'name-taken',
+    )
+
+    // 只改大小写：macOS 默认大小写不敏感，目标「已存在」其实是同一个目录，
+    // 不能被误判成 name-taken；Linux 上本来就是普通改名。
+    await addRobot({ robotsDir, file, name: 'writer-case' })
+    const cased = await renameRobot({ robotsDir, file, name: 'writer-case', newName: 'Writer-Case' })
+    assert.equal(cased.renamed, true)
+    assert.equal(cased.robot.name, 'Writer-Case')
+    assert.ok(
+      (await readRobotRegistry({ file })).robots.some((robot) => robot.name === 'Writer-Case'),
+      '登记表里是新名字',
+    )
+
+    // 登记表损坏：拒绝改名，不覆盖文件。
+    await fs.writeFile(file, '{broken')
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'painter', newName: 'author' }),
+      (error) => error.code === 'registry-unreadable',
+    )
+    assert.equal(await fs.readFile(file, 'utf8'), '{broken')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('renameRobot：登记表写失败时把目录改回旧名（失败后两侧仍一致）', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+    const writer = await addRobot({ robotsDir, file, name: 'writer' })
+
+    // 收掉登记文件所在目录的写权限：原子写的临时文件创建失败。
+    await fs.chmod(pluginDir, 0o500)
+    try {
+      await assert.rejects(
+        () => renameRobot({ robotsDir, file, name: 'writer', newName: 'author' }),
+        (error) => error.code === 'EACCES' || error.code === 'EPERM',
+      )
+    } finally {
+      await fs.chmod(pluginDir, 0o700)
+    }
+
+    // 目录改回旧名，登记表依旧指向 writer（没有半个新名字的条目）。
+    assert.equal((await fs.stat(path.join(robotsDir, 'writer'))).isDirectory(), true)
+    assert.equal(
+      await fs.stat(path.join(robotsDir, 'author')).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    )
+    const registry = await readRobotRegistry({ file })
+    assert.deepEqual(
+      registry.robots.map((robot) => robot.name),
+      ['writer'],
+    )
+    assert.equal(registry.robots[0].path, writer.robot.path)
+  } finally {
+    await fs.chmod(path.join(root, 'cache', 'dsh-plugin-robots'), 0o700).catch(() => {})
     await removeRoot(root)
   }
 })

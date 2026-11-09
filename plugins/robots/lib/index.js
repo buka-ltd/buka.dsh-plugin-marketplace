@@ -12,6 +12,7 @@
  * | `POST /buka-robots/create` | 建目录 + AGENTS.md 模板，并把机器人（含可选描述）插到登记表最前 |
  * | `POST /buka-robots/avatar` | 只改登记表里的头像 id |
  * | `POST /buka-robots/description` | 只改登记表里的一行描述（工作流用它选机器人） |
+ * | `POST /buka-robots/rename` | 改机器人目录名 + 更新登记表 + 按新路径重建 DSH 工作区 |
  * | `POST /buka-robots/remove` | 从登记表移除（目录、文件与会话保留） |
  * | `POST /buka-robots/agents` | 写入某机器人的 AGENTS.md，并补 CLAUDE.md 链接 |
  * | `POST /buka-robots/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
@@ -26,9 +27,9 @@
  * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_robots`
  * 让模型回答「有哪些机器人、挂没挂载、各自装了什么」；写工具
  * `buka_robot_build`（见 `lib/builder.js`、`lib/build-tool.js`）负责创建 /
- * 修改机器人、写 AGENTS.md 并挂到工作区，但**只对随包发布的「机器人构建」
- * preset 的根会话可见**（Config.builderPresets，判定见 `lib/access.js`）。
- * 删除机器人、安装 skills、页面上的编辑仍然只留给用户。
+ * 修改 / 重命名机器人、写 AGENTS.md 并挂到工作区，但**只对随包发布的
+ * 「机器人构建」preset 的根会话可见**（Config.builderPresets，判定见
+ * `lib/access.js`）。删除机器人、安装 skills、页面上的编辑仍然只留给用户。
  *
  * 另通过 `ctx.provide('bukaRobots', ...)` 对外提供一个 Host Service（见
  * `lib/service.js`）：`list()` 列出机器人，`avatarMap()` 给出机器人头像，
@@ -63,6 +64,7 @@ import {
   ensureClaudeLink,
   isValidRobotName,
   listRobots,
+  readAgentsFile,
   readRobotRegistry,
   removeRobot,
   ROBOT_DESCRIPTION_MAX_LENGTH,
@@ -93,6 +95,9 @@ const AVATAR_ROUTE = '/buka-robots/avatar'
 
 /** 页面编辑机器人描述用的路由。 */
 const DESCRIPTION_ROUTE = '/buka-robots/description'
+
+/** 页面重命名机器人（改目录 + 重建工作区）用的路由。 */
+const RENAME_ROUTE = '/buka-robots/rename'
 
 /** 页面删除机器人（只删登记）用的路由。 */
 const REMOVE_ROUTE = '/buka-robots/remove'
@@ -195,18 +200,14 @@ export const Config = z.object({
     .string()
     .default(DEFAULT_ROBOTS_DIR)
     .description('机器人根目录：机器人目录建在插件全局目录下；登记文件固定为该目录同级的 robots.json，支持 ~ 前缀。'),
-  subagentProvider: z
-    .string()
-    .default('spawn')
-    .description('机器人会话使用的 subagent 后端名；默认 spawn（进程内子代理）。'),
-  reportRetries: z
+  resultRetries: z
     .number()
     .step(1)
     .min(0)
     .max(5)
     .default(2)
     .description(
-      '工作流 report 节点没有交回 JSON 结果时，在原会话里要求它按格式重新回复的次数上限；0 表示不重试。',
+      '所有机器人节点都必须交回一个 JSON 结果（工作流节点用 outputSchema 约束其结构）；没有交回时，在原会话里要求它按格式重新回复的次数上限；0 表示不重试。',
     ),
   builderPresets: z
     .array(z.string())
@@ -220,7 +221,7 @@ export const Config = z.object({
  * 注册 HTTP 路由、只读工具与「机器人构建」preset 的写工具。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx 提供 `workspaceRegistry` 的插件上下文
- * @param {{ robotsDir?: string, subagentProvider?: string, reportRetries?: number, builderPresets?: string[] } | undefined} [config] 插件行配置
+ * @param {{ robotsDir?: string, resultRetries?: number, builderPresets?: string[] } | undefined} [config] 插件行配置
  */
 export function apply(ctx, config) {
   const robotsDir = resolveRobotsDir(config?.robotsDir)
@@ -239,8 +240,7 @@ export function apply(ctx, config) {
       registryFile,
       settingsFile,
       defineTool,
-      subagentProvider: config?.subagentProvider,
-      reportRetries: config?.reportRetries,
+      resultRetries: config?.resultRetries,
     }),
   )
 
@@ -665,6 +665,100 @@ export function apply(ctx, config) {
       () =>
         webCtx.webServer.register({
           kind: 'exact',
+          path: RENAME_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'POST')
+              return
+            }
+            const body = await readJsonBody(req, res)
+            if (body === undefined) return
+
+            const name = typeof body?.name === 'string' ? body.name.trim() : ''
+            const newName = typeof body?.newName === 'string' ? body.newName.trim() : ''
+            if (!isValidRobotName(name)) {
+              sendError(res, 400, 'invalid-name', `机器人名称不合法：${String(body?.name)}`)
+              return
+            }
+            if (!isValidRobotName(newName)) {
+              sendError(res, 400, 'invalid-name', `新机器人名称不合法：${String(body?.newName)}`)
+              return
+            }
+            if (name === newName) {
+              sendError(res, 400, 'invalid-name', '新名称与当前名称相同')
+              return
+            }
+
+            try {
+              // 与构建工具走同一条 buildRobot 路径：目录改名、登记表更新、
+              // 工作区重建（旧会话保留但不再挂在该机器人下）语义完全一致。
+              const result = await serializeRegistry(() =>
+                buildRobot({
+                  robotsDir,
+                  file: registryFile,
+                  name,
+                  newName,
+                  update: true,
+                  workspaceRegistry: ctx.workspaceRegistry,
+                }),
+              )
+              webCtx.logger?.info?.(
+                'buka-robots: 机器人 %s 已重命名为 %s（%s）',
+                name,
+                result.robot.name,
+                result.robot.path,
+              )
+              // 带上改名后的 AGENTS.md 摘要：Host 会把未改过的模板同步成新名 /
+              // 新路径，页面据此重设草稿，避免「保存」把旧模板写回去。
+              const agents = await readAgentsFile(result.robot.path)
+              sendJson(res, 200, {
+                ok: true,
+                previousName: result.previousName,
+                renamed: result.renamed,
+                robot: result.robot,
+                agents,
+                mounted: result.mounted,
+                workspaceId: typeof result.workspaceId === 'string' ? result.workspaceId : null,
+                mountError: result.mountError,
+              })
+            } catch (error) {
+              switch (error?.code) {
+                case 'invalid-name':
+                  sendError(res, 400, 'invalid-name', describeError(error))
+                  return
+                case 'invalid-update':
+                  sendError(res, 400, 'invalid-update', describeError(error))
+                  return
+                case 'unknown-robot':
+                  sendError(res, 404, 'unknown-robot', describeError(error))
+                  return
+                case 'name-taken':
+                  sendError(res, 409, 'name-taken', describeError(error))
+                  return
+                case 'missing-directory':
+                  sendError(res, 409, 'missing-directory', describeError(error))
+                  return
+                case 'path-outside-root':
+                  sendError(res, 409, 'path-outside-root', describeError(error))
+                  return
+                case 'registry-unreadable':
+                  sendError(res, 409, 'registry-unreadable', describeError(error))
+                  return
+                default:
+                  webCtx.logger?.warn?.('buka-robots: 重命名机器人失败：%s', describeError(error))
+                  sendError(res, 500, 'rename-failed', `重命名机器人失败：${describeError(error)}`)
+              }
+            }
+          },
+        }),
+      `buka-robots: POST ${RENAME_ROUTE}`,
+    )
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
           path: REMOVE_ROUTE,
           handler: async (req, res) => {
             if (rejected(req, res)) return
@@ -1001,7 +1095,7 @@ export function apply(ctx, config) {
       defineTool({
         name: 'buka_robots',
         description:
-          'List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md. This tool is read-only: creating or updating a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.',
+          'List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.',
         parameters: {},
         output: {
           schema: {
@@ -1185,12 +1279,13 @@ export function apply(ctx, config) {
             description: args?.description,
             agents: args?.agents,
             update: args?.update,
+            newName: args?.newName,
             workspaceRegistry: ctx.workspaceRegistry,
           }),
         )
         ctx.logger?.info?.(
           'buka-robots: %s 机器人 %s（%s）',
-          result.created ? '已创建' : '已更新',
+          result.created ? '已创建' : result.renamed ? `已重命名（原 ${result.previousName}）` : '已更新',
           result.robot.name,
           result.robot.path,
         )

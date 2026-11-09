@@ -125,7 +125,14 @@ async function loadClient() {
   }
 
   function InputStub(props) {
-    return h('input', { className: 'x-input', value: props.value ?? '', placeholder: props.placeholder ?? '' })
+    return h('input', {
+      className: 'x-input',
+      value: props.value ?? '',
+      placeholder: props.placeholder ?? '',
+      type: props.type,
+      maxLength: props.maxLength,
+      'data-modal-autofocus': props['data-modal-autofocus'],
+    })
   }
 
   function ModalStub(props) {
@@ -299,6 +306,14 @@ const zh = {
   save: '保存',
   saving: '保存中…',
   cancel: '取消',
+  rename: '重命名机器人',
+  renameLabel: '重命名',
+  renameFieldLabel: '新名称',
+  renameHint: '重命名会改机器人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个机器人下。',
+  renameEmpty: '先填一个新名称。',
+  renameSame: '新名称与当前名称相同。',
+  renameSaveFailed: '重命名失败：',
+  renamed: '已重命名为：',
   mount: '挂载',
   delete: '删除',
   tabsLabel: '机器人详情页签',
@@ -355,6 +370,10 @@ function listData(generalEnabled) {
  *   dialogOpen?: boolean,
  *   draftDescription?: string,
  *   descriptionDraft?: string,
+ *   renameOpen?: boolean,
+ *   renameDraft?: string,
+ *   renameSaving?: boolean,
+ *   renameError?: string | null,
  *   tab?: string,
  *   settingsOpen?: boolean,
  *   workspacesOpen?: boolean,
@@ -368,6 +387,10 @@ function states({
   dialogOpen = false,
   draftDescription = '',
   descriptionDraft = '',
+  renameOpen = false,
+  renameDraft = '',
+  renameSaving = false,
+  renameError = null,
   tab = 'agents',
   settingsOpen = false,
   workspacesOpen = false,
@@ -391,6 +414,10 @@ function states({
     descriptionDraft, // descriptionDraft
     false, // descriptionSaving
     null, // descriptionError
+    renameOpen, // renameOpen
+    renameDraft, // renameDraft
+    renameSaving, // renameSaving
+    renameError, // renameError
     selectedName, // selectedName
     tab, // tab
     '', // agentsDraft
@@ -565,4 +592,81 @@ test('机器人页：卡片与职责页签展示职责，创建对话框带职�
     (node) => node.type === 'textarea' && node.props?.placeholder === '例如：负责把会议记录整理成三点结论',
   )
   assert.ok(createField)
+})
+
+test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名对话框', async () => {
+  const client = await loadClient()
+
+  // 配置视图标题行：机器人名旁有铅笔按钮（tooltip / aria-label 带机器人名）。
+  const detail = client.render(states({ data: listData(true), selectedName: 'writer' }))
+  const renameButton = findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer')
+  assert.ok(renameButton, '配置视图标题行应有重命名按钮')
+  assert.equal(renameButton.props?.disabled, false)
+
+  // 目录缺失时入口禁用。
+  const missingData = listData(true)
+  missingData.robots[0].exists = false
+  const missingButton = findNode(
+    client.render(states({ data: missingData, selectedName: 'writer' })),
+    (node) => node.props?.['aria-label'] === '重命名 writer',
+  )
+  assert.equal(missingButton?.props?.disabled, true, '目录缺失时重命名按钮禁用')
+
+  // renameOpen 时对话框要有标题、新名称字段、后果提示与保存 / 取消。
+  const dialogStates = {
+    data: listData(true),
+    selectedName: 'writer',
+    renameOpen: true,
+    renameDraft: 'writer',
+  }
+  const dialog = collect(client.render(states(dialogStates)))
+  assert.ok(dialog.texts.includes('重命名机器人'))
+  assert.ok(dialog.texts.includes('新名称'))
+  assert.ok(
+    dialog.texts.includes('重命名会改机器人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个机器人下。'),
+  )
+  assert.ok(dialog.texts.includes('保存'))
+  assert.ok(dialog.texts.includes('取消'))
+  const field = findNode(
+    client.render(states(dialogStates)),
+    (node) => node.type === 'input' && node.props?.value === 'writer',
+  )
+  assert.ok(field, '对话框应有新名称输入框，并带出当前名称')
+  assert.equal(field.props?.maxLength, 64)
+
+  // 保存按钮：草稿与当前名相同 / 为空 / 保存中都禁用；改成新名字才可用。
+  const saveButtons = (options) =>
+    collect(client.render(states(options))).nodes.filter(
+      (node) => node.type === 'button' && (node.children ?? []).includes('保存'),
+    )
+  const sameButtons = saveButtons(dialogStates)
+  assert.ok(sameButtons.length > 0)
+  assert.ok(
+    sameButtons.every((node) => node.props?.disabled === true),
+    '新名称与当前名相同时保存禁用',
+  )
+  const changedButtons = saveButtons({ ...dialogStates, renameDraft: 'author' })
+  assert.ok(
+    changedButtons.some((node) => node.props?.disabled === false),
+    '改了新名称后保存可用',
+  )
+  const emptyButtons = saveButtons({ ...dialogStates, renameDraft: '   ' })
+  assert.ok(emptyButtons.every((node) => node.props?.disabled === true), '新名称为空时保存禁用')
+  const savingButtons = saveButtons({ ...dialogStates, renameDraft: 'author', renameSaving: true })
+  assert.ok(savingButtons.every((node) => node.props?.disabled === true), '保存中禁用')
+
+  // 失败提示留在对话框里。
+  const failed = collect(
+    client.render(states({ ...dialogStates, renameError: '重命名失败：机器人名称已被占用' })),
+  )
+  assert.ok(failed.texts.includes('重命名失败：机器人名称已被占用'))
+
+  // 登记文件损坏时重命名入口禁用。
+  const corruptData = listData(true)
+  corruptData.corrupt = true
+  const corruptButton = findNode(
+    client.render(states({ data: corruptData, selectedName: 'writer' })),
+    (node) => node.props?.['aria-label'] === '重命名 writer',
+  )
+  assert.equal(corruptButton?.props?.disabled, true, '登记文件损坏时重命名按钮禁用')
 })

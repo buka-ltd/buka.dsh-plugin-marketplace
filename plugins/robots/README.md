@@ -11,17 +11,22 @@
   也不再暴露给工作流、不能被工作流调用（随时可以再启用）。
 - 新建机器人 = 在插件根目录下建同名目录（并写入 AGENTS.md 模板）→ 登记到插件的 `robots.json` →
   再挂到 DSH 的**工作区列表**（`workspaces.create`），侧边栏工作区里立刻出现。
+- 重命名机器人 = 把 `<robotsDir>/<旧名>` 目录真正改名为新名 → 登记表里同一条目就地更新
+  `name` / `path`（位置、`createdAt`、`avatar`、`description` 不变）→ 删除旧工作区注册（若之前已挂载），
+  再按新路径**重建**工作区（未挂载的机器人改名后也会按新路径挂载，与构建工具「始终保证挂载」一致）；
+  **旧会话日志保留，但不再挂在这个机器人下**（这是改名语义的已知代价）。
 - 删除机器人 = 移除插件登记 + 删除对应的工作区注册；**机器人目录、文件与会话保留**（与 DSH 删除工作区的语义一致）。
 - 每个机器人可以：
   - **选一个预设头像**（新建时默认带一个，之后点详情页标题旁的头像即可更换）；
   - **写一句职责**（`description`，类似 skill 的 description）：工作流通过只读工具
     `buka_robots` 读到它，据此决定是否把某个节点交给这个机器人；
+  - **重命名**：改机器人目录名并重建 DSH 工作区，已有会话日志保留但不再列在这个机器人下；
   - 用 `npx skills` **按需选择**安装/移除**项目级** skills（落到 `<机器人目录>/.agents/skills`，
     同时给 Claude Code 建 `<机器人目录>/.claude/skills` 链接）；
   - 编辑自己的 `<机器人目录>/AGENTS.md`（同时维护 `CLAUDE.md` 指向它的软链接）；
   - 「新会话」——进入该机器人工作区的会话；
   - 未挂载时（例如工作区在 DSH 里被手动删掉了）显示「挂载」，一键恢复工作区注册。
-- **安装插件就自动获得「机器人构建」模式**：新建会话时选它，agent 会问清机器人要做什么，起草名字、头像、一句职责与 AGENTS.md，然后用只对该模式可见的 `buka_robot_build` 创建并挂到工作区。
+- **安装插件就自动获得「机器人构建」模式**：新建会话时选它，agent 会问清机器人要做什么，起草名字、头像、一句职责与 AGENTS.md，然后用只对该模式可见的 `buka_robot_build` 创建并挂到工作区；给已有机器人改名也走同一个工具（先确认再改）。
 
 ## 机器人构建模式（preset）
 
@@ -33,7 +38,7 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 | 显示名 | 机器人构建 |
 | 顺序 | 10（`standard` 之后、`workflow-orchestrator` 之前） |
 
-新建会话时选「机器人构建」，agent 会先问清这个机器人要做什么，再给出名字、头像、一句职责与完整的 AGENTS.md 草稿，等用户确认后调用 `buka_robot_build` 创建机器人、写 AGENTS.md 并挂到工作区；最后告诉用户机器人在哪、怎么开新会话、建议在「技能」页装哪些 skills。它不做机器人自己的工作，也不会创建用户没要求的机器人。
+新建会话时选「机器人构建」，agent 会先问清这个机器人要做什么，再给出名字、头像、一句职责与完整的 AGENTS.md 草稿，等用户确认后调用 `buka_robot_build` 创建机器人、写 AGENTS.md 并挂到工作区；**已有机器人要改名时也走同一个工具**：传 `name`（旧名）+ `newName`（新名）+ `update: true`，先和用户确认再改——改名会移动目录、重建工作区，旧会话不再列在该机器人下；最后告诉用户机器人在哪、怎么开新会话、建议在「技能」页装哪些 skills。它不做机器人自己的工作，也不会创建或改名用户没要求的机器人。
 
 - 写入口 `buka_robot_build` 只对 `builderPresets` 点名的 preset 的**根会话**可见：其他 preset、由它 spawn 出来的子会话都看不到，直接调用也会被 `assertAccess` 挡住（见 `lib/access.js`）。组成里没有 `sessions` / `agentPresets` 服务时收紧为不可见——写操作宁可不可用，也不暴露给普通会话。
 - 前提是组成里有 `@deepseek-ai/dsh-agent-preset` 与 `@deepseek-ai/dsh-agent-preset-registry`（Web / 桌面组合自带）；没有 preset 服务的纯 headless 组成里，页面照常工作，只是没有这个模式。
@@ -57,11 +62,11 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
   name: '@buka/dsh-plugin-robots'
   config:
     robotsDir: ~/robots
-    reportRetries: 2
+    resultRetries: 2
     builderPresets: ['robot-builder']
 ```
 
-`reportRetries`（默认 2）是工作流 `report` 节点「没有交回 JSON 结果」时在原会话里追问的次数上限；`0` 表示不重试。`builderPresets`（默认 `['robot-builder']`）是能看到并调用 `buka_robot_build` 的 agent preset 名单，见上文「机器人构建模式」。
+`resultRetries`（默认 2）是机器人没有交回合法 JSON 结果时在原会话里追问的次数上限；`0` 表示不重试。`builderPresets`（默认 `['robot-builder']`）是能看到并调用 `buka_robot_build` 的 agent preset 名单，见上文「机器人构建模式」。
 
 `robots.json`（version 1）是「哪些算机器人」的唯一来源：
 
@@ -80,15 +85,18 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 }
 ```
 
-- 写入是原子的（临时文件 + rename，权限 `0600`），新建/删除请求在 Host 里串行。
+- 写入是原子的（临时文件 + rename，权限 `0600`），新建 / 删除 / 改名请求在 Host 里串行。
 - `avatar` 是预设头像 id。旧登记表没有这个字段（或在别处被改坏）时，读取端按名字哈希
   兜底成一个确定的预设；下一次写登记表时会把具体 id 补上。新建机器人一定带头像。
 - `description` 是给工作流选择机器人用的一句职责，最长 500 个字符；读取 / 写入时会把
   换行与连续空白折叠成一个空格。旧登记表没有这个字段时按空串处理，
   在详情页的「职责」页签里补上即可，也可以在创建机器人时直接填。
+- 重命名时同一条目就地更新 `name` 与 `path`，位置、`createdAt`、`avatar`、`description` 不变；
+  `avatar` 按旧名解析成具体 id 后写回，避免旧记录缺头像时改名导致头像漂移。改名同时移动机器人
+  目录、重建 DSH 工作区；**已有会话日志保留，但不再挂在这个机器人下**。
 - 文件缺失按空表处理；文件损坏时页面提示并**拒绝写入**——否则一次新建就会覆盖掉原有登记。
   修复或删除该文件后刷新即可恢复。
-- 机器人名字规则：1–64 个字符，不能是 `.` / `..`、不能含 `/`、`\`，不能以 `.` 开头；允许字母、数字、汉字、`._-`。
+- 机器人名字规则：1–64 个字符，不能是 `.` / `..`、不能含 `/`、`\`，不能以 `.` 开头；允许字母、数字、汉字、`._-`。重命名的新名同样走这套规则，并且不能等于旧名、不能与登记表里其它机器人、机器人根目录下已存在的目录或内置「通用型机器人」重名。
 
 `settings.json`（version 1）只放页面设置，与「哪些算机器人」无关：
 
@@ -170,6 +178,8 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 - 读取上限 256 KiB；超过上限时页面显示提示，请用外部编辑器修改。
 - 保存上限 512 KiB，直接覆盖机器人目录下的 `AGENTS.md`。
 - 新建机器人时若 `AGENTS.md` 不存在，会写入一段带机器人名称与路径的模板；已存在则不覆盖。
+- 重命名时只有 `AGENTS.md` 内容**仍与用旧名 / 旧路径生成的模板完全一致**，才会改成新模板；
+  用户改过就不动，避免覆盖用户内容。
 - 机器人目录里自动把 `CLAUDE.md` 做成指向 `AGENTS.md` 的**相对符号链接**，Claude Code 因此读同一份内容。
   已存在的用户文件/其它链接不覆盖；平台不允许建链接时（如 Windows 未开开发者模式）降级为只有
   `@AGENTS.md` 的说明文件。保存 AGENTS.md、安装 skills 时都会补一次链接，旧机器人会被自动修复。
@@ -188,7 +198,7 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
   创建对话框里有头像选择器（默认选一个还没被占用的预设）。
   通用型机器人的「进入工作区」对话框读取 DSH 现有的工作区注册表，点一行就以标准模式打开该工作区；
   它没有配置页（没有目录、AGENTS.md 与 skills 可配）。
-- **配置页**：标题左侧是返回列表的图标按钮（带 tooltip），标题旁是头像（点它打开「更换头像」对话框，从预设里选一个保存），挂载状态标签紧跟在标题右侧，**不展示机器人目录**；右侧是「新会话」「打开 Finder」「刷新」。正文用可切换页签分成三块：
+- **配置页**：标题左侧是返回列表的图标按钮（带 tooltip），标题旁是头像（点它打开「更换头像」对话框，从预设里选一个保存），挂载状态标签紧跟在标题右侧，**不展示机器人目录**；右侧是「新会话」「打开 Finder」「刷新」。标题行还有重命名入口：一个铅笔图标按钮（tooltip / aria-label 为 `重命名 <机器人名>`，`corrupt`、目录缺失或写操作进行中时禁用），点开「重命名机器人」对话框填「新名称」（1–64 字符，与新建同一套规则）；保存后会**改机器人目录名并重建 DSH 工作区**，已有会话仍保留，但不再列在这个机器人下。名称为空、与当前名相同或保存中时保存按钮禁用，失败信息留在对话框里。正文用可切换页签分成三块：
   - **职责**：用一句话写清这个机器人负责什么 + 提示（工作流会读它决定是否把节点交给这个机器人），右侧是保存按钮，只有改动后才可用；
   - **AGENTS.md**：标题右侧是保存按钮（有改动才可用），等宽文本域占满剩余高度，不展示目录与链接状态；
   - **技能**：已安装列表（可移除）与「安装 skills」按钮。安装按钮打开对话框：填来源或点 Skills 收藏夹里的
@@ -203,6 +213,7 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 | --- | --- |
 | `GET /buka-robots/list` | 登记表里的机器人 + 挂载状态 + 项目 skills + AGENTS.md 状态 |
 | `POST /buka-robots/create` | 在 `robotsDir` 下建机器人目录、写 AGENTS.md 模板、登记到 `robots.json`；可带 `avatar`（不传则自动分配）与 `description` |
+| `POST /buka-robots/rename` | 把机器人目录改名为 `newName`、就地更新登记表 `name` / `path`，并在新路径重建 DSH 工作区（删除旧工作区注册）；已有会话日志保留但不再挂在该机器人下 |
 | `POST /buka-robots/avatar` | 改某个机器人的头像 id（只动登记表） |
 | `POST /buka-robots/description` | 改某个机器人的职责（只动登记表；工作流用它选机器人） |
 | `POST /buka-robots/remove` | 只删除登记条目（目录、文件保留） |
@@ -215,12 +226,12 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 | `GET /buka-robots/settings` | 读插件设置（目前只有通用型机器人开关） |
 | `POST /buka-robots/settings` | 写入插件设置；设置文件与登记表同级（`settings.json`） |
 
-除 `create` / `remove` 外，其余请求都用机器人名字（`name`）寻址，路径由 Host 从登记表读取，客户端不能传任意路径。所有路由沿用 web 组合的信任栅栏（`connection.requestRejection`），只接受本机已认证的同源请求。
+除 `create` / `remove` 外，其余请求都用机器人名字（`name`）寻址（`rename` 另带 `newName`），路径由 Host 从登记表读取，客户端不能传任意路径。所有路由沿用 web 组合的信任栅栏（`connection.requestRejection`），只接受本机已认证的同源请求。
 
 ## 模型工具
 
-- `buka_robots`（只读，所有会话可见）：返回机器人根目录、登记文件、是否损坏，以及登记表里每个机器人的名称、路径、**职责**、是否已挂载、项目级 skills 与是否有 AGENTS.md。职责是工作流编排器选择机器人的主要依据。通用型机器人启用时也会出现在清单的最后，字段与普通机器人完全同形（没有额外标记）；它的职责写明没有专用机器人时使用。
-- `buka_robot_build`（写，只对 `builderPresets` 点名的 preset 根会话可见）：创建或修改一个机器人并挂到工作区。参数是 `name` / `avatar` / `description` / `agents`（完整 AGENTS.md）/ `update`；同名已存在且没传 `update: true` 时拒绝，避免模型覆盖用户的机器人。挂载失败不算构建失败：返回 `mounted: false` 与 `mountError`，机器人本身已经建好。删除机器人、安装 skills、在页面上编辑 AGENTS.md 仍然只属于页面上的用户操作。
+- `buka_robots`（只读，所有会话可见）：返回机器人根目录、登记文件、是否损坏，以及登记表里每个机器人的名称、路径、**职责**、是否已挂载、项目级 skills 与是否有 AGENTS.md。职责是工作流编排器选择机器人的主要依据。通用型机器人启用时也会出现在清单的最后，字段与普通机器人完全同形（没有额外标记）；它的职责写明没有专用机器人时使用。本工具只读：新建、修改与**重命名**都走 `buka_robot_build`（或页面）。
+- `buka_robot_build`（写，只对 `builderPresets` 点名的 preset 根会话可见）：创建、修改或重命名一个机器人并挂到工作区。参数是 `name` / `newName` / `avatar` / `description` / `agents`（完整 AGENTS.md）/ `update`；同名已存在且没传 `update: true` 时拒绝，避免模型覆盖用户的机器人。`newName` 把 `name` 指定的**已存在**机器人改名为 `newName`，必须同时传 `update: true`，同一次调用还可以继续改头像 / 职责 / AGENTS.md；改名会移动机器人目录并重建 DSH 工作区，已有会话日志保留但不再列在该机器人下，所以**应先和用户确认再改**，也不要改用户没要求改的机器人。输出增加 `renamed` 与 `previousName`（未改名时分别为 `false` / `null`）。挂载失败不算构建失败：返回 `mounted: false` 与 `mountError`，机器人本身已经建好。删除机器人、安装 skills、在页面上编辑 AGENTS.md 仍然只属于页面上的用户操作。
 
 ## 结构
 
@@ -228,18 +239,18 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 | --- | --- |
 | `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client`、`locale` / `icon` 导出 |
 | `cordis.patch.yml` | bundle 层两条 insert：`page-buka-robots`（本插件）与 `preset-robot-builder`（随包发布的「机器人构建」preset） |
-| `lib/index.js` | Host 一半：插件入口、`robotsDir` / `builderPresets` 配置、包内路由、`buka_robots` 只读工具、`buka_robot_build` 的注册与可见性判定 |
-| `lib/robot-store.js` | 名称校验、目录创建与 AGENTS.md 模板、frontmatter、项目 skills 扫描、AGENTS.md 读写、机器人登记表与头像写入、挂载状态汇总；不依赖 DSH 运行时，便于单测 |
+| `lib/index.js` | Host 一半：插件入口、`robotsDir` / `builderPresets` 配置、包内路由（含 `POST /buka-robots/rename`）、`buka_robots` 只读工具、`buka_robot_build` 的注册与可见性判定 |
+| `lib/robot-store.js` | 名称校验、目录创建与重命名（连目录一起改、失败回滚）、AGENTS.md 模板、frontmatter、项目 skills 扫描、AGENTS.md 读写、机器人登记表与头像写入、挂载状态汇总；不依赖 DSH 运行时，便于单测 |
 | `lib/avatar.js` | 预设头像 id、默认分配与校验；id 是跨插件契约，浏览器一半各自维护 emoji / 底色映射 |
 | `lib/access.js` | `buka_robot_build` 的可见性判定：只放行点名 preset 的根会话；preset 服务缺失时收紧为不可见；纯函数，便于单测 |
-| `lib/builder.js` | 一次「构建」的语义：请求规范化、已存在机器人要 `update: true`、写 AGENTS.md、补 CLAUDE.md 链接、按规范路径判断挂载并只在需要时 `workspaceRegistry.create()`；不依赖 DSH 包，便于单测 |
-| `lib/build-tool.js` | `buka_robot_build` 的工具定义、参数 / 结果 schema 与 `render`；`defineTool` 由入口注入，便于单测 |
+| `lib/builder.js` | 一次「构建」的语义：请求规范化、已存在机器人要 `update: true`、改名（`newName`）移动目录并重建工作区、写 AGENTS.md、补 CLAUDE.md 链接、按规范路径判断挂载并只在需要时 `workspaceRegistry.create()`；不依赖 DSH 包，便于单测 |
+| `lib/build-tool.js` | `buka_robot_build` 的工具定义、参数（含 `newName`）/ 结果 schema（含 `renamed` / `previousName`）与 `render`；`defineTool` 由入口注入，便于单测 |
 | `lib/settings.js` | 插件设置（通用型机器人开关）：`settings.json` 的原子读写、默认值与坏文件回落；不依赖 DSH 包，便于单测 |
 | `lib/general-robot.js` | 通用型机器人的固定名字、职责、固定 🤖 头像 id 与清单项；靠它与 `avatarMap()` / `startSession()` 对接，对外不携带任何特殊标记 |
-| `lib/service.js` | 对外 Host Service `ctx.bukaRobots`：`list()`、`avatarMap()` 与 `startSession()`（新开会话，或按 `sessionId` 续接同一会话；续接前先 compact，report 节点在同会话里追问）；不依赖 DSH 包（`defineTool` 由入口注入），便于单测 |
+| `lib/service.js` | 对外 Host Service `ctx.bukaRobots`：`list()`、`avatarMap()`、阻塞的 `startSession()`、非阻塞的 `dispatchSession()`（返回 `readResult` / `send` / `retryReport` / `cancel` / `dispose` 可观测句柄）与只 resume、不发 prompt 的 `openSession()`；新开会话或按 `sessionId` 续接同一会话，续接前先 compact；每个会话都要求交回 JSON（scoped `structured_output`，可用 `outputSchema` 约束），不合法时按 `resultRetries` 追问；默认不限时；不依赖 DSH 包（`defineTool` 由入口注入），便于单测 |
 | `lib/npx.js` | 定位 `npx`、在机器人目录里执行 `skills add` / `skills remove`，并解析 `--list` 的文本清单 |
 | `lib/reveal.js` | 按平台选择文件管理器命令（`open` / `explorer` / `xdg-open`）并打开机器人目录 |
-| `client.js` | 浏览器一半：`sidebar.panellist` 图标 + `main` 面板；列表页（通用型机器人卡片 + 设置对话框）与配置页；文案走 `ctx.locale` |
+| `client.js` | 浏览器一半：`sidebar.panellist` 图标 + `main` 面板；列表页（通用型机器人卡片 + 设置对话框）、配置页（含重命名入口与对话框）；文案走 `ctx.locale` |
 | `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
 | `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
@@ -258,13 +269,19 @@ export function apply(ctx) {
   const { robots } = await ctx.bukaRobots.list()
   const session = await ctx.bukaRobots.startSession({
     robot: robots[0].name,
-    prompt: '把这份调研整理成三点结论。',
-    report: true,            // 要求会话交回一个 JSON 对象；没交回时会在同一会话里追问
+    prompt: '把这份调研整理成三点结论，结束时交回 JSON：{ status, summary }。',
+    // 可选：结构化结果的 JSON Schema（不传时是任意对象）；routes 用于告诉服务
+    // 合法的工作流 route 名，缺省时结果里不需要 next。
+    outputSchema: {
+      type: 'object',
+      properties: { status: { type: 'string' }, summary: { type: 'string' } },
+      required: ['status', 'summary'],
+    },
     title: '调研总结 · 写作者', // 会话标题；不传则由 DSH 自动命名（机器人消息不会触发自动命名）
-    timeoutMs: 10 * 60 * 1000,
+    timeoutMs: 5 * 60 * 1000, // 可选硬超时；不传就不限时（没有默认超时）
   })
   const first = await session.result
-  // { sessionId, robot, text, structured, reportRetries?, stopReason, error?, resumed?, compacted? }
+  // { sessionId, robot, text, structured, resultRetries?, stopReason, error?, resumed?, compacted? }
 
   // 同一个机器人再次执行：传回上一次的 sessionId。服务会先 compact 这个会话的
   // 历史，再把新的 prompt 发进同一个会话，而不是另开一个新的。
@@ -278,19 +295,64 @@ export function apply(ctx) {
 }
 ```
 
-`startSession()` 的行为：
+观察者式调用（工作流插件就是这样用的）：不 await 结果、不设默认超时，把 prompt 投进会话后自己订阅 `session/event`，`turn/end` 后读结果：
 
-- 不传 `sessionId` 时创建一个**普通顶层会话**（`cwd = 机器人目录`），并挂到机器人自己的工作区：所以侧边栏能看到、点开就是普通对话。机器人的 AGENTS.md 与项目 skills 照常生效；普通会话创建失败时才退回 `ctx.subagents.startActivation()`（spawn 子会话；不会出现在侧边栏，保证工作流仍能继续）；
+```js
+const { robots } = await ctx.bukaRobots.list()
+const handle = await ctx.bukaRobots.dispatchSession({
+  robot: robots[0].name,
+  prompt: '检查登录页并跑测试，结束时交回 JSON：{ next: "pass" | "fix", status, summary }。',
+  routes: ['pass', 'fix'], // 工作流节点的出边名；结果里的 next 必须是其中之一
+  outputSchema: { type: 'object', properties: { next: { enum: ['pass', 'fix'] } }, required: ['next'] },
+})
+// handle.startSeq 是这一轮的起点；调用方只处理自己登记过的会话事件。
+const turn = handle.readResult() // { sessionId, text, stopReason, turnEnded, structured?, resultRetries? }
+// turn.turnEnded 为 true 才表示这一轮真的结束；中断后恢复时先用它检查上一轮是否其实已经完成。
+
+// 恢复：只打开已有会话（resume / attach），不发 prompt。
+const resumed = await ctx.bukaRobots.openSession({ robot: robots[0].name, sessionId: turn.sessionId })
+const check = resumed.readResult({ sinceSeq: handle.startSeq })
+if (check.turnEnded !== true) {
+  await resumed.send('继续完成刚才的任务', { compactFirst: true }) // 同一会话再发一条
+  const continued = resumed.readResult({ sinceSeq: resumed.startSeq })
+}
+await resumed.cancel('timeout') // 取消当前轮，返回已经写下的内容
+await resumed.dispose()         // 只释放 live agent，会话日志保留
+```
+
+`startSession()` 的行为（默认 `wait: true`，保持“投递后等会话结束再返回结果”的阻塞语义；传 `wait: false` 等价于 `dispatchSession()`，见下文）：
+
+- 不传 `sessionId` 时创建一个**普通顶层会话**（`cwd = 机器人目录`），并挂到机器人自己的工作区：所以侧边栏能看到、点开就是普通对话。机器人的 AGENTS.md 与项目 skills 照常生效；创建失败直接报错，不退回 subagent，也不另开新会话；
 - `robot: '通用型机器人'` 走内置兜底项：不要求登记表条目，启用时把**调用方会话所在的工作区**当 cwd（没有调用方会话时退回宿主默认工作目录），以标准模式运行；停用时直接报错。工作流只应在没有其他合适机器人时选它；
 - 可传 `title` 给会话命名：新会话直接写入标题；续接时只在会话还没有标题的情况下补写，不覆盖用户手动改过的名字。机器人会话的首条消息来源是 `buka-robot`，DSH 的自动标题只看 `user` 来源的消息，所以不传 `title` 的机器人会话在侧边栏里会一直显示「未命名」——工作流插件会传「运行目标 · 机器人」；
-- 传 `sessionId` 时是该会话的**续接**：通过 `ctx.agents.resume()` 把会话重新加载成 live agent，先调用 `ctx.compaction.compactNow()` 压缩历史，再把这次 `prompt` 发进同一个会话。返回的 `resumed` 为 `true`，`compacted` 表示这次是否真的压缩了内容。压缩失败（例如摘要模型不可用）不会中断这一轮：`compacted` 为 `false`，原因写进 `compactionError`，prompt 照常发送；旧的子会话不存在 / 不可恢复时自动退回新会话，并把原因写进 `resumeError`，不会让调用方失败；
-- 可传 `agentPreset` 显式指定该会话使用的 agent preset：不带时子会话继承调用者的 preset，工作流插件用它把机器人节点落到普通工作 preset，避免继承编排器的 persona 与工具集；续接时会优先恢复会话里记录的 preset；
-- 投递 `prompt` 后等会话结束，返回最终文本；`report: true` 时为会话注册 scoped 工具 `structured_output`（subagent 兜底路径由运行时按 `outputSchema` 提供），结果出现在 `result.structured`；
-- `report: true` 的会话如果结束时没有交回 JSON（结构化工具没被调用，最后一条回复也不是 JSON 对象），服务会在**同一个会话**里补一条消息，要求它按要求的格式重新回复，最多 `reportRetries` 次；重试用尽仍没有结果时 `stopReason` 为 `error`，`error` 里写明追问了几次。最后一条回复本身是 JSON 对象（含 ```json 代码块）时同样算交回；
-- 机器人节点不弹审批：默认走委托权限（需要审批的操作由运行时拒绝），工作应落在机器人目录内；
-- 超时 / 取消时中断会话，再尽量收集已经产生的输出，`stopReason` 为 `timeout` / `aborted`；
+- 传 `sessionId` 时是该会话的**续接**：通过 `ctx.agents.resume()` 把会话重新加载成 live agent，先调用 `ctx.compaction.compactNow()` 压缩历史，再把这次 `prompt` 发进同一个会话。返回的 `resumed` 为 `true`，`compacted` 表示这次是否真的压缩了内容。压缩失败（例如摘要模型不可用）不会中断这一轮：`compacted` 为 `false`，原因写进 `compactionError`，prompt 照常发送；会话不存在 / 不可恢复 / 是旧版隐藏 subagent 会话时直接报错，不新开会话，调用方按失败处理；
+- 可传 `agentPreset` 显式指定该会话使用的 agent preset：不传时新会话按宿主默认组合创建，续接时优先恢复会话里记录的 preset；工作流插件用它把机器人节点落到普通工作 preset（默认 `standard`），避免继承编排器的 persona 与工具集；
+- **每个会话都要交回 JSON**：服务会注册 scoped 工具 `structured_output`，结果出现在 `result.structured`。可传 `outputSchema` 约束这个工具的 JSON Schema，不传时接受任意对象；最后一条回复本身是 JSON 对象（含 ```json 代码块）时同样算交回；
+- 可传 `routes`（合法的工作流 route 名列表）：结束时没有交回合法 JSON、或（工作流节点有出边时）`next` 不在 `routes` 里，服务会在**同一个会话**里补一条消息，说明当前问题和合法 route，要求重新回复，最多 `resultRetries` 次；重试用尽仍不合法时 `stopReason` 为 `error`，`error` 里写明追问了几次；
+- **走正常审批策略**：机器人是普通会话，未显式传 `approval`（或传 `'ask'`）时沿用部署的审批策略，可以在会话里请求工具审批或向用户提问；只有显式 `approval: 'never'` 才强制拒绝（无头场景）。机器人会话是**运行时根会话**，续接时也不挂回父会话；工作流不会注入行为提示词；
+- **没有默认超时**：不传 `timeoutMs` 时会话按自己的节奏跑完（旧版本默认 10 分钟，已移除）。需要硬截止时显式传正的 `timeoutMs`（毫秒）；超时 / 取消时中断会话，再尽量收集已经产生的输出，`stopReason` 为 `timeout` / `aborted`；
 - 读取结果后自动释放该轮的 live agent（会话日志仍然保留，可在侧边栏回看）；续接同一个会话不会新开会话；
 - 续接前的压缩来自宿主 `compaction` 服务（`@deepseek-ai/dsh-compaction-basic`）。桌面 profile 默认禁用它：缺失时续接仍会继续，但 `compacted` 为 `false`，`compactionError` 说明“压缩服务不可用”，页面会提示；需要真正压缩时在插件页启用该服务。
+
+### 非阻塞调用：`dispatchSession()` / `openSession()` / `startSession({ wait: false })`
+
+工作流观察者不 await 会话结果，而是把 prompt 投进去后订阅全局 `session/event`、在 `turn/end` 后自己读结果。服务为此提供三个入口：
+
+- `startSession({ ...request, wait: false })`：等价于 `dispatchSession(request)`；默认仍是 `wait: true`，既有调用方不受影响；
+- `dispatchSession({ robot, prompt, sessionId?, routes?, outputSchema?, ... })`：把 prompt 投进机器人会话后立即返回一个**可观测句柄**，不在服务里等待这一轮结束，也不设默认超时；
+- `openSession({ robot, sessionId, ... })`：只 resume / attach 一个已有会话，**不发 prompt**；恢复时先用 `readResult()` 检查上一轮是否其实已经结束（`turnEnded`），确认要继续再 `send()`。
+
+句柄字段：`mode`（固定 `session`）、`sessionId`、`robot`、`cwd`、`resumed`、`compacted`、`compactionError?`、`startSeq`（这一轮的起点序号），以及：
+
+| 方法 | 作用 |
+| --- | --- |
+| `readResult({ sinceSeq? })` | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }` |
+| `send(text, { compactFirst? })` | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq |
+| `retryReport({ routes?, reason? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题）；没有额度时返回 `null` |
+| `cancel(reason?)` | 取消当前轮，等它落定后返回已经写下的结果 |
+| `dispose()` | 只释放这一轮的 live agent，会话日志仍然保留 |
+
+所有机器人会话都是普通顶层会话；`openSession()` 遇到旧版 `origin: 'subagent'` 的隐藏会话会直接报错，不会把它当成可见会话继续。
 
 `list()` 返回 `{ root, registry, corrupt, robots }`，每个机器人带 `name / path / avatar / description / exists / mounted / workspaceId / skills / agents` 摘要（不含 AGENTS.md 正文）。这里仍然只列登记表里的机器人；通用型机器人只通过 `buka_robots` 工具、`avatarMap()` 和 `startSession()` 暴露。
 
@@ -307,7 +369,9 @@ dsh plugin --profile <profile> add "link:$PWD/plugins/robots"
 ## 已知限制
 
 - 只管理**本插件创建并登记**的机器人；在 DSH 里自己新建的工作区不会出现在这里，也不会被本插件删除。
+- 重命名会移动机器人目录并重建 DSH 工作区：旧的 DSH 工作区注册被删除，**已有会话日志虽然保留（不会被删除），但不再列在这个机器人下**。内容被用户改过的 AGENTS.md 不会同步新名 / 新路径。
 - 删除机器人只删除插件登记与工作区注册，不删除目录、文件与会话。要彻底清理，手动删除机器人目录后从登记表移除对应条目（或先删除机器人再删目录）。
+- 工作流定义与运行记录按**机器人名字**引用机器人；改名不会自动更新这些引用，已有的定义 / 运行仍指向旧名（旧名因此可以被新机器人复用，重名引用要自己梳理）。
 - 安装 skills 需要本机有 Node.js / npm，并且能访问 skill 来源（GitHub 等）；离线且 npx 缓存里没有该包时失败信息会原样显示。
 - `npx skills` 的读清单/安装/移除是整进程调用，没有进度条；网络慢时按钮会一直处于「读取中… / 安装中…」直到 180 秒超时。
 - 「读取 skills」每次都会重新拉取来源（CLI 侧没有 `--list` 的缓存），大仓库要等几秒；安装本身还会再做一次拉取。

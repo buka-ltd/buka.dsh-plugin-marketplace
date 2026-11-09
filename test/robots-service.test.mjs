@@ -22,11 +22,10 @@ import {
   mapTurnEnd,
   parseStructuredText,
   readSessionOutcome,
-  reportFailureMessage,
-  reportRetryPrompt,
+  resultFailureMessage,
+  resultRetryPrompt,
   structuredSubmittedSince,
   summarizeRobot,
-  textOfContent,
 } from '../plugins/robots/lib/service.js'
 
 test('robots service: summarizeRobot strips AGENTS.md bodies and keeps orchestration fields', () => {
@@ -119,13 +118,15 @@ async function makeRobotHome() {
  *
  * @returns {{ ctx: Record<string, any>, state: Record<string, any> }}
  */
-function makeFakeContext({ subagents, resumeError, compactionError, noCompaction, noAgentCreate, sessionTitle } = {}) {
+function makeFakeContext({ subagents, resumeError, resumeOrigin, compactionError, noCompaction, noAgentCreate, sessionTitle } = {}) {
   const state = {
     createOptions: null,
     // DSH 的 session-title 服务替身：记录显式命名调用；已有标题时不覆盖。
     sessionTitle: sessionTitle ?? null,
     sessionTitles: [],
     registered: [],
+    sections: [],
+    approvalPolicies: [],
     disposed: false,
     cancelled: false,
     finishIdle: null,
@@ -182,7 +183,7 @@ function makeFakeContext({ subagents, resumeError, compactionError, noCompaction
           if (name === 'systemPrompt') {
             return {
               getSectionOrder: () => 9900,
-              section: () => {},
+              section: (section) => state.sections.push(section),
             }
           }
           return undefined
@@ -210,6 +211,7 @@ function makeFakeContext({ subagents, resumeError, compactionError, noCompaction
       state.resumedFinishIdle = resolveIdle
       const session = {
         seq: 0,
+        header: resumeOrigin === undefined ? {} : { origin: resumeOrigin },
         ownEvents: () => state.resumedEvents,
       }
       const agent = {
@@ -306,7 +308,13 @@ function makeFakeContext({ subagents, resumeError, compactionError, noCompaction
       if (name === 'agentDefaultModel') {
         return { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
       }
-      if (name === 'approval') return { setPolicy() {} }
+      if (name === 'approval') {
+        return {
+          setPolicy(agent, policy) {
+            state.approvalPolicies.push({ agent, policy })
+          },
+        }
+      }
       if (name === 'compaction') {
         if (noCompaction === true) return undefined
         return {
@@ -399,7 +407,7 @@ test('robots service: avatarMap is a lightweight name -> avatar lookup', async (
   }
 })
 
-test('robots service: startSession creates a robot-cwd session, records structured report and disposes', async () => {
+test('robots service: startSession creates a robot-cwd session, records structured output and disposes', async () => {
   const home = await makeRobotHome()
   try {
     const { ctx, state } = makeFakeContext()
@@ -409,10 +417,19 @@ test('robots service: startSession creates a robot-cwd session, records structur
       registryFile: home.registryFile,
       defineTool: (definition) => definition,
     })
+    const outputSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        status: { type: 'string' },
+        next: { type: 'string', enum: ['done', 'retry'] },
+      },
+      required: ['status', 'next'],
+    }
     const session = await service.startSession({
       robot: 'writer',
       prompt: 'do the work',
-      report: true,
+      outputSchema,
       timeoutMs: 5000,
     })
     assert.equal(session.robot, 'writer')
@@ -425,17 +442,53 @@ test('robots service: startSession creates a robot-cwd session, records structur
     assert.deepEqual(state.mountedPresets, ['standard'])
     assert.equal(state.attachedSessions.length, 1)
     assert.equal(state.attachedSessions[0].sessionId, session.id)
+    // 每个机器人会话都装 scoped structured_output，parameters 就是 outputSchema。
     assert.equal(state.registered.length, 1)
     assert.equal(state.registered[0].name, 'structured_output')
+    assert.deepEqual(state.registered[0].parameters, outputSchema)
+    // 只有结构化输出契约这一段 systemPrompt，没有额外的行为段。
+    assert.deepEqual(
+      state.sections.map((section) => section.name),
+      ['tool:structured_output'],
+    )
+    assert.match(state.sections[0].text, /next/)
+    assert.doesNotMatch(state.sections[0].text, /approval|ask when blocked/i)
+    // 审批默认按部署策略：省略 approval 时不强制拒绝。
+    assert.deepEqual(state.approvalPolicies, [])
 
-    await state.registered[0].execute({ status: 'ok' })
+    await state.registered[0].execute({ status: 'ok', next: 'done' })
     state.finishIdle()
 
     const result = await session.result
     assert.equal(result.text, 'robot finished')
-    assert.deepEqual(result.structured, { status: 'ok' })
+    assert.deepEqual(result.structured, { status: 'ok', next: 'done' })
     assert.equal(result.stopReason, 'completed')
+    assert.equal(result.resultRetries, 0)
     assert.equal(state.disposed, true)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: the structured tool falls back to a generic object schema', async () => {
+  const home = await makeRobotHome()
+  try {
+    const { ctx, state } = makeFakeContext()
+    const service = new RobotSessionService({
+      ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const session = await service.startSession({ robot: 'writer', prompt: 'do it', timeoutMs: 5000 })
+    assert.deepEqual(state.registered[0].parameters, { type: 'object', additionalProperties: true })
+
+    state.finishIdle()
+    const result = await session.result
+    // 没有交回 JSON：同一会话里重试到上限后以 error 结束。
+    assert.equal(result.structured, undefined)
+    assert.equal(result.stopReason, 'error')
+    assert.equal(result.resultRetries, 2)
+    assert.match(result.error, /did not submit a structured JSON result/)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -568,8 +621,11 @@ test('robots service: a repeated entry compacts the same session and sends the n
     assert.equal(session.id, 'child-existing')
     assert.equal(session.resumed, true)
     assert.equal(state.resumeOptions.resumeSessionId, 'child-existing')
-    assert.equal(state.resumeOptions.parentAgent.id, 'root')
+    // 续接出来的会话是运行时根：不能把编排器 agent 当 parentAgent 传进去。
+    assert.equal('parentAgent' in state.resumeOptions, false)
     assert.equal(state.mountedPreset, 'standard')
+    // 省略 approval 时保留部署策略，不强制 never。
+    assert.deepEqual(state.approvalPolicies, [])
 
     const result = await session.result
     assert.equal(state.compacted, true)
@@ -581,7 +637,7 @@ test('robots service: a repeated entry compacts the same session and sends the n
     assert.equal(result.resumed, true)
     assert.equal(result.compacted, true)
     assert.equal(result.stopReason, 'completed')
-    assert.equal(result.reportRetries, undefined)
+    assert.equal(result.resultRetries, 0)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -613,7 +669,7 @@ test('robots service: compaction failure does not lose the continued turn', asyn
   }
 })
 
-test('robots service: a report node on a continued session gets its structured tool back', async () => {
+test('robots service: a continued session gets its structured tool back', async () => {
   const home = await makeRobotHome()
   try {
     const { ctx, state } = makeFakeContext()
@@ -622,25 +678,37 @@ test('robots service: a report node on a continued session gets its structured t
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
+    const outputSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        passed: { type: 'boolean' },
+        next: { type: 'string', enum: ['done'] },
+      },
+      required: ['passed', 'next'],
+    }
     const session = await service.startSession({
       robot: 'writer',
       prompt: 'check again',
       sessionId: 'child-report',
-      report: true,
+      outputSchema,
       agent: { id: 'root' },
       timeoutMs: 5000,
     })
     assert.equal(session.resumed, true)
     assert.equal(state.resumedRegistered.length, 1)
     assert.equal(state.resumedRegistered[0].name, 'structured_output')
+    assert.deepEqual(state.resumedRegistered[0].parameters, outputSchema)
     assert.equal(state.resumedSections.length, 1)
+    assert.equal(state.resumedSections[0].name, 'tool:structured_output')
     assert.match(state.resumedSections[0].text, /structured_output/)
+    assert.match(state.resumedSections[0].text, /next/)
 
     const result = await session.result
     assert.equal(result.resumed, true)
     // 续接会话的 fake 回复是 JSON 文本，没调用工具也应被解析成 structured。
     assert.deepEqual(result.structured, { passed: true })
-    assert.equal(result.reportRetries, 0)
+    assert.equal(result.resultRetries, 0)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -671,7 +739,7 @@ test('robots service: a missing compaction service is reported, not hidden', asy
   }
 })
 
-test('robots service: an unresumable session falls back to a fresh session', async () => {
+test('robots service: an unresumable session rejects without opening a new session', async () => {
   const home = await makeRobotHome()
   try {
     const { ctx, state } = makeFakeContext({ resumeError: new Error('session is missing') })
@@ -680,50 +748,25 @@ test('robots service: an unresumable session falls back to a fresh session', asy
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
-    const session = await service.startSession({
-      robot: 'writer',
-      prompt: 'do it',
-      sessionId: 'child-gone',
-      timeoutMs: 5000,
-    })
-    assert.equal(session.resumed, false)
-    assert.match(session.resumeError, /session is missing/)
-    state.finishIdle()
-    const result = await session.result
-    assert.equal(result.resumed, false)
-    assert.equal(result.compacted, false)
-    assert.match(result.resumeError, /session is missing/)
-    assert.equal(state.disposed, true)
+    await assert.rejects(
+      service.startSession({
+        robot: 'writer',
+        prompt: 'do it',
+        sessionId: 'child-gone',
+        timeoutMs: 5000,
+      }),
+      /could not resume robot session "child-gone".*session is missing.*refusing to start a new robot session/s,
+    )
+    assert.equal(state.createOptions, null, 'no replacement session is created')
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
 })
 
-test('robots service: textOfContent joins only text blocks', () => {
-  assert.equal(
-    textOfContent([
-      { type: 'text', text: 'a' },
-      { type: 'reasoning', text: 'hidden' },
-      { type: 'text', text: 'b' },
-    ]),
-    'a\nb',
-  )
-  assert.equal(textOfContent(undefined), '')
-})
-
 test('robots service: a caller agent gets a visible normal session in the robot workspace', async () => {
   const home = await makeRobotHome()
   try {
-    let startedActivation = false
-    const subagents = {
-      list: () => ['spawn'],
-      interrupt() {},
-      async startActivation() {
-        startedActivation = true
-        throw new Error('the subagent backend should not be used')
-      },
-    }
-    const { ctx, state } = makeFakeContext({ subagents })
+    const { ctx, state } = makeFakeContext()
     const service = new RobotSessionService({
       ctx,
       robotsDir: home.robotsDir,
@@ -740,7 +783,6 @@ test('robots service: a caller agent gets a visible normal session in the robot 
     assert.deepEqual(state.mountedPresets, ['standard'])
     assert.equal(state.attachedSessions.length, 1)
     assert.equal(state.attachedSessions[0].sessionId, session.id)
-    assert.equal(startedActivation, false)
     state.finishIdle()
     const result = await session.result
     assert.equal(result.text, 'robot finished')
@@ -750,326 +792,65 @@ test('robots service: a caller agent gets a visible normal session in the robot 
   }
 })
 
-test('robots service: startSession falls back to the subagent backend when a normal session cannot be created', async () => {
+test('robots service: a failed normal session creation is surfaced, never replaced by a subagent', async () => {
   const home = await makeRobotHome()
   try {
-    const calls = []
-    let disposed = false
+    let activated = false
     const subagents = {
       list: () => ['spawn'],
       interrupt() {},
-      async startActivation(spec) {
-        calls.push(spec)
-        return {
-          childId: 'child-1',
-          result: Promise.resolve({
-            output: [{ type: 'text', text: 'robot done' }],
-            structured: { status: 'ok' },
-            stopReason: 'completed',
-          }),
-          async dispose() {
-            disposed = true
-          },
-        }
-      },
-    }
-    const { ctx } = makeFakeContext({ subagents, noAgentCreate: true })
-    const service = new RobotSessionService({
-      ctx,
-      robotsDir: home.robotsDir,
-      registryFile: home.registryFile,
-      subagentProvider: 'spawn',
-    })
-    const session = await service.startSession({
-      robot: 'writer',
-      prompt: 'do it',
-      report: true,
-      agent: { id: 'root' },
-      agentPreset: 'standard',
-    })
-    assert.equal(session.id, 'child-1')
-    const result = await session.result
-    assert.equal(result.text, 'robot done')
-    assert.deepEqual(result.structured, { status: 'ok' })
-    assert.equal(result.stopReason, 'completed')
-    assert.equal(disposed, true)
-
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].provider, 'spawn')
-    assert.equal(calls[0].delivery, 'caller')
-    assert.equal(calls[0].request.parent.id, 'root')
-    assert.equal(calls[0].request.cwd, await fs.realpath(path.join(home.robotsDir, 'writer')))
-    assert.equal(calls[0].request.outputSchema.type, 'object')
-    assert.equal(calls[0].request.agentPreset, 'standard')
-    assert.match(calls[0].label, /writer/)
-  } finally {
-    await fs.rm(home.root, { recursive: true, force: true })
-  }
-})
-
-test('robots service: subagent session timeout interrupts and disposes', async () => {
-  const home = await makeRobotHome()
-  try {
-    let interrupted = false
-    let disposed = false
-    const subagents = {
-      list: () => ['spawn'],
-      interrupt() {
-        interrupted = true
-      },
       async startActivation() {
-        return {
-          childId: 'child-2',
-          result: new Promise(() => {}),
-          async dispose() {
-            disposed = true
-          },
-        }
+        activated = true
+        throw new Error('the subagent backend must not be used')
       },
     }
-    const { ctx } = makeFakeContext({ subagents, noAgentCreate: true })
+    const { ctx, state } = makeFakeContext({ subagents, noAgentCreate: true })
     const service = new RobotSessionService({
       ctx,
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
-    const session = await service.startSession({
-      robot: 'writer',
-      prompt: 'do it',
-      agent: { id: 'root' },
-      timeoutMs: 10,
-    })
-    const result = await session.result
-    assert.equal(result.stopReason, 'timeout')
-    assert.equal(interrupted, true)
-    assert.equal(disposed, true)
+    await assert.rejects(
+      service.startSession({
+        robot: 'writer',
+        prompt: 'do it',
+        agent: { id: 'root' },
+      }),
+      /could not create a visible robot session.*normal robot sessions are unavailable.*refusing to fall back/s,
+    )
+    assert.equal(activated, false, 'no subagent fallback is attempted')
+    assert.equal(state.createOptions, null)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
 })
 
-/**
- * 可控的 subagent 活动：会话事件与最终结果都由测试手动驱动。
- *
- * @param {string} childId
- * @returns {{ child: Record<string, any>, emit: Function, followups: Array<Record<string, any>>, resolve: Function, result: Promise<any> }}
- */
-function retryActivation(childId) {
-  /** @type {Function} */
-  let resolveResult
-  const result = new Promise((resolve) => {
-    resolveResult = resolve
-  })
-  /** @type {Array<Record<string, any>>} */
-  const events = []
-  /** @type {Array<Record<string, any>>} */
-  const followups = []
-  /** @type {Map<string, Function[]>} */
-  const handlers = new Map()
-  const session = {
-    seq: 0,
-    ownEvents: () => events,
-  }
-  /** @type {string[]} */
-  const removedInbox = []
-  const child = {
-    id: childId,
-    session,
-    inbox: {
-      remove(id) {
-        removedInbox.push(id)
-      },
-    },
-    ctx: {
-      on(name, handler) {
-        const list = handlers.get(name) ?? []
-        list.push(handler)
-        handlers.set(name, list)
-        return () => {
-          handlers.set(name, (handlers.get(name) ?? []).filter((item) => item !== handler))
-        }
-      },
-    },
-    followup(message) {
-      followups.push(message)
-    },
-  }
-  /** @param {string} type @param {Record<string, any>} data @returns {void} */
-  function emit(type, data) {
-    session.seq += 1
-    const event = { type, seq: session.seq, data }
-    events.push(event)
-    for (const handler of handlers.get('session/event') ?? []) handler(session, event)
-  }
-  return { child, emit, followups, removedInbox, result, resolve: (value) => resolveResult(value) }
-}
-
-/**
- * 建一个走 subagent 后端的 report 节点会话。
- *
- * @param {Record<string, any>} home
- * @param {ReturnType<typeof retryActivation>} activation
- * @param {number} [reportRetries]
- * @returns {Promise<{ session: Record<string, any>, state: Record<string, any> }>}
- */
-async function startRetrySession(home, activation, reportRetries = 2, reportRetryWakeTimeoutMs) {
-  const subagents = {
-    list: () => ['spawn'],
-    interrupt() {},
-    async startActivation() {
-      return {
-        childId: activation.child.id,
-        result: activation.result,
-        async dispose() {},
-      }
-    },
-  }
-  const { ctx, state } = makeFakeContext({ subagents, noAgentCreate: true })
-  state.liveAgents.set(activation.child.id, activation.child)
-  const service = new RobotSessionService({
-    ctx,
-    robotsDir: home.robotsDir,
-    registryFile: home.registryFile,
-    subagentProvider: 'spawn',
-    reportRetries,
-    ...(reportRetryWakeTimeoutMs === undefined ? {} : { reportRetryWakeTimeoutMs }),
-  })
-  const session = await service.startSession({
-    robot: 'writer',
-    prompt: 'do the work',
-    report: true,
-    agent: { id: 'root' },
-    timeoutMs: 5000,
-  })
-  return { session, state }
-}
-
-/**
- * 等一轮微任务：重试消息是排到微任务里投递的。
- *
- * @returns {Promise<void>}
- */
-function flushMicrotasks() {
-  return new Promise((resolve) => setImmediate(resolve))
-}
-
-test('robots service: a report node asks the same session for JSON before it can finish', async () => {
+test('robots service: resuming a hidden subagent session rejects without a replacement', async () => {
   const home = await makeRobotHome()
   try {
-    const activation = retryActivation('child-retry')
-    const { session } = await startRetrySession(home, activation)
-
-    activation.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    assert.equal(activation.followups.length, 1, 'the missing JSON injects one follow-up')
-    assert.match(activation.followups[0].content[0].text, /structured_output/)
-    assert.equal(activation.followups[0].source.kind, 'buka-robot')
-    assert.equal(activation.followups[0].role, 'user', 'the injected message is a complete user message')
-    assert.equal(typeof activation.followups[0].id, 'string')
-
-    activation.emit('tool/call', {
-      turn: 2,
-      step: 1,
-      callId: 'call-1',
-      name: 'structured_output',
-      arguments: '{"ok":true}',
+    const { ctx, state } = makeFakeContext({ resumeOrigin: 'subagent' })
+    const service = new RobotSessionService({
+      ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
     })
-    activation.emit('tool/result', {
-      turn: 2,
-      step: 1,
-      message: { role: 'tool', toolCallId: 'call-1', isError: false, content: [] },
-    })
-    activation.emit('turn/end', { turn: 2, reason: { kind: 'completed' } })
-    activation.resolve({ output: [{ type: 'text', text: 'done' }], structured: { ok: true }, stopReason: 'completed' })
+    await assert.rejects(
+      service.startSession({
+        robot: 'writer',
+        prompt: 'do it',
+        sessionId: 'hidden-child',
+      }),
+      /hidden subagent robot session.*refusing to start a new robot session/s,
+    )
+    assert.equal(state.resumeDisposed, true, 'the hidden handle is released')
+    assert.equal(state.createOptions, null, 'no replacement session is created')
 
-    const result = await session.result
-    assert.deepEqual(result.structured, { ok: true })
-    assert.equal(result.stopReason, 'completed')
-    assert.equal(result.reportRetries, 1)
-  } finally {
-    await fs.rm(home.root, { recursive: true, force: true })
-  }
-})
-
-test('robots service: a retry message that never wakes the session is withdrawn from the inbox', async () => {
-  const home = await makeRobotHome()
-  try {
-    const activation = retryActivation('child-wake')
-    const { session } = await startRetrySession(home, activation, 2, 5)
-    activation.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    assert.equal(activation.followups.length, 1)
-    assert.equal(activation.removedInbox.length, 0, 'the watchdog waits for the next turn')
-    await new Promise((resolve) => setTimeout(resolve, 30))
-    assert.equal(activation.removedInbox.length, 1, 'the pending retry message is removed to unblock the activity')
-    assert.equal(activation.removedInbox[0], activation.followups[0].id)
-    activation.resolve({ output: [], stopReason: 'error' })
-    const result = await session.result
-    assert.equal(result.stopReason, 'error')
-  } finally {
-    await fs.rm(home.root, { recursive: true, force: true })
-  }
-})
-
-test('robots service: a JSON reply text avoids an unnecessary retry', async () => {
-  const home = await makeRobotHome()
-  try {
-    const activation = retryActivation('child-json-text')
-    const { session } = await startRetrySession(home, activation)
-    activation.emit('assistant/message', {
-      message: { content: [{ type: 'text', text: '{"ok":true}' }] },
-    })
-    activation.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    assert.equal(activation.followups.length, 0, 'a JSON reply already satisfies the report')
-    activation.resolve({ output: [{ type: 'text', text: '{"ok":true}' }], stopReason: 'error' })
-    const result = await session.result
-    assert.deepEqual(result.structured, { ok: true })
-    assert.equal(result.stopReason, 'completed')
-  } finally {
-    await fs.rm(home.root, { recursive: true, force: true })
-  }
-})
-
-test('robots service: report retries are bounded and end with a clear error', async () => {
-  const home = await makeRobotHome()
-  try {
-    const activation = retryActivation('child-exhaust')
-    const { session } = await startRetrySession(home, activation, 2)
-
-    activation.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    activation.emit('turn/end', { turn: 2, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    activation.emit('turn/end', { turn: 3, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    assert.equal(activation.followups.length, 2, 'the session is asked at most reportRetries times')
-    activation.resolve({ output: [{ type: 'text', text: 'plain answer' }], stopReason: 'error' })
-
-    const result = await session.result
-    assert.equal(result.stopReason, 'error')
-    assert.equal(result.reportRetries, 2)
-    assert.match(result.error, /did not submit a structured JSON result after 2 retries in the same session/)
-  } finally {
-    await fs.rm(home.root, { recursive: true, force: true })
-  }
-})
-
-test('robots service: a JSON object in the final reply counts as the structured result', async () => {
-  const home = await makeRobotHome()
-  try {
-    const activation = retryActivation('child-text')
-    const { session } = await startRetrySession(home, activation)
-    activation.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await flushMicrotasks()
-    activation.resolve({
-      output: [{ type: 'text', text: '```json\n{"ok":true}\n```' }],
-      stopReason: 'error',
-    })
-    const result = await session.result
-    assert.deepEqual(result.structured, { ok: true })
-    assert.equal(result.stopReason, 'completed')
-    assert.equal(result.error, undefined)
+    await assert.rejects(
+      service.openSession({ robot: 'writer', sessionId: 'hidden-child' }),
+      /hidden subagent robot session/,
+    )
+    assert.equal(state.resumeDisposed, true)
+    assert.equal(state.createOptions, null)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -1083,12 +864,11 @@ test('robots service: a visible normal session is asked again for its JSON', asy
       ctx,
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
-      reportRetries: 2,
+      resultRetries: 2,
     })
     const session = await service.startSession({
       robot: 'writer',
       prompt: 'do the work',
-      report: true,
       timeoutMs: 5000,
     })
     state.finishIdle()
@@ -1098,7 +878,7 @@ test('robots service: a visible normal session is asked again for its JSON', asy
     assert.match(state.followups[1].content[0].text, /structured_output/)
     assert.match(state.followups[2].content[0].text, /retry 2\/2/)
     assert.equal(result.stopReason, 'error')
-    assert.equal(result.reportRetries, 2)
+    assert.equal(result.resultRetries, 2)
     assert.match(result.error, /did not submit a structured JSON result/)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
@@ -1106,8 +886,26 @@ test('robots service: a visible normal session is asked again for its JSON', asy
 })
 
 test('robots service: retry helpers parse JSON replies and detect submitted structured results', () => {
-  assert.match(reportRetryPrompt(1, 2, 'structured_output'), /retry 1\/2/)
-  assert.equal(reportFailureMessage(0), 'the robot session did not submit a structured JSON result')
+  assert.match(resultRetryPrompt(1, 2, { toolName: 'structured_output' }), /retry 1\/2/)
+  assert.match(resultRetryPrompt(1, 2, { toolName: 'structured_output' }), /structured_output/)
+  assert.match(
+    resultRetryPrompt(1, 2, { toolName: 'structured_output' }),
+    /did not provide a structured JSON result/,
+  )
+  assert.equal(resultFailureMessage(0), 'the robot session did not submit a structured JSON result')
+
+  // 问题类型与合法路由名都要写进重试提示。
+  const missingNext = resultRetryPrompt(2, 3, { reason: 'missing-next', routes: ['done', 'retry'] })
+  assert.match(missingNext, /did not include the required `next` route/)
+  assert.match(missingNext, /"done"/)
+  assert.match(missingNext, /"retry"/)
+  assert.match(missingNext, /retry 2\/3/)
+  const invalidNext = resultRetryPrompt(1, 2, { reason: 'invalid-next', routes: ['done'] })
+  assert.match(invalidNext, /is not one of the routes this node can follow/)
+  assert.match(invalidNext, /"done"/)
+  // 没有路由时不要把 next 强塞给节点。
+  assert.doesNotMatch(resultRetryPrompt(1, 2, {}), /`next`/)
+
   assert.deepEqual(parseStructuredText('{"ok":true}'), { ok: true })
   assert.deepEqual(parseStructuredText('```json\n{"ok":true}\n```'), { ok: true })
   assert.equal(parseStructuredText('plain text'), undefined)
@@ -1122,6 +920,99 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   assert.equal(structuredSubmittedSince(session), true)
   assert.equal(structuredSubmittedSince(session, 3), false)
   assert.equal(structuredSubmittedSince({ ownEvents: () => [] }), false)
+})
+
+
+test('robots service: retryReport accepts routes/reason and is bounded', async () => {
+  const home = await makeRobotHome()
+  try {
+    const fake = makeDispatchContext()
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const handle = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'do the work',
+      routes: ['continue'],
+    })
+    const prompt = handle.retryReport({ routes: ['done', 'retry'], reason: 'missing-next' })
+    assert.equal(typeof prompt, 'string')
+    assert.match(prompt, /did not include the required `next` route/)
+    assert.match(prompt, /"done"/)
+    assert.match(prompt, /"retry"/)
+    assert.match(prompt, /retry 1\/2/)
+    // 不传 options 时用会话请求里的 routes 兜底，缺省按缺 JSON 处理。
+    const fallback = handle.retryReport()
+    assert.equal(typeof fallback, 'string')
+    assert.match(fallback, /did not provide a structured JSON result/)
+    assert.match(fallback, /"continue"/)
+    assert.equal(handle.retryReport(), null, 'retry quota is bounded')
+    await handle.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: approval defaults to the deployment policy; never forces rejections', async () => {
+  const home = await makeRobotHome()
+  try {
+    /** @param {ReturnType<typeof makeFakeContext>} fake */
+    const makeService = (fake) =>
+      new RobotSessionService({
+        ctx: fake.ctx,
+        robotsDir: home.robotsDir,
+        registryFile: home.registryFile,
+      })
+
+    // 省略 approval：保持部署策略。
+    const omitted = makeFakeContext()
+    const omittedSession = await makeService(omitted).startSession({ robot: 'writer', prompt: 'do it', timeoutMs: 5000 })
+    assert.deepEqual(omitted.state.approvalPolicies, [])
+    omitted.state.finishIdle()
+    await omittedSession.result
+
+    // 'ask' 是默认值，同样不动策略。
+    const asked = makeFakeContext()
+    const askedSession = await makeService(asked).startSession({
+      robot: 'writer',
+      prompt: 'do it',
+      approval: 'ask',
+      timeoutMs: 5000,
+    })
+    assert.deepEqual(asked.state.approvalPolicies, [])
+    asked.state.finishIdle()
+    await askedSession.result
+
+    // 'never' 才强制拒绝需要审批的操作。
+    const forced = makeFakeContext()
+    const forcedSession = await makeService(forced).startSession({
+      robot: 'writer',
+      prompt: 'do it',
+      approval: 'never',
+      timeoutMs: 5000,
+    })
+    assert.equal(forced.state.approvalPolicies.length, 1)
+    assert.equal(forced.state.approvalPolicies[0].policy, 'never')
+    forced.state.finishIdle()
+    await forcedSession.result
+
+    // 续接出来的会话遵循同一规则。
+    const resumed = makeFakeContext()
+    const resumedSession = await makeService(resumed).startSession({
+      robot: 'writer',
+      prompt: 'do it',
+      sessionId: 'child-approval',
+      approval: 'never',
+      timeoutMs: 5000,
+    })
+    assert.equal(resumed.state.approvalPolicies.length, 1)
+    assert.equal(resumed.state.approvalPolicies[0].policy, 'never')
+    await resumedSession.result
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
 })
 
 
@@ -1186,7 +1077,6 @@ test('robots service: 通用型机器人跑在调用方工作区，使用标准�
       agent,
       agentPreset: 'standard',
       title: '运行目标 · 通用型机器人',
-      report: true,
       timeoutMs: 5000,
     })
 
@@ -1200,6 +1090,148 @@ test('robots service: 通用型机器人跑在调用方工作区，使用标准�
     const result = await session.result
     assert.deepEqual(result.structured, { ok: true })
     assert.equal(result.stopReason, 'completed')
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * dispatch / openSession 用的最小假上下文：visible 会话 + 可追加的会话事件。
+ *
+ * @returns {{ ctx: Record<string, any>, state: Record<string, any>, agent: Record<string, any> }}
+ */
+function makeDispatchContext() {
+  const events = []
+  const state = {
+    events,
+    followups: [],
+    disposed: false,
+    createOptions: null,
+    resumeOptions: null,
+  }
+  const session = {
+    get seq() {
+      return events.length
+    },
+    snapshotEvents(from = 0) {
+      return events.slice(from)
+    },
+    ownEvents() {
+      return events.slice()
+    },
+  }
+  const agent = {
+    id: 'dispatch-session',
+    session,
+    followup(message) {
+      state.followups.push(message)
+      events.push({ type: 'user/message', seq: events.length, data: {} })
+      events.push({
+        type: 'assistant/message',
+        seq: events.length,
+        data: { message: { content: [{ type: 'text', text: `dispatch done ${state.followups.length}` }] } },
+      })
+      events.push({ type: 'turn/end', seq: events.length, data: { reason: { kind: 'completed' } } })
+    },
+    whenIdle: async () => {},
+    cancel() {
+      state.cancelled = true
+    },
+    ctx: { on() { return () => {} } },
+  }
+  const handle = {
+    agent,
+    dispose: async () => {
+      state.disposed = true
+    },
+  }
+  const childCtx = {
+    get() {
+      return undefined
+    },
+    tools: { register() {} },
+  }
+  const agents = {
+    async create(options) {
+      state.createOptions = options
+      await options.setup?.(childCtx, agent)
+      return handle
+    },
+    async resume(options) {
+      state.resumeOptions = options
+      await options.setup?.(childCtx, agent)
+      return handle
+    },
+    get(id) {
+      return id === agent.id ? agent : undefined
+    },
+  }
+  const ctx = {
+    agents,
+    workspaceRegistry: {
+      list: () => [],
+      async resolveByPath(target) {
+        return { path: target, async attachSession() {} }
+      },
+    },
+    get(name) {
+      if (name === 'agents') return agents
+      if (name === 'agentDefaultModel') {
+        return { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+      }
+      return undefined
+    },
+  }
+  return { ctx, state, agent }
+}
+
+test('robots service: dispatchSession returns before the turn ends and reads the finished turn', async () => {
+  const home = await makeRobotHome()
+  try {
+    const fake = makeDispatchContext()
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const handle = await service.dispatchSession({ robot: 'writer', prompt: 'do the work' })
+    assert.equal(handle.mode, 'session')
+    assert.equal(handle.sessionId, 'dispatch-session')
+    assert.equal(handle.startSeq, 0)
+    assert.equal(fake.state.followups.length, 1)
+    const result = handle.readResult()
+    assert.equal(result.turnEnded, true)
+    assert.equal(result.text, 'dispatch done 1')
+    assert.equal(result.stopReason, 'completed')
+    await handle.dispose()
+    assert.equal(fake.state.disposed, true)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: openSession attaches a finished session without sending a prompt, then can continue it', async () => {
+  const home = await makeRobotHome()
+  try {
+    const fake = makeDispatchContext()
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const first = await service.dispatchSession({ robot: 'writer', prompt: 'first' })
+    const firstSeq = first.startSeq
+    await first.dispose()
+    const opened = await service.openSession({ robot: 'writer', sessionId: 'dispatch-session' })
+    assert.equal(fake.state.followups.length, 1, 'openSession does not send a prompt')
+    const previous = opened.readResult({ sinceSeq: firstSeq })
+    assert.equal(previous.turnEnded, true)
+    assert.equal(previous.text, 'dispatch done 1')
+    await opened.send('continue')
+    assert.equal(fake.state.followups.length, 2)
+    const next = opened.readResult({ sinceSeq: opened.startSeq - 1 })
+    assert.equal(next.text, 'dispatch done 2')
+    await opened.dispose()
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }

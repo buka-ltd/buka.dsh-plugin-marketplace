@@ -56,17 +56,26 @@ function storeOf(root) {
 }
 
 /**
- * 假的工作区注册表：记录 `create` 调用，`list` 返回调用方给的数据。
+ * 假的工作区注册表：记录 `create` / `delete` 调用，`list` 返回当前数据。
  *
  * @param {{ workspaces?: Array<{ id: string, path: string }>, create?: (directory: string) => Promise<{ id: string }> }} [options]
- * @returns {{ list: () => Array<{ id: string, path: string }>, create: (directory: string) => Promise<{ id: string }>, created: string[] }}
+ * @returns {{
+ *   list: () => Array<{ id: string, path: string }>,
+ *   create: (directory: string) => Promise<{ id: string }>,
+ *   delete: (id: string) => boolean,
+ *   created: string[],
+ *   deleted: string[],
+ * }}
  */
 function fakeWorkspaceRegistry(options = {}) {
   /** @type {string[]} */
   const created = []
+  /** @type {string[]} */
+  const deleted = []
   let workspaces = [...(options.workspaces ?? [])]
   return {
     created,
+    deleted,
     list: () => workspaces,
     create:
       options.create ??
@@ -76,6 +85,12 @@ function fakeWorkspaceRegistry(options = {}) {
         workspaces = [workspace, ...workspaces]
         return workspace
       }),
+    delete: (id) => {
+      deleted.push(id)
+      const before = workspaces.length
+      workspaces = workspaces.filter((workspace) => workspace.id !== id)
+      return workspaces.length < before
+    },
   }
 }
 
@@ -87,6 +102,7 @@ test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界',
     agents: '',
     agentsBytes: 0,
     update: false,
+    newName: '',
   })
   assert.deepEqual(
     normalizeBuildRequest({
@@ -103,6 +119,7 @@ test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界',
       agents: '# 角色\n',
       agentsBytes: Buffer.byteLength('# 角色\n', 'utf8'),
       update: true,
+      newName: '',
     },
   )
   // 全空白的 AGENTS.md 视为「不写」，避免模型误清空。
@@ -133,6 +150,16 @@ test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界',
   )
   assert.throws(
     () => normalizeBuildRequest({ name: 'writer', update: 'yes' }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
+  )
+  // 改名：newName 必须合法，且必须配 update: true。
+  assert.equal(normalizeBuildRequest({ name: 'writer', newName: '  author ', update: true }).newName, 'author')
+  assert.throws(
+    () => normalizeBuildRequest({ name: 'writer', newName: '../escape', update: true }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidName,
+  )
+  assert.throws(
+    () => normalizeBuildRequest({ name: 'writer', newName: 'author' }),
     (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
   )
   assert.throws(
@@ -412,6 +439,8 @@ function toolOutput(overrides = {}) {
     description: '把会议记录整理成三点结论',
     created: true,
     updated: false,
+    renamed: false,
+    previousName: null,
     agentsBytes: 12,
     mounted: true,
     workspaceId: 'workspace-1',
@@ -437,6 +466,8 @@ function buildResult(overrides = {}) {
     },
     created: true,
     updated: false,
+    renamed: false,
+    previousName: null,
     agentsBytes: 12,
     mounted: true,
     workspaceId: 'workspace-1',
@@ -465,9 +496,13 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
   assert.equal(tool.parameters.name.required, true)
   assert.equal(tool.parameters.description.required, true)
   assert.equal(tool.parameters.update.type, 'boolean')
+  assert.equal(tool.parameters.newName.type, 'string')
   assert.ok(tool.description.includes('sprout'), '描述里列出可选头像 id')
   assert.ok(tool.description.includes('update: true'), '描述里说明覆盖要先 update')
+  assert.ok(tool.description.includes('newName'), '描述里说明改名入口')
   assert.equal(tool.output.schema.properties.workspaceId.oneOf.length, 2)
+  assert.equal(tool.output.schema.properties.renamed.type, 'boolean')
+  assert.equal(tool.output.schema.properties.previousName.oneOf.length, 2)
 
   const agent = { id: 'root' }
   const output = await tool.execute({ name: 'writer', agents: '# x' }, { agent })
@@ -480,6 +515,8 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     description: '把会议记录整理成三点结论',
     created: true,
     updated: false,
+    renamed: false,
+    previousName: null,
     agentsBytes: 12,
     mounted: true,
     workspaceId: 'workspace-1',
@@ -501,6 +538,8 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     description: '把会议记录整理成三点结论',
     created: false,
     updated: true,
+    renamed: false,
+    previousName: null,
     agentsBytes: 12,
     mounted: false,
     workspaceId: null,
@@ -515,6 +554,12 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
   assert.match(render(toolOutput()), /Mounted as a workspace workspace-1\./)
   assert.match(render(toolOutput({ created: false, updated: true, agentsBytes: 0 })), /^Updated robot: writer/)
   assert.match(render(toolOutput({ mountError: 'boom', mounted: false })), /Not mounted: boom/)
+  // 改名：第一行给出旧名 → 新名，并说明旧会话不再挂在该机器人下。
+  const renamedRender = render(
+    toolOutput({ created: false, updated: true, renamed: true, previousName: 'writer', name: 'author' }),
+  )
+  assert.match(renamedRender, /^Renamed robot: writer → author/)
+  assert.match(renamedRender, /no longer listed under the robot/)
 })
 
 test('createRobotBuildTool：assertAccess 抛错时不执行构建', async () => {
@@ -607,6 +652,175 @@ test('buildRobot：description 随创建写入，update 可改、空串保留原
     })
     assert.equal(fourth.updated, false, '空描述不算一次更新')
     assert.equal(fourth.robot.description, '写发布说明与测试报告')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('buildRobot：newName 改目录与登记表，并按新路径重建工作区', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    const registry = fakeWorkspaceRegistry()
+    const first = await buildRobot({
+      ...store,
+      name: 'writer',
+      avatar: 'owl',
+      description: '写发布说明',
+      agents: '# 原稿\n',
+      workspaceRegistry: registry,
+    })
+    assert.deepEqual(registry.created, [first.robot.path], '创建时挂到旧路径')
+
+    const renamed = await buildRobot({
+      ...store,
+      name: 'writer',
+      newName: 'author',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(renamed.created, false)
+    assert.equal(renamed.updated, true)
+    assert.equal(renamed.renamed, true)
+    assert.equal(renamed.previousName, 'writer')
+    assert.equal(renamed.robot.name, 'author')
+    assert.equal(renamed.robot.path, path.join(path.dirname(first.robot.path), 'author'))
+    assert.equal(renamed.robot.avatar, 'owl', '头像保留')
+    assert.equal(renamed.robot.description, '写发布说明', '职责保留')
+    assert.equal(renamed.robot.createdAt, first.robot.createdAt, '创建时间保留')
+    assert.equal(
+      await fs.stat(first.robot.path).then(
+        () => true,
+        () => false,
+      ),
+      false,
+      '旧目录已不存在',
+    )
+    assert.equal(await fs.readFile(path.join(renamed.robot.path, 'AGENTS.md'), 'utf8'), '# 原稿\n')
+
+    const registered = await readRobotRegistry({ file: store.file })
+    assert.deepEqual(
+      registered.robots.map((robot) => robot.name),
+      ['author'],
+    )
+    assert.equal(registered.robots[0].path, renamed.robot.path)
+
+    // 旧工作区注册被摘掉，新路径重建一个新工作区（新 id）。
+    assert.deepEqual(registry.deleted, [first.workspaceId])
+    assert.equal(registry.created.length, 2)
+    assert.equal(registry.created[1], renamed.robot.path)
+    assert.equal(renamed.mounted, true)
+    assert.notEqual(renamed.workspaceId, first.workspaceId)
+    assert.equal(renamed.mountError, null)
+
+    // 目录改名后 CLAUDE.md 的相对软链接仍然有效。
+    const claude = await readClaudeLink(renamed.robot.path)
+    assert.equal(claude.exists, true)
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('buildRobot：newName 必须配 update，目标名/目录被占用时拒绝，同名视为不改名', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    const registry = fakeWorkspaceRegistry()
+    const writer = await buildRobot({ ...store, name: 'writer', workspaceRegistry: registry })
+    await buildRobot({ ...store, name: 'painter', workspaceRegistry: registry })
+
+    // 没有 update：不允许改已存在机器人的名字。
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'writer', newName: 'author', workspaceRegistry: registry }),
+      (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
+    )
+    // 新名与登记表里的机器人重名。
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'writer', newName: 'painter', update: true, workspaceRegistry: registry }),
+      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
+    )
+    // 新名与 robotsDir 下已存在的目录重名（没有登记条目也不能占）。
+    await fs.mkdir(path.join(store.robotsDir, 'ghost'))
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'writer', newName: 'ghost', update: true, workspaceRegistry: registry }),
+      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
+    )
+    // 内置「通用型机器人」的名字保留。
+    await assert.rejects(
+      () =>
+        buildRobot({
+          ...store,
+          name: 'writer',
+          newName: '通用型机器人',
+          update: true,
+          workspaceRegistry: registry,
+        }),
+      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
+    )
+    // 不能把不存在的机器人「改名」出来。
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'nobody', newName: 'author', update: true, workspaceRegistry: registry }),
+      (error) => error.code === BUILD_ERROR_CODES.unknownRobot,
+    )
+
+    // 同名：no-op，不碰目录与登记表。
+    const same = await buildRobot({
+      ...store,
+      name: 'writer',
+      newName: 'writer',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(same.renamed, false)
+    assert.equal(same.previousName, null)
+    assert.equal(same.updated, false)
+    assert.equal(same.robot.path, writer.robot.path)
+    assert.equal((await fs.stat(writer.robot.path)).isDirectory(), true)
+    assert.deepEqual(
+      (await readRobotRegistry({ file: store.file })).robots.map((robot) => robot.name),
+      ['painter', 'writer'],
+    )
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('buildRobot：改名与头像 / 职责 / AGENTS.md 同一次调用；未挂载的机器人改名后重新挂载', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    const registry = fakeWorkspaceRegistry()
+    const first = await buildRobot({ ...store, name: 'writer', workspaceRegistry: registry })
+
+    const renamed = await buildRobot({
+      ...store,
+      name: 'writer',
+      newName: 'author',
+      update: true,
+      avatar: 'panda',
+      description: '写发布说明与测试报告',
+      agents: '# 新版 AGENTS.md\n',
+      workspaceRegistry: registry,
+    })
+    assert.equal(renamed.renamed, true)
+    assert.equal(renamed.robot.avatar, 'panda')
+    assert.equal(renamed.robot.description, '写发布说明与测试报告')
+    assert.equal(await fs.readFile(path.join(renamed.robot.path, 'AGENTS.md'), 'utf8'), '# 新版 AGENTS.md\n')
+    assert.equal(renamed.robot.createdAt, first.robot.createdAt)
+
+    // 未挂载的机器人在改名后会按新路径重新挂载。
+    const loose = await buildRobot({ ...store, name: 'loose' })
+    assert.equal(loose.mounted, false)
+    const mountAfterRename = await buildRobot({
+      ...store,
+      name: 'loose',
+      newName: 'loose-next',
+      update: true,
+      workspaceRegistry: fakeWorkspaceRegistry(),
+    })
+    assert.equal(mountAfterRename.renamed, true)
+    assert.equal(mountAfterRename.mounted, true)
+    assert.equal(mountAfterRename.workspaceId, 'workspace-1')
   } finally {
     await removeRoot(root)
   }

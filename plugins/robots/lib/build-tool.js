@@ -25,6 +25,8 @@ export const ROBOT_BUILD_TOOL_NAME = 'buka_robot_build'
  *     robot: { name: string, path: string, avatar: string, description: string, createdAt: string },
  *     created: boolean,
  *     updated: boolean,
+ *     renamed: boolean,
+ *     previousName: string | null,
  *     agentsBytes: number,
  *     mounted: boolean,
  *     workspaceId: unknown,
@@ -43,7 +45,7 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
   return defineTool({
     name: ROBOT_BUILD_TOOL_NAME,
     description:
-      'Create or update one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ' +
+      'Create, update or rename one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. To rename that existing robot, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the robot — confirm the new name with the user first. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ' +
       `${avatars}.`,
     parameters: {
       name: {
@@ -73,6 +75,11 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
         description:
           'Set true only when the user asked to change a robot that already exists. Without it, an existing name is rejected.',
       },
+      newName: {
+        type: 'string',
+        description:
+          'Optional new name when the user asked to rename an existing robot: pass name as the current name, newName as the new one, and update: true. Renaming moves the robot directory and re-registers its DSH workspace; earlier conversations stay in history but are no longer listed under the robot, so confirm with the user first. Same rules as name: 1-64 characters, letters, digits or Chinese plus ".", "_" and "-".',
+      },
     },
     output: {
       schema: {
@@ -89,6 +96,16 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
           },
           created: { type: 'boolean', required: true, description: 'Whether this call created the robot.' },
           updated: { type: 'boolean', required: true, description: 'Whether this call changed an existing robot.' },
+          renamed: {
+            type: 'boolean',
+            required: true,
+            description: 'Whether this call renamed an existing robot (moved its directory and re-registered its workspace).',
+          },
+          previousName: {
+            required: true,
+            description: 'Robot name before this call when it renamed the robot, otherwise null.',
+            oneOf: [{ type: 'string' }, { type: 'null' }],
+          },
           agentsBytes: {
             type: 'number',
             required: true,
@@ -112,13 +129,27 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
         },
       },
       render: (_args, value) => {
+        const previousName =
+          typeof value?.previousName === 'string' && value.previousName !== '' ? value.previousName : null
+        const renamed = value?.renamed === true && previousName !== null
         const action =
-          value?.created === true ? 'Created robot' : value?.updated === true ? 'Updated robot' : 'Robot ready'
+          value?.created === true
+            ? 'Created robot'
+            : renamed
+              ? `Renamed robot: ${previousName} → ${String(value?.name ?? '')}`
+              : value?.updated === true
+                ? 'Updated robot'
+                : 'Robot ready'
         const description = String(value?.description ?? '')
-        const lines = [
-          `${action}: ${String(value?.name ?? '')} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`,
-          `Description: ${description === '' ? '(none)' : description}`,
-        ]
+        const identity = renamed
+          ? `${action} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`
+          : `${action}: ${String(value?.name ?? '')} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`
+        const lines = [identity, `Description: ${description === '' ? '(none)' : description}`]
+        if (renamed) {
+          lines.push(
+            'The workspace was re-registered at the new path; earlier conversations stay in history but are no longer listed under the robot.',
+          )
+        }
         if (typeof value?.agentsBytes === 'number' && value.agentsBytes > 0) {
           lines.push(`AGENTS.md written: ${value.agentsBytes} bytes.`)
         }
@@ -144,6 +175,8 @@ export function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAc
         description: result.robot.description,
         created: result.created,
         updated: result.updated,
+        renamed: result.renamed === true,
+        previousName: typeof result.previousName === 'string' ? result.previousName : null,
         agentsBytes: result.agentsBytes,
         mounted: result.mounted,
         workspaceId: typeof result.workspaceId === 'string' ? result.workspaceId : null,
