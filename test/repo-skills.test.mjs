@@ -1,6 +1,10 @@
 /**
  * 「GitHub 仓库 skills 列表」拉取、缓存与建树的单测。
  *
+ * 本地绝对路径与任意 git 地址的读取在 `skills-repos-local-git.test.mjs` 单独覆盖；
+ * 这里只验证 GitHub 行为不变，以及来源种类变化后的错误码：web / package 仍是
+ * `unsupported-source`，git 地址在没有 git 时返回 `git-unavailable`。
+ *
  * 全部走注入的 `fetchImpl`，不访问真实网络；缓存目录用临时 DSH home，
  * 每个用例结束清理。重点覆盖：
  *
@@ -234,7 +238,7 @@ test('GitHub 链接与 owner/repo 收敛成同一来源和缓存键', async (t) 
 
   const first = await fetchRepoSkills({
     homes,
-    source: 'https://github.com/Acme/Demo/tree/main',
+    source: 'https://github.com/Acme/Demo',
     fetchImpl,
     now: 1,
   })
@@ -300,11 +304,24 @@ test('错误码：非法来源、非 GitHub、404、限流与网络失败', asyn
     assert.equal(result.code, 'invalid-source', String(source))
     assert.equal(typeof result.message, 'string')
   }
-  for (const source of ['@scope/pkg', 'notion', 'https://gitlab.com/a/b']) {
+  for (const source of ['@scope/pkg', 'notion', 'https://github.com/a/b/tree/main']) {
     const result = await fetchRepoSkills({ homes, source, fetchImpl: neverFetch })
     assert.equal(result.ok, false)
     assert.equal(result.code, 'unsupported-source', source)
   }
+  // 非 GitHub 的 git 地址会走 clone：本机没有 git 时返回 git-unavailable，
+  // 仍然不碰 fetch。
+  const noGit = async () => {
+    throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' })
+  }
+  const gitMissing = await fetchRepoSkills({
+    homes,
+    source: 'https://gitlab.com/a/b',
+    fetchImpl: neverFetch,
+    runGit: noGit,
+  })
+  assert.equal(gitMissing.ok, false)
+  assert.equal(gitMissing.code, 'git-unavailable')
   assert.equal(called.length, 0, '非法/不支持的来源不应该发请求')
 
   const missing = createFetch({ trees: {} })
@@ -939,11 +956,22 @@ test('probeRepoKind：非法/非 GitHub 来源直接失败且不发请求', asyn
     assert.equal(result.ok, false)
     assert.equal(result.code, 'invalid-source', String(source))
   }
-  for (const source of ['@scope/pkg', 'notion', 'https://gitlab.com/a/b']) {
+  for (const source of ['@scope/pkg', 'notion', 'https://github.com/a/b/tree/main']) {
     const result = await probeRepoKind({ homes, source, fetchImpl: neverFetch })
     assert.equal(result.ok, false)
     assert.equal(result.code, 'unsupported-source', source)
   }
+  const noGit = async () => {
+    throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' })
+  }
+  const gitMissing = await probeRepoKind({
+    homes,
+    source: 'https://gitlab.com/a/b',
+    fetchImpl: neverFetch,
+    runGit: noGit,
+  })
+  assert.equal(gitMissing.ok, false)
+  assert.equal(gitMissing.code, 'git-unavailable')
   assert.equal(called.length, 0)
 })
 

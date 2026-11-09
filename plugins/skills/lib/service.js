@@ -13,14 +13,16 @@
  *
  * 三个公开方法形成一条从「收藏」到「仓库内容」的链：
  *
- * - `listRepositories()`：收藏的仓库，附带探测出的类型（npx skills 仓库 /
- *   Claude Code marketplace / 不可用 / 暂时判不出）与预计 skill 数；
+ * - `listRepositories()`：收藏的来源，附带探测出的类型（npx skills 仓库 /
+ *   Claude Code marketplace / 不可用 / 暂时判不出）与预计 skill 数。来源可以是
+ *   GitHub 仓库、任意 git 远端或本地绝对路径，都能探测与列出；
  * - `listSkills({ source })`：某个仓库里所有可安装的 skill（扁平列表）；
  * - `listPlugins({ source })`：Claude Code marketplace 里的插件，每个插件带
  *   自己的 skill 列表；对非 marketplace 仓库返回 `not-a-marketplace`。
  *
- * 所有网络访问都复用 `lib/repo-skills.js` 的 TTL 缓存与错误码，并且按仓库
- * 来源合并并发请求：页面展开卡片、另一个插件同时调服务时只打一次 GitHub。
+ * 所有仓库访问都复用 `lib/repo-skills.js` 的 TTL 缓存与错误码，并且按仓库
+ * 来源合并并发请求：页面展开卡片、另一个插件同时调服务时，同一个仓库只会
+ * 拉一次（GitHub 走 API，git 远端浅克隆，本地路径直接扫描）。
  * 服务本身不写任何状态，收藏的增删仍由本插件的路由负责（这是用户操作，不是
  * 对外能力）。
  *
@@ -106,7 +108,8 @@ const PROBE_CONCURRENCY = 4
  * @typedef {{
  *   ok: false,
  *   code: 'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited'
- *     | 'fetch-failed' | 'repo-unavailable' | 'not-a-marketplace',
+ *     | 'fetch-failed' | 'git-unavailable' | 'git-failed' | 'repo-unavailable'
+ *     | 'not-a-marketplace',
  *   message: string,
  * }} ServiceFailure
  */
@@ -165,14 +168,16 @@ export class SkillsCatalogService {
   }
 
   /**
-   * 列出收藏的仓库，并逐个探测类型与 skill 数量。
+   * 列出收藏的来源，并逐个探测类型与 skill 数量。
    *
-   * 探测走 `probeRepoKind()`：只拉仓库树（必要时再拉 marketplace.json），
-   * 不拉任何 `SKILL.md` 原文；结论按 30 分钟 TTL 缓存，`refresh: true` 时
-   * 绕过缓存重新探测。同一仓库的并发探测会被合并。
+   * 探测走 `probeRepoKind()`：GitHub 只拉仓库树（必要时再拉 marketplace.json），
+   * git 远端先浅克隆到缓存目录，本地绝对路径直接扫描目录；都不拉任何
+   * `SKILL.md` 原文。结论按 30 分钟 TTL 缓存，`refresh: true` 时绕过缓存重新
+   * 探测。同一条来源的并发探测会被合并。
    *
    * 失败不会让整个列表失败：条目退回 `kind: 'unknown'`，并带上探测错误码与
-   * 原因，其他收藏照常返回。
+   * 原因（npm 包名、GitHub 子页面等不可列出的来源也会落到这里），其他收藏照常
+   * 返回。
    *
    * @param {ServiceOptions} [options]
    * @returns {Promise<RepositoryList>}

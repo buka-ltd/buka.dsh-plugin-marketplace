@@ -1,11 +1,18 @@
 /**
- * 「收藏的 GitHub 仓库里有哪些 skills」：拉取、缓存与建树。
+ * 「收藏的来源里有哪些 skills」：拉取、缓存与建树。
  *
- * 页面第二个 Tab 的收藏项可能指向一个包含多个 skill 的仓库。为了展开成 tree，
- * 这里直接调用 GitHub 的公开 API：
+ * 页面第二个 Tab 的收藏项可能指向一个包含多个 skill 的仓库，来源可以是 GitHub
+ * 仓库、任意 git 远端或本地绝对路径。展开成 tree 的第一步都是拿到「仓库树 +
+ * 按仓库内路径读文件」：
  *
- * - `GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1` 拿整棵树；
- * - `https://raw.githubusercontent.com/.../SKILL.md` 拿每个候选 skill 的原文。
+ * - GitHub：`GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1` 拿整棵树，
+ *   `https://raw.githubusercontent.com/.../SKILL.md` 拿文件原文；
+ * - 任意 git 远端：先 `git clone --depth 1` 到缓存目录（`lib/git-source.js`），
+ *   再把克隆目录当本地目录扫描；
+ * - 本地绝对路径：直接扫描目录（`lib/local-source.js`）。
+ *
+ * 三种来源最终都收敛成 `{ tree, readFile }` 的读取抽象（`openRepo()`），后面的
+ * 发现规则、分类与建树只认这个抽象，不再关心来源本身。
  *
  * 发现规则与 `npx skills` CLI 的 `findSkillMdPaths()` 保持一致（优先级前缀、
  * container 层级、跳过的目录），只是额外记住命中哪个优先级前缀，用它把展示
@@ -26,7 +33,8 @@
  * `complete: false` 标记（`root` 固定为 `[]`），展开时才补成完整树。
  *
  * 缓存放在 DSH home 下（`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`），
- * 按 `owner/repo` 的小写键存整棵树，TTL 30 分钟。缓存是**可重建的易失数据**：
+ * 按规范化来源（`owner/repo`、本地绝对路径或 git 地址）的小写键存整棵树，TTL
+ * 30 分钟；git 来源的克隆目录另由 `lib/git-source.js` 管理。缓存是**可重建的易失数据**：
  * 文件损坏、版本不符或单条结构不合法时都直接当作未命中并重拉重写，不像收藏
  * 文件那样拒绝覆盖。写入仍是原子写（同目录临时文件 + rename），避免留下半个
  * 文件。SKILL.md 拉取失败只影响那一个节点的名称/描述，不会让整棵树失败。
@@ -34,7 +42,8 @@
  * 这样「列出市场里有哪些插件」不必重拉：树里没有 skill 的插件不会建节点，
  * 但清单仍在，调用方可以列出它们并给一个空 skill 列表。
  *
- * 本模块只依赖 Node 内置模块，可单独测试；网络、时钟与缓存目录都从参数注入。
+ * 本模块只依赖 Node 内置模块，可单独测试；网络、时钟、git 子进程与缓存目录都
+ * 从参数注入。
  *
  * @module @buka/dsh-plugin-skills/repo-skills
  */
@@ -42,7 +51,9 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-import { MAX_SOURCE_LENGTH, normalizeRepoSource, repoKey } from './repo-store.js'
+import { ensureGitClone } from './git-source.js'
+import { openLocalRepo } from './local-source.js'
+import { MAX_SOURCE_LENGTH, classifyRepoSource, repoKey } from './repo-store.js'
 import { parseFrontmatter, resolveHomes } from './skill-store.js'
 
 /**
@@ -50,6 +61,7 @@ import { parseFrontmatter, resolveHomes } from './skill-store.js'
  * @typedef {{ type: 'skill', name: string, path: string, description: string }} SkillNode
  * @typedef {DirNode | SkillNode} TreeNode
  * @typedef {'npx-skills' | 'claude-code-marketplace' | 'unavailable'} RepoKind
+ * @typedef {(args: string[], options?: { cwd?: string }) => Promise<{ stdout: string, stderr: string }>} GitRunner
  * @typedef {{
  *   source: string, kind: RepoKind, ref: string, sha: string, fetchedAt: number,
  *   truncated: boolean, skills: number, complete: boolean, root: TreeNode[],
@@ -57,10 +69,16 @@ import { parseFrontmatter, resolveHomes } from './skill-store.js'
  * }} CacheEntry
  * @typedef {{ name: string, root: string, description: string }} MarketplacePlugin
  * @typedef {{ name: string, plugins: MarketplacePlugin[] }} CachedMarketplace
+ * @typedef {{ kind: 'github', owner: string, repo: string }
+ *   | { kind: 'local', root: string }
+ *   | { kind: 'git', url: string }} RepoOrigin
  */
 
-/** 缓存文件格式版本；不匹配的缓存直接丢弃重建（v1 没有 kind / complete，v2 没有 marketplace 清单）。 */
-export const REPO_SKILLS_CACHE_VERSION = 3
+/**
+ * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v1 没有 kind / complete，v2 没有
+ * marketplace 清单，v3 只认 GitHub 来源，来源种类变化后 v3 条目不再可信）。
+ */
+export const REPO_SKILLS_CACHE_VERSION = 4
 
 /** 缓存有效期：30 分钟。GitHub 的树变化不频繁，过期后按需重拉。 */
 export const REPO_SKILLS_CACHE_TTL_MS = 30 * 60 * 1000
@@ -203,18 +221,18 @@ function splitRepo(text) {
 }
 
 /**
- * 拉取并缓存一个 GitHub 仓库的 skill 树。
+ * 拉取并缓存一个来源的 skill 树。
  *
- * `source` 先经 `normalizeRepoSource()` 收敛（GitHub 链接变成 `owner/repo`），
- * 再要求它确实是 GitHub 仓库；`@scope/pkg`、`notion`、GitLab 链接等返回
- * `unsupported-source`。缓存命中时完全不发网络请求；否则依次尝试
- * `HEAD`、`main`、`master`，任意一个成功即停。
+ * `source` 先经 `classifyRepoSource()` 解析成三种可列出的来源之一：GitHub 仓库、
+ * 任意 git 远端、本地绝对路径；`@scope/pkg`、`notion` 与已知不是仓库的网页链接
+ * （如 GitHub 子页面）返回 `unsupported-source`。缓存命中时完全不访问来源；
+ * GitHub 来源依次尝试 `HEAD`、`main`、`master`，git 来源复用已经克隆的目录。
  *
  * 仓库分类顺序固定：npx skills → Claude Code marketplace → 不可用。用于展示
  * 的目录节点路径已经去掉容器前缀，skill 节点保留完整仓库路径；marketplace
- * 的根节点是「一个插件一个目录」。网络失败、限流、仓库不存在等情况都返回
- * `{ ok: false, code, message }`，不向调用方抛异常；缓存写入失败则忽略，
- * 因为它随时可以重建。
+ * 的根节点是「一个插件一个目录」。网络失败、限流、仓库不存在、找不到 git 等
+ * 情况都返回 `{ ok: false, code, message }`，不向调用方抛异常；缓存写入失败
+ * 则忽略，因为它随时可以重建。
  *
  * 命中探测写下的轻量缓存（`complete: false`）时仍会重新拉一次 tree，把完整树
  * 补进缓存；命中 `kind: 'unavailable'` 且未过期时直接返回 `repo-unavailable`。
@@ -227,12 +245,13 @@ function splitRepo(text) {
  *   token?: string,
  *   now?: number,
  *   ttlMs?: number,
+ *   runGit?: GitRunner,
  * }} [options]
  * @returns {Promise<
  *   | { ok: true, source: string, kind: RepoKind, ref: string, sha: string,
  *       fetchedAt: number, cached: boolean, truncated: boolean, root: TreeNode[], skills: number,
  *       marketplace: CachedMarketplace | null }
- *   | { ok: false, code: 'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable', message: string }
+ *   | { ok: false, code: 'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable' | 'git-unavailable' | 'git-failed', message: string }
  * >}
  */
 export async function fetchRepoSkills({
@@ -243,10 +262,11 @@ export async function fetchRepoSkills({
   token,
   now = Date.now(),
   ttlMs = REPO_SKILLS_CACHE_TTL_MS,
+  runGit,
 } = {}) {
-  const target = await resolveTarget({ homes, source, token, now })
-  if (target.ok !== true) return target.failure
-  const { repo, canonical, timestamp, resolvedToken, file, id, cached } = target
+  const request = await resolveTarget({ homes, source, token, now })
+  if (request.ok !== true) return request.failure
+  const { origin, canonical, timestamp, resolvedToken, file, id, cached } = request
 
   if (refresh !== true && isFresh(cached, timestamp, ttlMs)) {
     if (cached.kind === 'unavailable') return repoUnavailable()
@@ -254,23 +274,17 @@ export async function fetchRepoSkills({
     // complete: false 只是探测写下的轻量结论：展开时补一次完整流程并写回完整树。
   }
 
-  const tree = await fetchRepoTree({ ...repo, token: resolvedToken, fetchImpl })
-  if (!tree.ok) return tree
+  const reader = await openRepo({ origin, fetchImpl, token: resolvedToken, homes, runGit })
+  if (!reader.ok) return reader
 
-  const classification = await classifyRepo({
-    tree: tree.tree,
-    repo,
-    ref: tree.ref,
-    token: resolvedToken,
-    fetchImpl,
-  })
+  const classification = await classifyRepo({ tree: reader.tree, reader })
   if (classification.failure !== undefined) return classification.failure
 
   if (classification.kind === 'unavailable') {
     try {
       await updateCache(file, (current) => ({
         ...current,
-        [id]: lightEntry({ source: canonical, kind: 'unavailable', tree, timestamp, skills: 0 }),
+        [id]: lightEntry({ source: canonical, kind: 'unavailable', tree: reader, timestamp, skills: 0 }),
       }))
     } catch {
       // 缓存是可重建的易失数据：写不进去不影响本次结果，下次再试。
@@ -279,19 +293,18 @@ export async function fetchRepoSkills({
   }
 
   const content = await loadRepoContent({
-    repo,
-    tree,
+    tree: reader.tree,
+    reader,
     classification,
-    token: resolvedToken,
-    fetchImpl,
+    repoName: originName(origin),
   })
   const entry = {
     source: canonical,
     kind: classification.kind,
-    ref: tree.ref,
-    sha: tree.sha,
+    ref: reader.ref,
+    sha: reader.sha,
     fetchedAt: timestamp,
-    truncated: tree.truncated,
+    truncated: reader.truncated,
     skills: content.skills,
     complete: true,
     root: content.root,
@@ -308,11 +321,11 @@ export async function fetchRepoSkills({
     ok: true,
     source: canonical,
     kind: classification.kind,
-    ref: tree.ref,
-    sha: tree.sha,
+    ref: reader.ref,
+    sha: reader.sha,
     fetchedAt: timestamp,
     cached: false,
-    truncated: tree.truncated,
+    truncated: reader.truncated,
     root: content.root,
     skills: content.skills,
     marketplace: entry.marketplace,
@@ -320,11 +333,12 @@ export async function fetchRepoSkills({
 }
 
 /**
- * 只探测一个仓库属于哪种技能仓库，不拉任何 SKILL.md 原文。
+ * 只探测一个来源属于哪种技能仓库，不拉任何 SKILL.md 原文。
  *
- * 收藏卡片打开后会自动调用它来显示徽标，所以这里只拉 tree，必要时再拉一份
- * `marketplace.json`。失败码与 `fetchRepoSkills` 完全一致；判定为不可用时
- * 返回 `repo-unavailable`（命中已缓存的不可用结论时同样不发请求）。
+ * 收藏卡片打开后会自动调用它来显示徽标，所以这里只拿 tree（本地路径 / git 克隆
+ * 是扫目录，GitHub 是拉 tree），必要时再读一份 `marketplace.json`。失败码与
+ * `fetchRepoSkills` 完全一致；判定为不可用时返回 `repo-unavailable`（命中已缓存
+ * 的不可用结论时同样不访问来源）。
  *
  * 写缓存总是写轻量条目（`complete: false`，`root: []`），并且**不覆盖**已存在
  * 的完整树缓存：探测刷新不该把展开时拿到的完整数据降级掉。
@@ -337,11 +351,12 @@ export async function fetchRepoSkills({
  *   token?: string,
  *   now?: number,
  *   ttlMs?: number,
+ *   runGit?: GitRunner,
  * }} [options]
  * @returns {Promise<
  *   | { ok: true, source: string, kind: RepoKind, skills: number, cached: boolean,
  *       ref: string, sha: string, fetchedAt: number, truncated: boolean }
- *   | { ok: false, code: 'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable', message: string }
+ *   | { ok: false, code: 'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable' | 'git-unavailable' | 'git-failed', message: string }
  * >}
  */
 export async function probeRepoKind({
@@ -352,26 +367,21 @@ export async function probeRepoKind({
   token,
   now = Date.now(),
   ttlMs = REPO_SKILLS_CACHE_TTL_MS,
+  runGit,
 } = {}) {
-  const target = await resolveTarget({ homes, source, token, now })
-  if (target.ok !== true) return target.failure
-  const { repo, canonical, timestamp, resolvedToken, file, id, cached } = target
+  const request = await resolveTarget({ homes, source, token, now })
+  if (request.ok !== true) return request.failure
+  const { origin, canonical, timestamp, resolvedToken, file, id, cached } = request
 
   if (refresh !== true && isFresh(cached, timestamp, ttlMs)) {
     if (cached.kind === 'unavailable') return repoUnavailable()
     return probeResult(canonical, cached, true)
   }
 
-  const tree = await fetchRepoTree({ ...repo, token: resolvedToken, fetchImpl })
-  if (!tree.ok) return tree
+  const reader = await openRepo({ origin, fetchImpl, token: resolvedToken, homes, runGit })
+  if (!reader.ok) return reader
 
-  const classification = await classifyRepo({
-    tree: tree.tree,
-    repo,
-    ref: tree.ref,
-    token: resolvedToken,
-    fetchImpl,
-  })
+  const classification = await classifyRepo({ tree: reader.tree, reader })
   if (classification.failure !== undefined) return classification.failure
 
   const kind = classification.kind
@@ -379,10 +389,10 @@ export async function probeRepoKind({
     kind === 'unavailable'
       ? 0
       : kind === 'npx-skills'
-        ? findSkillMdPaths(tree.tree).length
-        : countMarketplaceSkills(tree.tree, classification.marketplace)
+        ? findSkillMdPaths(reader.tree).length
+        : countMarketplaceSkills(reader.tree, classification.marketplace)
 
-  await writeProbeCache(file, id, lightEntry({ source: canonical, kind, tree, timestamp, skills }))
+  await writeProbeCache(file, id, lightEntry({ source: canonical, kind, tree: reader, timestamp, skills }))
   if (kind === 'unavailable') return repoUnavailable()
 
   return {
@@ -391,15 +401,18 @@ export async function probeRepoKind({
     kind,
     skills,
     cached: false,
-    ref: tree.ref,
-    sha: tree.sha,
+    ref: reader.ref,
+    sha: reader.sha,
     fetchedAt: timestamp,
-    truncated: tree.truncated,
+    truncated: reader.truncated,
   }
 }
 
 /**
  * 校验来源、解析 token 并读缓存：两个入口共用的前半段。
+ *
+ * 来源种类由 `classifyRepoSource()` 判定：`web` / `package` 直接返回
+ * `unsupported-source`（它们没有可列出的仓库树，也没有缓存条目）。
  *
  * @param {{
  *   homes: { agentsHome: string, dshHome: string },
@@ -408,36 +421,56 @@ export async function probeRepoKind({
  *   now: unknown,
  * }} options
  * @returns {Promise<
- *   | { ok: true, repo: { owner: string, repo: string }, canonical: string, timestamp: number,
+ *   | { ok: true, origin: RepoOrigin, canonical: string, timestamp: number,
  *       resolvedToken: string | null, file: string, entries: Record<string, CacheEntry>,
  *       id: string, cached: CacheEntry | undefined }
  *   | { ok: false, failure: { ok: false, code: string, message: string } }
  * >}
  */
 async function resolveTarget({ homes, source, token, now }) {
-  const normalized = normalizeRepoSource(source)
-  if (normalized === null) {
+  const classified = classifyRepoSource(source)
+  if (!classified.ok) {
     return {
       ok: false,
-      failure: failure('invalid-source', 'Invalid source: expected a GitHub owner/repo or repository URL.'),
+      failure: failure(
+        'invalid-source',
+        'Invalid source: expected a GitHub owner/repo, a git URL, or an absolute path.',
+      ),
     }
   }
-  const repo = githubRepoOf(normalized)
-  if (repo === null) {
+  if (classified.listable !== true) {
     return {
       ok: false,
-      failure: failure('unsupported-source', 'Unsupported source: only GitHub repositories can be listed.'),
+      failure: failure(
+        'unsupported-source',
+        'Unsupported source: only GitHub repositories, git remotes, and local absolute paths can be listed.',
+      ),
     }
   }
-  // 最终来源统一成 `owner/repo`：带子路径/查询串的 GitHub 链接也能落到与
-  // `owner/repo` 相同的缓存键上，避免同一仓库被缓存成两份。
-  const canonical = `${repo.owner}/${repo.repo}`
+
+  const canonical = classified.source
+  let origin
+  if (classified.kind === 'github') {
+    const repo = githubRepoOf(canonical)
+    if (repo === null) {
+      return {
+        ok: false,
+        failure: failure('invalid-source', 'Invalid source: expected a GitHub owner/repo.'),
+      }
+    }
+    origin = { kind: 'github', owner: repo.owner, repo: repo.repo }
+  } else if (classified.kind === 'local') {
+    origin = { kind: 'local', root: canonical }
+  } else {
+    origin = { kind: 'git', url: canonical }
+  }
+
   const timestamp = typeof now === 'number' && Number.isFinite(now) ? now : Date.now()
   const resolvedToken = resolveToken(token)
   const file = repoSkillsCacheFile(homes)
   const entries = await readCache(file)
   const id = repoKey(canonical)
-  return { ok: true, repo, canonical, timestamp, resolvedToken, file, entries, id, cached: entries[id] }
+  return { ok: true, origin, canonical, timestamp, resolvedToken, file, entries, id, cached: entries[id] }
 }
 
 /**
@@ -516,32 +549,140 @@ function lightEntry({ source, kind, tree, timestamp, skills }) {
 }
 
 /**
- * 按分类结果把仓库内容拉成可展示的树；只用于完整展开，探测不需要。
+ * 打开一棵仓库树：把三种来源都收敛成 `{ tree, readFile }`。
  *
- * SKILL.md 元数据复用同一套 raw 拉取 + frontmatter 解析 + 6 并发。
+ * GitHub 用 API 拉树、raw.githubusercontent.com 读文件；git 来源先浅克隆到缓存
+ * 目录再当本地目录扫描；本地来源直接扫描目录。
+ *
+ * 走到这里说明磁盘缓存没有命中（过期，或只有一条轻量探测结论），所以三种来源
+ * 都重新读一次最新内容：GitHub 重拉 tree、本地路径重扫目录、git 来源先
+ * `git fetch` 更新克隆（离线时 `ensureGitClone` 保留旧克隆）。
  *
  * @param {{
- *   repo: { owner: string, repo: string },
- *   tree: { ref: string, tree: unknown[] },
- *   classification: { kind: 'npx-skills' } | { kind: 'claude-code-marketplace', marketplace: { plugins: MarketplacePlugin[] } },
- *   token: string | null,
+ *   origin: RepoOrigin,
  *   fetchImpl: typeof fetch,
+ *   token: string | null,
+ *   homes: { agentsHome: string, dshHome: string },
+ *   runGit?: GitRunner,
+ * }} options
+ * @returns {Promise<
+ *   | { ok: true, ref: string, sha: string, truncated: boolean, tree: unknown[],
+ *       readFile: (repoPath: string) => Promise<string | null> }
+ *   | { ok: false, code: string, message: string }
+ * >}
+ */
+async function openRepo({ origin, fetchImpl, token, homes, runGit }) {
+  if (origin.kind === 'github') {
+    const tree = await fetchRepoTree({ owner: origin.owner, repo: origin.repo, token, fetchImpl })
+    if (!tree.ok) return tree
+    return {
+      ok: true,
+      ref: tree.ref,
+      sha: tree.sha,
+      truncated: tree.truncated,
+      tree: tree.tree,
+      readFile: createGithubReader({
+        owner: origin.owner,
+        repo: origin.repo,
+        ref: tree.ref,
+        token,
+        fetchImpl,
+      }),
+    }
+  }
+
+  if (origin.kind === 'local') return openLocalRepo(origin.root)
+
+  // 只有缓存未命中时才会调用本函数，所以每次读都顺手更新克隆；fetch 失败时
+  // `ensureGitClone` 保留旧克隆，离线仍能展开。
+  const cloned = await ensureGitClone({ homes, url: origin.url, runGit, update: true })
+  if (!cloned.ok) return cloned
+  const opened = await openLocalRepo(cloned.dir)
+  if (!opened.ok) return opened
+  return {
+    ok: true,
+    // 克隆目录是某个提交的工作区快照；ref 固定写 HEAD，sha 来自 rev-parse。
+    ref: 'HEAD',
+    sha: cloned.sha,
+    truncated: opened.truncated,
+    tree: opened.tree,
+    readFile: opened.readFile,
+  }
+}
+
+/**
+ * GitHub 的 `readFile`：从 raw.githubusercontent.com 取文件原文。
+ *
+ * 网络异常、超时与任何非 2xx 都返回 null（对调用方就是「这个文件读不到」）：
+ * SKILL.md 读不到只影响一个节点的元数据，marketplace 清单读不到则由分类函数
+ * 升级成 `fetch-failed`。
+ *
+ * @param {{ owner: string, repo: string, ref: string, token: string | null, fetchImpl: typeof fetch }} options
+ * @returns {(repoPath: string) => Promise<string | null>}
+ */
+function createGithubReader({ owner, repo, ref, token, fetchImpl }) {
+  return async function readFile(repoPath) {
+    const segments = repoPath.split('/').map((segment) => encodeURIComponent(segment))
+    const url = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${segments.join('/')}`
+    try {
+      const response = await fetchImpl(url, {
+        headers: rawHeaders(token),
+        signal: AbortSignal.timeout(RAW_TIMEOUT_MS),
+      })
+      if (!response?.ok) return null
+      return await response.text()
+    } catch {
+      return null
+    }
+  }
+}
+
+/**
+ * 来源的展示名：只给根目录 SKILL.md 的节点名兜底（没有 frontmatter name 时）。
+ *
+ * @param {RepoOrigin} origin
+ * @returns {string}
+ */
+function originName(origin) {
+  if (origin.kind === 'github') return origin.repo
+  if (origin.kind === 'local') {
+    const base = path.basename(origin.root)
+    return base === '' ? origin.root : base
+  }
+  // git 地址取最后一段：`.../group/repo.git` 与 `git@host:group/repo.git` 都适用。
+  const stripped = origin.url.replace(/\/+$/u, '').replace(/\.git$/iu, '')
+  const parts = stripped.split(/[/:]/u).filter((part) => part !== '')
+  const segment = parts.at(-1)
+  return segment === undefined ? origin.url : segment
+}
+
+/**
+ * 按分类结果把仓库内容拉成可展示的树；只用于完整展开，探测不需要。
+ *
+ * SKILL.md 元数据走同一个 `reader.readFile()`：本地 / git 来源因此不碰网络，
+ * GitHub 来源仍是 raw 请求 + frontmatter 解析 + 6 并发。
+ *
+ * @param {{
+ *   tree: unknown[],
+ *   reader: { readFile: (repoPath: string) => Promise<string | null> },
+ *   classification: { kind: 'npx-skills' } | { kind: 'claude-code-marketplace', marketplace: { plugins: MarketplacePlugin[] } },
+ *   repoName: string,
  * }} options
  * @returns {Promise<{ root: TreeNode[], skills: number }>}
  */
-async function loadRepoContent({ repo, tree, classification, token, fetchImpl }) {
+async function loadRepoContent({ tree, reader, classification, repoName }) {
   if (classification.kind === 'npx-skills') {
-    const discovered = findSkillMdPaths(tree.tree)
+    const discovered = findSkillMdPaths(tree)
     const metadata = await mapLimit(discovered, SKILL_MD_CONCURRENCY, (entry) =>
-      fetchSkillMetadata(entry, { ...repo, ref: tree.ref, token, fetchImpl }),
+      readSkillMetadata(entry, reader),
     )
-    return { root: buildTree(metadata, repo.repo), skills: metadata.length }
+    return { root: buildTree(metadata, repoName), skills: metadata.length }
   }
 
-  const groups = collectMarketplaceSkills(tree.tree, classification.marketplace)
+  const groups = collectMarketplaceSkills(tree, classification.marketplace)
   const paths = groups.flatMap((group) => group.skills.map((skill) => skill.path))
   const fetched = await mapLimit(paths, SKILL_MD_CONCURRENCY, (skillPath) =>
-    fetchSkillFile(skillPath, { ...repo, ref: tree.ref, token, fetchImpl }),
+    readSkillFile(reader, skillPath),
   )
   const metas = new Map()
   paths.forEach((skillPath, index) => metas.set(skillPath, fetched[index]))
@@ -633,15 +774,12 @@ async function fetchRepoTree({ owner, repo, token, fetchImpl }) {
  * `plugins/<plugin>/skills/<name>/SKILL.md` 也会被兜底命中，若它先于
  * marketplace 判定，这类仓库就永远显示成 npx（详见 `findPrioritySkillMdPaths`）。
  *
- * tree 里说 marketplace 文件在、却拉不到时返回 `fetch-failed`（而不是
- * 「不可用」），避免把网络问题误判成仓库类型。
+ * tree 里说 marketplace 文件在、却读不到时返回 `fetch-failed`（而不是
+ * 「不可用」），避免把网络 / 读文件问题误判成仓库类型。
  *
  * @param {{
  *   tree: unknown[],
- *   repo: { owner: string, repo: string },
- *   ref: string,
- *   token: string | null,
- *   fetchImpl: typeof fetch,
+ *   reader: { readFile: (repoPath: string) => Promise<string | null> },
  * }} options
  * @returns {Promise<
  *   | { kind: 'npx-skills' }
@@ -650,7 +788,7 @@ async function fetchRepoTree({ owner, repo, token, fetchImpl }) {
  *   | { failure: { ok: false, code: 'fetch-failed', message: string } }
  * >}
  */
-async function classifyRepo({ tree, repo, ref, token, fetchImpl }) {
+async function classifyRepo({ tree, reader }) {
   const allSkillMds = allSkillMdPaths(tree)
   if (findPrioritySkillMdPaths(allSkillMds).size > 0) return { kind: 'npx-skills' }
 
@@ -662,9 +800,16 @@ async function classifyRepo({ tree, repo, ref, token, fetchImpl }) {
       entry.path === MARKETPLACE_PATH,
   )
   if (listed) {
-    const fetched = await fetchMarketplaceText({ ...repo, ref, token, fetchImpl })
-    if (!fetched.ok) return { failure: fetched }
-    const marketplace = parseMarketplace(fetched.text)
+    const text = await reader.readFile(MARKETPLACE_PATH)
+    if (text === null) {
+      return {
+        failure: failure(
+          'fetch-failed',
+          'Failed to read the Claude Code marketplace manifest from the repository.',
+        ),
+      }
+    }
+    const marketplace = parseMarketplace(text)
     // 清单不合法：这个仓库不是可用的 Claude Code marketplace，继续看 npx 的
     // 兜底规则能不能列出它，而不是直接判死。
     if (marketplace !== null) return { kind: 'claude-code-marketplace', marketplace }
@@ -674,36 +819,6 @@ async function classifyRepo({ tree, repo, ref, token, fetchImpl }) {
   // 的发现结果一致。
   if (allSkillMds.some((skillMd) => skillMd.split('/').length <= 6)) return { kind: 'npx-skills' }
   return { kind: 'unavailable' }
-}
-
-/**
- * 拉取仓库根的 marketplace.json 原文。
- *
- * 与 SKILL.md 共用 raw 请求头与超时；网络异常与任何非 2xx 都算 `fetch-failed`，
- * 因为 tree 已经告诉我们文件存在，拉不到是请求失败而不是仓库类型问题。
- *
- * @param {{ owner: string, repo: string, ref: string, token: string | null, fetchImpl: typeof fetch }} options
- * @returns {Promise<{ ok: true, text: string } | { ok: false, code: 'fetch-failed', message: string }>}
- */
-async function fetchMarketplaceText({ owner, repo, ref, token, fetchImpl }) {
-  const url = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${MARKETPLACE_PATH}`
-  let response
-  try {
-    response = await fetchImpl(url, {
-      headers: rawHeaders(token),
-      signal: AbortSignal.timeout(RAW_TIMEOUT_MS),
-    })
-  } catch (error) {
-    return failure('fetch-failed', `GitHub marketplace request failed: ${errorText(error)}`)
-  }
-  if (!response?.ok) {
-    return failure('fetch-failed', `GitHub marketplace request returned HTTP ${response?.status ?? 'unknown'}.`)
-  }
-  try {
-    return { ok: true, text: await response.text() }
-  } catch (error) {
-    return failure('fetch-failed', `GitHub marketplace response could not be read: ${errorText(error)}`)
-  }
 }
 
 /**
@@ -925,32 +1040,26 @@ function findSkillMdPaths(tree) {
 }
 
 /**
- * 按仓库内完整路径拉取并解析一个 SKILL.md；失败时 name/description 都留空。
+ * 按仓库内完整路径读取并解析一个 SKILL.md；失败时 name/description 都留空。
  *
  * 这是 npx 与 marketplace 两条流程共用的底层：npx 流还要自己补展示路径，
- * marketplace 流直接用仓库完整路径。
+ * marketplace 流直接用仓库完整路径。`reader` 屏蔽了来源差异（GitHub raw、
+ * 本地文件或 git 克隆目录里的文件）。
  *
+ * @param {{ readFile: (repoPath: string) => Promise<string | null> }} reader
  * @param {string} skillMd 仓库内的完整 SKILL.md 路径
- * @param {{ owner: string, repo: string, ref: string, token: string | null, fetchImpl: typeof fetch }} options
  * @returns {Promise<{ name: string, description: string }>}
  */
-async function fetchSkillFile(skillMd, { owner, repo, ref, token, fetchImpl }) {
-  const segments = skillMd.split('/').map((segment) => encodeURIComponent(segment))
-  const url = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${segments.join('/')}`
-
-  let text = ''
+async function readSkillFile(reader, skillMd) {
+  let text
   try {
-    const response = await fetchImpl(url, {
-      headers: rawHeaders(token),
-      signal: AbortSignal.timeout(RAW_TIMEOUT_MS),
-    })
-    if (response?.ok) text = await response.text()
+    text = await reader.readFile(skillMd)
   } catch {
-    text = ''
+    text = null
   }
 
   try {
-    return parseFrontmatter(text)
+    return parseFrontmatter(text ?? '')
   } catch {
     // 解析器只处理字符串；这里兜底，避免一个坏文件让整棵树失败。
     return { name: '', description: '' }
@@ -958,17 +1067,17 @@ async function fetchSkillFile(skillMd, { owner, repo, ref, token, fetchImpl }) {
 }
 
 /**
- * 拉取一个 SKILL.md 并解析 name/description；失败时两个字段都留空。
+ * 读取一个 SKILL.md 并解析 name/description；失败时两个字段都留空。
  *
  * npx 流的位置：`displayPath` 是剥掉容器前缀后的展示路径，`fullPath` 仍是
  * 仓库里的完整路径。
  *
  * @param {{ skillMd: string, prefix: string }} entry 发现的候选路径
- * @param {{ owner: string, repo: string, ref: string, token: string | null, fetchImpl: typeof fetch }} options
+ * @param {{ readFile: (repoPath: string) => Promise<string | null> }} reader
  * @returns {Promise<{ displayPath: string, fullPath: string, name: string, description: string }>}
  */
-async function fetchSkillMetadata(entry, options) {
-  const meta = await fetchSkillFile(entry.skillMd, options)
+async function readSkillMetadata(entry, reader) {
+  const meta = await readSkillFile(reader, entry.skillMd)
   return {
     displayPath: entry.skillMd.slice(entry.prefix.length),
     fullPath: entry.skillMd,
@@ -1419,7 +1528,10 @@ function repoUnavailable() {
 /**
  * 统一的失败返回，保证错误码集合与模块契约一致。
  *
- * @param {'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable'} code
+ * `git-unavailable` 表示本机没有可执行的 git；`git-failed` 表示 clone / fetch /
+ * 读克隆目录失败。两者只可能出现在 git 来源上，其余错误码对三种来源通用。
+ *
+ * @param {'invalid-source' | 'unsupported-source' | 'repo-not-found' | 'rate-limited' | 'fetch-failed' | 'repo-unavailable' | 'git-unavailable' | 'git-failed'} code
  * @param {string} message
  * @returns {{ ok: false, code: string, message: string }}
  */

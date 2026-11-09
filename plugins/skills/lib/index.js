@@ -11,9 +11,11 @@
  *   `probe=1` 时只探测仓库类型：npx skills / Claude Code marketplace / 不可用）。
  *   收藏的仓库既可以是 npx skills 仓库，也可以是 Claude Code marketplace 仓库：
  *   前者按 `npx skills` 的发现规则列 SKILL.md，后者只列 marketplace 里各本地
- *   插件子树中的 SKILL.md（commands / agents 不列）。列表数据来自同一份磁盘
- *   扫描（`lib/skill-store.js`），收藏来自 `lib/repo-store.js` 的 JSON 文件，
- *   仓库 skills 由 `lib/repo-skills.js` 按 TTL 缓存 GitHub 的仓库树；
+ *   插件子树中的 SKILL.md（commands / agents 不列）。收藏来源可以是 GitHub
+ *   仓库、任意 git 远端（Host 用 `git clone --depth 1` 拉到缓存目录再扫描）或
+ *   本地绝对路径（直接扫描目录）。列表数据来自同一份磁盘扫描
+ *   （`lib/skill-store.js`），收藏来自 `lib/repo-store.js` 的 JSON 文件，
+ *   仓库 skills 由 `lib/repo-skills.js` 按 TTL 缓存仓库树；
  * - 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
  *   是不是 npx skills 装的」。卸载是破坏性操作，只留给页面上的用户按钮，
  *   不开放给模型。
@@ -390,10 +392,14 @@ function repoStatusFor(code) {
 /**
  * 仓库 skills 路由的失败码 → HTTP 状态码。
  *
- * `unsupported-source` 用 400：来源本身合法，但这个来源（包名 / 非 GitHub
- * 链接）没有可以让 Host 列举的仓库树，请求方不该重试。`repo-unavailable`
- * 用 422：请求格式没问题，只是这个仓库既不是 npx skills 也不是 Claude Code
- * marketplace，改来源才有意义。
+ * `unsupported-source` 用 400：来源本身合法，但这个来源（npm 包名 / 已知不是
+ * 仓库的网页链接）没有可以让 Host 列举的仓库树，请求方不该重试。
+ * `repo-unavailable` 用 422：请求格式没问题，只是这个仓库既不是 npx skills
+ * 也不是 Claude Code marketplace，改来源才有意义。
+ *
+ * `git-unavailable`（本机没有 git）用 500：这是 Host 环境问题，与来源无关；
+ * `git-failed`（clone/fetch 失败）用 502：上游 git 服务或网络的问题，和 GitHub
+ * 的 `fetch-failed` 同级。
  *
  * @param {string | undefined} code
  * @returns {number}
@@ -403,6 +409,7 @@ function repoSkillsStatusFor(code) {
   if (code === 'repo-unavailable') return 422
   if (code === 'repo-not-found') return 404
   if (code === 'rate-limited') return 429
+  if (code === 'git-unavailable') return 500
   return 502
 }
 

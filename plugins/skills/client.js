@@ -12,12 +12,13 @@
  *
  * - 「已安装」：两个全局 skills 根目录下现有的 skill，标注哪些由 npx skills
  *   管理，并提供按来源选择的卸载入口；
- * - 「收藏」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub 链接
- *   或包名），用于以后 `npx skills add` 时随手取用；点标题打开仓库，卡片右侧
- *   的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。来源既可以是
- *   npx skills 仓库，也可以是 Claude Code marketplace 仓库：打开收藏页后会对
- *   每个 GitHub 收藏静默探测仓库类型（`probe=1`，只读 tree，不阻塞列表），
- *   标题行标出「npx skills」「Claude Code 市场」或「不可用」。
+ * - 「收藏」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub/GitLab 等
+ *   git 地址、本地绝对路径或包名），用于以后 `npx skills add` 时随手取用；
+ *   点标题打开仓库，卡片右侧的「删除」按钮与已安装列表的卸载按钮同款
+ *   （outline + 危险色）。来源既可以是 npx skills 仓库，也可以是 Claude Code
+ *   marketplace 仓库：打开收藏页后会对每个可列出 skills 的收藏静默探测仓库
+ *   类型（`probe=1`，只读 tree，不阻塞列表），标题行标出「npx skills」
+ *   「Claude Code 市场」或「不可用」。
  *
  * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
  * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
@@ -78,7 +79,7 @@ window.__ModuleLoader__.load({
      * 收藏页本地缓存的键：展开过哪些仓库、收起了哪些目录、每个仓库上次拿到的
      * skills 树。放在浏览器 localStorage 里（和 DSH 自己的 `dsh.sessions.current`
      * 等页面状态同一个 origin），这样关掉 DSH 再打开时能先按上次的样子渲染，
-     * 不用等 Host 重新拉 GitHub。键名沿用 DSH 的 `dsh.` 前缀并带版本号。
+     * 不用等 Host 重新拉取仓库。键名沿用 DSH 的 `dsh.` 前缀并带版本号。
      */
     const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'
 
@@ -126,7 +127,7 @@ window.__ModuleLoader__.load({
       dialogTitle: 'Save repository',
       fieldSource: 'Repository',
       fieldNote: 'Note',
-      addPlaceholder: 'owner/repo, a GitHub link, or a package name',
+      addPlaceholder: 'owner/repo, a GitHub/GitLab link, a git URL, or an absolute path',
       notePlaceholder: 'Optional',
       add: 'Save',
       adding: 'Saving…',
@@ -135,7 +136,8 @@ window.__ModuleLoader__.load({
       removing: 'Deleting…',
       removed: 'Deleted:',
       duplicate: 'Already saved:',
-      invalidSource: 'Invalid source: use owner/repo, a GitHub link, an http(s) link, or a package name.',
+      invalidSource:
+        'Invalid source: use owner/repo, a GitHub/GitLab or other git URL, a local absolute path, an http(s) link, or a package name. Package names can be saved but not expanded.',
       invalidNote: 'The note is limited to 200 characters.',
       storeUnreadable: 'The saved-repos file cannot be parsed; fix or delete it first:',
       addFailed: 'Could not save:',
@@ -148,8 +150,9 @@ window.__ModuleLoader__.load({
       treeFailed: 'Could not load skills:',
       treeNotFound: 'Repository not found or not accessible.',
       treeRateLimited: 'GitHub API rate limit reached. Try again later.',
-      treeUnsupported: 'Only GitHub repositories can be listed.',
+      treeUnsupported: 'Package names and web links cannot list skills.',
       treeUnavailable: 'This repository is neither an npx skills repository nor a Claude Code marketplace.',
+      treeGitUnavailable: 'Git is not installed or not on PATH, so git repositories cannot be read.',
       kindNpx: 'npx skills',
       kindMarketplace: 'Claude Code marketplace',
       kindUnavailable: 'unavailable',
@@ -187,7 +190,7 @@ window.__ModuleLoader__.load({
       dialogTitle: '收藏',
       fieldSource: '仓库',
       fieldNote: '备注',
-      addPlaceholder: 'owner/repo、GitHub 链接或包名',
+      addPlaceholder: 'owner/repo、GitHub/GitLab 链接、git 地址或绝对路径',
       notePlaceholder: '可选',
       add: '收藏',
       adding: '收藏中…',
@@ -196,7 +199,7 @@ window.__ModuleLoader__.load({
       removing: '删除中…',
       removed: '已删除：',
       duplicate: '已经收藏过：',
-      invalidSource: '来源格式不对：只支持 owner/repo、GitHub 链接、http(s) 链接或 npm 包名。',
+      invalidSource: '来源格式不对：支持 owner/repo、GitHub/GitLab 等 git 地址、本地绝对路径、http(s) 链接或包名；包名可以收藏但不能展开。',
       invalidNote: '备注最长 200 个字符。',
       storeUnreadable: '收藏文件无法解析，请先修复或删除它：',
       addFailed: '收藏失败：',
@@ -209,8 +212,9 @@ window.__ModuleLoader__.load({
       treeFailed: '获取 skills 失败：',
       treeNotFound: '仓库不存在或无权访问。',
       treeRateLimited: 'GitHub 接口限流，稍后再试。',
-      treeUnsupported: '只有 GitHub 仓库可以列出 skills。',
+      treeUnsupported: '包名和网页链接不能列出 skills。',
       treeUnavailable: '这个仓库不可用：既不是 npx skills 仓库，也不是 Claude Code marketplace。',
+      treeGitUnavailable: '没有找到 git（不在 PATH 上），无法读取 git 仓库。',
       kindNpx: 'npx skills',
       kindMarketplace: 'Claude Code 市场',
       kindUnavailable: '不可用',
@@ -371,8 +375,9 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 收藏项对应的可打开链接：GitHub 仓库拼成网页地址，http(s) 来源原样使用，
-     * 纯包名（如 `notion`）没有可打开的仓库页，返回空串。
+     * 收藏项对应的可打开链接：GitHub 仓库拼成网页地址，http(s) 来源原样使用；
+     * ssh/git 地址、SCP 形式、本地绝对路径与包名都没有可打开的网页（标题显示
+     * 为纯文本，不猜链接），返回空串。
      *
      * @param {string} source 已规范化的来源
      * @returns {string}
@@ -387,14 +392,36 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 这个来源能不能让 Host 去列 skills：只有 GitHub 的 `owner/repo` 可以。
-     * 包名与非 GitHub 链接照样能收藏，只是没有可展开的树。
+     * 这个来源能不能让 Host 去列 skills，与 Host `repo-store.js` 的
+     * `classifyRepoSource()` 对应：`github`、`git`、`local` 三种可以列出，
+     * `web`、`package` 只能当书签。
+     *
+     * 能列出的写法：GitHub 的 `owner/repo`、GitHub 以外的任意 http(s) 链接、
+     * `ssh://` / `git://` 地址、SCP 形式（`git@host:path`）、POSIX 绝对路径
+     * 与 Windows 绝对路径；npm 包名（`notion`、`@scope/pkg`）和 GitHub 子页面
+     * （如 `https://github.com/o/r/tree/main`）照样能收藏，只是没有可展开的树。
      *
      * @param {string} source 已规范化的来源
      * @returns {boolean}
      */
-    function isGitHubRepo(source) {
-      return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/u.test(normalizeRepo(source).label)
+    function isListableSource(source) {
+      const text = typeof source === 'string' ? source.trim() : ''
+      if (text === '') return false
+      // GitHub 网页链接：只有仓库根本身（`/owner/repo`，可带 `.git` 与结尾斜杠）
+      // 能列出；`/tree/...` 之类的子页面、带查询串的链接在 Host 侧归为 `web`。
+      if (/^https?:\/\/(?:www\.)?github\.com\//iu.test(text)) {
+        return /^https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/iu.test(
+          text.replace(/\/+$/u, ''),
+        )
+      }
+      // 其它 http(s) 链接与显式的 git 协议都按 git 远端处理。
+      if (/^(?:https?|ssh|git):\/\//iu.test(text)) return true
+      // 本地绝对路径：POSIX `/…`、Windows 盘符 `C:\` / `C:/` 与 UNC 路径。
+      if (/^\//u.test(text) || /^[A-Za-z]:[\\/]/u.test(text) || /^\\\\[^\\]+\\/u.test(text)) return true
+      // SCP 形式 `[user@]host:path`；盘符已在上面排除，避免把 `C:` 当主机名。
+      if (/^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]+:(?!\/\/)\S+$/u.test(text)) return true
+      // GitHub `owner/repo`（Host 把它规范化成这个形式）。
+      return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/u.test(text)
     }
 
     /**
@@ -545,6 +572,8 @@ window.__ModuleLoader__.load({
 
     /**
      * tree 加载失败时的展示文本；已知错误码说清楚原因，其余带 Host 诊断。
+     * `git-unavailable`（本机没有 git）有专门文案；`git-failed` 走默认分支，
+     * 带上 Host 给的具体原因（clone/fetch 的 stderr）。
      *
      * @param {function(string): string} t 翻译函数
      * @param {unknown} failure 带 `code` 的错误
@@ -560,6 +589,8 @@ window.__ModuleLoader__.load({
           return t('treeRateLimited')
         case 'unsupported-source':
           return t('treeUnsupported')
+        case 'git-unavailable':
+          return t('treeGitUnavailable')
         case 'invalid-source':
           return t('invalidSource')
         default:
@@ -702,8 +733,8 @@ window.__ModuleLoader__.load({
       const [expandedRepos, setExpandedRepos] = React.useState(restored?.expandedRepos ?? {})
       const [trees, setTrees] = React.useState(restored?.trees ?? {})
       const [collapsedDirs, setCollapsedDirs] = React.useState(restored?.collapsedDirs ?? {})
-      // 每个 GitHub 收藏的仓库类型探测结果（npx skills / Claude Code 市场 /
-      // 不可用），只用来渲染标题行的徽标。纯页面状态、不进 localStorage：
+      // 每个可列出 skills 的收藏的仓库类型探测结果（npx skills / Claude Code
+      // 市场 / 不可用），只用来渲染标题行的徽标。纯页面状态、不进 localStorage：
       // 重开 DSH 重新探测一次即可。删除收藏时由下面的 prune 一起清掉。
       const [probes, setProbes] = React.useState({})
 
@@ -773,13 +804,13 @@ window.__ModuleLoader__.load({
       }, [savedData])
 
       // 展开状态、收起的目录与拿到的树都写回 localStorage：关掉 DSH 再打开时
-      // 能立刻恢复上次的收藏页，不用先等 Host 重新拉 GitHub。
+      // 能立刻恢复上次的收藏页，不用先等 Host 重新拉取仓库。
       React.useEffect(() => {
         writeViewCache({ expandedRepos, collapsedDirs, trees })
       }, [expandedRepos, collapsedDirs, trees])
 
       // 从本地缓存恢复出来的树可能已经过期：切到「收藏」Tab 后，用 Host 的磁盘
-      // 缓存（必要时才重新拉 GitHub）在后台校正。请求期间保留旧树，不会从
+      // 缓存（必要时才重新拉取仓库）在后台校正。请求期间保留旧树，不会从
       // 「有列表」退回「加载中」。只做一次，之后由展开动作与「刷新」按钮触发。
       const revalidatedRef = React.useRef(false)
       React.useEffect(() => {
@@ -790,14 +821,14 @@ window.__ModuleLoader__.load({
         }
       }, [tab, savedData])
 
-      // 切到「收藏」Tab 后静默探测每个 GitHub 收藏的仓库类型：这是轻量请求
-      // （Host 只拉 tree，必要时拉 marketplace.json），不阻塞列表渲染，结果只
-      // 影响标题行的徽标。已经探测过（含探测中、探测失败）的卡片不重复发请求，
-      // 想强制重探走顶部「刷新」。
+      // 切到「收藏」Tab 后静默探测每个可列出 skills 的收藏的仓库类型：这是
+      // 轻量请求（Host 只拉 tree，必要时拉 marketplace.json），不阻塞列表渲染，
+      // 结果只影响标题行的徽标。已经探测过（含探测中、探测失败）的卡片不重复
+      // 发请求，想强制重探走顶部「刷新」。
       React.useEffect(() => {
         if (tab !== 'repos' || savedData === null) return
         for (const repo of repos) {
-          if (!isGitHubRepo(repo.source)) continue
+          if (!isListableSource(repo.source)) continue
           if (probes[repo.id] !== undefined) continue
           probeRepo(repo)
         }
@@ -812,12 +843,12 @@ window.__ModuleLoader__.load({
         setReloadKey((key) => key + 1)
         for (const repo of repos) {
           if (expandedRepos[repo.id] === true) loadTree(repo, { refresh: true })
-          if (isGitHubRepo(repo.source)) probeRepo(repo, { refresh: true })
+          if (isListableSource(repo.source)) probeRepo(repo, { refresh: true })
         }
       }
 
       /**
-       * 取一个仓库的 skills 树。Host 侧有 TTL 缓存并负责拉 GitHub，这里只在
+       * 取一个仓库的 skills 树。Host 侧有 TTL 缓存并负责拉取仓库内容，这里只在
        * 展开与页面刷新时发请求；失败时保留旧数据，只更新错误状态。
        *
        * @param {{ id: string, source: string }} repo 一条收藏
@@ -844,7 +875,7 @@ window.__ModuleLoader__.load({
       /**
        * 探测一个仓库的类型（npx skills / Claude Code 市场 / 不可用）。Host 只拉
        * tree（必要时再拉 marketplace.json），比展开轻得多，所以收藏页打开后可以
-       * 对所有 GitHub 收藏各发一次。
+       * 对所有可列出的收藏各发一次。
        *
        * 「不可用」是正常结论而不是错误：Host 返回 `repo-unavailable` 时转成
        * `{ kind: 'unavailable' }` 的 ready 数据，让卡片显示「不可用」徽标，不弹
@@ -1258,7 +1289,7 @@ window.__ModuleLoader__.load({
       function renderSaved() {
         const rows = repos.map((repo) => {
           const link = repoUrl(repo.source)
-          const listable = isGitHubRepo(repo.source)
+          const listable = isListableSource(repo.source)
           const installedAlready = installedRepos.has(repo.id)
           const expanded = expandedRepos[repo.id] === true
           // 徽标优先用展开后拿到的完整结果（也带 kind），其次用轻量探测结果；
@@ -1277,7 +1308,8 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'buka-skills-titleCluster' },
-                  // 只有 GitHub 仓库能列出 skills，其余来源不显示折叠箭头。
+                  // 只有可列出的来源（GitHub / git 远端 / 本地路径）显示折叠
+                  // 箭头；包名与网页链接只当书签，没有可展开的树。
                   listable
                     ? h(
                         'button',
