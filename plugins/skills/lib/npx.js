@@ -1,5 +1,5 @@
 /**
- * 定位并执行 `npx skills`。
+ * 定位并执行 `npx skills`（安装与卸载共用）。
  *
  * 桌面版 DSH 从 Finder / Dock 启动时，进程的 PATH 可能与登录 shell 不同（没有
  * mise / nvm / Homebrew 的 shim），所以这里不直接 `spawn('npx')`，而是：
@@ -25,11 +25,14 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 
-/** `npx skills remove` 的最长等待时间，避免网络问题把页面卡死。 */
+/** `npx skills` 的长等待上限，避免网络问题把页面卡死。 */
 export const NPX_TIMEOUT_MS = 120_000
 
 /** 页面展示与失败信息里保留的命令输出上限。 */
 export const MAX_OUTPUT_BYTES = 4000
+
+/** 失败信息里指代这条命令的默认名称；安装与卸载都用它。 */
+export const DEFAULT_NPX_LABEL = 'npx skills'
 
 /** Windows 上 npm 的启动器是 `npx.cmd`，其余平台是 `npx`。 */
 const NPX_EXECUTABLE = process.platform === 'win32' ? 'npx.cmd' : 'npx'
@@ -39,19 +42,20 @@ const NPX_EXECUTABLE = process.platform === 'win32' ? 'npx.cmd' : 'npx'
  * 传入子命令参数，返回 `{ ok, message?, output? }`。
  *
  * @param {{ agentsHome: string }} homes 全局 agent 目录；作为子进程 cwd
- * @param {{ env?: NodeJS.ProcessEnv, timeoutMs?: number }} [options] 测试可注入的环境与超时
+ * @param {{ env?: NodeJS.ProcessEnv, timeoutMs?: number, label?: string }} [options] 测试可注入的环境、超时与失败信息里的命令名
  * @returns {(args: string[]) => Promise<{ ok: boolean, message?: string, output?: string }>}
  */
 export function createNpxRunner(homes, options = {}) {
   const baseEnv = options.env ?? process.env
   const timeoutMs = options.timeoutMs ?? NPX_TIMEOUT_MS
+  const label = options.label ?? DEFAULT_NPX_LABEL
 
   return async function runNpx(args) {
     const resolved = await resolveNpxCommand(baseEnv)
     if (resolved === null) {
       return {
         ok: false,
-        message: `没有找到 npx。请先安装 Node.js（含 npm），或手动删除 ${path.join(homes.agentsHome, 'skills')} 下的目录。`,
+        message: `没有找到 npx。请先安装 Node.js（含 npm），或手动管理 ${path.join(homes.agentsHome, 'skills')} 下的 skill。`,
       }
     }
 
@@ -93,7 +97,7 @@ export function createNpxRunner(homes, options = {}) {
         const text = cleanOutput(output)
         settle({
           ok: false,
-          message: `npx skills remove 超时（${Math.round(timeoutMs / 1000)}s）`,
+          message: `${label} 超时（${Math.round(timeoutMs / 1000)}s）`,
           output: text,
         })
         killTree(child)
@@ -110,8 +114,8 @@ export function createNpxRunner(homes, options = {}) {
         }
         const reason =
           signal === null || signal === undefined
-            ? `npx skills remove 退出码 ${String(code)}`
-            : `npx skills remove 被信号 ${signal} 终止`
+            ? `${label} 退出码 ${String(code)}`
+            : `${label} 被信号 ${signal} 终止`
         settle({ ok: false, message: reason, output: text })
       })
     })

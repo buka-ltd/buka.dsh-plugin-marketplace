@@ -18,7 +18,9 @@
  *   （outline + 危险色）。来源既可以是 npx skills 仓库，也可以是 Claude Code
  *   marketplace 仓库：打开收藏页后会对每个可列出 skills 的收藏静默探测仓库
  *   类型（`probe=1`，只读 tree，不阻塞列表），标题行标出「npx skills」
- *   「Claude Code 市场」或「不可用」。
+ *   「Claude Code 市场」或「不可用」。展开后的每个 skill 右侧有「安装」按钮：
+ *   点一下就把这一个 skill 装到全局（Host 交给 `npx skills add -g`），已经装过
+ *   的显示「已安装」标记而不是按钮。
  *
  * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
  * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
@@ -30,10 +32,10 @@
  * 结构：标题行 + 工具栏 + Tab 行，内容区 960px 宽、卡片列表、48px 图标块。
  * 这样两个页面共享同一套尺寸、圆角、颜色 token 与控件手感。
  *
- * 页面只做展示与触发：列表、卸载、收藏的读写都走 Host 一半注册的包内路由
- * （`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
- * 这样「怎么卸载」「收藏存在哪」都只有一份实现。收藏页的展开状态与上次拿到
- * 的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
+ * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
+ * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
+ * 这样「怎么卸载」「怎么安装」「收藏存在哪」都只有一份实现。收藏页的展开状态与
+ * 上次拿到的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
  * 关闭 DSH 再打开时先按上次的样子渲染，再找 Host 校正，不用干等网络。
  *
  * 客户端模块格式固定为 `window.__ModuleLoader__.load({ id, factory })`，
@@ -54,6 +56,7 @@ window.__ModuleLoader__.load({
       StateDot,
       IconBranchOutlineRegular,
       IconChevronRightOutlineRegular,
+      IconDownloadOutlineRegular,
       IconPlusOutlineRegular,
       IconRefreshOutlineRegular,
       IconSkillOutlineRegular,
@@ -71,6 +74,7 @@ window.__ModuleLoader__.load({
     /** 与 Host 一半的路由常量保持一致。 */
     const LIST_ROUTE = '/buka-skills/list'
     const UNINSTALL_ROUTE = '/buka-skills/uninstall'
+    const INSTALL_ROUTE = '/buka-skills/install'
     const REPOS_ROUTE = '/buka-skills/repos'
     const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
     const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
@@ -148,6 +152,11 @@ window.__ModuleLoader__.load({
       addFailed: 'Could not save:',
       removeFailed: 'Could not remove:',
       installedBadge: 'installed',
+      install: 'Install',
+      installing: 'Installing…',
+      installedToast: 'Installed:',
+      installFailed: 'Install failed:',
+      installMissing: 'This skill is no longer in the repository list. Refresh the repository and try again.',
       expandRepo: 'Show skills',
       collapseRepo: 'Hide skills',
       treeLoading: 'Loading skills…',
@@ -210,6 +219,11 @@ window.__ModuleLoader__.load({
       addFailed: '收藏失败：',
       removeFailed: '删除失败：',
       installedBadge: '已安装',
+      install: '安装',
+      installing: '安装中…',
+      installedToast: '已安装：',
+      installFailed: '安装失败：',
+      installMissing: '仓库列表里已经找不到这个 skill，刷新仓库后再试。',
       expandRepo: '展开 skills',
       collapseRepo: '收起 skills',
       treeLoading: '正在获取 skills…',
@@ -280,10 +294,12 @@ window.__ModuleLoader__.load({
 .buka-skills-treeName{min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
 .buka-skills-treeCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px;line-height:18px}
 .buka-skills-treeGroup{margin:0;padding:0 0 0 16px;list-style:none;flex-direction:column;gap:1px;display:flex}
-.buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:column;padding:2px 6px;display:flex}
+.buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;align-items:center;gap:8px;padding:2px 6px;display:flex}
 @media (hover:hover){.buka-skills-treeSkill:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.buka-skills-treeSkillMain{min-width:0;flex:1;flex-direction:column;display:flex}
 .buka-skills-treeSkillName{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-size:13px;line-height:20px}
 .buka-skills-treeSkillDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:1;-webkit-box-orient:vertical;font-size:12px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere}
+.buka-skills-treeSkillAction{flex:none;display:flex;align-items:center}
 .buka-skills-treeArea{flex-direction:column;gap:2px;display:flex}
 .buka-skills-treeStatus{padding:2px 6px 2px 34px}
 .buka-skills-treeFailure{gap:8px;padding:2px 6px 2px 34px;display:flex;flex-wrap:wrap;align-items:center}
@@ -576,6 +592,35 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * skill 名对应的安装目录键，规则与 `npx skills` 的 sanitizeName() / Host 的
+     * `skillDirName()` 一致：小写，非 `[a-z0-9._]` 的连续字符换成连字符，去掉
+     * 首尾的 `.` 与 `-`，最多 255 字符。用来判断仓库树里的 skill 是否已安装。
+     *
+     * @param {unknown} name skill 名
+     * @returns {string}
+     */
+    function skillKeyOf(name) {
+      if (typeof name !== 'string') return ''
+      return name
+        .toLowerCase()
+        .replace(/[^a-z0-9._]+/gu, '-')
+        .replace(/^[.-]+|[.-]+$/gu, '')
+        .slice(0, 255)
+    }
+
+    /**
+     * 一条树里的 skill 与它所在收藏的组合键：安装中只让这一行显示进度，
+     * 其它行继续可读（但按钮统一禁用，Host 侧安装/卸载本来也是串行的）。
+     *
+     * @param {{ id: string }} repo 一条收藏
+     * @param {object} node Host 返回的 skill 节点
+     * @returns {string}
+     */
+    function installKeyOf(repo, node) {
+      return `${repo.id}\n${typeof node?.path === 'string' ? node.path : ''}`
+    }
+
+    /**
      * tree 加载失败时的展示文本；已知错误码说清楚原因，其余带 Host 诊断。
      * `git-unavailable`（本机没有 git）有专门文案；`git-failed` 走默认分支，
      * 带上 Host 给的具体原因（clone/fetch 的 stderr）。
@@ -730,6 +775,9 @@ window.__ModuleLoader__.load({
       const [dialogOpen, setDialogOpen] = React.useState(false)
       const [addError, setAddError] = React.useState(null)
       const [removing, setRemoving] = React.useState(null)
+      // 正在安装的树 skill（`installKeyOf()` 的组合键）；Host 侧安装与卸载串行，
+      // 这里也同一时刻只放一个请求，避免用户连点排出看不到的队列。
+      const [installing, setInstalling] = React.useState(null)
       // 收藏仓库的树：哪些卡片展开、各仓库拿到（或正在拿）的树、哪些目录收起来。
       // 按仓库 id 存，删除收藏后由下面的 prune 清掉，避免留下孤儿状态。
       // 初始值来自 localStorage 里的上一份缓存：重开 DSH 后先按上次的样子渲染，
@@ -783,6 +831,20 @@ window.__ModuleLoader__.load({
         for (const skill of skills) {
           for (const value of [skill.npxSource, skill.npxSourceUrl]) {
             const key = normalizeRepo(value).key
+            if (key !== '') keys.add(key)
+          }
+        }
+        return keys
+      }, [installedData])
+
+      // 已安装 skill 的目录键集合：仓库树里的每个 skill 据此显示「已安装」标记
+      // 而不是「安装」按钮。用目录名（id）与展示名两个来源，名字与目录名不一致
+      // 的历史安装也能命中。
+      const installedSkillKeys = React.useMemo(() => {
+        const keys = new Set()
+        for (const skill of skills) {
+          for (const value of [skill.id, skill.name]) {
+            const key = skillKeyOf(value)
             if (key !== '') keys.add(key)
           }
         }
@@ -974,6 +1036,48 @@ window.__ModuleLoader__.load({
           flash('error', `${t('failed')} ${messageOf(failure)}`)
         } finally {
           setBusy(null)
+        }
+      }
+
+      /**
+       * 只重读「已安装」列表：安装成功后调用，让新 skill 立刻出现在第一页，
+       * 收藏页的「已安装」标记也随之更新。不刷新仓库树与探测，省掉一轮网络请求。
+       */
+      async function refreshInstalled() {
+        try {
+          const body = await requestJson(LIST_ROUTE)
+          setInstalled({ data: body, error: null, loading: false })
+        } catch (failure) {
+          setInstalled((prev) => ({ ...prev, error: messageOf(failure), loading: false }))
+        }
+      }
+
+      /**
+       * 安装树里的一个 skill：Host 校验来源是收藏、skill 在仓库列表里，然后交给
+       * `npx skills add` 装到全局 `~/.agents/skills`。成功后只刷新已安装列表，
+       * 树保持展开，用户能接着装下一个。
+       *
+       * @param {{ id: string, source: string }} repo 一条收藏
+       * @param {{ name: string, path: string }} node Host 返回的 skill 节点
+       */
+      async function installSkill(repo, node) {
+        if (installing !== null) return
+        setInstalling(installKeyOf(repo, node))
+        try {
+          const body = await requestJson(INSTALL_ROUTE, {
+            method: 'POST',
+            body: JSON.stringify({ source: repo.source, path: node.path }),
+          })
+          flash('success', `${t('installedToast')} ${body.name ?? node.name}`)
+          await refreshInstalled()
+        } catch (failure) {
+          const text =
+            failure?.code === 'skill-not-found'
+              ? t('installMissing')
+              : `${t('installFailed')} ${messageOf(failure)}`
+          flash('error', text)
+        } finally {
+          setInstalling(null)
         }
       }
 
@@ -1247,9 +1351,13 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述）。
+       * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 安装入口）。
        *
-       * @param {{ id: string }} repo 一条收藏
+       * skill 叶子右侧根据状态显示「安装」按钮 / 「安装中…」/「已安装」：
+       * 已安装的判断只看全局安装列表（名字按 npx 的 sanitize 规则归一），
+       * 不依赖仓库来源，所以同一个 skill 从别的仓库装过也不给重复安装按钮。
+       *
+       * @param {{ id: string, source: string }} repo 一条收藏
        * @param {object} node Host 返回的树节点
        * @returns {object} React 元素
        */
@@ -1278,14 +1386,45 @@ window.__ModuleLoader__.load({
           )
         }
         const description = typeof node.description === 'string' ? node.description : ''
+        const installed = installedSkillKeys.has(skillKeyOf(node.name))
+        const busy = installing === installKeyOf(repo, node)
         return h(
           'li',
           { className: 'buka-skills-treeItem', key: node.path },
           h(
             'div',
             { className: 'buka-skills-treeSkill', title: description === '' ? node.path : description },
-            h('span', { className: 'buka-skills-treeSkillName' }, node.name),
-            description === '' ? null : h('span', { className: 'buka-skills-treeSkillDesc' }, description),
+            h(
+              'div',
+              { className: 'buka-skills-treeSkillMain' },
+              h('span', { className: 'buka-skills-treeSkillName' }, node.name),
+              description === '' ? null : h('span', { className: 'buka-skills-treeSkillDesc' }, description),
+            ),
+            h(
+              'div',
+              { className: 'buka-skills-treeSkillAction' },
+              installed
+                ? h(Tag, { tone: 'success' }, t('installedBadge'))
+                : busy
+                  ? h(
+                      'span',
+                      { className: 'buka-skills-statusWithDot', role: 'status' },
+                      h(StateDot, { state: 'ongoing' }),
+                      t('installing'),
+                    )
+                  : h(
+                      Button,
+                      {
+                        variant: 'outline',
+                        size: 'sm',
+                        icon: h(IconDownloadOutlineRegular, { size: 13 }),
+                        'aria-label': `${t('install')} ${node.name}`,
+                        disabled: installing !== null,
+                        onClick: () => installSkill(repo, node),
+                      },
+                      t('install'),
+                    ),
+            ),
           ),
         )
       }

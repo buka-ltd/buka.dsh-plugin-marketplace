@@ -4,7 +4,8 @@
  * 提供三件东西：
  *
  * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
- *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个；
+ *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
+ *   `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局；
  *   `GET /buka-skills/repos` 列出用户收藏的仓库，
  *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
  *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
@@ -15,9 +16,10 @@
  *   仓库、任意 git 远端（Host 用 `git clone --depth 1` 拉到缓存目录再扫描）或
  *   本地绝对路径（直接扫描目录）。列表数据来自同一份磁盘扫描
  *   （`lib/skill-store.js`），收藏来自 `lib/repo-store.js` 的 JSON 文件，
- *   仓库 skills 由 `lib/repo-skills.js` 按 TTL 缓存仓库树；
+ *   仓库 skills 由 `lib/repo-skills.js` 按 TTL 缓存仓库树，安装由
+ *   `lib/skill-install.js` 交给 `npx skills add`（与卸载共用串行队列）；
  * - 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
- *   是不是 npx skills 装的」。卸载是破坏性操作，只留给页面上的用户按钮，
+ *   是不是 npx skills 装的」。安装与卸载都是写操作，只留给页面上的用户按钮，
  *   不开放给模型。
  * - 一个 Host Service `ctx.bukaSkills`（`lib/service.js`）：把收藏的仓库、
  *   仓库里的 skill 列表与 marketplace 插件列表开放给其他插件。页面与工具
@@ -34,6 +36,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createNpxRunner } from './npx.js'
 import { addSavedRepo, listSavedRepos, removeSavedRepo } from './repo-store.js'
 import { SERVICE_NAME, SkillsCatalogService } from './service.js'
+import { installSavedSkill } from './skill-install.js'
 import { collectGlobalSkills, resolveHomes, uninstallGlobalSkill } from './skill-store.js'
 
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
@@ -47,6 +50,9 @@ const LIST_ROUTE = '/buka-skills/list'
 
 /** 页面卸载 skill 用的路由。 */
 const UNINSTALL_ROUTE = '/buka-skills/uninstall'
+
+/** 页面把收藏仓库里的一个 skill 安装到全局用的路由。 */
+const INSTALL_ROUTE = '/buka-skills/install'
 
 /** 收藏仓库的列表 / 添加路由。 */
 const REPOS_ROUTE = '/buka-skills/repos'
@@ -91,12 +97,12 @@ export function apply(ctx) {
   // 仓库级请求的并发合并与 TTL 缓存都在服务里：页面路由与外部插件调服务时
   // 共用同一份在途请求，同一仓库不会重复打 GitHub。
 
-  // npx skills 会整份重写共享的 lockfile，两个卸载并发执行可能互相覆盖条目；
-  // 这里把卸载请求排成一条队列，页面上的并发点击也安全。
-  let uninstallQueue = Promise.resolve()
-  function serializeUninstall(work) {
-    const run = uninstallQueue.then(work, work)
-    uninstallQueue = run.then(
+  // npx skills 会整份重写共享的 lockfile，安装与卸载并发执行可能互相覆盖条目；
+  // 这里把两类请求排成一条队列，页面上的并发点击也安全。
+  let npxQueue = Promise.resolve()
+  function serializeNpxTool(work) {
+    const run = npxQueue.then(work, work)
+    npxQueue = run.then(
       () => undefined,
       () => undefined,
     )
@@ -156,7 +162,7 @@ export function apply(ctx) {
             const body = await readJsonBody(req, res)
             if (body === undefined) return
             try {
-              const result = await serializeUninstall(() =>
+              const result = await serializeNpxTool(() =>
                 uninstallGlobalSkill({
                   homes,
                   scope: body?.scope,
@@ -174,6 +180,46 @@ export function apply(ctx) {
           },
         }),
       `buka-skills: POST ${UNINSTALL_ROUTE}`,
+    )
+
+    // ---- 从收藏列表一键安装 ------------------------------------------------
+    // 只接受收藏过的来源；skill 是否存在、叫什么以 Host 这次读到的仓库列表
+    // 为准（浏览器只传仓库路径）。安装与卸载共用串行队列，避免两者同时改写
+    // npx skills 的 lockfile。
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: INSTALL_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'POST')
+              return
+            }
+            const body = await readJsonBody(req, res)
+            if (body === undefined) return
+            try {
+              const result = await serializeNpxTool(() =>
+                installSavedSkill({
+                  homes,
+                  catalog,
+                  source: body?.source,
+                  skillPath: body?.path,
+                  runNpx,
+                }),
+              )
+              if (result.ok) {
+                webCtx.logger?.info?.('buka-skills: 已安装 %s（%s）', String(result.name), String(result.repo))
+              }
+              sendJson(res, result.ok ? 200 : installStatusFor(result.code), result)
+            } catch (error) {
+              sendJson(res, 500, { ok: false, message: describeError(error) })
+            }
+          },
+        }),
+      `buka-skills: POST ${INSTALL_ROUTE}`,
     )
 
     // ---- 收藏的仓库（npx skills 与 Claude Code marketplace）----------------
@@ -371,6 +417,36 @@ function statusFor(code) {
   if (code === 'invalid-scope' || code === 'invalid-id') return 400
   if (code === 'lock-unreadable') return 409
   return 500
+}
+
+/**
+ * 安装操作的失败码 → HTTP 状态码。
+ *
+ * `not-saved` / `invalid-source` / `invalid-skill-name` / `unsupported-source` 是
+ * 请求本身的问题（400）；`skill-not-found` 与仓库不存在是 404；
+ * `already-installed` / `store-unreadable` 是当前状态不允许这次写入（409）；
+ * 仓库不可用 422；限流 429；`unsupported-home` 与 `git-unavailable` 是本机环境
+ * 问题（500）；其余（`npx-failed`、`fetch-failed`、`git-failed` 等上游失败）
+ * 按 502 处理。
+ *
+ * @param {string | undefined} code skill-install 返回的错误码
+ * @returns {number}
+ */
+function installStatusFor(code) {
+  if (
+    code === 'invalid-source' ||
+    code === 'invalid-skill-name' ||
+    code === 'not-saved' ||
+    code === 'unsupported-source'
+  ) {
+    return 400
+  }
+  if (code === 'skill-not-found' || code === 'repo-not-found' || code === 'not-found') return 404
+  if (code === 'already-installed' || code === 'store-unreadable') return 409
+  if (code === 'repo-unavailable') return 422
+  if (code === 'rate-limited') return 429
+  if (code === 'unsupported-home' || code === 'git-unavailable') return 500
+  return 502
 }
 
 /**
