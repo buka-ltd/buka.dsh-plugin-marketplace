@@ -4,8 +4,8 @@
     "zh-cn": "Buka DSH 插件市场"
   },
   "description": {
-    "en": "Plugins for DeepSeek Harness: one bundle per capability, installable from the Discover tab.",
-    "zh-cn": "DeepSeek Harness 插件：每个 bundle 一项能力，可在 Plugins 的 Discover 页直接安装。"
+    "en": "Skill, robot and workflow plugins for DeepSeek Harness: Skills package capability and knowledge, Robots turn that into individuals with a defined role, and Workflows drive several robots through a pre-defined flow with explicit human-intervention checkpoints. Installable from Plugins → Discover.",
+    "zh-cn": "面向 DeepSeek Harness 的能力 · 机器人 · 工作流三层插件：Skills 把能力与知识打包成技能，Robots 把技能装进有明确职责的个体，Workflows 用事先定好、运行中不临时改动的流程驱动多个机器人完成复杂工程，并在关键节点停下来等你介入。可在 Plugins 的 Discover 页安装。"
   },
   "publicUrl": "https://buka-ltd.github.io/buka.dsh-plugin-marketplace/index.json",
   "packageScope": "@buka",
