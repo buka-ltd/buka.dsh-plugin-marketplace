@@ -120,19 +120,13 @@ test('local：扫描 npx skills 布局，probeRepoKind 与 fetchRepoSkills 都�
   assert.equal(result.skills, 2)
   assert.equal(result.cached, false)
   assert.equal(result.truncated, false)
+  // 与 `npx skills add --list` 一致：catalog 布局里的 bucket 目录不进树。
   assert.deepEqual(result.root, [
     {
-      type: 'dir',
-      name: 'core',
-      path: 'core',
-      children: [
-        {
-          type: 'skill',
-          name: 'batch',
-          path: 'skills/core/batch/SKILL.md',
-          description: 'Batch it',
-        },
-      ],
+      type: 'skill',
+      name: 'batch',
+      path: 'skills/core/batch/SKILL.md',
+      description: 'Batch it',
     },
     {
       type: 'skill',

@@ -240,10 +240,25 @@ export async function readNpxLock(file) {
  * @returns {{ name: string, description: string }}
  */
 export function parseFrontmatter(text) {
-  if (typeof text !== 'string') return { name: '', description: '' }
+  const front = frontmatterLines(text)
+  if (front === null) return { name: '', description: '' }
+  return {
+    name: parseFrontmatterField(front, 'name'),
+    description: parseFrontmatterField(front, 'description'),
+  }
+}
+
+/**
+ * 取 frontmatter 内部的行（不含两侧 `---`）；不是合法 frontmatter 时返回 null。
+ *
+ * @param {unknown} text SKILL.md 全文
+ * @returns {string[] | null}
+ */
+function frontmatterLines(text) {
+  if (typeof text !== 'string') return null
   const normalized = text.replace(/^\uFEFF/u, '').replace(/\r\n/gu, '\n')
   const lines = normalized.split('\n')
-  if (lines[0]?.trim() !== '---') return { name: '', description: '' }
+  if (lines[0]?.trim() !== '---') return null
   let end = -1
   for (let index = 1; index < lines.length; index += 1) {
     if (lines[index].trim() === '---') {
@@ -251,12 +266,43 @@ export function parseFrontmatter(text) {
       break
     }
   }
-  if (end < 0) return { name: '', description: '' }
-  const front = lines.slice(1, end)
-  return {
-    name: parseFrontmatterField(front, 'name'),
-    description: parseFrontmatterField(front, 'description'),
+  if (end < 0) return null
+  return lines.slice(1, end)
+}
+
+/**
+ * `metadata.internal: true` 的 skill 是内部 skill：`npx skills` 默认不列出它、
+ * 也不安装它（除非用户显式按名字请求）。这里跟随 CLI 的判定，只认 frontmatter
+ * 里 `metadata` 映射下的布尔 true（带引号的 `"true"` 是字符串，不算）。
+ *
+ * @param {unknown} text SKILL.md 全文
+ * @returns {boolean}
+ */
+export function parseFrontmatterInternal(text) {
+  const front = frontmatterLines(text)
+  if (front === null) return false
+  for (let index = 0; index < front.length; index += 1) {
+    const match = /^metadata\s*:\s*(.*)$/u.exec(front[index])
+    if (match === null) continue
+    const inline = match[1].trim()
+    // 行内 flow 映射：`metadata: { internal: true }`。
+    if (inline.startsWith('{')) {
+      return /(?:^|[,{])\s*internal\s*:\s*(?:true|True|TRUE)\s*(?:[,}]|$)/u.test(inline)
+    }
+    // 块映射：只看 metadata 的直接子键（同一缩进）。
+    let childIndent = -1
+    for (let next = index + 1; next < front.length; next += 1) {
+      const row = front[next]
+      if (row.trim() === '') continue
+      const indent = /^\s*/u.exec(row)[0].length
+      if (indent === 0) break
+      if (childIndent < 0) childIndent = indent
+      if (indent !== childIndent) continue
+      if (/^\s+internal\s*:\s*(?:true|True|TRUE)\s*(?:#.*)?$/u.test(row)) return true
+    }
+    return false
   }
+  return false
 }
 
 /**

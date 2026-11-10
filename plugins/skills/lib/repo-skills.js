@@ -14,9 +14,13 @@
  * 三种来源最终都收敛成 `{ tree, readFile }` 的读取抽象（`openRepo()`），后面的
  * 发现规则、分类与建树只认这个抽象，不再关心来源本身。
  *
- * 发现规则与 `npx skills` CLI 的 `findSkillMdPaths()` 保持一致（优先级前缀、
- * container 层级、跳过的目录），只是额外记住命中哪个优先级前缀，用它把展示
- * 路径上的容器目录（如 `skills/`）剥掉。展示路径用于建 tree，skill 节点的
+ * 发现规则与 `npx skills` CLI 的 `findSkillMdPaths()` 保持一致（文件名必须是
+ * `SKILL.md`、优先级前缀、container 层级、跳过的目录），**展示方式也照 CLI 的
+ * 清单来**：npx 仓库不按仓库的物理目录分组。像 `skills/<bucket>/<skill>/
+ * SKILL.md` 这种 catalog 布局，bucket 只对发现有用，CLI 列出来的是扁平的 skill
+ * 列表；这里同样把 skill 平铺在根上，只有仓库根的 `.claude-plugin/plugin.json`
+ * 或 `.claude-plugin/marketplace.json` 里**显式声明**了某个 skill 目录属于哪个
+ * 插件时，才按插件名分组（与 CLI 的 `getPluginGroupings()` 一致）。skill 节点的
  * `path` 仍保留仓库里的完整路径，方便排查。
  *
  * 收藏的仓库有两类，判定顺序固定（用户要求）：先按 `npx skills` 的优先级前缀
@@ -26,7 +30,8 @@
  * 每个插件一个目录节点；两者都不是时，npx 的兜底规则（任意不超过 6 段的
  * SKILL.md）仍然算 npx skills 仓库；最后才标记为不可用（`repo-unavailable`）。
  * 兜底排在 marketplace 之后，是因为它太宽松：`plugins/<plugin>/skills/<name>/
- * SKILL.md` 正好 5 段，会命中；若它在前，marketplace 永远显示成 npx。
+ * SKILL.md` 正好 5 段，会命中；若它在前，marketplace 永远显示成 npx。判定本身
+ * 只看这棵树，不依赖清单文件；npx 仓库展开时才读清单做插件分组，判定不受影响。
  *
  * `probeRepoKind()` 只跑上面这套判定（只拉 tree，必要时拉 marketplace.json），
  * 给收藏卡片显示徽标用，不拉任何 SKILL.md 原文。探测写下的轻量结论用
@@ -54,7 +59,7 @@ import path from 'node:path'
 import { ensureGitClone } from './git-source.js'
 import { openLocalRepo } from './local-source.js'
 import { MAX_SOURCE_LENGTH, classifyRepoSource, repoKey } from './repo-store.js'
-import { parseFrontmatter, resolveHomes } from './skill-store.js'
+import { parseFrontmatter, parseFrontmatterInternal, resolveHomes } from './skill-store.js'
 
 /**
  * @typedef {{ type: 'dir', name: string, path: string, children: TreeNode[] }} DirNode
@@ -76,9 +81,10 @@ import { parseFrontmatter, resolveHomes } from './skill-store.js'
 
 /**
  * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v1 没有 kind / complete，v2 没有
- * marketplace 清单，v3 只认 GitHub 来源，来源种类变化后 v3 条目不再可信）。
+ * marketplace 清单，v3 只认 GitHub 来源，v4 的 npx 树按物理目录分组、与
+ * `npx skills` 的清单不一致）。
  */
-export const REPO_SKILLS_CACHE_VERSION = 4
+export const REPO_SKILLS_CACHE_VERSION = 5
 
 /** 缓存有效期：30 分钟。GitHub 的树变化不频繁，过期后按需重拉。 */
 export const REPO_SKILLS_CACHE_TTL_MS = 30 * 60 * 1000
@@ -94,6 +100,12 @@ const RAW_TIMEOUT_MS = 8_000
 
 /** Claude Code marketplace 清单在仓库里的固定路径。 */
 const MARKETPLACE_PATH = '.claude-plugin/marketplace.json'
+
+/**
+ * Claude Code 单插件清单在插件根下的固定路径；npx skills 仓库按它声明的
+ * `skills` 做展示分组，与 CLI 的 `getPluginGroupings()` 一致。
+ */
+const PLUGIN_MANIFEST_PATH = '.claude-plugin/plugin.json'
 
 /** 合法的仓库分类；与缓存条目的 `kind` 字段同值。 */
 const REPO_KINDS = new Set(['npx-skills', 'claude-code-marketplace', 'unavailable'])
@@ -662,6 +674,10 @@ function originName(origin) {
  * SKILL.md 元数据走同一个 `reader.readFile()`：本地 / git 来源因此不碰网络，
  * GitHub 来源仍是 raw 请求 + frontmatter 解析 + 6 并发。
  *
+ * npx 分支还会读仓库根的 `.claude-plugin/plugin.json` / `marketplace.json`
+ * 做展示分组（读不到或不合法就当没有分组，不影响列表）。marketplace 分支的
+ * 插件清单在分类时已经解析过，这里直接用。
+ *
  * @param {{
  *   tree: unknown[],
  *   reader: { readFile: (repoPath: string) => Promise<string | null> },
@@ -673,10 +689,11 @@ function originName(origin) {
 async function loadRepoContent({ tree, reader, classification, repoName }) {
   if (classification.kind === 'npx-skills') {
     const discovered = findSkillMdPaths(tree)
-    const metadata = await mapLimit(discovered, SKILL_MD_CONCURRENCY, (entry) =>
-      readSkillMetadata(entry, reader),
+    const metadata = await mapLimit(discovered, SKILL_MD_CONCURRENCY, (skillMd) =>
+      readSkillMetadata(skillMd, reader),
     )
-    return { root: buildTree(metadata, repoName), skills: metadata.length }
+    const groupings = await readSkillGroupings({ tree, reader })
+    return buildNpxTree(metadata, groupings, repoName)
   }
 
   const groups = collectMarketplaceSkills(tree, classification.marketplace)
@@ -946,6 +963,22 @@ function rawHeaders(token) {
 }
 
 /**
+ * 路径的 basename 是否就是 `SKILL.md`（大小写不敏感）。
+ *
+ * 不能写成 `endsWith('skill.md')`：那会把 `.changeset/foo-skill.md`、
+ * `my-skill.md` 这类普通 Markdown 也当成 skill。`npx skills` CLI 的
+ * `findSkillMdPaths()` 用的是 basename 比较。
+ *
+ * @param {unknown} value 仓库内路径
+ * @returns {boolean}
+ */
+function isSkillMdPath(value) {
+  if (typeof value !== 'string') return false
+  const name = value.slice(value.lastIndexOf('/') + 1)
+  return name.toLowerCase() === 'skill.md'
+}
+
+/**
  * 收集树里所有 SKILL.md blob 的完整路径。
  *
  * @param {unknown[]} tree GitHub 树节点数组
@@ -954,25 +987,27 @@ function rawHeaders(token) {
 function allSkillMdPaths(tree) {
   return tree
     .filter((entry) => entry !== null && typeof entry === 'object')
-    .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string')
-    .filter((entry) => entry.path.toLowerCase().endsWith('skill.md'))
+    .filter((entry) => entry.type === 'blob' && isSkillMdPath(entry.path))
     .map((entry) => entry.path)
 }
 
 /**
- * 只按优先级前缀发现 SKILL.md，返回「完整路径 → 命中的容器前缀」。
+ * 只按优先级前缀发现 SKILL.md，返回命中的完整路径集合。
  *
  * 分类时用它判断 npx 规则是不是**真的**发现了这个仓库：`findSkillMdPaths()`
  * 末尾还有一条很宽松的兜底（任意 ≤6 段的 SKILL.md），Claude Code marketplace
  * 的 `plugins/<plugin>/skills/<name>/SKILL.md` 正好会被它命中。若兜底也算
  * 「npx 仓库」，marketplace 就永远轮不到，所以先用优先级前缀判定。
  *
+ * 另外，catalog 布局（`skills/<bucket>/<skill>/SKILL.md`）命中前缀后不再把
+ * bucket 目录留到展示层：npx 的清单是扁平的，bucket 只对发现有用。
+ *
  * @param {string[]} allSkillMds
- * @returns {Map<string, string>}
+ * @returns {Set<string>}
  */
 function findPrioritySkillMdPaths(allSkillMds) {
   const lowerPaths = new Set(allSkillMds.map((one) => one.toLowerCase()))
-  const found = new Map()
+  const found = new Set()
 
   for (const prefix of PRIORITY_PREFIXES) {
     const isContainer = prefix !== ''
@@ -982,14 +1017,14 @@ function findPrioritySkillMdPaths(allSkillMds) {
 
       // 前缀下的根 SKILL.md。
       if (rest.toLowerCase() === 'skill.md') {
-        if (!found.has(skillMd)) found.set(skillMd, prefix)
+        found.add(skillMd)
         continue
       }
 
       const parts = rest.split('/')
       // `<prefix>/<skill>/SKILL.md`：容器下的直接子目录，总是接受。
       if (parts.length === 2 && parts[1].toLowerCase() === 'skill.md') {
-        if (!found.has(skillMd)) found.set(skillMd, prefix)
+        found.add(skillMd)
         continue
       }
 
@@ -1008,7 +1043,7 @@ function findPrioritySkillMdPaths(allSkillMds) {
         skillDirs.every((part) => !SKIP_DIRS.has(part)) &&
         !hasAncestorSkill
       ) {
-        if (!found.has(skillMd)) found.set(skillMd, prefix)
+        found.add(skillMd)
       }
     }
   }
@@ -1017,38 +1052,37 @@ function findPrioritySkillMdPaths(allSkillMds) {
 }
 
 /**
- * 照搬 `npx skills` CLI 的 `findSkillMdPaths()`，并记录命中的优先级前缀。
+ * 照搬 `npx skills` CLI 的 `findSkillMdPaths()`，返回可安装 skill 的
+ * `SKILL.md` 完整路径列表（顺序同 CLI：优先级前缀顺序 → 树顺序）。
  *
- * 返回的 `prefix` 是该路径最终采用的容器前缀（没有命中时为 `''`），调用方
- * 用它计算展示路径。CLI 的 `subpath` 参数这里不需要，等价于空串。
+ * 与 CLI 一样返回扁平路径：容器前缀（`skills/`、`.agents/skills/` 等）和
+ * catalog 布局里的 bucket 目录都只用于发现，不进展示路径；展示分组由
+ * `readSkillGroupings()` 按仓库清单决定。CLI 的 `subpath` 参数这里不需要，
+ * 等价于空串。
  *
  * @param {unknown[]} tree GitHub 树节点数组
- * @returns {Array<{ skillMd: string, prefix: string }>}
+ * @returns {string[]}
  */
 function findSkillMdPaths(tree) {
   const allSkillMds = allSkillMdPaths(tree)
   if (allSkillMds.length === 0) return []
 
   const found = findPrioritySkillMdPaths(allSkillMds)
-  if (found.size > 0) {
-    return [...found].map(([skillMd, prefix]) => ({ skillMd, prefix }))
-  }
+  if (found.size > 0) return [...found]
   // 没有命中任何优先级前缀时跟随 CLI 的兜底：最多 6 段路径。
-  return allSkillMds
-    .filter((skillMd) => skillMd.split('/').length <= 6)
-    .map((skillMd) => ({ skillMd, prefix: '' }))
+  return allSkillMds.filter((skillMd) => skillMd.split('/').length <= 6)
 }
 
 /**
  * 按仓库内完整路径读取并解析一个 SKILL.md；失败时 name/description 都留空。
  *
- * 这是 npx 与 marketplace 两条流程共用的底层：npx 流还要自己补展示路径，
- * marketplace 流直接用仓库完整路径。`reader` 屏蔽了来源差异（GitHub raw、
- * 本地文件或 git 克隆目录里的文件）。
+ * 这是 npx 与 marketplace 两条流程共用的底层：npx 流再根据完整路径算展示用的
+ * 名称回退，marketplace 流直接用仓库完整路径。`reader` 屏蔽了来源差异
+ * （GitHub raw、本地文件或 git 克隆目录里的文件）。
  *
  * @param {{ readFile: (repoPath: string) => Promise<string | null> }} reader
  * @param {string} skillMd 仓库内的完整 SKILL.md 路径
- * @returns {Promise<{ name: string, description: string }>}
+ * @returns {Promise<{ name: string, description: string, internal: boolean }>}
  */
 async function readSkillFile(reader, skillMd) {
   let text
@@ -1059,30 +1093,32 @@ async function readSkillFile(reader, skillMd) {
   }
 
   try {
-    return parseFrontmatter(text ?? '')
+    const meta = parseFrontmatter(text ?? '')
+    return {
+      name: typeof meta.name === 'string' ? meta.name : '',
+      description: typeof meta.description === 'string' ? meta.description : '',
+      internal: parseFrontmatterInternal(text ?? ''),
+    }
   } catch {
     // 解析器只处理字符串；这里兜底，避免一个坏文件让整棵树失败。
-    return { name: '', description: '' }
+    return { name: '', description: '', internal: false }
   }
 }
 
 /**
  * 读取一个 SKILL.md 并解析 name/description；失败时两个字段都留空。
  *
- * npx 流的位置：`displayPath` 是剥掉容器前缀后的展示路径，`fullPath` 仍是
- * 仓库里的完整路径。
- *
- * @param {{ skillMd: string, prefix: string }} entry 发现的候选路径
+ * @param {string} skillMd 仓库内的完整 SKILL.md 路径
  * @param {{ readFile: (repoPath: string) => Promise<string | null> }} reader
- * @returns {Promise<{ displayPath: string, fullPath: string, name: string, description: string }>}
+ * @returns {Promise<{ fullPath: string, name: string, description: string, internal: boolean }>}
  */
-async function readSkillMetadata(entry, reader) {
-  const meta = await readSkillFile(reader, entry.skillMd)
+async function readSkillMetadata(skillMd, reader) {
+  const meta = await readSkillFile(reader, skillMd)
   return {
-    displayPath: entry.skillMd.slice(entry.prefix.length),
-    fullPath: entry.skillMd,
+    fullPath: skillMd,
     name: typeof meta.name === 'string' ? meta.name.trim() : '',
     description: typeof meta.description === 'string' ? meta.description.trim() : '',
+    internal: meta.internal === true,
   }
 }
 
@@ -1113,45 +1149,245 @@ async function mapLimit(items, limit, worker) {
 }
 
 /**
- * 把剥过前缀的展示路径拼成目录树。
+ * 读仓库根的插件清单，返回「skill 目录 → 插件名」，用于 npx 仓库的展示分组。
  *
- * - 目录节点按展示路径建 `path`（如 `core`），同名目录自动合并；
- * - skill 节点的 `path` 用仓库里的完整路径（如 `skills/core/x/SKILL.md`）；
- * - 名称缺失时用所在目录名兜底，根目录的 `SKILL.md` 用仓库名。
+ * 与 `npx skills` CLI 的 `getPluginGroupings()` 一致：
  *
- * @param {Array<{ displayPath: string, fullPath: string, name: string, description: string }>} entries
- * @param {string} repoName
- * @returns {TreeNode[]}
+ * - 只读仓库根的 `.claude-plugin/marketplace.json` 与 `.claude-plugin/plugin.json`；
+ * - 只认同仓库内的本地插件：`source` 必须缺省或以 `./` 开头，远程/对象 source 跳过；
+ * - 只认清单里**显式声明**的 `skills` 目录（每项以 `./` 开头），其余 skill 不进组；
+ * - 清单缺失、JSON 不合法或形状不对都不报错，当作没有分组 —— 分组只是展示优化，
+ *   不能让整棵树失败。
+ *
+ * @param {{
+ *   tree: unknown[],
+ *   reader: { readFile: (repoPath: string) => Promise<string | null> },
+ * }} options
+ * @returns {Promise<Map<string, string>>} key 是仓库内 skill 目录（'' 表示仓库根），value 是插件名
  */
-function buildTree(entries, repoName) {
-  const nodes = []
-  const dirs = new Map()
+async function readSkillGroupings({ tree, reader }) {
+  const paths = new Set(
+    tree
+      .filter((entry) => entry !== null && typeof entry === 'object')
+      .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string')
+      .map((entry) => entry.path),
+  )
+  const groupings = new Map()
+
+  if (paths.has(MARKETPLACE_PATH)) {
+    const manifest = await readJsonObject(reader, MARKETPLACE_PATH)
+    if (manifest !== null) applyMarketplaceGroupings(manifest, groupings)
+  }
+  if (paths.has(PLUGIN_MANIFEST_PATH)) {
+    const manifest = await readJsonObject(reader, PLUGIN_MANIFEST_PATH)
+    if (manifest !== null) applyPluginGroupings(manifest, groupings)
+  }
+  return groupings
+}
+
+/**
+ * 读一个仓库内 JSON 文件；读不到、不是 JSON 或顶层不是对象时返回 null。
+ *
+ * @param {{ readFile: (repoPath: string) => Promise<string | null> }} reader
+ * @param {string} repoPath
+ * @returns {Promise<Record<string, unknown> | null>}
+ */
+async function readJsonObject(reader, repoPath) {
+  let text
+  try {
+    text = await reader.readFile(repoPath)
+  } catch {
+    return null
+  }
+  if (typeof text !== 'string') return null
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return null
+  }
+  return data !== null && typeof data === 'object' && !Array.isArray(data) ? data : null
+}
+
+/**
+ * marketplace 清单里的插件分组：每个插件的 `skills` 数组显式列出的目录。
+ *
+ * @param {Record<string, unknown>} manifest
+ * @param {Map<string, string>} out
+ * @returns {void}
+ */
+function applyMarketplaceGroupings(manifest, out) {
+  const pluginRoot = manifestDir(manifest.metadata?.pluginRoot)
+  // pluginRoot 不合法时 CLI 整份清单都不用于分组。
+  if (pluginRoot === null) return
+  const plugins = Array.isArray(manifest.plugins) ? manifest.plugins : []
+
+  for (const entry of plugins) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const name = normalizeGroupName(entry.name)
+    if (name === null) continue
+    // 只处理仓库内的本地插件；对象形式的 github / url / npm source 不在本仓库里。
+    const base = manifestDir(entry.source)
+    if (base === null) continue
+    for (const dir of declaredSkillDirs(entry.skills, joinRepoPath(pluginRoot, base))) {
+      out.set(dir, name)
+    }
+  }
+}
+
+/**
+ * 插件根 `.claude-plugin/plugin.json` 的分组：清单 name 就是组名，`skills`
+ * 显式列出的目录相对插件根（仓库根）。
+ *
+ * @param {Record<string, unknown>} manifest
+ * @param {Map<string, string>} out
+ * @returns {void}
+ */
+function applyPluginGroupings(manifest, out) {
+  const name = normalizeGroupName(manifest.name)
+  if (name === null) return
+  for (const dir of declaredSkillDirs(manifest.skills, '')) out.set(dir, name)
+}
+
+/**
+ * 分组用的插件名：CLI 直接用清单里的 `name`，这里只 trim、限长并拒绝控制字符，
+ * 不套 Claude Code 插件的命名规则（清单里更宽松的名字也照常分组）。
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeGroupName(value) {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (text === '' || text.length > MAX_PLUGIN_ROOT_LENGTH || CONTROL_PATTERN.test(text)) return null
+  return text
+}
+
+/**
+ * 解析清单里的一个本地目录：缺省表示插件根，字符串必须以 `./` 开头。
+ *
+ * 与 CLI 一致：undefined → 空串（插件根），合法 `./...` → 规范化后的相对路径，
+ * 其它（`.`、`../x`、远程 source、非字符串）→ null（跳过这个 entry）。
+ *
+ * @param {unknown} value
+ * @returns {string | null} 规范化相对路径（'' 表示根），或 null 表示跳过
+ */
+function manifestDir(value) {
+  if (value === undefined) return ''
+  if (typeof value !== 'string' || !value.startsWith('./')) return null
+  return normalizeManifestPath(value.slice(2))
+}
+
+/**
+ * 清单里声明的 skills 路径列表（CLI 允许字符串或字符串数组）。
+ *
+ * @param {unknown} declared
+ * @param {string} base 相对于仓库根的插件根
+ * @returns {string[]} 仓库内 skill 目录
+ */
+function declaredSkillDirs(declared, base) {
+  const list = Array.isArray(declared) ? declared : typeof declared === 'string' ? [declared] : []
+  const dirs = []
+  for (const item of list) {
+    if (typeof item !== 'string' || !item.startsWith('./')) continue
+    const rel = normalizeManifestPath(item.slice(2))
+    if (rel === null) continue
+    dirs.push(joinRepoPath(base, rel))
+  }
+  return dirs
+}
+
+/**
+ * 规范化清单里的相对路径：去掉开头 / 结尾的多余 `/`，再要求它是安全的相对路径。
+ *
+ * @param {string} value 已去掉 `./` 前缀的路径
+ * @returns {string | null}
+ */
+function normalizeManifestPath(value) {
+  const trimmed = value.replace(/^\/+|\/+$/gu, '')
+  if (trimmed === '') return ''
+  return normalizeRelativePath(trimmed)
+}
+
+/**
+ * 拼两段仓库内相对路径，空串表示仓库根。
+ *
+ * @param {string} base
+ * @param {string} rel
+ * @returns {string}
+ */
+function joinRepoPath(base, rel) {
+  if (base === '') return rel
+  if (rel === '') return base
+  return `${base}/${rel}`
+}
+
+/**
+ * 把 npx skills 仓库的发现结果拼成展示树。
+ *
+ * 展示方式与 `npx skills add --list` 一致：清单里显式归到插件的 skill 放进
+ * 以插件名命名的目录节点（同名插件的 skill 合并到同一组），其余 skill 平铺在
+ * 根上；**不按仓库的物理目录分组**。`metadata.internal: true` 的内部 skill
+ * 默认不列（与 CLI 一致）；同名 skill 不去重（npx 的 GitHub 快路径也只是逐个
+ * 列出），保留它们是为了不隐藏仓库里真实存在的文件。
+ *
+ * - 目录节点的 `name` 与 `path` 都是插件名；
+ * - skill 节点的 `path` 用仓库里的完整路径（如 `skills/engineering/x/SKILL.md`）；
+ * - 名称缺失时用 skill 所在目录名兜底，根目录的 `SKILL.md` 用仓库名。
+ *
+ * @param {Array<{ fullPath: string, name: string, description: string, internal: boolean }>} entries
+ * @param {Map<string, string>} groupings skill 目录 → 插件名（`readSkillGroupings()` 的结果）
+ * @param {string} repoName
+ * @returns {{ root: TreeNode[], skills: number }}
+ */
+function buildNpxTree(entries, groupings, repoName) {
+  const groups = new Map()
+  const plain = []
+  let skills = 0
 
   for (const entry of entries) {
-    const segments = entry.displayPath.split('/').filter((segment) => segment !== '')
-    // 最后一段是 SKILL.md，倒数第二段是 skill 自己的目录；后者成为 skill
-    // 节点，只有它上面的分组目录才建成 dir 节点。
-    const dirSegments = segments.slice(0, -2)
-    const fallback = segments.length < 2 ? repoName : segments.at(-2)
-    const name = entry.name === '' ? fallback : entry.name
-
-    let children = nodes
-    let key = ''
-    for (const segment of dirSegments) {
-      key = key === '' ? segment : `${key}/${segment}`
-      let dir = dirs.get(key)
-      if (dir === undefined) {
-        dir = { type: 'dir', name: segment, path: key, children: [] }
-        dirs.set(key, dir)
-        children.push(dir)
-      }
-      children = dir.children
+    if (entry.internal === true) continue
+    skills += 1
+    const name = entry.name === '' ? fallbackSkillName(entry.fullPath, repoName) : entry.name
+    const node = { type: 'skill', name, path: entry.fullPath, description: entry.description }
+    const plugin = groupings.get(skillDirOf(entry.fullPath))
+    if (plugin === undefined) {
+      plain.push(node)
+      continue
     }
-    children.push({ type: 'skill', name, path: entry.fullPath, description: entry.description })
+    const children = groups.get(plugin)
+    if (children === undefined) groups.set(plugin, [node])
+    else children.push(node)
   }
 
-  sortTree(nodes)
-  return nodes
+  const dirs = [...groups].map(([name, children]) => ({ type: 'dir', name, path: name, children }))
+  const root = [...dirs, ...plain]
+  sortTree(root)
+  return { root, skills }
+}
+
+/**
+ * SKILL.md 所在的仓库内目录；仓库根 `SKILL.md` 返回空串。
+ *
+ * @param {string} skillMd
+ * @returns {string}
+ */
+function skillDirOf(skillMd) {
+  const slash = skillMd.lastIndexOf('/')
+  return slash < 0 ? '' : skillMd.slice(0, slash)
+}
+
+/**
+ * skill 名称缺失时的兜底：skill 目录名；仓库根 `SKILL.md` 用仓库名。
+ *
+ * @param {string} skillMd
+ * @param {string} repoName
+ * @returns {string}
+ */
+function fallbackSkillName(skillMd, repoName) {
+  const dir = skillDirOf(skillMd)
+  if (dir === '') return repoName
+  return dir.slice(dir.lastIndexOf('/') + 1)
 }
 
 /**
@@ -1169,8 +1405,7 @@ function buildTree(entries, repoName) {
 function collectMarketplaceSkills(tree, marketplace) {
   const skillMds = tree
     .filter((entry) => entry !== null && typeof entry === 'object')
-    .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string')
-    .filter((entry) => entry.path.toLowerCase().endsWith('skill.md'))
+    .filter((entry) => entry.type === 'blob' && isSkillMdPath(entry.path))
     .map((entry) => entry.path)
 
   const ordered = [...marketplace.plugins].sort(

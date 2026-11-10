@@ -218,6 +218,38 @@ test('listSkills：npx skills 仓库摊平成 skill 列表，plugin 为 null', a
   assert.deepEqual(cached.skills, result.skills)
 })
 
+test('listSkills：npx 仓库里清单声明的 skill 带 plugin 名，其余为 null', async (t) => {
+  const homes = await tempHomes(t)
+  const { fetchImpl } = createFetch({
+    'acme/grouped': {
+      tree: [
+        { type: 'blob', path: 'skills/declared/SKILL.md' },
+        { type: 'blob', path: 'skills/plain/SKILL.md' },
+        { type: 'blob', path: '.claude-plugin/plugin.json' },
+      ],
+      contents: {
+        'skills/declared/SKILL.md': '---\nname: declared\ndescription: In the plugin\n---\n',
+        'skills/plain/SKILL.md': '---\nname: plain\ndescription: Not declared\n---\n',
+        '.claude-plugin/plugin.json': JSON.stringify({
+          name: 'demo-plugin',
+          skills: ['./skills/declared'],
+        }),
+      },
+    },
+  })
+  await addSavedRepo({ homes, source: 'acme/grouped' })
+  const service = new SkillsCatalogService({ homes, fetchImpl })
+
+  const result = await service.listSkills({ source: 'acme/grouped' })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.kind, 'npx-skills')
+  assert.deepEqual(result.skills, [
+    { name: 'declared', description: 'In the plugin', path: 'skills/declared/SKILL.md', plugin: 'demo-plugin' },
+    { name: 'plain', description: 'Not declared', path: 'skills/plain/SKILL.md', plugin: null },
+  ])
+})
+
 test('listSkills：marketplace 把 skill 归到所属插件', async (t) => {
   const homes = await tempHomes(t)
   const { fetchImpl } = createFetch(sampleRepos())

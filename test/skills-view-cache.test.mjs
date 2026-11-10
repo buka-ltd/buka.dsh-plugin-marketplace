@@ -19,7 +19,7 @@ const source = readFileSync(new URL('client.js', PACKAGE_ROOT), 'utf8')
 
 test('收藏页缓存键是带版本的 dsh. 键，版本不符按没有缓存处理', () => {
   assert.ok(source.includes("const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'"), '缓存键变了或丢了')
-  assert.ok(source.includes('const VIEW_CACHE_VERSION = 1'), '缓存格式版本丢了')
+  assert.ok(source.includes('const VIEW_CACHE_VERSION = 2'), '缓存格式版本丢了')
   assert.ok(
     source.includes('parsed.version !== VIEW_CACHE_VERSION'),
     '版本不符时必须当作没有缓存，不能拿旧结构硬套',

@@ -59,7 +59,7 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 收藏页打开后，Host 会对每个可列出的收藏（GitHub、任意 git 地址、本地绝对路径）做一次判定，卡片标题行显示结果徽标（`npx skills` / `Claude Code 市场` / `不可用`）。包名与已知不是仓库根的子页面链接只能收藏，没有判定徽标、也没有仓库树。判定按下面的顺序进行，命中即停：
 
-1. **npx skills 仓库（标准布局）**：读仓库的递归树，按 `npx skills add` 的**优先级前缀**在标准目录（`skills/`、`.agents/skills/`、`skills/.curated/` 等，见 CLI 的 `PRIORITY_PREFIXES`）里找 `SKILL.md`。命中至少一个就按 npx skills 仓库处理，不再拉 marketplace 文件；
+1. **npx skills 仓库（标准布局）**：读仓库的递归树，按 `npx skills add` 的**优先级前缀**在标准目录（`skills/`、`.agents/skills/`、`skills/.curated/` 等，见 CLI 的 `PRIORITY_PREFIXES`）里找 basename 为 `SKILL.md` 的文件（大小写不敏感，`foo-skill.md` 这类普通 Markdown 不算）。命中至少一个就按 npx skills 仓库处理；判定只看这棵树，不依赖仓库清单文件；
 2. **Claude Code marketplace 仓库**：没有优先级命中时，看仓库根有没有 `.claude-plugin/marketplace.json`。文件存在且能解析成合法 marketplace，就按 marketplace 仓库处理；
 3. **npx skills 仓库（兜底布局）**：没有可用的 marketplace 文件（没有、JSON 不合法或结构不对）时，npx 的兜底规则仍然生效 —— 树里任意不超过 6 段的 `SKILL.md` 都算发现，按 npx skills 仓库处理；
 4. **不可用**：以上都不是，卡片标「不可用」，展开时提示原因。
@@ -74,9 +74,9 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 展开可用的仓库才拉每个 `SKILL.md` 的 frontmatter 并建树：
 
-- **npx skills 仓库**：目录层级直接变成树的分组，skill 名字与描述取自各自 `SKILL.md` 的 frontmatter；
+- **npx skills 仓库**：展示方式与 `npx skills add --list` 一致，**不按仓库的物理目录分组**。`skills/<bucket>/<skill>/SKILL.md` 这种 catalog 布局里 bucket 只对发现有作用，skill 一律平铺；只有仓库根的 `.claude-plugin/plugin.json` 或 `.claude-plugin/marketplace.json` 里**显式声明**某个 skill 目录属于哪个插件时，才把该 skill 放进以插件名命名的目录节点（与 CLI 的 `getPluginGroupings()` 一致，同名插件的 skill 合并；没有声明清单、清单读不到或不合法时全部平铺）。frontmatter 里 `metadata.internal: true` 的内部 skill 默认不列（与 `npx skills` 一致，它只在被显式按名字请求时才安装）；skill 名字与描述取自各自 `SKILL.md` 的 frontmatter，名称缺失时回退目录名、仓库根 `SKILL.md` 回退仓库名；
 - **Claude Code marketplace 仓库**：按 `.claude-plugin/marketplace.json` 的 `plugins` 逐个插件分组，目录节点就是插件名，只列该插件目录下的 `SKILL.md`（`skills/` 默认目录、插件根的单文件 skill、以及 manifest 里自定义的 skills 目录都能覆盖）；`source` 指向仓库外（github / url / git-subdir / npm 等）的插件无法在本仓库里列出，直接跳过；marketplace 里没有任何可列 skill 时展开为空树，但仍算有效市场；
-- 判定与树都会缓存：`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 4；来源种类变了，旧缓存自动作废），TTL 30 分钟；探测只记判定结果（不写整棵树），展开时补全；marketplace 的清单也随完整树一起缓存，所以「列出市场里有哪些插件」不必重拉，没有 skill 的插件也能列出来。缓存写入是串行的「读最新内容 → 改 → 原子写」，并发探测不会互相覆盖条目；页面顶部「刷新」会绕过缓存：重新判定全部可列出的收藏、重拉已展开仓库的树；缓存文件坏了直接重建（它是易失数据，和收藏文件不同，不需要用户修）；
+- 判定与树都会缓存：`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 5；npx 树的分组方式变了，旧缓存自动作废），TTL 30 分钟；探测只记判定结果（不写整棵树），展开时补全；marketplace 的清单也随完整树一起缓存，所以「列出市场里有哪些插件」不必重拉，没有 skill 的插件也能列出来。缓存写入是串行的「读最新内容 → 改 → 原子写」，并发探测不会互相覆盖条目；页面顶部「刷新」会绕过缓存：重新判定全部可列出的收藏、重拉已展开仓库的树；缓存文件坏了直接重建（它是易失数据，和收藏文件不同，不需要用户修）；
 - 页面状态也会缓存：展开过哪些仓库、收起了哪些目录、每个仓库上次拿到的树都存在浏览器 localStorage（键 `dsh.buka-skills.view.v1`）。关掉 DSH 再打开时，收藏页先按上次的样子渲染（不显示加载中、不等网络），切到「收藏」后后台再向 Host 校正一次，Host 磁盘缓存过期才会重新读取仓库；徽标来自探测，不进 localStorage，重启后会先短暂不显示；localStorage 不可用或写满时自动退回不缓存，功能不受影响；
 - 包名照样收藏，但没有判定徽标、也没有仓库树；已知不是仓库根的子页面链接（如 `https://github.com/o/r/tree/main/...`）同样只能收藏，展开会提示不支持；
 - 私有仓库与接口限流：GitHub 用 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量给 Host 提供 token（提高限额、访问私有仓库），匿名请求限额用尽时页面提示稍后再试；任意 git 地址的私有仓库用本机 git 凭据 / SSH key。
@@ -115,7 +115,7 @@ export function apply(ctx) {
 | 方法 | 返回 | 说明 |
 | --- | --- | --- |
 | `listRepositories({ refresh? })` | `{ file, exists, corrupt, repositories }` | 收藏的仓库，按收藏文件顺序；每条带 `kind`（`npx-skills` / `claude-code-marketplace` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因 |
-| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path, plugin }`，`plugin` 只在 marketplace 里有值 |
+| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path, plugin }`，`plugin` 是仓库清单里显式声明它所属的插件名（npx skills 与 marketplace 都适用），没有归入插件时为 `null` |
 | `listPlugins({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, plugins }` | Claude Code marketplace 里声明的插件，每个 `{ name, root, description, skills }`；没有 skill 的插件也会出现（`skills: []`） |
 
 本地路径来源的 `ref` 是 `worktree`、`sha` 为空串；git 来源的 `ref` 是 `HEAD`、`sha` 取克隆当前的提交号。
@@ -142,7 +142,7 @@ export function apply(ctx) {
 | `lib/skill-store.js` | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试 |
 | `lib/npx.js` | 定位 `npx`（PATH → mise/nvm/Volta/Homebrew → npm 自带 `npx-cli.js`）并执行 `npx skills remove` |
 | `lib/repo-store.js` | 收藏来源的规范化与分类（GitHub / 任意 git 地址 / 本地路径 / 网页链接 / 包名）/ 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包 |
-| `lib/repo-skills.js` | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
+| `lib/repo-skills.js` | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树（npx 仓库按 CLI 的清单方式平铺 / 按仓库清单显式声明的插件分组）并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
 | `lib/local-source.js` | 本地目录的读取抽象：递归遍历（跳过依赖 / 构建目录，有深度、条数、单文件大小上限）与限定在根目录内的文件读取，输出与 GitHub 树一致的形状，便于单独测试 |
 | `lib/git-source.js` | 任意 git 地址的克隆缓存：`git clone --depth 1` 到 `buka-skills/cache/git/`，刷新时 fetch / reset，离线复用旧克隆；git 不在 `PATH` 与 clone 失败分别报 `git-unavailable` / `git-failed`，便于单独测试 |
 | `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏）都通过 Host 路由取数与操作，收藏用 `Modal` 对话框录入仓库与备注；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage，重开 DSH 时先恢复再校正；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
@@ -174,7 +174,11 @@ dsh plugin --profile <profile> add "link:$PWD/plugins/skills"
 - 本地路径直接扫描目录、不复制文件：`node_modules` / `.git` / `dist` 等目录被跳过，巨型仓库超过遍历上限时树会被截断。
 - GitHub 私有仓库与匿名限额：给 Host 进程设置 `GITHUB_TOKEN` / `GH_TOKEN`，否则匿名请求限额用尽时页面提示稍后再试。
 - marketplace 判定优先于 npx 的宽松兜底：仓库根有合法的 `.claude-plugin/marketplace.json` 时，`plugins/**` 下的 skills 会按插件分组展示，而不是平铺成 npx 树。
+- npx 仓库的展示分组只认仓库根的 `.claude-plugin/plugin.json` / `.claude-plugin/marketplace.json` 里**显式声明**的 skills 目录（与 `npx skills` CLI 相同）；`source` 指向仓库外、或清单放在子目录的插件不会参与分组，它们的 skill 仍然平铺列出。
+- npx skills CLI 会把清单里声明的 skills 目录追加为搜索目录；这里不追加，skill 只在仓库的常规布局（优先级前缀 / ≤6 段兜底）里发现，清单声明只用于分组。
+- npx skills CLI 会把 frontmatter 解析失败、或缺少 `name` / `description` 的 `SKILL.md` 跳过；这里不做严格 YAML 校验，只按 frontmatter 取名称与描述并在缺失时回退目录名，所以这类文件仍会出现在列表里。
 - Claude Code marketplace 只列 skills（插件的 `SKILL.md`），不列 commands / agents；`source` 指向仓库外（github / url / git-subdir / npm 等）的插件不会展开。
 - marketplace 只认仓库根目录的 `.claude-plugin/marketplace.json`：放在别处、或通过 `extraKnownMarketplaces` 的 `path` 指到子目录的市场不会被识别。
 - 判定结果也按 30 分钟 TTL 缓存：仓库刚变成可用/不可用时，点顶部「刷新」可以立刻重新判定。
+- 卡片上的「预计 skill 数」来自探测，探测只读仓库树，不知道 frontmatter 里 `metadata.internal` 的内部 skill，所以可能比展开后的列表多；展开时以实际列表为准。
 - 仓库树按 30 分钟 TTL 缓存，仓库里的 skill 刚更新时可能还是旧列表；点顶部「刷新」可以强制重拉已展开的仓库。重开 DSH 后看到的是上次缓存在浏览器里的列表，后台校正完成前可能短暂显示旧内容。

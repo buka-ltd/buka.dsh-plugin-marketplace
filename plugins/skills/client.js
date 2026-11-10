@@ -83,8 +83,13 @@ window.__ModuleLoader__.load({
      */
     const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'
 
-    /** 本地缓存的格式版本；版本不符就当没有缓存，不做迁移。 */
-    const VIEW_CACHE_VERSION = 1
+    /**
+     * 本地缓存的格式版本；版本不符就当没有缓存，不做迁移。
+     *
+     * v2：npx 仓库的树改为按 `npx skills` 清单平铺/按插件分组（不再按仓库物理
+     * 目录分组），v1 缓存里的旧树形状已经不对，直接丢弃重新拉。
+     */
+    const VIEW_CACHE_VERSION = 2
 
     /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
     const SAVE_FORM_ID = 'buka-skills-save-form'

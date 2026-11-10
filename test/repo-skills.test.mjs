@@ -8,11 +8,11 @@
  * 全部走注入的 `fetchImpl`，不访问真实网络；缓存目录用临时 DSH home，
  * 每个用例结束清理。重点覆盖：
  *
- * - 与 `npx skills` 一致的发现规则与容器前缀剥离；
+ * - 与 `npx skills` 一致的发现规则、平铺展示与清单插件分组；
  * - 仓库分类顺序：npx skills → Claude Code marketplace → 不可用；
  * - marketplace 清单解析、本地插件分组与远程/非法 source 的跳过；
  * - `probeRepoKind()` 的轻量探测与「不降级完整缓存」；
- * - 目录/skill 的排序与完整仓库路径；
+ * - skill 的排序与完整仓库路径；
  * - TTL、`refresh`、损坏缓存与 v1 缓存的重建；
  * - 各错误码与分支回退；
  * - token 来源与 SKILL.md 拉取的并发上限。
@@ -33,7 +33,11 @@ import {
   repoSkillsCacheFile,
 } from '../plugins/skills/lib/repo-skills.js'
 import { repoKey } from '../plugins/skills/lib/repo-store.js'
-import { parseFrontmatter, parseFrontmatterDescription } from '../plugins/skills/lib/skill-store.js'
+import {
+  parseFrontmatter,
+  parseFrontmatterDescription,
+  parseFrontmatterInternal,
+} from '../plugins/skills/lib/skill-store.js'
 
 /** GitHub tree API 的 URL，测试里拼断言用。 */
 function treeUrl(owner, repo, branch, host = 'api.github.com') {
@@ -117,7 +121,7 @@ async function readCacheFile(homes) {
   }
 }
 
-test('GitHub 仓库：发现 SKILL.md、剥容器前缀、排序并解析元数据', async (t) => {
+test('GitHub 仓库：发现 SKILL.md、按 npx 清单平铺、排序并解析元数据', async (t) => {
   const { homes } = await tempHomes(t)
   const tree = [
     { type: 'blob', path: 'SKILL.md' },
@@ -151,32 +155,14 @@ test('GitHub 仓库：发现 SKILL.md、剥容器前缀、排序并解析元数�
   assert.equal(result.cached, false)
   assert.equal(result.truncated, false)
   assert.equal(result.skills, 4)
+  // 与 `npx skills add --list` 一致：catalog 布局里的 bucket（core / Workflows）
+  // 只对发现有作用，不进展示树；skill 全部平铺并按名称排序。
   assert.deepEqual(result.root, [
     {
-      type: 'dir',
-      name: 'core',
-      path: 'core',
-      children: [
-        {
-          type: 'skill',
-          name: 'firecrawl-agent',
-          path: 'skills/core/firecrawl-agent/SKILL.md',
-          description: 'Agentic browsing',
-        },
-      ],
-    },
-    {
-      type: 'dir',
-      name: 'Workflows',
-      path: 'Workflows',
-      children: [
-        {
-          type: 'skill',
-          name: 'batch',
-          path: 'skills/Workflows/batch/SKILL.md',
-          description: '',
-        },
-      ],
+      type: 'skill',
+      name: 'batch',
+      path: 'skills/Workflows/batch/SKILL.md',
+      description: '',
     },
     { type: 'skill', name: 'Demo', path: 'SKILL.md', description: 'Root skill' },
     {
@@ -184,6 +170,12 @@ test('GitHub 仓库：发现 SKILL.md、剥容器前缀、排序并解析元数�
       name: 'find-skills',
       path: 'skills/find-skills/SKILL.md',
       description: 'Find the right skill',
+    },
+    {
+      type: 'skill',
+      name: 'firecrawl-agent',
+      path: 'skills/core/firecrawl-agent/SKILL.md',
+      description: 'Agentic browsing',
     },
   ])
 
@@ -483,7 +475,8 @@ test('SKILL.md 的并发上限为 6', async (t) => {
     maxInFlight = Math.max(maxInFlight, inFlight)
     try {
       await new Promise((resolve) => setTimeout(resolve, 5))
-      return new Response('---\nname: s\ndescription: d\n---\n', { status: 200 })
+      const name = decodeURIComponent(url).split('/').at(-2)
+      return new Response(`---\nname: ${name}\ndescription: d\n---\n`, { status: 200 })
     } finally {
       inFlight -= 1
     }
@@ -538,6 +531,19 @@ test('githubRepoOf：只认 GitHub owner/repo 与 github.com 链接', () => {
   }
 })
 
+test('parseFrontmatterInternal 只认 metadata.internal: true', () => {
+  assert.equal(
+    parseFrontmatterInternal('---\nname: a\ndescription: A\nmetadata:\n  version: "1"\n  internal: true\n---\n'),
+    true,
+  )
+  assert.equal(parseFrontmatterInternal('---\nmetadata: { internal: true }\n---\n'), true)
+  assert.equal(parseFrontmatterInternal('---\nmetadata:\n  internal: "true"\n---\n'), false, '字符串 true 不算')
+  assert.equal(parseFrontmatterInternal('---\nmetadata:\n  internal: false\n---\n'), false)
+  assert.equal(parseFrontmatterInternal('---\nname: a\ndescription: A\n---\n'), false)
+  assert.equal(parseFrontmatterInternal('no frontmatter'), false)
+  assert.equal(parseFrontmatterInternal(undefined), false)
+})
+
 test('parseFrontmatter 同时解析 name 与 description，旧导出行为不变', () => {
   assert.deepEqual(parseFrontmatter('---\nname: demo\ndescription: >\n  folded\n  text\n---\n'), {
     name: 'demo',
@@ -549,7 +555,7 @@ test('parseFrontmatter 同时解析 name 与 description，旧导出行为不变
   assert.equal(parseFrontmatterDescription('---\ndescription: inline\n---\n'), 'inline')
 })
 
-test('分类：npx 优先，命中 SKILL.md 时不拉 marketplace.json', async (t) => {
+test('分类：npx 优先，判定不依赖清单；展开时读清单只为插件分组', async (t) => {
   const { homes } = await tempHomes(t)
   const tree = [
     { type: 'blob', path: 'skills/a/SKILL.md' },
@@ -559,7 +565,11 @@ test('分类：npx 优先，命中 SKILL.md 时不拉 marketplace.json', async (
     trees: { HEAD: { tree } },
     contents: {
       'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n',
-      '.claude-plugin/marketplace.json': JSON.stringify({ plugins: [{ name: 'p', source: './plugins/p' }] }),
+      // npx 仓库也会按清单里**显式声明**的 skills 目录分组（CLI 的
+      // getPluginGroupings 行为）；判定本身仍在看到 SKILL.md 时就定了。
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        plugins: [{ name: 'p', source: './', skills: ['./skills/a'] }],
+      }),
     },
   })
 
@@ -568,11 +578,65 @@ test('分类：npx 优先，命中 SKILL.md 时不拉 marketplace.json', async (
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'npx-skills')
   assert.equal(result.skills, 1)
-  assert.equal(calls.length, 2, '只发 tree 与 SKILL.md 两次请求')
+  assert.deepEqual(result.root, [
+    {
+      type: 'dir',
+      name: 'p',
+      path: 'p',
+      children: [{ type: 'skill', name: 'a', path: 'skills/a/SKILL.md', description: 'A' }],
+    },
+  ])
   assert.deepEqual(
-    calls.filter((one) => one.url.startsWith('https://raw.githubusercontent.com/')).map((one) => one.url),
-    [rawUrl('acme', 'demo', 'HEAD', 'skills/a/SKILL.md')],
+    calls
+      .filter((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
+      .map((one) => one.url)
+      .sort(),
+    [rawUrl('acme', 'demo', 'HEAD', '.claude-plugin/marketplace.json'), rawUrl('acme', 'demo', 'HEAD', 'skills/a/SKILL.md')].sort(),
   )
+})
+
+test('npx：按 plugin.json 显式声明的 skills 分组，bucket 目录不进树', async (t) => {
+  const { homes } = await tempHomes(t)
+  const tree = [
+    { type: 'blob', path: 'skills/engineering/ask-matt/SKILL.md' },
+    { type: 'blob', path: 'skills/engineering/tdd/SKILL.md' },
+    { type: 'blob', path: 'skills/in-progress/loop-me/SKILL.md' },
+    { type: 'blob', path: 'skills/productivity/grill-me/SKILL.md' },
+    { type: 'blob', path: '.claude-plugin/plugin.json' },
+  ]
+  const { fetchImpl } = createFetch({
+    trees: { HEAD: { tree } },
+    contents: {
+      'skills/engineering/ask-matt/SKILL.md': '---\nname: ask-matt\ndescription: Router\n---\n',
+      'skills/engineering/tdd/SKILL.md': '---\nname: tdd\ndescription: Test driven\n---\n',
+      'skills/in-progress/loop-me/SKILL.md': '---\nname: loop-me\ndescription: Beta loop\n---\n',
+      'skills/productivity/grill-me/SKILL.md': '---\nname: grill-me\ndescription: Interview\n---\n',
+      // plugin.json 只声明两个 promoted 目录；loop-me 没有声明，留在根上。
+      '.claude-plugin/plugin.json': JSON.stringify({
+        name: 'mattpocock-skills',
+        skills: ['./skills/engineering/ask-matt', './skills/engineering/tdd'],
+      }),
+    },
+  })
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.kind, 'npx-skills')
+  assert.equal(result.skills, 4)
+  assert.deepEqual(result.root, [
+    {
+      type: 'dir',
+      name: 'mattpocock-skills',
+      path: 'mattpocock-skills',
+      children: [
+        { type: 'skill', name: 'ask-matt', path: 'skills/engineering/ask-matt/SKILL.md', description: 'Router' },
+        { type: 'skill', name: 'tdd', path: 'skills/engineering/tdd/SKILL.md', description: 'Test driven' },
+      ],
+    },
+    { type: 'skill', name: 'grill-me', path: 'skills/productivity/grill-me/SKILL.md', description: 'Interview' },
+    { type: 'skill', name: 'loop-me', path: 'skills/in-progress/loop-me/SKILL.md', description: 'Beta loop' },
+  ])
 })
 
 test('Claude Code marketplace：按插件分组列出 SKILL.md（不列 commands / agents）', async (t) => {
@@ -753,21 +817,64 @@ test('marketplace：清单不合法但有 npx 兜底可发现的 SKILL.md 时按
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'npx-skills')
   assert.equal(result.skills, 1)
+  // 兜底发现的 skill 同样平铺；物理目录 docs/ 不进树。
   assert.deepEqual(result.root, [
-    {
-      type: 'dir',
-      name: 'docs',
-      path: 'docs',
-      children: [
-        {
-          type: 'skill',
-          name: 'skill-demo',
-          path: 'docs/skill-demo/SKILL.md',
-          description: 'fallback',
-        },
-      ],
-    },
+    { type: 'skill', name: 'skill-demo', path: 'docs/skill-demo/SKILL.md', description: 'fallback' },
   ])
+})
+
+test('npx：metadata.internal 的内部 skill 默认不列（与 npx CLI 一致）', async (t) => {
+  const { homes } = await tempHomes(t)
+  const { fetchImpl } = createFetch({
+    trees: {
+      HEAD: {
+        tree: [
+          { type: 'blob', path: 'skills/public/SKILL.md' },
+          { type: 'blob', path: '.agents/skills/internal/SKILL.md' },
+        ],
+      },
+    },
+    contents: {
+      'skills/public/SKILL.md': '---\nname: public\ndescription: Public skill\n---\n',
+      '.agents/skills/internal/SKILL.md':
+        '---\nname: internal\ndescription: Internal skill\nmetadata:\n  internal: true\n---\n',
+    },
+  })
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.skills, 1)
+  assert.deepEqual(result.root, [
+    { type: 'skill', name: 'public', path: 'skills/public/SKILL.md', description: 'Public skill' },
+  ])
+})
+
+test('npx：basename 必须是 SKILL.md，foo-skill.md 这类普通 Markdown 不会被当成 skill', async (t) => {
+  const { homes } = await tempHomes(t)
+  const { fetchImpl } = createFetch({
+    trees: {
+      HEAD: {
+        tree: [
+          { type: 'blob', path: '.changeset/software-factory-skill.md' },
+          { type: 'blob', path: 'docs/writing-a-skill.md' },
+        ],
+      },
+    },
+    contents: {
+      '.changeset/software-factory-skill.md': '---\nname: software-factory-skill\ndescription: Not a skill\n---\n',
+      'docs/writing-a-skill.md': '---\nname: writing-a-skill\ndescription: Not a skill\n---\n',
+    },
+  })
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'repo-unavailable')
+  assert.equal(
+    (await readCacheFile(homes)).entries[repoKey('acme/demo')].skills,
+    0,
+  )
 })
 
 test('marketplace：清单拉取失败返回 fetch-failed 而不是不可用', async (t) => {

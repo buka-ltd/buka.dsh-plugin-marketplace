@@ -63,7 +63,8 @@ const PROBE_CONCURRENCY = 4
 
 /**
  * 一个可安装 skill。`path` 是它在仓库里的完整路径（`.../SKILL.md`）；
- * `plugin` 只在 Claude Code marketplace 里有值。
+ * `plugin` 是仓库清单里显式声明它所属的插件名，没有归入任何插件时为 null
+ * （npx skills 仓库与 Claude Code marketplace 都适用）。
  *
  * @typedef {{
  *   name: string,
@@ -196,9 +197,10 @@ export class SkillsCatalogService {
   /**
    * 列出一个仓库里所有可安装的 skill。
    *
-   * npx skills 仓库按 `npx skills` 的发现规则列；Claude Code marketplace 会
-   * 把每个插件下的 skill 一起列出来，并用 `plugin` 标出所属插件。结果与页面
-   * 展开的树来自同一次拉取（同一份缓存），所以两处不会互相矛盾。
+   * 列表扁平化：npx skills 仓库按 `npx skills` 的发现规则列，仓库清单里显式
+   * 声明的插件分组同样用 `plugin` 标出；Claude Code marketplace 把每个插件下
+   * 的 skill 一起列出来。结果与页面展开的树来自同一次拉取（同一份缓存），
+   * 所以两处不会互相矛盾。
    *
    * @param {ServiceOptions & { source?: unknown }} [options]
    * @returns {Promise<
@@ -346,19 +348,16 @@ export class SkillsCatalogService {
 /**
  * 把 `fetchRepoSkills()` 返回的树摊平成 skill 列表。
  *
- * npx skills 仓库的树根是展示用的分组目录，`plugin` 一律为 null；
- * marketplace 的树根每个节点是一个插件，用节点名作为 `plugin`。
+ * 树根的目录节点都是插件分组（marketplace 的插件，或 npx 仓库清单里显式
+ * 声明的插件），用节点名作为 `plugin`；平铺在根上的 skill `plugin` 为 null。
  *
- * @param {{ kind: string, root: TreeNode[] }} fetched
+ * @param {{ root: TreeNode[] }} fetched
  * @returns {SkillRef[]}
  */
 function flattenSkillTree(fetched) {
-  if (fetched.kind === 'claude-code-marketplace') {
-    return fetched.root.flatMap((node) =>
-      node.type === 'dir' ? flattenSkills(node.children, node.name) : flattenSkills([node], null),
-    )
-  }
-  return flattenSkills(fetched.root, null)
+  return fetched.root.flatMap((node) =>
+    node.type === 'dir' ? flattenSkills(node.children, node.name) : flattenSkills([node], null),
+  )
 }
 
 /**
