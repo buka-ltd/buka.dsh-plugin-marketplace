@@ -489,26 +489,36 @@ export class RobotSessionService {
         presets.composeFrom(childCtx, request.agent.ctx)
       }
     }
-    this.#installStructuredTool(childCtx, state, request.outputSchema)
+    this.#installStructuredTool(childCtx, state, request.outputSchema, {
+      abortable: request.abortable === true,
+    })
   }
 
   /**
    * 在会话上安装结构化结果工具。`outputSchema` 直接作为工具的 `parameters`
    * （例如工作流节点要求 `next` 取某个枚举值）；没给时退回宽松对象 schema，
-   * 但仍然要求交回一个 JSON 对象。
+   * 但仍然要求交回一个 JSON 对象。`abortable` 为 true 时，工具说明和系统提示
+   * 都会告诉节点：确实无法完成时可以交回 `abort` 主动终止，而不是随便选一条
+   * route。
    *
    * @param {any} childCtx
    * @param {{ reported: { value: unknown } }} state
    * @param {unknown} [schema]
+   * @param {{ abortable?: boolean }} [options]
    * @returns {void}
    */
-  #installStructuredTool(childCtx, state, schema) {
+  #installStructuredTool(childCtx, state, schema, options = {}) {
     const tools = childCtx?.get?.('tools') ?? childCtx?.tools
     if (typeof tools?.register !== 'function') return
+    const abortText =
+      options.abortable === true
+        ? ' If you cannot complete this task, submit a single "abort" string with a short reason instead of picking a route; the workflow ends and the run is recorded as failed.'
+        : ''
     tools.register({
       name: STRUCTURED_OUTPUT_TOOL,
       description:
-        "Report the final structured JSON result of this node. Call this exactly once, when your answer is complete; the arguments must match this tool's parameter schema exactly.",
+        "Report the final structured JSON result of this node. Call this exactly once, when your answer is complete; the arguments must match this tool's parameter schema exactly." +
+        abortText,
       parameters: normalizeOutputSchema(schema),
       output: {
         schema: {
@@ -539,7 +549,7 @@ export class RobotSessionService {
             typeof systemPrompt.getSectionOrder === 'function'
               ? systemPrompt.getSectionOrder('STRUCTURED_OUTPUT')
               : 9900,
-          text: STRUCTURED_OUTPUT_INSTRUCTION,
+          text: `${STRUCTURED_OUTPUT_INSTRUCTION}${abortText}`,
         })
       } catch {
         // 没有 systemPrompt 注册表时退回提示词里的重试消息。
@@ -611,6 +621,7 @@ export class RobotSessionService {
               resultRetryPrompt(retries, this.resultRetries, {
                 toolName: STRUCTURED_OUTPUT_TOOL,
                 routes: request.routes,
+                abortable: request.abortable === true,
               }),
             ),
           )
@@ -1029,10 +1040,10 @@ export class RobotSessionService {
       },
       /**
        * 没交回结构化结果时，按调用方给的 `routes` / `reason` 取下一条追问；
-       * 没有额度时返回 `null`。工作流 supervisor 在缺 JSON、缺 `next` 或
-       * `next` 不是合法路由时调用它。
+       * 没有额度时返回 `null`。工作流 supervisor 在缺 JSON、缺 `next`、
+       * `next` 不合法、结果不匹配 output 或 abort 形态不合法时调用它。
        *
-       * @param {{ routes?: string[], reason?: 'missing-json' | 'missing-next' | 'invalid-next' | string }} [options]
+       * @param {{ routes?: string[], abortable?: boolean, reason?: 'missing-json' | 'missing-next' | 'invalid-next' | 'invalid-output' | 'invalid-abort' | 'ambiguous-result' | string, detail?: string }} [options]
        * @returns {string | null}
        */
       retryReport(options = {}) {
@@ -1042,6 +1053,8 @@ export class RobotSessionService {
         return resultRetryPrompt(retries, max, {
           toolName: STRUCTURED_OUTPUT_TOOL,
           routes: options?.routes ?? request.routes,
+          abortable:
+            typeof options?.abortable === 'boolean' ? options.abortable : request.abortable === true,
           reason: typeof options?.reason === 'string' ? options.reason : undefined,
           detail: typeof options?.detail === 'string' ? options.detail : undefined,
         })
@@ -1411,21 +1424,26 @@ function followupMessage(text, sourceKind = 'buka-robot') {
 
 /**
  * 机器人没有交回结构化 JSON 结果时，注入原会话的重试提示：说清这次的问题
- * （缺 JSON / 缺 `next` / `next` 不是合法路由），并列出合法路由名。
+ * （缺 JSON / 缺 `next` / `next` 不是合法路由 / 结果不匹配 output / abort 形态
+ * 不合法），列出合法路由名，并在允许主动终止时再次给出 `abort` 出口。
  *
  * @param {number} attempt 第几次重试（从 1 开始）
  * @param {number} maxAttempts 最多重试几次
  * @param {{
  *   toolName?: string,
  *   routes?: string[],
- *   reason?: 'missing-json' | 'missing-next' | 'invalid-next' | string,
+ *   abortable?: boolean,
+ *   detail?: string,
+ *   reason?: 'missing-json' | 'missing-next' | 'invalid-next' | 'invalid-output' | 'invalid-abort' | 'ambiguous-result' | string,
  * }} [options] `toolName` 是该后端提交结构化结果用的工具名；`routes` 是节点
- *   允许的出口路由名；`reason` 说明这次为什么要求重答（默认缺 JSON）。
+ *   允许的出口路由名；`abortable` 表示节点可以用 `abort` 主动终止；`detail`
+ *   是额外的具体问题；`reason` 说明这次为什么要求重答（默认缺 JSON）。
  * @returns {string}
  */
 export function resultRetryPrompt(attempt, maxAttempts, options = {}) {
   const toolName = typeof options.toolName === 'string' ? options.toolName : STRUCTURED_OUTPUT_TOOL
   const routes = routeNames(options.routes)
+  const abortable = options.abortable === true
   const reason = typeof options.reason === 'string' ? options.reason : 'missing-json'
   const detail = typeof options.detail === 'string' ? options.detail.trim() : ''
   const problem =
@@ -1435,16 +1453,25 @@ export function resultRetryPrompt(attempt, maxAttempts, options = {}) {
         ? 'the `next` route in your last JSON result is not one of the routes this node can follow'
         : reason === 'invalid-output'
           ? 'the JSON object in your last result does not match the output schema declared for this node'
-          : 'your last answer did not provide a structured JSON result'
+          : reason === 'invalid-abort'
+            ? 'the `abort` field in your last JSON result must be a non-empty string explaining why you cannot complete the task'
+            : reason === 'ambiguous-result'
+              ? 'your last JSON result included both `next` and `abort`; submit exactly one of them'
+              : 'your last answer did not provide a structured JSON result'
   let text =
     `The workflow orchestrator expected the final result of this node as a single JSON object, but ${problem}. ` +
     `Do not reply with plain text again: finish now by calling the ${toolName} tool with a single JSON object that answers the assigned task.`
   if (detail !== '') text += ` Problem: ${detail}.`
   if (routes.length > 0) {
+    const routeList = routes.map((route) => `"${route}"`).join(', ')
+    text += abortable
+      ? ` When this node has outgoing routes, include exactly one of \`next\` (one of ${routeList}) and \`abort\`.`
+      : ' When this node has outgoing routes, the object MUST include `next` set to exactly one of these route names: ' +
+        `${routeList}.`
+  }
+  if (abortable) {
     text +=
-      ' When this node has outgoing routes, the object MUST include `next` set to exactly one of these route names: ' +
-      routes.map((route) => `"${route}"`).join(', ') +
-      '.'
+      ' If you cannot complete this node\'s task, do not pick a route you do not believe in: set `abort` to a short non-empty reason instead; the workflow ends and the run is recorded as failed.'
   }
   text += ` This is retry ${attempt}/${maxAttempts}.`
   return text

@@ -23,7 +23,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { buildResultSchema, outputProblems, routeNamesOf } from './output.js'
-import { resolveRoute } from './routing.js'
+import { resolveAbort, resolveRoute } from './routing.js'
 import {
   WorkflowCancelledError,
   WorkflowRunError,
@@ -860,6 +860,7 @@ export class WorkflowSupervisor {
         ...(this.options.robotPreset === '' ? {} : { agentPreset: this.options.robotPreset }),
         outputSchema: buildResultSchema(node),
         routes: routeNamesOf(node),
+        abortable: true,
         title: robotSessionTitle(run, node),
         ...(node.agentOptions === undefined ? {} : { agentOptions: node.agentOptions }),
         approval: 'ask',
@@ -979,6 +980,21 @@ export class WorkflowSupervisor {
       return
     }
 
+    // 主动终止优先于中断恢复：节点已经明确说无法完成时，不必再把同一会话接
+    // 起来；即使这一轮以 aborted / interrupted / error 结束，abort 也是最强的
+    // 意图。
+    const abort = result.structured === undefined ? null : resolveAbort(result.structured)
+    if (abort?.abort !== undefined) {
+      if (ctx.run.pendingInteraction !== null) {
+        ctx.run.pendingInteraction = null
+        await this.#save(ctx)
+      }
+      await this.#abortNode(ctx, node, result, abort.abort.reason, {
+        workspace: typeof entry.handle?.cwd === 'string' ? entry.handle.cwd : undefined,
+      })
+      return
+    }
+
     if (RECOVERABLE_STOP_REASONS.has(result.stopReason) && result.stopReason !== 'completed') {
       entry.claimed = false
       entry.recoveryRequested = true
@@ -1010,6 +1026,25 @@ export class WorkflowSupervisor {
           typeof result.error === 'string' && result.error !== ''
             ? result.error
             : 'the node did not submit a structured JSON result',
+      }
+      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      return
+    }
+
+    // next / abort 同时出现，或 abort 的形态不合法：在同一会话里追问。
+    if (abort?.error !== undefined) {
+      if (
+        await this.#retryResult(ctx, entry, node, {
+          reason: abort.error.kind,
+          routes: routeNamesOf(node),
+        })
+      ) {
+        return
+      }
+      result = {
+        ...result,
+        stopReason: 'error',
+        error: `invalid workflow result for node "${node.id}": ${abort.error.message}`,
       }
       await this.#completeNode(ctx, node, result, { route: null, workspace })
       return
@@ -1070,7 +1105,7 @@ export class WorkflowSupervisor {
    * @returns {Promise<boolean>} true 表示已经发出重试
    */
   async #retryResult(ctx, entry, node, { reason, routes, detail }) {
-    const prompt = entry.handle?.retryReport?.({ reason, routes, detail })
+    const prompt = entry.handle?.retryReport?.({ reason, routes, detail, abortable: true })
     if (typeof prompt !== 'string' || prompt.trim() === '') return false
     try {
       await entry.handle.send(prompt, { compactFirst: false })
@@ -1096,12 +1131,35 @@ export class WorkflowSupervisor {
   }
 
   /**
+   * 把节点主动终止落成一条失败的 robot step，并结束整个运行。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} node
+   * @param {Record<string, any>} result
+   * @param {string} reason 节点给出的无法完成原因
+   * @param {{ recovered?: boolean, recoveryAttempts?: number, workspace?: string }} [extra]
+   * @returns {Promise<void>}
+   */
+  async #abortNode(ctx, node, result, reason, extra = {}) {
+    await this.#completeNode(
+      ctx,
+      node,
+      {
+        ...result,
+        stopReason: 'aborted',
+        error: reason,
+      },
+      { ...extra, route: null, aborted: true },
+    )
+  }
+
+  /**
    * 正常 / 失败地落一条 robot step，并决定下一节点。
    *
    * @param {Record<string, any>} ctx
    * @param {Record<string, any>} node
    * @param {Record<string, any>} result
-   * @param {{ recovered?: boolean, recoveryAttempts?: number, timedOut?: boolean, route?: Record<string, any> | null }} extra
+   * @param {{ recovered?: boolean, recoveryAttempts?: number, timedOut?: boolean, aborted?: boolean, route?: Record<string, any> | null }} extra
    * @returns {Promise<void>}
    */
   async #completeNode(ctx, node, result, extra) {
@@ -1113,21 +1171,46 @@ export class WorkflowSupervisor {
     const finishedAt = Date.now()
     const startedAt = typeof current.startedAt === 'number' ? current.startedAt : finishedAt
     const preview = truncateUtf8(result.text ?? '', this.options.previewBytes)
-    let stopReason = typeof result.stopReason === 'string' ? result.stopReason : 'error'
+    let aborted = extra.aborted === true
+    let stopReason = aborted
+      ? 'aborted'
+      : typeof result.stopReason === 'string'
+        ? result.stopReason
+        : 'error'
     const recovered = extra.recovered === true || current.recovered === true
     const recoveryAttempts = Number.isInteger(extra.recoveryAttempts)
       ? extra.recoveryAttempts
       : Number.isInteger(current.recoveryAttempts)
         ? current.recoveryAttempts
         : 0
-    let route = extra.route
+    let route = aborted ? null : extra.route
     if (route === undefined && stopReason === 'completed') {
-      const resolved = resolveRoute(node, result.structured)
-      if (resolved.error !== undefined) {
-        await this.#fail(ctx, new WorkflowRunError(`invalid workflow route: ${resolved.error}`))
+      // 防御性处理：调用方没先解析 abort 时，这里也不能把主动终止当成一条
+      // 缺失的 next 路由。
+      const resolvedAbort = resolveAbort(result.structured)
+      if (resolvedAbort?.abort !== undefined) {
+        aborted = true
+        stopReason = 'aborted'
+        route = null
+        result = {
+          ...result,
+          stopReason: 'aborted',
+          error: resolvedAbort.abort.reason,
+        }
+      } else if (resolvedAbort?.error !== undefined) {
+        await this.#fail(
+          ctx,
+          new WorkflowRunError(`invalid workflow result: ${resolvedAbort.error.message}`),
+        )
         return
+      } else {
+        const resolved = resolveRoute(node, result.structured)
+        if (resolved.error !== undefined) {
+          await this.#fail(ctx, new WorkflowRunError(`invalid workflow route: ${resolved.error}`))
+          return
+        }
+        route = resolved.rule
       }
-      route = resolved.rule
     }
     // 附件只在节点正常完成时落盘。复制失败属于节点输出不完整：把节点改成
     // error，而不是带着缺失的附件继续路由。
@@ -1182,6 +1265,7 @@ export class WorkflowSupervisor {
       sessionId,
       status: stopReason === 'completed' ? 'completed' : 'failed',
       stopReason,
+      ...(aborted ? { aborted: true } : {}),
       route: routeName,
       routeTo,
       startedAt,
@@ -1234,6 +1318,7 @@ export class WorkflowSupervisor {
         sessionId,
         status: step.status,
         stopReason,
+        ...(aborted ? { aborted: true } : {}),
         error: result.error ?? null,
         structured: result.structured ?? null,
         attachments: nodeAttachments,
@@ -1259,6 +1344,7 @@ export class WorkflowSupervisor {
       nodeId: node.id,
       visit: current.visit,
       stopReason,
+      ...(aborted ? { aborted: true } : {}),
       sessionId,
       resumed: step.resumed,
       compacted: step.compacted,
@@ -1267,12 +1353,13 @@ export class WorkflowSupervisor {
     })
 
     if (stopReason !== 'completed') {
-      const message =
+      const detail =
         typeof result.error === 'string' && result.error !== ''
           ? result.error
           : `robot node "${node.id}" ended with ${stopReason}`
+      const message = aborted ? `workflow node "${node.id}" aborted the run: ${detail}` : detail
       run.error = message
-      await this.#finish(ctx, 'failed', { nodeId: node.id, message })
+      await this.#finish(ctx, 'failed', { nodeId: node.id, message, aborted })
       return
     }
 
@@ -1381,23 +1468,40 @@ export class WorkflowSupervisor {
             error: 'the robot session did not submit a structured JSON result',
           }
         } else {
-          const problems = outputProblems(node, check.structured)
-          if (problems.length > 0) {
+          const abort = resolveAbort(check.structured)
+          if (abort?.abort !== undefined) {
+            await this.#abortNode(ctx, node, check, abort.abort.reason, {
+              recovered: true,
+              recoveryAttempts: 1,
+              workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
+            })
+            return
+          }
+          if (abort?.error !== undefined) {
             result = {
               ...check,
               stopReason: 'error',
-              error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
+              error: `invalid workflow result for node "${node.id}": ${abort.error.message}`,
             }
           } else {
-            const resolved = resolveRoute(node, check.structured)
-            if (resolved.error !== undefined) {
+            const problems = outputProblems(node, check.structured)
+            if (problems.length > 0) {
               result = {
                 ...check,
                 stopReason: 'error',
-                error: `invalid workflow route: ${resolved.error}`,
+                error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
               }
             } else {
-              route = resolved.rule
+              const resolved = resolveRoute(node, check.structured)
+              if (resolved.error !== undefined) {
+                result = {
+                  ...check,
+                  stopReason: 'error',
+                  error: `invalid workflow route: ${resolved.error}`,
+                }
+              } else {
+                route = resolved.rule
+              }
             }
           }
         }
@@ -1795,23 +1899,40 @@ export class WorkflowSupervisor {
             error: 'the robot session did not submit a structured JSON result',
           }
         } else {
-          const problems = outputProblems(node, check.structured)
-          if (problems.length > 0) {
+          const abort = resolveAbort(check.structured)
+          if (abort?.abort !== undefined) {
+            await this.#abortNode(ctx, node, check, abort.abort.reason, {
+              recovered: true,
+              recoveryAttempts: 1,
+              workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
+            })
+            return 'recovered'
+          }
+          if (abort?.error !== undefined) {
             result = {
               ...check,
               stopReason: 'error',
-              error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
+              error: `invalid workflow result for node "${node.id}": ${abort.error.message}`,
             }
           } else {
-            const resolved = resolveRoute(node, check.structured)
-            if (resolved.error !== undefined) {
+            const problems = outputProblems(node, check.structured)
+            if (problems.length > 0) {
               result = {
                 ...check,
                 stopReason: 'error',
-                error: `invalid workflow route: ${resolved.error}`,
+                error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
               }
             } else {
-              route = resolved.rule
+              const resolved = resolveRoute(node, check.structured)
+              if (resolved.error !== undefined) {
+                result = {
+                  ...check,
+                  stopReason: 'error',
+                  error: `invalid workflow route: ${resolved.error}`,
+                }
+              } else {
+                route = resolved.rule
+              }
             }
           }
         }
@@ -1928,7 +2049,7 @@ export class WorkflowSupervisor {
   /**
    * @param {Record<string, any>} ctx
    * @param {string} status
-   * @param {{ nodeId?: string | null, message?: string }} [extra]
+   * @param {{ nodeId?: string | null, message?: string, aborted?: boolean }} [extra]
    * @returns {Promise<Record<string, any>>}
    */
   async #finish(ctx, status, extra = {}) {
@@ -1945,6 +2066,7 @@ export class WorkflowSupervisor {
       status,
       lastNode: extra.nodeId ?? null,
       ...(extra.message === undefined ? {} : { message: extra.message }),
+      ...(extra.aborted === true ? { aborted: true } : {}),
       ...(status === 'failed' && run.error !== null ? { error: run.error } : {}),
     }
     for (const entry of this.#dispatchEntriesForRun(ctx.runId)) {
@@ -2039,6 +2161,7 @@ export class WorkflowSupervisor {
       sessionId,
       outputSchema: buildResultSchema(node),
       routes: routeNamesOf(node),
+      abortable: true,
       title: robotSessionTitle(ctx.run, node),
       ...(node.agentOptions === undefined ? {} : { agentOptions: node.agentOptions }),
       approval: 'ask',
@@ -2359,12 +2482,13 @@ function recoveryPrompt(node, reason) {
   const routes = routeNamesOf(node)
   const routeText =
     routes.length > 0
-      ? ` The final JSON object must include "next" set to one of these route names: ${routes.join(', ')}.`
-      : ''
+      ? ` The final JSON object must include exactly one of "next" (one of: ${routes.join(', ')}) and "abort".`
+      : ' The final JSON object may include "abort" if you cannot complete the task.'
   return (
     `Your previous execution of workflow node "${node.id}" was interrupted before it delivered a result (${reason}). ` +
     'Continue from the work already done in this session and finish the assigned task now. ' +
     `When you are done, submit the final JSON object by calling the structured_output tool; it must match this node's declared output schema.${routeText} ` +
+    'If you cannot complete this task, submit "abort" with a short non-empty reason instead of choosing a route. ' +
     'Put the actual answer in the final text; do not put it only in an attachment.'
   )
 }

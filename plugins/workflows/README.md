@@ -1,6 +1,6 @@
 # @buka/dsh-plugin-workflows
 
-由**编排 preset** 现场创建的一次性工作流：编排 agent 审视任务后写一份节点图，直接交给插件调度，跑到终止状态或异常为止。当前是**格式 v2**（`WORKFLOW_FORMAT_VERSION = 2`）：每个机器人节点都在定义里声明 `output`（节点结果 JSON 的 JSON Schema），交回 JSON 并用 JSON 里的 `next` 选择出边；定义校验阶段会按这些 schema 检查边 prompt 里的模板变量。会话中断只续接同一会话，续接失败直接终止运行；宿主重启后未完成的运行也能接着跑，续接失败则标成 `interrupted`。
+由**编排 preset** 现场创建的一次性工作流：编排 agent 审视任务后写一份节点图，直接交给插件调度，跑到终止状态或异常为止。当前是**格式 v2**（`WORKFLOW_FORMAT_VERSION = 2`）：每个机器人节点都在定义里声明 `output`（节点结果 JSON 的 JSON Schema），交回 JSON 并用 JSON 里的 `next` 选择出边，或者在确实无法完成时用 `abort` 主动终止整个运行；定义校验阶段会按这些 schema 检查边 prompt 里的模板变量。会话中断只续接同一会话，续接失败直接终止运行；宿主重启后未完成的运行也能接着跑，续接失败则标成 `interrupted`。
 
 设计的边界：
 
@@ -128,16 +128,20 @@
 }
 ```
 
-`check` 节点交回的 JSON（`structured_output` 的参数；纯文本 JSON 也接受，并且同样校验）；字段必须匹配该节点的 `output`，`next` 与 `attachments` 由引擎合并进实际 schema：
+`check` 节点交回的 JSON（`structured_output` 的参数；纯文本 JSON 也接受，并且同样校验）；字段必须匹配该节点的 `output`，`next`、`abort` 与 `attachments` 由引擎合并进实际 schema：
 
 ```jsonc
 // 测试打回：next 必须是 check 的出边名之一
 { "next": "fix", "status": "blocked", "reason": "登录页仍然空白，快照显示渲染前抛错" }
 // 测试通过（去 done）：同样要交回 JSON，但 done 是终止节点，所以 pass 边不带 prompt
 { "next": "pass", "status": "ok", "summary": "已修复，3 个测试全绿" }
+// 节点确实无法完成：不选任何路径，直接终止整个运行并留下原因
+{ "abort": "登录页仍然空白，且当前环境没有可用的浏览器快照；需要人工排查环境" }
 ```
 
-`status` / `blocked` / `reason` 等只是机器人自己约定的**业务字段**，不是节点或运行状态——运行状态仍然只有 `completed` / `failed` / `cancelled` / `rejected` / `waiting` / `interrupted`。
+`abort` 是每个机器人节点内置的**主动终止**能力：它不是一条出边、不产生 route、也不需要预先定义 `end` 节点。合法 `abort` 会把这次执行记成失败（`step.aborted = true`、`stopReason = "aborted"`），运行以 `failed` 结束并在 `run.error` / `error` 里留下节点 id 与原因；`run.result.aborted` 也是 `true`。不满足声明的 `output` 必填字段时仍然可以靠 `abort` 干净退出，所以不要为了“停住”而伪造一条路径。
+
+`status` / `blocked` / `reason` 等只是机器人自己约定的**业务字段**，不是节点或运行状态——运行状态仍然只有 `completed` / `failed` / `cancelled` / `rejected` / `waiting` / `interrupted`；主动终止只是 `failed` 的一种带 `aborted` 标记的来源。
 
 节点字段：
 
@@ -158,11 +162,11 @@
 
 **格式校验是严格的**：`report` 与 `when` 在 v2 里都是校验错误（分别提示 report 已在格式 2 移除、when 已移除请用 JSON 的 `next` 选择出边）；机器人节点没有 `prompt`，但必须声明 `output`；start / gate / end 声明 `output` 会报错；v2 不兼容旧格式（没有 start 节点、用顶层 `"start"` 指定入口、prompt 写在机器人节点上）的定义。
 
-**输出契约与路由**：每个机器人节点必须声明 `output`——节点结果 JSON 的 JSON Schema。支持的关键字：`type`（必填：object / array / string / number / integer / boolean / null）、`description`、`properties`、`required`、`additionalProperties`（布尔）、`items`、`enum`、`const`、`oneOf`（独占）；属性名必须是 `[A-Za-z0-9_-]{1,64}`，方便模板寻址；顶层不能声明 `next` / `attachments`。引擎把声明合并成 `structured_output` 的参数：有出边时加 `next` 枚举并设为必填，同时总是加内置的 `attachments` 数组；并把同一份契约追加到节点 prompt 末尾。
+**输出契约与路由**：每个机器人节点必须声明 `output`——节点结果 JSON 的 JSON Schema。支持的关键字：`type`（必填：object / array / string / number / integer / boolean / null）、`description`、`properties`、`required`、`additionalProperties`（布尔）、`items`、`enum`、`const`、`oneOf`（独占）；属性名必须是 `[A-Za-z0-9_-]{1,64}`，方便模板寻址；顶层不能声明 `next` / `abort` / `attachments`。引擎把声明合并成 `structured_output` 的参数：有出边时加 `next` 枚举（不放进 `required`，因为 `abort` 可以替代它），总是加内置的 `abort` 字符串与内置的 `attachments` 数组；并把同一份契约追加到节点 prompt 末尾。
 
-节点必须交回**一个 JSON 对象**（scoped 工具 `structured_output`；最后一条回复本身是 JSON、或用 ```json 代码块同样接受，并且同样校验）。缺必填字段、类型 / enum 不符、或 `additionalProperties: false` 下多出字段时，插件在**同一个会话**里追问并给出具体问题，最多 `resultRetries` 次（robots 插件配置，默认 2）；重试用尽仍不合法时节点以 `error` 结束。节点有出边时，JSON 里必须带 `next`，值就是某条出边的 `name`；缺 `next`、值对不上任何出边、或同一个节点下出边重名也走同一追问通道。观察者按 `next` 直接走那条边（连同它的 `prompt`），不需要 `when` 条件，也不需要额外的判断 agent。没有出边的终止机器人节点仍然交回 JSON，但不需要 `next`。除 `next` 外的字段都存进这次执行的 `data`（模板可用 `{{nodes.<id>.data.<path>}}` 引用）；`attachments` 是内置能力，会被规范化成复制后的清单。运行页展示最终文本、附件下载与这次走出的 route，不铺 key/value、也不展示原始 JSON。
+节点必须交回**一个 JSON 对象**（scoped 工具 `structured_output`；最后一条回复本身是 JSON、或用 ```json 代码块同样接受，并且同样校验）。缺必填字段、类型 / enum 不符、或 `additionalProperties: false` 下多出字段时，插件在**同一个会话**里追问并给出具体问题，最多 `resultRetries` 次（robots 插件配置，默认 2）；重试用尽仍不合法时节点以 `error` 结束。节点有出边时，JSON 里必须带 `next`（某条出边的 `name`）或 `abort`，二者恰好一个；缺 `next`、值对不上任何出边、`next` 与 `abort` 同时出现、`abort` 不是非空字符串、或同一个节点下出边重名都走同一追问通道，追问会再次说明 `abort` 是合法出口。合法 `abort` 直接终止运行，观察者不会再续接中断的会话；合法的 `next` 则按那条边（连同它的 `prompt`）前进，不需要 `when` 条件，也不需要额外的判断 agent。没有出边的终止机器人节点仍然交回 JSON，但不需要 `next`。除 `next` / `abort` 外的字段都存进这次执行的 `data`（模板可用 `{{nodes.<id>.data.<path>}}` 引用）；`attachments` 是内置能力，会被规范化成复制后的清单，且只在节点正常完成时复制。运行页展示最终文本、附件下载与这次走出的 route（主动终止时显示 `节点主动终止运行` 标签与原因），不铺 key/value、也不展示原始 JSON。
 
-边上的机器人 `prompt` 应当写清两件事：任务，以及每个 `next` 值分别代表什么。结果字段由节点的 `output` 声明、由引擎自动追加到 prompt，不要在边 prompt 里重复字段清单；也不要把附件当成答案的输出通道。工作流不会注入其它行为提示词。
+边上的机器人 `prompt` 应当写清两件事：任务，以及每个 `next` 值分别代表什么。结果字段由节点的 `output` 声明、由引擎自动追加到 prompt，不要在边 prompt 里重复字段清单；也不要把附件当成答案的输出通道。`abort` 出口也由引擎契约统一说明，不需要在每条边 prompt 里重复，更不要为了“无法完成”单独加一条假路径或结束节点。
 
 续接同一个机器人会话时，服务会重新装好同名的 `structured_output` 工具，续接轮次同样要交回匹配 `output` 的 JSON。升级前已在跑的运行快照没有 `output`：这些节点沿用旧的宽松 schema，prompt 也不追加契约块，运行结束后自然消失。
 
@@ -173,7 +177,7 @@ prompt 只做占位符替换，不求值：`{{goal}}`、`{{step}}`、`{{nodes.<i
 - 根路径只能是 `goal` / `step` / `runId` / `nodes`；
 - `{{nodes.<id>.<field>}}` 的节点必须存在；`text` / `data` / `route` / `attachments` / `robot` / `sessionId` 只对 robot 节点有效，`decision` 只对 gate 节点有效；
 - `{{nodes.<id>.data.<path>}}` 必须落在该节点声明的 `output` 里：对象按 `properties` 下钻；数组必须是数字下标且声明了 `items`；`oneOf` 要求所有分支都存在。即使 `additionalProperties` 允许，引用未声明字段也会在计划阶段报错；
-- `data.next` / `data.attachments` 是引擎保留字段，请改用 `{{nodes.<id>.route}}` / `{{nodes.<id>.attachments.<index>...}}`。
+- `data.next` / `data.abort` / `data.attachments` 是引擎保留字段，请改用 `{{nodes.<id>.route}}` / `{{nodes.<id>.attachments.<index>...}}`。
 
 运行期值不存在时该节点仍然会失败（这里只校验 schema 存在性，不推断节点在这条边上是否已经执行过）；`.text` 对二进制 / 超大附件不可用。
 

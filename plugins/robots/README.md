@@ -303,7 +303,8 @@ const handle = await ctx.bukaRobots.dispatchSession({
   robot: robots[0].name,
   prompt: '检查登录页并跑测试，结束时交回 JSON：{ next: "pass" | "fix", status, summary }。',
   routes: ['pass', 'fix'], // 工作流节点的出边名；结果里的 next 必须是其中之一
-  outputSchema: { type: 'object', properties: { next: { enum: ['pass', 'fix'] } }, required: ['next'] },
+  outputSchema: { type: 'object', properties: { next: { enum: ['pass', 'fix'] }, abort: { type: 'string' } } },
+  abortable: true, // 允许节点用 { "abort": "原因" } 主动终止；默认 false
 })
 // handle.startSeq 是这一轮的起点；调用方只处理自己登记过的会话事件。
 const turn = handle.readResult() // { sessionId, text, stopReason, turnEnded, structured?, resultRetries? }
@@ -329,6 +330,7 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 - 可传 `agentPreset` 显式指定该会话使用的 agent preset：不传时新会话按宿主默认组合创建，续接时优先恢复会话里记录的 preset；工作流插件用它把机器人节点落到普通工作 preset（默认 `standard`），避免继承编排器的 persona 与工具集；
 - **每个会话都要交回 JSON**：服务会注册 scoped 工具 `structured_output`，结果出现在 `result.structured`。可传 `outputSchema` 约束这个工具的 JSON Schema，不传时接受任意对象；最后一条回复本身是 JSON 对象（含 ```json 代码块）时同样算交回；
 - 可传 `routes`（合法的工作流 route 名列表）：结束时没有交回合法 JSON、或（工作流节点有出边时）`next` 不在 `routes` 里，服务会在**同一个会话**里补一条消息，说明当前问题和合法 route，要求重新回复，最多 `resultRetries` 次；重试用尽仍不合法时 `stopReason` 为 `error`，`error` 里写明追问了几次。工作流还可以用 `reason: 'invalid-output'` 与可选的 `detail` 追问「结果不符合节点声明的 output schema」，服务会把 detail 原样附在追问消息里；
+- 可传 `abortable: true` 告诉服务这个节点允许用 `{ "abort": "原因" }` 主动终止：`structured_output` 的工具说明与系统提示会补上「确实无法完成时交回 abort，而不是随便选一条 route」，结果追问也会在列出 route 的同时再次给出 abort 出口；默认 `false`，行为与旧调用方完全一致。`reason: 'invalid-abort'` / `'ambiguous-result'` 是工作流为「abort 形态不合法」与「next 和 abort 同时出现」准备的追问类型；
 - **走正常审批策略**：机器人是普通会话，未显式传 `approval`（或传 `'ask'`）时沿用部署的审批策略，可以在会话里请求工具审批或向用户提问；只有显式 `approval: 'never'` 才强制拒绝（无头场景）。机器人会话是**运行时根会话**，续接时也不挂回父会话；工作流不会注入行为提示词；
 - **没有默认超时**：不传 `timeoutMs` 时会话按自己的节奏跑完（旧版本默认 10 分钟，已移除）。需要硬截止时显式传正的 `timeoutMs`（毫秒）；超时 / 取消时中断会话，再尽量收集已经产生的输出，`stopReason` 为 `timeout` / `aborted`；
 - 读取结果后自动释放该轮的 live agent（会话日志仍然保留，可在侧边栏回看）；续接同一个会话不会新开会话。DSH 在 `session/disposed` 时会向客户端发 `api-session/removed`，所以释放后服务会用宿主 `sessionController.list()` 取回这条仍然持久化的会话并补发一次 `api-session/added`：节点结束时它不会从侧边栏消失，运行页的「打开会话」也仍然能进入。`sessionController` 不存在（headless 组合）或读列表失败时只记一条 warn，不影响节点结果；
@@ -339,7 +341,7 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 工作流观察者不 await 会话结果，而是把 prompt 投进去后订阅全局 `session/event`、在 `turn/end` 后自己读结果。服务为此提供三个入口：
 
 - `startSession({ ...request, wait: false })`：等价于 `dispatchSession(request)`；默认仍是 `wait: true`，既有调用方不受影响；
-- `dispatchSession({ robot, prompt, sessionId?, routes?, outputSchema?, ... })`：把 prompt 投进机器人会话后立即返回一个**可观测句柄**，不在服务里等待这一轮结束，也不设默认超时；
+- `dispatchSession({ robot, prompt, sessionId?, routes?, outputSchema?, abortable?, ... })`：把 prompt 投进机器人会话后立即返回一个**可观测句柄**，不在服务里等待这一轮结束，也不设默认超时；
 - `openSession({ robot, sessionId, ... })`：只 resume / attach 一个已有会话，**不发 prompt**；恢复时先用 `readResult()` 检查上一轮是否其实已经结束（`turnEnded`），确认要继续再 `send()`。
 
 句柄字段：`mode`（固定 `session`）、`sessionId`、`robot`、`cwd`、`resumed`、`compacted`、`compactionError?`、`startSeq`（这一轮的起点序号），以及：
@@ -348,7 +350,7 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 | --- | --- |
 | `readResult({ sinceSeq? })` | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }` |
 | `send(text, { compactFirst? })` | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq |
-| `retryReport({ routes?, reason?, detail? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题；`reason: 'invalid-output'` 时附上 `detail`）；没有额度时返回 `null` |
+| `retryReport({ routes?, abortable?, reason?, detail? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题；`reason: 'invalid-output'` 时附上 `detail`，`abortable: true` 时同时给出 abort 出口）；没有额度时返回 `null` |
 | `cancel(reason?)` | 取消当前轮，等它落定后返回已经写下的结果 |
 | `dispose()` | 只释放这一轮的 live agent，会话日志仍然保留；释放后服务会把这条仍然持久化的会话补通告回客户端（`api-session/added`），所以侧边栏与「打开会话」都不受影响 |
 

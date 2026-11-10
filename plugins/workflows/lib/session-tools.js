@@ -668,7 +668,7 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
     defineTool({
       name: 'buka_workflow_execution_output',
       description:
-        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a gate execution returns its decision. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
+        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a node that aborted the workflow reports stopReason "aborted" with its reason in error. A gate execution returns its decision. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
       parameters: {
         seq: {
           type: 'number',

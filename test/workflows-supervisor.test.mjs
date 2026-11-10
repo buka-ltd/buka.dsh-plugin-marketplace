@@ -67,12 +67,13 @@ function harness({
           reportSubmitted: result.structured !== undefined,
         }
       },
-      retryReport({ routes = [], reason = '', detail = '' } = {}) {
+      retryReport({ routes = [], reason = '', detail = '', abortable = false } = {}) {
         if (retries >= 2) return null
         retries += 1
         const routeText = routes.length === 0 ? '' : ` routes=${routes.join(',')}`
         const detailText = typeof detail === 'string' && detail !== '' ? ` detail=${detail}` : ''
-        return `retry-${retries} ${reason}${routeText}${detailText}`
+        const abortText = abortable ? ' abort' : ''
+        return `retry-${retries} ${reason}${routeText}${detailText}${abortText}`
       },
       async send(text, { compactFirst = true } = {}) {
         calls.sends.push({ sessionId: state.sessionId, text, compactFirst })
@@ -299,8 +300,9 @@ test('supervisor: a turn/end event advances the run without an awaited session r
     })
     assert.equal(host.calls.dispatch[0].approval, 'ask')
     assert.equal('report' in host.calls.dispatch[0], false)
-    assert.deepEqual(host.calls.dispatch[0].outputSchema.required, ['next'])
+    assert.equal(host.calls.dispatch[0].outputSchema.required, undefined)
     assert.deepEqual(host.calls.dispatch[0].outputSchema.properties.next.enum, ['完成'])
+    assert.equal(host.calls.dispatch[0].outputSchema.properties.abort.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.summary.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.attachments.type, 'array')
     assert.match(host.calls.dispatch[0].outputSchema.properties.attachments.description, /independent data or files/)
@@ -1352,7 +1354,8 @@ test('supervisor: a result that does not match the declared output is retried in
     assert.equal(run.steps[0].status, 'completed')
     assert.equal(run.steps[0].data.summary, 'done')
     assert.equal(run.steps[0].route, '完成')
-    assert.deepEqual(host.calls.dispatch[0].outputSchema.required, ['summary', 'next'])
+    assert.deepEqual(host.calls.dispatch[0].outputSchema.required, ['summary'])
+    assert.equal(host.calls.dispatch[0].outputSchema.properties.abort.type, 'string')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -1434,6 +1437,271 @@ test('supervisor: pending question and approval are recorded and cleared', async
     await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction === null, 'approval cleared')
 
     await supervisor.cancel(started.runId)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a valid abort ends the run as failed without following an edge', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'cannot', structured: { abort: '缺少访问生产环境的凭据' }, stopReason: 'completed' },
+      ],
+    })
+    const definition = SIMPLE
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'aborted run')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps.length, 1)
+    assert.equal(run.steps[0].status, 'failed')
+    assert.equal(run.steps[0].stopReason, 'aborted')
+    assert.equal(run.steps[0].aborted, true)
+    assert.equal(run.steps[0].route, null)
+    assert.equal(run.steps[0].routeTo, null)
+    assert.equal(run.steps[0].error, '缺少访问生产环境的凭据')
+    assert.equal(run.result.status, 'failed')
+    assert.equal(run.result.aborted, true)
+    assert.match(run.error, /workflow node "work" aborted the run/u)
+    assert.match(run.error, /缺少访问生产环境的凭据/u)
+    assert.equal(host.calls.dispatch.length, 1, 'no next node is dispatched')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: abort does not need the declared output fields', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [{ text: 'cannot', structured: { abort: '输出无法生成' }, stopReason: 'completed' }],
+    })
+    const definition = {
+      goal: '严格输出',
+      maxSteps: 10,
+      nodes: [
+        { id: 'start', type: 'start', next: [{ to: 'work', name: '开始', prompt: 'do the work' }] },
+        {
+          id: 'work',
+          type: 'robot',
+          robot: 'writer',
+          output: {
+            type: 'object',
+            properties: { summary: { type: 'string' } },
+            required: ['summary'],
+            additionalProperties: false,
+          },
+          next: [{ to: 'done', name: '完成' }],
+        },
+        { id: 'done', type: 'end', status: 'completed' },
+      ],
+    }
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'aborted strict output')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps[0].aborted, true)
+    assert.equal(run.steps[0].error, '输出无法生成')
+    assert.equal(run.result.aborted, true)
+    assert.equal(host.calls.sends.length, 0, 'abort bypasses the declared output validation')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: abort on a terminal robot node fails instead of completing', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [{ text: 'cannot', structured: { abort: '没有可用的数据源' }, stopReason: 'completed' }],
+    })
+    const definition = {
+      goal: '终止节点主动终止',
+      maxSteps: 10,
+      nodes: [
+        { id: 'start', type: 'start', next: [{ to: 'work', name: '开始', prompt: 'do the work' }] },
+        {
+          id: 'work',
+          type: 'robot',
+          robot: 'writer',
+          output: { type: 'object', properties: {} },
+        },
+      ],
+    }
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'terminated abort')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps[0].aborted, true)
+    assert.equal(run.result.aborted, true)
+    assert.match(run.error, /没有可用的数据源/u)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: next and abort together are retried in the same session', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'both', structured: { next: '完成', abort: '继续不了' }, stopReason: 'completed' },
+        { text: 'abort', structured: { abort: '继续不了' }, stopReason: 'completed' },
+      ],
+    })
+    const definition = SIMPLE
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'ambiguous abort retry')
+    const run = await store.readRun(started.runId)
+    assert.equal(host.calls.sends.length, 1)
+    assert.match(host.calls.sends[0].text, /ambiguous-result/u)
+    assert.match(host.calls.sends[0].text, /abort/u)
+    assert.equal(run.steps[0].aborted, true)
+    assert.equal(run.steps[0].error, '继续不了')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: an empty abort reason is retried, then fails as invalid output', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'bad', structured: { abort: '' }, stopReason: 'completed' },
+        { text: 'bad', structured: { abort: '   ' }, stopReason: 'completed' },
+        { text: 'bad', structured: { abort: '' }, stopReason: 'completed' },
+      ],
+    })
+    const definition = SIMPLE
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'invalid abort exhausted')
+    const run = await store.readRun(started.runId)
+    assert.equal(host.calls.sends.length, 2)
+    assert.match(host.calls.sends[0].text, /invalid-abort/u)
+    assert.match(run.error, /invalid workflow result/u)
+    assert.match(run.error, /non-empty reason/u)
+    assert.equal(run.steps[0].aborted, undefined)
+    assert.equal(run.result.aborted, undefined)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: resumeAll finalizes a completed abort result as an aborted run', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const definition = SIMPLE
+    const plan = planOf(definition)
+    const run = {
+      version: 1,
+      runId: 'wf-recover-abort',
+      seq: 1,
+      goal: '恢复主动终止',
+      status: 'running',
+      createdAt: 1,
+      updatedAt: 1,
+      finishedAt: null,
+      createdBy: { sessionId: 'root' },
+      current: {
+        nodeId: 'work',
+        visit: 1,
+        seq: 1,
+        type: 'robot',
+        robot: 'writer',
+        prompt: 'do the work',
+        sessionId: 'session-recover-abort',
+        startSeq: 0,
+        startedAt: 1,
+        attempt: 1,
+        recoveryAttempts: 0,
+      },
+      pendingGate: null,
+      steps: [],
+      sessions: [],
+      result: null,
+      error: null,
+    }
+    await store.create({ run, definition, plan })
+    const host = harness({ autoFinish: false })
+    host.sessions.set('session-recover-abort', {
+      sessionId: 'session-recover-abort',
+      prompt: 'do the work',
+      turnSeq: 1,
+      turnEnded: true,
+      result: { text: 'cannot', structured: { abort: '恢复后发现无法完成' }, stopReason: 'completed' },
+      disposed: false,
+      cancelled: null,
+    })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    await supervisor.resumeAll()
+    await waitFor(async () => (await store.readRun(run.runId))?.status === 'failed', 'recovered abort')
+    const persisted = await store.readRun(run.runId)
+    assert.equal(persisted.steps.length, 1)
+    assert.equal(persisted.steps[0].recovered, true)
+    assert.equal(persisted.steps[0].aborted, true)
+    assert.equal(persisted.result.aborted, true)
+    assert.match(persisted.error, /恢复后发现无法完成/u)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a valid abort wins over session recovery', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [{ text: 'cannot', structured: { abort: '会话断开前已确认无法继续' }, stopReason: 'aborted' }],
+    })
+    const definition = SIMPLE
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'abort before recovery')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps[0].aborted, true)
+    assert.equal(run.result.aborted, true)
+    assert.equal(host.calls.open.length, 0, 'the session is not resumed when it already aborted')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

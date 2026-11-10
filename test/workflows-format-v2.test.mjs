@@ -357,8 +357,8 @@ test('routing: resolveRoute reports missing, unknown and terminal routes', () =>
   assert.deepEqual(routing.resolveRoute({}, { next: 'yes' }), { rule: null })
 })
 
-test('routing: only resolveRoute is exported', () => {
-  assert.deepEqual(Object.keys(routing).sort(), ['resolveRoute'])
+test('routing: exports resolveRoute and resolveAbort', () => {
+  assert.deepEqual(Object.keys(routing).sort(), ['MAX_ABORT_REASON_LENGTH', 'resolveAbort', 'resolveRoute'])
 })
 
 test('run: renderNodePrompt renders the edge prompt with template values', () => {

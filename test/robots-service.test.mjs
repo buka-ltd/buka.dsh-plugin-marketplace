@@ -534,6 +534,37 @@ test('robots service: startSession creates a robot-cwd session, records structur
   }
 })
 
+test('robots service: abortable adds the abort escape to the structured output contract', async () => {
+  const home = await makeRobotHome()
+  try {
+    const { ctx, state } = makeFakeContext()
+    const service = new RobotSessionService({
+      ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const session = await service.startSession({
+      robot: 'writer',
+      prompt: 'do the work',
+      abortable: true,
+      timeoutMs: 5000,
+      outputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { abort: { type: 'string' } },
+      },
+    })
+    assert.match(state.registered[0].description, /abort/u)
+    assert.match(state.sections[0].text, /abort/u)
+    await state.registered[0].execute({ abort: '缺少工作区权限' })
+    state.finishIdle()
+    const result = await session.result
+    assert.deepEqual(result.structured, { abort: '缺少工作区权限' })
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
 test('robots service: the structured tool falls back to a generic object schema', async () => {
   const home = await makeRobotHome()
   try {
@@ -974,6 +1005,19 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   })
   assert.match(invalidOutput, /does not match the output schema declared for this node/)
   assert.match(invalidOutput, /Problem: status: missing required field\./)
+  const ambiguous = resultRetryPrompt(1, 2, {
+    reason: 'ambiguous-result',
+    routes: ['done'],
+    abortable: true,
+  })
+  assert.match(ambiguous, /included both `next` and `abort`/u)
+  assert.match(ambiguous, /exactly one of `next`/u)
+  assert.match(ambiguous, /set `abort` to a short non-empty reason/u)
+  const invalidAbort = resultRetryPrompt(1, 2, { reason: 'invalid-abort', abortable: true })
+  assert.match(invalidAbort, /`abort` field in your last JSON result must be a non-empty string/u)
+  assert.match(invalidAbort, /set `abort` to a short non-empty reason/u)
+  // 没有 abortable 时不能把 abort 作为出口塞给节点。
+  assert.doesNotMatch(resultRetryPrompt(1, 2, { reason: 'missing-next', routes: ['done'] }), /`abort`/u)
   // 没有路由时不要把 next 强塞给节点。
   assert.doesNotMatch(resultRetryPrompt(1, 2, {}), /`next`/)
 
@@ -1007,6 +1051,7 @@ test('robots service: retryReport accepts routes/reason and is bounded', async (
       robot: 'writer',
       prompt: 'do the work',
       routes: ['continue'],
+      abortable: true,
     })
     const prompt = handle.retryReport({ routes: ['done', 'retry'], reason: 'missing-next' })
     assert.equal(typeof prompt, 'string')
@@ -1014,6 +1059,8 @@ test('robots service: retryReport accepts routes/reason and is bounded', async (
     assert.match(prompt, /"done"/)
     assert.match(prompt, /"retry"/)
     assert.match(prompt, /retry 1\/2/)
+    assert.match(prompt, /exactly one of `next`/u)
+    assert.match(prompt, /set `abort` to a short non-empty reason/u)
     // invalid-output 的 detail 要带进追问，routes 不传时用会话请求里的值兜底。
     const invalid = handle.retryReport({
       reason: 'invalid-output',

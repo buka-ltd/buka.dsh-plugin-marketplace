@@ -171,6 +171,7 @@ window.__ModuleLoader__.load({
         'No input was recorded for this execution. Older runs did not persist a per-entry prompt, so the definition template is not shown again.',
       executionNoOutput: 'This execution produced no text output.',
       executionTimedOut: 'Timed out',
+      executionAborted: 'Node aborted the run',
       executionPrev: 'Previous step',
       executionPrevNone: 'This is the first execution in this run.',
       executionNext: 'Next step',
@@ -298,6 +299,7 @@ window.__ModuleLoader__.load({
       executionInputMissing: '这次执行没有记录输入；旧运行没有按次落盘提示词，所以这里不重复展示定义里的模板。',
       executionNoOutput: '这次执行没有文本输出。',
       executionTimedOut: '超时',
+      executionAborted: '节点主动终止运行',
       executionPrev: '上一步',
       executionPrevNone: '这是本次运行的第一次执行。',
       executionNext: '下一步',
@@ -1865,6 +1867,7 @@ window.__ModuleLoader__.load({
             step.compacted === true ? h(Tag, { tone: 'success' }, t('sessionCompacted')) : null,
             step.recovered === true ? h(Tag, { tone: 'info' }, t('sessionRecovered')) : null,
             step.timedOut === true ? h(Tag, { tone: 'warning' }, t('executionTimedOut')) : null,
+            step.aborted === true ? h(Tag, { tone: 'warning' }, t('executionAborted')) : null,
           ),
           h(
             'div',

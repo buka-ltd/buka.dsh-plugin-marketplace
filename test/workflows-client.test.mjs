@@ -855,6 +855,43 @@ test('client: a running node shows recovering and live-duration state, and step 
   assert.equal(texts.filter((text) => text === 'session-1').length, 1, 'the live session is shown once')
 })
 
+test('client: an aborted execution shows the abort tag and its reason', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const abortedRun = {
+    ...data.run,
+    status: 'failed',
+    error: 'workflow node "publish" aborted the run: 缺少发布凭据',
+    result: {
+      status: 'failed',
+      lastNode: 'publish',
+      message: 'workflow node "publish" aborted the run: 缺少发布凭据',
+      aborted: true,
+    },
+    steps: data.run.steps.map((step) =>
+      step.seq === 2
+        ? {
+            ...step,
+            status: 'failed',
+            stopReason: 'aborted',
+            aborted: true,
+            route: null,
+            routeTo: null,
+            error: '缺少发布凭据',
+          }
+        : step,
+    ),
+  }
+  const model = buildRunGraph({ run: abortedRun, definition: data.definition })
+  assert.ok(model)
+  const graph = { ...model, ...layoutRunGraph(model) }
+  const tree = client.render(detailStates({ ...data, run: abortedRun, graph }, 'publish'))
+  const { texts } = collect(tree)
+  assert.ok(texts.includes('executionAborted'), 'the execution is tagged as an abort')
+  assert.ok(texts.includes('error: 缺少发布凭据'), 'the node reason is shown')
+  assert.equal(texts.includes('routeLabel: done'), false, 'an aborted execution has no route')
+})
+
 test('client: entering a run focuses the running node, or done when completed', async () => {
   const client = await loadClient()
 

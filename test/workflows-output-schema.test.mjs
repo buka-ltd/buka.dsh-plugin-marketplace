@@ -115,16 +115,23 @@ test('output: unsupported keywords, malformed required and bad shapes are reject
   assert.match(errorText(badAdditional), /must be true or false/u)
 })
 
-test('output: next and attachments are reserved at the top level', () => {
+test('output: next, abort and attachments are reserved at the top level', () => {
   const next = parse({ type: 'object', properties: { next: { type: 'string' } } })
   assert.match(errorText(next), /added by the workflow from the outgoing edge names/u)
+  const abort = parse({ type: 'object', properties: { abort: { type: 'string' } } })
+  assert.match(errorText(abort), /built-in way to end the run/u)
   const attachments = parse({ type: 'object', properties: { attachments: { type: 'array' } } })
   assert.match(errorText(attachments), /built-in attachments capability/u)
 
-  // 嵌套对象里的 next 只是普通数据字段，允许。
+  // 嵌套对象里的 next / abort 只是普通数据字段，允许。
   const nested = parse({
     type: 'object',
-    properties: { meta: { type: 'object', properties: { next: { type: 'string' } } } },
+    properties: {
+      meta: {
+        type: 'object',
+        properties: { next: { type: 'string' }, abort: { type: 'string' } },
+      },
+    },
   })
   assert.deepEqual(nested.errors, [])
 })
@@ -174,7 +181,9 @@ test('output: buildResultSchema merges next and the built-in attachments capabil
   const before = JSON.parse(JSON.stringify(node.output))
   const schema = buildResultSchema(node)
   assert.deepEqual(schema.properties.next.enum, ['交稿', '完成'])
-  assert.deepEqual(schema.required, ['summary', 'next'])
+  assert.deepEqual(schema.required, ['summary'], 'next is optional because abort can replace it')
+  assert.equal(schema.properties.abort.type, 'string')
+  assert.match(schema.properties.abort.description, /cannot complete this task/u)
   assert.equal(schema.properties.attachments.type, 'array')
   assert.match(schema.properties.attachments.description, /independent data or files/u)
   assert.match(schema.properties.attachments.description, /never put the answer itself/u)
@@ -182,12 +191,14 @@ test('output: buildResultSchema merges next and the built-in attachments capabil
 
   const terminal = buildResultSchema({ id: 'done', type: 'robot', output: { type: 'object', properties: {} } })
   assert.equal(Object.hasOwn(terminal.properties, 'next'), false)
+  assert.equal(terminal.properties.abort.type, 'string')
   assert.deepEqual(terminal.required, undefined)
   assert.equal(terminal.properties.attachments.type, 'array')
 
   const legacy = buildResultSchema({ id: 'old', type: 'robot' })
   assert.equal(legacy.type, 'object')
   assert.equal(legacy.additionalProperties, true)
+  assert.equal(legacy.properties.abort.type, 'string')
   assert.equal(legacy.properties.attachments.type, 'array')
   assert.deepEqual(routeNamesOf(node), ['交稿', '完成'])
 })
@@ -270,8 +281,11 @@ test('output: outputProblems validates the declared result JSON', () => {
   const extra = outputProblems(node, { status: 'ok', extra: true })
   assert.match(extra[0], /extra: unexpected field/)
 
-  // 顶层 next / attachments 是引擎字段，不参与声明字段校验。
-  assert.deepEqual(outputProblems(node, { status: 'ok', next: '完成', attachments: ['a'] }), [])
+  // 顶层 next / abort / attachments 是引擎字段，不参与声明字段校验。
+  assert.deepEqual(
+    outputProblems(node, { status: 'ok', next: '完成', abort: 'cannot continue', attachments: ['a'] }),
+    [],
+  )
 
   // 升级前的快照没有 output：不校验。
   assert.deepEqual(outputProblems({ id: 'old', type: 'robot' }, { anything: true }), [])
@@ -294,7 +308,11 @@ test('output: renderOutputContract states the final-text and attachment rules', 
   assert.match(contract, /^---\nResult contract \(added by the workflow\):/u)
   assert.match(contract, /"summary"/)
   assert.match(contract, /"next"/)
+  assert.match(contract, /"abort"/)
   assert.match(contract, /"attachments"/)
+  assert.match(contract, /exactly one of "next"/u)
+  assert.match(contract, /cannot complete this task/u)
+  assert.match(contract, /recorded as failed/u)
   assert.match(contract, /final assistant text is this step's output/)
   assert.match(contract, /not a place for the answer itself/)
   assert.doesNotMatch(contract, /deliverable/u)

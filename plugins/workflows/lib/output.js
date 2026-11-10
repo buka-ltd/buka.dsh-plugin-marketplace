@@ -7,8 +7,9 @@
  * - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。定义由模型现场
  *   生成，所以这里只放行一组可移植关键字，避免把任意 schema 直接当成工具参数；
  * - `buildResultSchema`：把声明的 `output` 与引擎字段合并成真正交给
- *   `structured_output` 的 schema。`next` 由出边名生成；`attachments` 是每个
- *   robot 节点内置的能力，总是可选出现（不是主输出，只放独立数据 / 文件）；
+ *   `structured_output` 的 schema。`next` 由出边名生成；`abort` 是每个 robot
+ *   节点内置的主动终止能力；`attachments` 是每个 robot 节点内置的能力，总是
+ *   可选出现（不是主输出，只放独立数据 / 文件）；
  * - `outputProblems`：运行期按声明的 `output` 校验节点交回的结果；
  * - `resolveOutputPath`：定义校验时检查 prompt 里 `{{nodes.<id>.data.<path>}}`
  *   的路径是否真的在目标节点的 `output` 里；
@@ -30,7 +31,7 @@ export const MAX_OUTPUT_SCHEMA_DEPTH = 8
 export const MAX_OUTPUT_PROPERTIES = 64
 
 /** 引擎保留、不允许在 `output` 里声明的顶层字段。 */
-export const RESERVED_OUTPUT_FIELDS = Object.freeze(['next', 'attachments'])
+export const RESERVED_OUTPUT_FIELDS = Object.freeze(['next', 'attachments', 'abort'])
 
 /** 属性名必须能被 prompt 模板的点号路径寻址。 */
 const PROPERTY_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u
@@ -234,7 +235,9 @@ function walkSchema(raw, path, depth, state, fail) {
             `${path}.properties.${name}`,
             name === 'next'
               ? 'is added by the workflow from the outgoing edge names; do not declare it in output'
-              : 'is always available as the built-in attachments capability; do not declare it in output',
+              : name === 'abort'
+                ? 'is the built-in way to end the run when this node cannot complete its task; do not declare it in output'
+                : 'is always available as the built-in attachments capability; do not declare it in output',
           )
           invalid = true
           continue
@@ -367,9 +370,10 @@ function attachmentSchema() {
 /**
  * 构造真正交给 `structured_output` 的 schema。
  *
- * 新定义以声明的 `output` 为底，合并 `next`（有出边时 enum + required）与内置的
- * `attachments`；升级前已在跑的快照没有 `output`，退回旧的宽松对象 schema，保证
- * 未完成的运行能继续。返回值是新对象，不会修改节点。
+ * 新定义以声明的 `output` 为底，合并 `next`（有出边时 enum）、内置的 `abort`
+ * 与内置的 `attachments`；升级前已在跑的快照没有 `output`，退回旧的宽松对象
+ * schema，保证未完成的运行能继续。`next` 不放进 `required`：节点可以用 `abort`
+ * 代替它。返回值是新对象，不会修改节点。
  *
  * @param {Record<string, any>} node
  * @returns {Record<string, any>}
@@ -385,12 +389,16 @@ export function buildResultSchema(node) {
     schema.properties.next = {
       type: 'string',
       enum: routes,
-      description: 'Route key from the workflow definition; selects the next edge.',
+      description:
+        'Route key from the workflow definition; selects the next edge. Use "abort" instead when you cannot complete this node\'s task.',
     }
-    const required = Array.isArray(schema.required) ? schema.required : []
-    if (!required.includes('next')) schema.required = [...required, 'next']
   }
 
+  schema.properties.abort = {
+    type: 'string',
+    description:
+      'Set this instead of "next" (or instead of a normal result on a terminal node) when you cannot complete this task: a short reason why. The workflow ends and the run is recorded as failed. Abort does not need to satisfy the declared output fields.',
+  }
   schema.properties.attachments = attachmentSchema()
   return schema
 }
@@ -443,8 +451,9 @@ export function resolveOutputPath(schema, segments) {
 /**
  * 按声明的 `output` 校验节点交回的结果。
  *
- * 引擎保留的顶层 `next` / `attachments` 不参与声明字段校验：`next` 由路由单独
- * 校验，`attachments` 是内置能力。返回可读问题列表，空数组表示通过。
+ * 引擎保留的顶层 `next` / `abort` / `attachments` 不参与声明字段校验：`next`
+ * 与 `abort` 由结果解析单独处理，`attachments` 是内置能力。返回可读问题列表，
+ * 空数组表示通过。
  *
  * @param {Record<string, any>} node
  * @param {unknown} data
@@ -599,6 +608,8 @@ export function renderOutputContract(node) {
     '```json',
     JSON.stringify(schema, null, 2),
     '```',
+    'When this node has outgoing edges, the object must contain exactly one of "next" (one of the declared route names) and "abort".',
+    'If you cannot complete this task, do not choose a route you do not believe in: submit "abort" with a short non-empty reason instead. The workflow ends immediately, the run is recorded as failed, and the declared output fields and attachments are not required.',
     "The final assistant text is this step's output shown on the run page; put the actual answer in the final text and the declared fields.",
     'The "attachments" list is a built-in capability for independent data or files this node produced (archives, traces, images, large datasets); it is not a place for the answer itself.',
   ].join('\n')
