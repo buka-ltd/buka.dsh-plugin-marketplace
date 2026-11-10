@@ -10,7 +10,7 @@
  *
  * 一个 run 同时只有一个活跃节点；每个 run 的推进串行化，避免事件竞争导致
  * 重复 dispatch。运行状态以磁盘上的 run.json 为权威，内存里只有活跃句柄。
- * 节点正常完成时会把声明的附件复制到该次执行的节点目录，并把清单写进
+ * 节点正常完成时会把结果里的附件复制到该次执行的节点目录，并把清单写进
  * run.steps / 节点结果 / 模板上下文。
  *
  * 观察者还维护 `sessionId → runId` 索引，供机器人会话里的四个只读工具判断
@@ -22,6 +22,7 @@
 
 import { randomUUID } from 'node:crypto'
 
+import { buildResultSchema, outputProblems, routeNamesOf } from './output.js'
 import { resolveRoute } from './routing.js'
 import {
   WorkflowCancelledError,
@@ -857,7 +858,7 @@ export class WorkflowSupervisor {
         prompt,
         ...(creator === undefined ? {} : { agent: creator }),
         ...(this.options.robotPreset === '' ? {} : { agentPreset: this.options.robotPreset }),
-        outputSchema: resultSchemaOf(node),
+        outputSchema: buildResultSchema(node),
         routes: routeNamesOf(node),
         title: robotSessionTitle(run, node),
         ...(node.agentOptions === undefined ? {} : { agentOptions: node.agentOptions }),
@@ -1014,6 +1015,29 @@ export class WorkflowSupervisor {
       return
     }
 
+    // 结果 JSON 必须匹配节点在定义里声明的 output；不匹配时在同一会话里追问，
+    // 额度与 missing-json / invalid-next 共用。
+    const problems = outputProblems(node, result.structured)
+    if (problems.length > 0) {
+      const detail = problems.slice(0, 3).join('; ')
+      if (
+        await this.#retryResult(ctx, entry, node, {
+          reason: 'invalid-output',
+          routes: routeNamesOf(node),
+          detail,
+        })
+      ) {
+        return
+      }
+      result = {
+        ...result,
+        stopReason: 'error',
+        error: `invalid workflow output for node "${node.id}": ${detail}`,
+      }
+      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      return
+    }
+
     const route = resolveRoute(node, result.structured)
     if (route.error !== undefined) {
       if (
@@ -1042,11 +1066,11 @@ export class WorkflowSupervisor {
    * @param {Record<string, any>} ctx
    * @param {Record<string, any>} entry
    * @param {Record<string, any>} node
-   * @param {{ reason: string, routes?: string[] }} input
+   * @param {{ reason: string, routes?: string[], detail?: string }} input
    * @returns {Promise<boolean>} true 表示已经发出重试
    */
-  async #retryResult(ctx, entry, node, { reason, routes }) {
-    const prompt = entry.handle?.retryReport?.({ reason, routes })
+  async #retryResult(ctx, entry, node, { reason, routes, detail }) {
+    const prompt = entry.handle?.retryReport?.({ reason, routes, detail })
     if (typeof prompt !== 'string' || prompt.trim() === '') return false
     try {
       await entry.handle.send(prompt, { compactFirst: false })
@@ -1357,15 +1381,24 @@ export class WorkflowSupervisor {
             error: 'the robot session did not submit a structured JSON result',
           }
         } else {
-          const resolved = resolveRoute(node, check.structured)
-          if (resolved.error !== undefined) {
+          const problems = outputProblems(node, check.structured)
+          if (problems.length > 0) {
             result = {
               ...check,
               stopReason: 'error',
-              error: `invalid workflow route: ${resolved.error}`,
+              error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
             }
           } else {
-            route = resolved.rule
+            const resolved = resolveRoute(node, check.structured)
+            if (resolved.error !== undefined) {
+              result = {
+                ...check,
+                stopReason: 'error',
+                error: `invalid workflow route: ${resolved.error}`,
+              }
+            } else {
+              route = resolved.rule
+            }
           }
         }
         await this.#completeNode(ctx, node, result, {
@@ -1657,7 +1690,7 @@ export class WorkflowSupervisor {
       return 'interrupted'
     }
     const ctx = this.#createContext({ run, plan, definition, mode: 'background' })
-    // 模板里引用的是完整交付物；run.steps 只留预览，恢复时用节点结果全文覆盖。
+    // 模板里引用的是完整最终文本；run.steps 只留预览，恢复时用节点结果全文覆盖。
     try {
       const nodeResults = await this.store.readNodeResults(runId)
       const byKey = new Map(nodeResults.map((result) => [`${String(result.seq)}:${String(result.nodeId)}`, result]))
@@ -1762,15 +1795,24 @@ export class WorkflowSupervisor {
             error: 'the robot session did not submit a structured JSON result',
           }
         } else {
-          const resolved = resolveRoute(node, check.structured)
-          if (resolved.error !== undefined) {
+          const problems = outputProblems(node, check.structured)
+          if (problems.length > 0) {
             result = {
               ...check,
               stopReason: 'error',
-              error: `invalid workflow route: ${resolved.error}`,
+              error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
             }
           } else {
-            route = resolved.rule
+            const resolved = resolveRoute(node, check.structured)
+            if (resolved.error !== undefined) {
+              result = {
+                ...check,
+                stopReason: 'error',
+                error: `invalid workflow route: ${resolved.error}`,
+              }
+            } else {
+              route = resolved.rule
+            }
           }
         }
         await this.#completeNode(ctx, node, result, {
@@ -1995,7 +2037,7 @@ export class WorkflowSupervisor {
     return {
       robot: node.robot,
       sessionId,
-      outputSchema: resultSchemaOf(node),
+      outputSchema: buildResultSchema(node),
       routes: routeNamesOf(node),
       title: robotSessionTitle(ctx.run, node),
       ...(node.agentOptions === undefined ? {} : { agentOptions: node.agentOptions }),
@@ -2207,76 +2249,6 @@ export class WorkflowSupervisor {
 }
 
 /**
- * 一个 robot 节点可用于 JSON `next` 的路由键（出边 name）。
- *
- * @param {Record<string, any>} node
- * @returns {string[]}
- */
-function routeNamesOf(node) {
-  const rules = Array.isArray(node?.next) ? node.next : []
-  return rules
-    .map((rule) => (typeof rule?.name === 'string' ? rule.name.trim() : ''))
-    .filter((name) => name !== '')
-}
-
-/**
- * 传给 robots 服务的 structured_output 参数 schema：有出边时必须给 next，
- * 并用 enum 限定为当前节点的路由键。
- *
- * @param {Record<string, any>} node
- * @returns {Record<string, any>}
- */
-function resultSchemaOf(node) {
-  const routes = routeNamesOf(node)
-  const attachmentSchema = {
-    type: 'array',
-    description:
-      'Optional files this node produced. Paths are relative to your workspace (or absolute inside it); the workflow copies each file into this execution\'s node directory. Later nodes can list/read them with buka_workflow_execution_attachment or reference them in a prompt as {{nodes.<node id>.attachments.<index>.path}} (and .text for small text files). Binary files are read by path, not embedded.',
-    items: {
-      oneOf: [
-        { type: 'string', description: 'Path to a file, relative to your workspace.' },
-        {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            path: { type: 'string', description: 'Path to a file, relative to your workspace.' },
-            name: {
-              type: 'string',
-              description: 'Optional destination name; defaults to the source file name.',
-            },
-            description: {
-              type: 'string',
-              description: 'Optional one-line description shown with the attachment.',
-            },
-          },
-          required: ['path'],
-        },
-      ],
-    },
-  }
-  if (routes.length === 0) {
-    return {
-      type: 'object',
-      additionalProperties: true,
-      properties: { attachments: attachmentSchema },
-    }
-  }
-  return {
-    type: 'object',
-    additionalProperties: true,
-    properties: {
-      next: {
-        type: 'string',
-        enum: routes,
-        description: 'Route key from the workflow definition; selects the next edge.',
-      },
-      attachments: attachmentSchema,
-    },
-    required: ['next'],
-  }
-}
-
-/**
  * 只保留运行页展示需要的问题字段，并限制体积。
  *
  * @param {unknown} questions
@@ -2392,6 +2364,7 @@ function recoveryPrompt(node, reason) {
   return (
     `Your previous execution of workflow node "${node.id}" was interrupted before it delivered a result (${reason}). ` +
     'Continue from the work already done in this session and finish the assigned task now. ' +
-    `When you are done, submit the final JSON object by calling the structured_output tool.${routeText}`
+    `When you are done, submit the final JSON object by calling the structured_output tool; it must match this node's declared output schema.${routeText} ` +
+    'Put the actual answer in the final text; do not put it only in an attachment.'
   )
 }

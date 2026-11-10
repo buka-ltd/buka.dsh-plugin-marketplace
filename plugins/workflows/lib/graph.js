@@ -56,7 +56,7 @@ export const RAIL_PAD = 14
 /** 终止节点允许的最终状态。 */
 const END_STATUSES = new Set(['completed', 'failed', 'rejected'])
 
-/** 卡片上交付物 / 任务预览的最大字符数。 */
+/** 卡片上最终文本 / 任务预览的最大字符数。 */
 const PREVIEW_LIMIT = 160
 
 /**

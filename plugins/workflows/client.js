@@ -7,8 +7,9 @@
  *
  * - 列表：最近运行的状态、目标、runId、开始时间；
  * - 详情：纵向节点图 + 右侧节点详情；节点详情按「第几次执行」拆成 Tab，每个
- *   Tab 只放那一次的输入（渲染后的提示词）与输出（交付物、附件下载、结构化数据、会话）；
- * - 每个节点可以「打开会话」，复用 DSH 的 `uiWorkspace.openSession(sessionId)`。
+ *   Tab 只放那一次的输入（渲染后的提示词）与输出（最终文本、附件下载、结构化数据、会话）；
+ * - 每个节点可以「打开会话」，复用 DSH 的 `uiWorkspace.openSession(sessionId)`；
+ *   客户端会话列表里还没有这个会话时先补一次 `sessions.refresh()`。
  *
  * 运行记录由 Host 的 `/buka-workflows/runs` 与 `/buka-workflows/run` 两条只读
  * 路由提供，附件下载走 `/buka-workflows/attachment`；有运行在跑时每 1.5 秒刷新一次（否则 5 秒），后台运行也能看到进度。
@@ -168,7 +169,7 @@ window.__ModuleLoader__.load({
       executionNoInput: 'This execution recorded no input.',
       executionInputMissing:
         'No input was recorded for this execution. Older runs did not persist a per-entry prompt, so the definition template is not shown again.',
-      executionNoOutput: 'This execution produced no text deliverable.',
+      executionNoOutput: 'This execution produced no text output.',
       executionTimedOut: 'Timed out',
       executionPrev: 'Previous step',
       executionPrevNone: 'This is the first execution in this run.',
@@ -181,8 +182,8 @@ window.__ModuleLoader__.load({
       nodeMaxVisits: 'Max visits',
       nodeEndStatus: 'End status',
       gateDetail: 'Gate detail',
-      finalDeliverable: 'Final deliverable',
-      finalDeliverableEmpty: 'This run produced no robot deliverable.',
+      finalDeliverable: 'Final output',
+      finalDeliverableEmpty: 'This run produced no robot output.',
       finalDeliverableFrom: 'From',
       promptTruncated: 'The prompt is truncated for display.',
       noGraph: 'This run has no saved definition snapshot, so the node graph cannot be drawn.',
@@ -295,7 +296,7 @@ window.__ModuleLoader__.load({
       routeLabel: '路由',
       executionNoInput: '这次执行没有记录输入。',
       executionInputMissing: '这次执行没有记录输入；旧运行没有按次落盘提示词，所以这里不重复展示定义里的模板。',
-      executionNoOutput: '这次执行没有文本交付物。',
+      executionNoOutput: '这次执行没有文本输出。',
       executionTimedOut: '超时',
       executionPrev: '上一步',
       executionPrevNone: '这是本次运行的第一次执行。',
@@ -308,8 +309,8 @@ window.__ModuleLoader__.load({
       nodeMaxVisits: '最多访问',
       nodeEndStatus: '终止状态',
       gateDetail: '门禁说明',
-      finalDeliverable: '最终交付物',
-      finalDeliverableEmpty: '这次运行没有机器人交付物。',
+      finalDeliverable: '最终输出',
+      finalDeliverableEmpty: '这次运行没有机器人输出。',
       finalDeliverableFrom: '来自',
       promptTruncated: '提示词过长，仅展示前面一部分。',
       noGraph: '这次运行没有保存定义快照，无法绘制节点图。',
@@ -1322,11 +1323,41 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 客户端会话列表里还没有这个会话时，先做一次全量刷新。
+       *
+       * 宿主释放机器人 agent 后会给客户端发 `api-session/removed`，旧版本留下的
+       * 记录、或补通告失败时，这个节点会话可能已经不在客户端列表里；此时
+       * `uiWorkspace.openSession()` 会抛 `sessions.retain: unknown session`。
+       * 这里补一次 `sessions.refresh()`，把宿主仍然持久化的会话重新拉回来。
+       *
+       * @param {string} sessionId
+       * @returns {Promise<void>}
+       */
+      async function refreshSessionsIfUnknown(sessionId) {
+        const sessions = service('sessions')
+        if (sessions === null || typeof sessions.refresh !== 'function') return
+        let known = false
+        try {
+          known = sessions.list?.getSnapshot?.()?.byId?.[sessionId] !== undefined
+        } catch {
+          known = false
+        }
+        if (known) return
+        try {
+          await sessions.refresh()
+        } catch (failure) {
+          // 刷新失败时仍然尝试打开：openSession 会给出真正的错误原因。
+          console.warn('buka-workflows: refreshing the session list failed:', failure)
+        }
+      }
+
+      /**
        * 打开某个节点会话。
        *
        * @param {Record<string, any>} step
+       * @returns {Promise<void>}
        */
-      function openSession(step) {
+      async function openSession(step) {
         const sessionId = typeof step?.sessionId === 'string' ? step.sessionId : ''
         if (sessionId === '') return
         const uiWorkspace = service('uiWorkspace')
@@ -1335,6 +1366,7 @@ window.__ModuleLoader__.load({
           return
         }
         try {
+          await refreshSessionsIfUnknown(sessionId)
           uiWorkspace.openSession(sessionId)
         } catch (failure) {
           flash('error', `${t('openSessionFailed')} ${messageOf(failure)}`)
@@ -1374,7 +1406,7 @@ window.__ModuleLoader__.load({
        * 默认选中的节点：
        * - 有正在执行 / 等待授权的节点 → 那个节点；
        * - 运行已完成 → 它最后走到的终止节点（没有就找任意已到达的终止节点），
-       *   让页面一进来就展示最终交付物；
+       *   让页面一进来就展示最终输出；
        * - 其他状态 → 最近执行过的节点；
        * - 都没有 → 起点。
        *

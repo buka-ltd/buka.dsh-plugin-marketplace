@@ -8,9 +8,9 @@
  * - `start`：唯一的开始节点，不建会话、不执行；它只有一条出边，出边上的
  *   `prompt` 就是真正的第一个机器人节点首次进入时的提示词；
  * - `robot`：交给某个机器人执行；同一个机器人一次运行共用一个可续接的会话，
- *   节点只带一句给运行页展示的 `summary`，不带提示词——每次进入它的边各自
- *   定义 prompt。机器人节点总是交回一个 JSON 对象，其中的 `next` 是出边
- *   `name`（路由键）；
+ *   节点只带一句给运行页展示的 `summary` 与必填的 `output`（节点结果 JSON 的
+ *   schema），不带提示词——每次进入它的边各自定义 prompt。机器人节点总是交回
+ *   一个 JSON 对象，其中的 `next` 是出边 `name`（路由键）；
  * - `gate`：不建会话，等待用户做一次原生审批，批准 / 拒绝各走一条出边；
  * - `end`：终止节点，带最终状态（completed / rejected / failed）。
  *
@@ -26,8 +26,15 @@
  * 旧格式（顶层 `start`、节点 prompt、`report`、`when` 条件）在 format 2 里
  * 全部移除：出现即报错，不做兼容。
  *
+ * robot 节点必须声明 `output`：节点结果 JSON 的 JSON Schema（子集校验见
+ * `output.js`）。定义校验还会检查每条边 prompt 里的模板占位符：引用的节点必须
+ * 存在，`{{nodes.<id>.data.<path>}}` 的路径必须真的在目标节点的 `output` 里。
+ *
  * @module @buka/dsh-plugin-workflows/definition
  */
+
+import { parseOutputSchema, resolveOutputPath } from './output.js'
+import { inspectTemplate } from './template.js'
 
 /** 单份定义最多节点数。 */
 export const MAX_NODES = 200
@@ -216,6 +223,9 @@ export function validateDefinition(input, options = {}) {
       if (reachable.has(id)) continue
       fail(`nodes[${index}]`, `node "${id}" is not reachable from start, so it would never run`)
     }
+    // 结构没问题后再检查 prompt 里的变量：引用的节点必须存在，data 路径必须在
+    // 目标节点声明的 output 里。这样定义写错时在计划阶段就能定位到边。
+    if (errors.length === 0) validatePromptReferences(nodes, edges, fail)
     const hasRobot = order.some((id) => nodes.get(id).type === 'robot')
     if (errors.length === 0 && !hasRobot) {
       warnings.push('the workflow has no robot node, so nothing will be delegated')
@@ -446,6 +456,7 @@ function parseNode(raw, path, fail) {
  */
 function parseStartNode(raw, id, path, fail) {
   const node = { id, type: 'start' }
+  rejectOutputOnFixedNode(raw, path, fail)
   node.next = parseEdgeList(raw.next, `${path}.next`, fail, { allowString: false })
   return node
 }
@@ -483,6 +494,15 @@ function parseRobotNode(raw, id, path, fail) {
   }
   node.summary = summary.slice(0, MAX_SUMMARY_LENGTH)
 
+  // robot 节点必须声明结果 JSON 的 schema：它是运行期校验、structured_output
+  // 参数与节点 prompt 结果契约的唯一来源。
+  if (raw.output === undefined) {
+    fail(`${path}.output`, 'is required: declare the JSON result schema for this robot node')
+  } else {
+    const output = parseOutputSchema(raw.output, `${path}.output`, fail)
+    if (output !== null) node.output = output
+  }
+
   node.agentOptions = parseAgentOptions(raw.agentOptions, `${path}.agentOptions`, fail)
   node.timeoutMs = parsePositiveInteger(raw.timeoutMs, `${path}.timeoutMs`, fail, 24 * 60 * 60 * 1000)
   node.maxVisits = parsePositiveInteger(raw.maxVisits, `${path}.maxVisits`, fail, 1000)
@@ -501,6 +521,7 @@ function parseRobotNode(raw, id, path, fail) {
  */
 function parseGateNode(raw, id, path, fail) {
   const node = { id, type: 'gate' }
+  rejectOutputOnFixedNode(raw, path, fail)
   if (typeof raw.title !== 'string' || raw.title.trim() === '') {
     fail(`${path}.title`, 'must be a non-empty title')
     node.title = ''
@@ -525,11 +546,12 @@ function parseGateNode(raw, id, path, fail) {
  */
 function parseEndNode(raw, id, path, fail) {
   const node = { id, type: 'end' }
+  rejectOutputOnFixedNode(raw, path, fail)
   if (raw.status !== undefined && !END_STATUSES.has(raw.status)) {
     fail(`${path}.status`, 'must be "completed", "failed" or "rejected"')
   }
   node.status = END_STATUSES.has(raw.status) ? raw.status : 'completed'
-  // 终止节点只表达运行以什么状态结束；它展示的「最终交付物」来自这次运行最后一次
+  // 终止节点只表达运行以什么状态结束；它展示的「最终输出」来自这次运行最后一次
   // 机器人执行的落盘正文，不由定义写死。
   return node
 }
@@ -705,6 +727,113 @@ function parseGateEdge(raw, path, fail) {
     return null
   }
   return parseEdgeExtras({ to }, raw, path, fail)
+}
+
+/**
+ * start / gate / end 节点的输出由引擎定义，不接受 `output`。
+ *
+ * @param {Record<string, any>} raw
+ * @param {string} path
+ * @param {(path: string, message: string) => void} fail
+ * @returns {void}
+ */
+function rejectOutputOnFixedNode(raw, path, fail) {
+  if (raw.output === undefined) return
+  fail(`${path}.output`, 'is only supported on robot nodes; start, gate and end nodes have fixed outputs')
+}
+
+/**
+ * 校验每条边 prompt 里的模板变量。
+ *
+ * 只检查「引用的节点存在、字段在目标节点的 output 里、节点类型匹配」，不推断
+ * 这个节点在这条边上是否已经执行过——那属于运行时。
+ *
+ * `edges` 里已经包含 start / robot / gate 的所有边；只有带 prompt 的边需要检查。
+ *
+ * @param {Map<string, Record<string, any>>} nodes
+ * @param {Array<{ edge: Record<string, any>, path: string }>} edges
+ * @param {(path: string, message: string) => void} fail
+ * @returns {void}
+ */
+function validatePromptReferences(nodes, edges, fail) {
+  for (const { edge, path } of edges) {
+    if (typeof edge.prompt !== 'string' || edge.prompt === '') continue
+    const inspected = inspectTemplate(edge.prompt)
+    if (inspected.errors.length > 0) {
+      for (const message of inspected.errors) fail(`${path}.prompt`, message)
+      continue
+    }
+    for (const placeholder of inspected.paths) {
+      const problem = referenceProblem(nodes, placeholder)
+      if (problem !== null) fail(`${path}.prompt`, problem)
+    }
+  }
+}
+
+/**
+ * 单个模板路径的引用检查。
+ *
+ * @param {Map<string, Record<string, any>>} nodes
+ * @param {string} path
+ * @returns {string | null}
+ */
+function referenceProblem(nodes, path) {
+  const segments = path.split('.')
+  const root = segments[0]
+  if (root === 'goal' || root === 'step' || root === 'runId') {
+    if (segments.length === 1) return null
+    return `template path "${path}" cannot be descended into: "${root}" is not an object`
+  }
+  if (root !== 'nodes') {
+    return `unknown template path "${path}"; available: {{goal}}, {{step}}, {{runId}}, {{nodes.<id>...}}`
+  }
+  if (segments.length < 3) {
+    return `template path "${path}" is incomplete; use {{nodes.<id>.<field>}}`
+  }
+
+  const id = segments[1]
+  const node = nodes.get(id)
+  if (node === undefined) {
+    return `template path "${path}" references unknown node "${id}"`
+  }
+
+  const field = segments[2]
+  const rest = segments.slice(3)
+  const robotOnly = () => `template path "${path}" reads "${field}", which only robot nodes provide`
+  const gateOnly = () => `template path "${path}" reads "${field}", which only gate nodes provide`
+
+  if (field === 'data') {
+    if (node.type !== 'robot') return robotOnly()
+    if (rest.length === 0) return null
+    if (rest[0] === 'next') {
+      return `template path "${path}" uses reserved field "next"; use {{nodes.${id}.route}}`
+    }
+    if (rest[0] === 'attachments') {
+      return `template path "${path}" uses reserved field "attachments"; use {{nodes.${id}.attachments.<index>...}}`
+    }
+    if (node.output === undefined || node.output === null) {
+      return `template path "${path}" cannot be checked because node "${id}" has no declared output schema`
+    }
+    const reason = resolveOutputPath(node.output, rest)
+    if (reason === null) return null
+    return `template path "${path}" ${reason} in node "${id}".output`
+  }
+
+  if (field === 'attachments') {
+    // manifest 的形状由引擎定义，这里只检查节点类型；具体条目在运行时读取。
+    return node.type === 'robot' ? null : robotOnly()
+  }
+  if (field === 'decision') {
+    if (node.type !== 'gate') return gateOnly()
+    if (rest.length > 0) return `template path "${path}" descends into "decision", which is not an object`
+    return null
+  }
+  if (field === 'text' || field === 'route' || field === 'robot' || field === 'sessionId') {
+    if (node.type !== 'robot') return robotOnly()
+    if (rest.length > 0) return `template path "${path}" descends into "${field}", which is not an object`
+    return null
+  }
+  return `template path "${path}" uses unknown node output "${field}"; available: text, data, route, attachments, robot, sessionId, decision (gate)`
 }
 
 /**

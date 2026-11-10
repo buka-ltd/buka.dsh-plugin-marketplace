@@ -67,11 +67,12 @@ function harness({
           reportSubmitted: result.structured !== undefined,
         }
       },
-      retryReport({ routes = [], reason = '' } = {}) {
+      retryReport({ routes = [], reason = '', detail = '' } = {}) {
         if (retries >= 2) return null
         retries += 1
         const routeText = routes.length === 0 ? '' : ` routes=${routes.join(',')}`
-        return `retry-${retries} ${reason}${routeText}`
+        const detailText = typeof detail === 'string' && detail !== '' ? ` detail=${detail}` : ''
+        return `retry-${retries} ${reason}${routeText}${detailText}`
       },
       async send(text, { compactFirst = true } = {}) {
         calls.sends.push({ sessionId: state.sessionId, text, compactFirst })
@@ -237,6 +238,7 @@ const SIMPLE = {
       type: 'robot',
       robot: 'writer',
       summary: '干活',
+      output: { type: 'object', properties: { summary: { type: 'string' } } },
       agentOptions: { provider: 'test-provider', model: 'test-model' },
       next: [{ to: 'done', name: '完成' }],
     },
@@ -253,6 +255,7 @@ const LOOP = {
       id: 'check',
       type: 'robot',
       robot: 'reviewer',
+      output: { type: 'object', properties: {} },
       maxVisits: 5,
       next: [
         { to: 'done', name: '通过' },
@@ -263,6 +266,7 @@ const LOOP = {
       id: 'fix',
       type: 'robot',
       robot: 'fixer',
+      output: { type: 'object', properties: {} },
       next: [{ to: 'check', name: '修好了', prompt: 'check again' }],
     },
     { id: 'done', type: 'end', status: 'completed' },
@@ -297,10 +301,16 @@ test('supervisor: a turn/end event advances the run without an awaited session r
     assert.equal('report' in host.calls.dispatch[0], false)
     assert.deepEqual(host.calls.dispatch[0].outputSchema.required, ['next'])
     assert.deepEqual(host.calls.dispatch[0].outputSchema.properties.next.enum, ['完成'])
+    assert.equal(host.calls.dispatch[0].outputSchema.properties.summary.type, 'string')
+    assert.equal(host.calls.dispatch[0].outputSchema.properties.attachments.type, 'array')
+    assert.match(host.calls.dispatch[0].outputSchema.properties.attachments.description, /independent data or files/)
     assert.equal(run.steps[0].route, '完成')
     assert.equal(run.steps[0].routeTo, 'done')
     const results = await store.readNodeResults(started.runId)
-    assert.equal(results[0].prompt, 'do the work')
+    assert.ok(results[0].prompt.startsWith('do the work\n\n---\nResult contract'))
+    assert.match(results[0].prompt, /"summary"/)
+    assert.match(results[0].prompt, /final assistant text/)
+    assert.match(results[0].prompt, /not a place for the answer itself/)
     assert.equal(results[0].text, 'work done')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -438,6 +448,7 @@ test('supervisor: node attachments are copied, recorded and embedded into the ne
           id: 'dev',
           type: 'robot',
           robot: 'writer',
+          output: { type: 'object', properties: {} },
           next: [
             {
               to: 'review',
@@ -451,6 +462,7 @@ test('supervisor: node attachments are copied, recorded and embedded into the ne
           id: 'review',
           type: 'robot',
           robot: 'reviewer',
+          output: { type: 'object', properties: {} },
           next: [{ to: 'done', name: '完成' }],
         },
         { id: 'done', type: 'end', status: 'completed' },
@@ -895,6 +907,7 @@ const GATE = {
       id: 'prepare',
       type: 'robot',
       robot: 'writer',
+      output: { type: 'object', properties: {} },
       next: [{ to: 'confirm', name: '准备完成' }],
     },
     {
@@ -909,6 +922,7 @@ const GATE = {
       id: 'publish',
       type: 'robot',
       robot: 'publisher',
+      output: { type: 'object', properties: {} },
       next: [{ to: 'done', name: '完成' }],
     },
     { id: 'done', type: 'end', status: 'completed' },
@@ -974,9 +988,16 @@ test('supervisor: restart recovery rehydrates attachments into the next prompt',
           id: 'dev',
           type: 'robot',
           robot: 'writer',
+          output: { type: 'object', properties: {} },
           next: [{ to: 'review', name: '交稿', prompt: 'read {{nodes.dev.attachments.0.text}}' }],
         },
-        { id: 'review', type: 'robot', robot: 'reviewer', next: [{ to: 'done', name: '完成' }] },
+        {
+          id: 'review',
+          type: 'robot',
+          robot: 'reviewer',
+          output: { type: 'object', properties: {} },
+          next: [{ to: 'done', name: '完成' }],
+        },
         { id: 'done', type: 'end', status: 'completed' },
       ],
     }
@@ -1279,6 +1300,89 @@ test('supervisor: an unknown next is retried with the allowed routes', async () 
     await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'unknown next retry')
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /完成/)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+const REQUIRED_OUTPUT = {
+  goal: '输出 schema',
+  maxSteps: 10,
+  nodes: [
+    { id: 'start', type: 'start', next: [{ to: 'work', name: '开始', prompt: 'do the work' }] },
+    {
+      id: 'work',
+      type: 'robot',
+      robot: 'writer',
+      output: {
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+        additionalProperties: false,
+      },
+      next: [{ to: 'done', name: '完成' }],
+    },
+    { id: 'done', type: 'end', status: 'completed' },
+  ],
+}
+
+test('supervisor: a result that does not match the declared output is retried in the same session', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'bad shape', structured: { next: '完成' }, stopReason: 'completed' },
+        { text: 'fixed', structured: { next: '完成', summary: 'done' }, stopReason: 'completed' },
+      ],
+    })
+    const definition = REQUIRED_OUTPUT
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'invalid output retry')
+    const run = await store.readRun(started.runId)
+    assert.equal(host.calls.sends.length, 1)
+    assert.match(host.calls.sends[0].text, /invalid-output/)
+    assert.match(host.calls.sends[0].text, /detail=summary: missing required field/)
+    assert.equal(run.steps[0].status, 'completed')
+    assert.equal(run.steps[0].data.summary, 'done')
+    assert.equal(run.steps[0].route, '完成')
+    assert.deepEqual(host.calls.dispatch[0].outputSchema.required, ['summary', 'next'])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: exhausting the retries for an invalid output fails the node with the field problem', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'bad 1', structured: { next: '完成' }, stopReason: 'completed' },
+        { text: 'bad 2', structured: { next: '完成' }, stopReason: 'completed' },
+        { text: 'bad 3', structured: { next: '完成' }, stopReason: 'completed' },
+      ],
+    })
+    const definition = REQUIRED_OUTPUT
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'invalid output exhaustion')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps[0].status, 'failed')
+    assert.match(run.steps[0].error, /invalid workflow output for node "work"/)
+    assert.match(run.steps[0].error, /summary: missing required field/)
+    assert.equal(run.steps[0].route, null)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

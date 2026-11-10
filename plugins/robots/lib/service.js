@@ -70,6 +70,13 @@ const STRUCTURED_OUTPUT_INSTRUCTION =
 /** 取消后等待 agent 落定（写入 turn/end）的最长时间。 */
 const SETTLE_AFTER_CANCEL_MS = 2000
 
+/**
+ * 释放 agent 后重新通告会话时，读取宿主会话列表的最长时间。
+ *
+ * 通告只是可读性补偿，不能因为宿主列表很慢就拖住释放流程。
+ */
+const ANNOUNCE_SESSION_TIMEOUT_MS = 2000
+
 /** 机器人会话被超时 / 取消时抛出的内部错误。 */
 export class RobotSessionStop extends Error {
   /**
@@ -397,7 +404,7 @@ export class RobotSessionService {
         timeoutMs,
         signal,
         compactFirst: true,
-        dispose: () => disposeHandle(handle),
+        dispose: () => this.#releaseAgent(handle, sessionId),
       }),
       cancel(reason) {
         try {
@@ -412,7 +419,7 @@ export class RobotSessionService {
           // 已停止或已释放：忽略。
         }
       },
-      dispose: () => disposeHandle(handle),
+      dispose: () => this.#releaseAgent(handle, sessionId),
     }
   }
 
@@ -571,7 +578,7 @@ export class RobotSessionService {
     let stopReason = 'completed'
     let retries = 0
     let structured
-    // 超时 / 取消时从这一轮的起点往后读，避免把上一轮的旧文本当成本轮交付物。
+    // 超时 / 取消时从这一轮的起点往后读，避免把上一轮的旧文本当成本轮最终文本。
     let turnStartSeq = 0
 
     try {
@@ -687,7 +694,7 @@ export class RobotSessionService {
     const dispose = async () => {
       if (disposed) return
       disposed = true
-      await disposeHandle(handle)
+      await this.#releaseAgent(handle, sessionId)
     }
 
     return {
@@ -964,7 +971,7 @@ export class RobotSessionService {
     const dispose = async () => {
       if (disposed) return
       disposed = true
-      await disposeHandle(handle)
+      await service.#releaseAgent(handle, sessionId)
     }
     /** @type {Record<string, any>} */
     const observer = {
@@ -1036,6 +1043,7 @@ export class RobotSessionService {
           toolName: STRUCTURED_OUTPUT_TOOL,
           routes: options?.routes ?? request.routes,
           reason: typeof options?.reason === 'string' ? options.reason : undefined,
+          detail: typeof options?.detail === 'string' ? options.detail : undefined,
         })
       },
       /**
@@ -1091,6 +1099,72 @@ export class RobotSessionService {
         `buka-robots: compacting robot session failed; continuing without it: ${message}`,
       )
       return { compacted: false, compactionError: message }
+    }
+  }
+
+  /**
+   * 释放一次 dispatch / 续接对应的 live agent，并把这个仍然持久化的会话补通告
+   * 回客户端。会话日志由 DSH 保存，释放 agent 只影响这一轮的内存占用。
+   *
+   * `#assertVisibleAgent` 拒绝隐藏 subagent 时走的是普通 `disposeHandle`：
+   * 那类会话本来就不该出现在侧边栏。
+   *
+   * @param {any} handle
+   * @param {string} sessionId
+   * @returns {Promise<void>}
+   */
+  async #releaseAgent(handle, sessionId) {
+    await disposeHandle(handle)
+    await this.#announceDurableSession(sessionId)
+  }
+
+  /**
+   * 把刚释放 agent 的机器人会话重新通告给客户端（`api-session/added`）。
+   *
+   * DSH 在 `session/disposed` 时会向客户端发 `api-session/removed`，而机器人
+   * 会话的 agent 是每个节点结束就释放的：只发 removed 的话，会话会从侧边栏
+   * 消失，运行页「打开会话」也会因为客户端列表里没有这个 id 而报
+   * `sessions.retain: unknown session`。会话本身还在磁盘上，所以这里用宿主
+   * `sessionController.list()` 取回它（此时是冷会话的 summary）并补发一次
+   * `api-session/added`，客户端就把它当作普通历史会话保留下来。
+   *
+   * 通告只是可读性补偿：服务缺失（headless 组合）、列表读取失败、事件参数
+   * 不可序列化时都只记日志，绝不影响节点结果。
+   *
+   * @param {string} sessionId
+   * @returns {Promise<void>}
+   */
+  async #announceDurableSession(sessionId) {
+    const id = typeof sessionId === 'string' ? sessionId.trim() : ''
+    if (id === '') return
+    const ctx = this.ctx
+    if (ctx === null || ctx === undefined || typeof ctx.emit !== 'function') return
+    const controller = ctx?.get?.('sessionController') ?? ctx?.sessionController
+    if (controller === null || controller === undefined || typeof controller.list !== 'function') return
+
+    let summary
+    try {
+      const signal =
+        typeof AbortSignal.timeout === 'function'
+          ? AbortSignal.timeout(ANNOUNCE_SESSION_TIMEOUT_MS)
+          : new AbortController().signal
+      const result = await controller.list({}, signal)
+      const items = Array.isArray(result?.items) ? result.items : []
+      summary = items.find((item) => item?.sessionId === id)
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `buka-robots: could not read the session list while re-announcing robot session "${id}": ${describeError(error)}`,
+      )
+      return
+    }
+    if (summary === undefined) return
+
+    try {
+      ctx.emit('api-session/added', summary)
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `buka-robots: could not re-announce robot session "${id}" after releasing its agent: ${describeError(error)}`,
+      )
     }
   }
 
@@ -1353,15 +1427,19 @@ export function resultRetryPrompt(attempt, maxAttempts, options = {}) {
   const toolName = typeof options.toolName === 'string' ? options.toolName : STRUCTURED_OUTPUT_TOOL
   const routes = routeNames(options.routes)
   const reason = typeof options.reason === 'string' ? options.reason : 'missing-json'
+  const detail = typeof options.detail === 'string' ? options.detail.trim() : ''
   const problem =
     reason === 'missing-next'
       ? 'your last JSON result did not include the required `next` route'
       : reason === 'invalid-next'
         ? 'the `next` route in your last JSON result is not one of the routes this node can follow'
-        : 'your last answer did not provide a structured JSON result'
+        : reason === 'invalid-output'
+          ? 'the JSON object in your last result does not match the output schema declared for this node'
+          : 'your last answer did not provide a structured JSON result'
   let text =
     `The workflow orchestrator expected the final result of this node as a single JSON object, but ${problem}. ` +
     `Do not reply with plain text again: finish now by calling the ${toolName} tool with a single JSON object that answers the assigned task.`
+  if (detail !== '') text += ` Problem: ${detail}.`
   if (routes.length > 0) {
     text +=
       ' When this node has outgoing routes, the object MUST include `next` set to exactly one of these route names: ' +

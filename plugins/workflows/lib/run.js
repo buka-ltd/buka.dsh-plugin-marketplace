@@ -12,6 +12,7 @@
  * @module @buka/dsh-plugin-workflows/run
  */
 
+import { renderOutputContract } from './output.js'
 import { renderTemplate } from './template.js'
 
 /** 运行级错误：节点失败、超出步数、缺少服务等。 */
@@ -42,7 +43,9 @@ export class WorkflowCancelledError extends Error {
  * 渲染一个机器人节点的最终提示词。
  *
  * format 2 只在进入节点的边上定义 prompt：`edgePrompt` 必须存在，渲染后也不能为
- * 空；不存在节点自身 prompt 的兼容回退。
+ * 空；不存在节点自身 prompt 的兼容回退。渲染完成后追加节点声明的结果契约
+ * （`output` 合并 `next` 与附件能力后的 schema）；升级前没有 `output` 的快照
+ * 不追加，保持旧提示词。
  *
  * @param {Record<string, any>} node 已规范化的机器人节点
  * @param {string | null} edgePrompt 走到进入这条边时携带的 prompt 模板
@@ -65,7 +68,8 @@ export function renderNodePrompt(node, edgePrompt, values, plan, step, runId) {
   if (prompt.trim() === '') {
     throw new WorkflowRunError(`robot node "${node.id}" has no prompt on its incoming edge`)
   }
-  return prompt
+  const contract = renderOutputContract(node)
+  return contract === '' ? prompt : `${prompt}\n\n${contract}`
 }
 
 /**

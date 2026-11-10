@@ -1,7 +1,7 @@
 /**
  * 工作流节点附件：输入规范化、从机器人工作区复制到节点目录、文本读取。
  *
- * 节点在结构化结果里声明 `attachments`，这里负责把声明变成落盘清单。本模块
+ * 节点在结构化结果里返回 `attachments`，这里负责把结果里的清单变成落盘文件。本模块
  * 不 import 任何 DSH 包，也不决定运行目录布局；目录与清单的持久化由
  * `run-store.js` 负责，便于单测。
  *
@@ -129,7 +129,7 @@ function uniqueAttachmentName(name, used) {
 }
 
 /**
- * 规范化一个附件声明；非法项抛出带下标的错误。
+ * 规范化一个附件请求；非法项抛出带下标的错误。
  *
  * @param {unknown} raw
  * @param {{ maxCount?: number }} [options]

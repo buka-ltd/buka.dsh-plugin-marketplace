@@ -118,7 +118,18 @@ async function makeRobotHome() {
  *
  * @returns {{ ctx: Record<string, any>, state: Record<string, any> }}
  */
-function makeFakeContext({ subagents, resumeError, resumeOrigin, compactionError, noCompaction, noAgentCreate, sessionTitle } = {}) {
+function makeFakeContext({
+  subagents,
+  resumeError,
+  resumeOrigin,
+  compactionError,
+  noCompaction,
+  noAgentCreate,
+  sessionTitle,
+  sessionListError,
+  noSessionController,
+  noEmit,
+} = {}) {
   const state = {
     createOptions: null,
     // DSH 的 session-title 服务替身：记录显式命名调用；已有标题时不覆盖。
@@ -145,11 +156,24 @@ function makeFakeContext({ subagents, resumeError, resumeOrigin, compactionError
     compactionAgent: null,
     mountedPresets: [],
     attachedSessions: [],
+    // 宿主会话列表的替身：create/resume 时登记一条 summary，list() 返回冷会话版本。
+    summaries: [],
+    sessionListCalls: 0,
+    emitted: [],
+    warnings: [],
   }
   const agentsService = {
     async create(options) {
       if (noAgentCreate === true) throw new Error('normal robot sessions are unavailable')
       state.createOptions = options
+      state.summaries.push({
+        sessionId: options.sessionId,
+        cwd: typeof options.meta?.cwd === 'string' ? options.meta.cwd : '',
+        agentAvailable: true,
+        running: true,
+        blank: false,
+        updatedAt: 1,
+      })
       let resolveIdle
       const idle = new Promise((resolve) => {
         resolveIdle = resolve
@@ -204,6 +228,14 @@ function makeFakeContext({ subagents, resumeError, resumeOrigin, compactionError
     async resume(options) {
       state.resumeOptions = options
       if (resumeError !== undefined) throw resumeError
+      state.summaries.push({
+        sessionId: options.resumeSessionId,
+        cwd: '',
+        agentAvailable: true,
+        running: true,
+        blank: false,
+        updatedAt: 1,
+      })
       let resolveIdle
       const idle = new Promise((resolve) => {
         resolveIdle = resolve
@@ -292,9 +324,34 @@ function makeFakeContext({ subagents, resumeError, resumeOrigin, compactionError
       },
     },
     agents: agentsService,
+    logger: { warn: (message) => state.warnings.push(String(message)) },
+    ...(noEmit === true
+      ? {}
+      : {
+          emit(event, ...args) {
+            state.emitted.push([event, ...args])
+          },
+        }),
     get(name) {
       if (name === 'subagents') return subagents
       if (name === 'agents') return agentsService
+      if (name === 'sessionController') {
+        if (noSessionController === true) return undefined
+        return {
+          async list() {
+            state.sessionListCalls += 1
+            if (sessionListError !== undefined) throw sessionListError
+            // 释放 agent 之后宿主读到的就是冷会话 summary。
+            return {
+              items: state.summaries.map((summary) => ({
+                ...summary,
+                agentAvailable: false,
+                running: false,
+              })),
+            }
+          },
+        }
+      }
       if (name === 'sessionTitle') {
         return {
           get: () => state.sessionTitle ?? undefined,
@@ -465,6 +522,13 @@ test('robots service: startSession creates a robot-cwd session, records structur
     assert.equal(result.stopReason, 'completed')
     assert.equal(result.resultRetries, 0)
     assert.equal(state.disposed, true)
+    // 释放 agent 后会话仍然持久化：补通告一次冷会话，客户端不会把它从列表里删掉。
+    assert.equal(state.sessionListCalls, 1)
+    const announced = state.emitted.filter(([event]) => event === 'api-session/added')
+    assert.equal(announced.length, 1)
+    assert.equal(announced[0][1].sessionId, session.id)
+    assert.equal(announced[0][1].agentAvailable, false)
+    assert.equal(announced[0][1].running, false)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
@@ -903,6 +967,13 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   const invalidNext = resultRetryPrompt(1, 2, { reason: 'invalid-next', routes: ['done'] })
   assert.match(invalidNext, /is not one of the routes this node can follow/)
   assert.match(invalidNext, /"done"/)
+  const invalidOutput = resultRetryPrompt(1, 2, {
+    reason: 'invalid-output',
+    routes: ['done'],
+    detail: 'status: missing required field',
+  })
+  assert.match(invalidOutput, /does not match the output schema declared for this node/)
+  assert.match(invalidOutput, /Problem: status: missing required field\./)
   // 没有路由时不要把 next 强塞给节点。
   assert.doesNotMatch(resultRetryPrompt(1, 2, {}), /`next`/)
 
@@ -943,11 +1014,15 @@ test('robots service: retryReport accepts routes/reason and is bounded', async (
     assert.match(prompt, /"done"/)
     assert.match(prompt, /"retry"/)
     assert.match(prompt, /retry 1\/2/)
-    // 不传 options 时用会话请求里的 routes 兜底，缺省按缺 JSON 处理。
-    const fallback = handle.retryReport()
-    assert.equal(typeof fallback, 'string')
-    assert.match(fallback, /did not provide a structured JSON result/)
-    assert.match(fallback, /"continue"/)
+    // invalid-output 的 detail 要带进追问，routes 不传时用会话请求里的值兜底。
+    const invalid = handle.retryReport({
+      reason: 'invalid-output',
+      detail: 'status: expected string, got integer',
+    })
+    assert.equal(typeof invalid, 'string')
+    assert.match(invalid, /does not match the output schema declared for this node/)
+    assert.match(invalid, /Problem: status: expected string, got integer\./)
+    assert.match(invalid, /"continue"/)
     assert.equal(handle.retryReport(), null, 'retry quota is bounded')
     await handle.dispose()
   } finally {
@@ -1100,7 +1175,7 @@ test('robots service: 通用型机器人跑在调用方工作区，使用标准�
  *
  * @returns {{ ctx: Record<string, any>, state: Record<string, any>, agent: Record<string, any> }}
  */
-function makeDispatchContext() {
+function makeDispatchContext({ sessionListError, noSessionController, noEmit } = {}) {
   const events = []
   const state = {
     events,
@@ -1108,6 +1183,10 @@ function makeDispatchContext() {
     disposed: false,
     createOptions: null,
     resumeOptions: null,
+    summaries: [],
+    sessionListCalls: 0,
+    emitted: [],
+    warnings: [],
   }
   const session = {
     get seq() {
@@ -1154,11 +1233,30 @@ function makeDispatchContext() {
   const agents = {
     async create(options) {
       state.createOptions = options
+      // 真实运行时 agent id 就等于请求的 sessionId（服务会传 newSessionId 或随机生成）。
+      agent.id = options.sessionId
+      state.summaries.push({
+        sessionId: agent.id,
+        cwd: typeof options.meta?.cwd === 'string' ? options.meta.cwd : '',
+        agentAvailable: true,
+        running: true,
+        blank: false,
+        updatedAt: 1,
+      })
       await options.setup?.(childCtx, agent)
       return handle
     },
     async resume(options) {
       state.resumeOptions = options
+      agent.id = options.resumeSessionId
+      state.summaries.push({
+        sessionId: agent.id,
+        cwd: '',
+        agentAvailable: true,
+        running: true,
+        blank: false,
+        updatedAt: 1,
+      })
       await options.setup?.(childCtx, agent)
       return handle
     },
@@ -1168,6 +1266,14 @@ function makeDispatchContext() {
   }
   const ctx = {
     agents,
+    logger: { warn: (message) => state.warnings.push(String(message)) },
+    ...(noEmit === true
+      ? {}
+      : {
+          emit(event, ...args) {
+            state.emitted.push([event, ...args])
+          },
+        }),
     workspaceRegistry: {
       list: () => [],
       async resolveByPath(target) {
@@ -1178,6 +1284,22 @@ function makeDispatchContext() {
       if (name === 'agents') return agents
       if (name === 'agentDefaultModel') {
         return { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
+      }
+      if (name === 'sessionController') {
+        if (noSessionController === true) return undefined
+        return {
+          async list() {
+            state.sessionListCalls += 1
+            if (sessionListError !== undefined) throw sessionListError
+            return {
+              items: state.summaries.map((summary) => ({
+                ...summary,
+                agentAvailable: false,
+                running: false,
+              })),
+            }
+          },
+        }
       }
       return undefined
     },
@@ -1196,7 +1318,7 @@ test('robots service: dispatchSession returns before the turn ends and reads the
     })
     const handle = await service.dispatchSession({ robot: 'writer', prompt: 'do the work' })
     assert.equal(handle.mode, 'session')
-    assert.equal(handle.sessionId, 'dispatch-session')
+    assert.equal(handle.sessionId, fake.state.createOptions.sessionId)
     assert.equal(handle.startSeq, 0)
     assert.equal(fake.state.followups.length, 1)
     const result = handle.readResult()
@@ -1232,6 +1354,66 @@ test('robots service: openSession attaches a finished session without sending a 
     const next = opened.readResult({ sinceSeq: opened.startSeq - 1 })
     assert.equal(next.text, 'dispatch done 2')
     await opened.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: releasing a dispatched agent re-announces the durable session', async () => {
+  const home = await makeRobotHome()
+  try {
+    const fake = makeDispatchContext()
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const handle = await service.dispatchSession({ robot: 'writer', prompt: 'do the work' })
+    await handle.dispose()
+    assert.equal(fake.state.disposed, true)
+    assert.equal(fake.state.sessionListCalls, 1, 'the host session list is read once after disposing')
+    const announced = fake.state.emitted.filter(([event]) => event === 'api-session/added')
+    assert.equal(announced.length, 1, 'the durable session is announced back to the client')
+    assert.equal(announced[0][1].sessionId, handle.sessionId)
+    assert.equal(announced[0][1].agentAvailable, false, 'the announced session is cold')
+    assert.equal(announced[0][1].running, false)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: a missing session list or a failing list never breaks releasing the agent', async () => {
+  const home = await makeRobotHome()
+  try {
+    // 没有 sessionController（例如 headless 组合）：只释放 agent，不补通告。
+    const withoutController = makeDispatchContext({ noSessionController: true })
+    const first = new RobotSessionService({
+      ctx: withoutController.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const firstHandle = await first.dispatchSession({ robot: 'writer', prompt: 'do the work' })
+    await firstHandle.dispose()
+    assert.equal(withoutController.state.disposed, true)
+    assert.equal(withoutController.state.sessionListCalls, 0)
+    assert.deepEqual(withoutController.state.emitted, [])
+
+    // 读会话列表失败：只 warn，dispose 仍然成功。
+    const failing = makeDispatchContext({ sessionListError: new Error('session list unavailable') })
+    const second = new RobotSessionService({
+      ctx: failing.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const secondHandle = await second.dispatchSession({ robot: 'writer', prompt: 'do the work' })
+    await secondHandle.dispose()
+    assert.equal(failing.state.disposed, true)
+    assert.equal(failing.state.sessionListCalls, 1)
+    assert.deepEqual(failing.state.emitted, [])
+    assert.ok(
+      failing.state.warnings.some((message) => message.includes('re-announcing robot session')),
+      'a failed re-announce is reported',
+    )
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }

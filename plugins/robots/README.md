@@ -328,10 +328,10 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 - 传 `sessionId` 时是该会话的**续接**：通过 `ctx.agents.resume()` 把会话重新加载成 live agent，先调用 `ctx.compaction.compactNow()` 压缩历史，再把这次 `prompt` 发进同一个会话。返回的 `resumed` 为 `true`，`compacted` 表示这次是否真的压缩了内容。压缩失败（例如摘要模型不可用）不会中断这一轮：`compacted` 为 `false`，原因写进 `compactionError`，prompt 照常发送；会话不存在 / 不可恢复 / 是旧版隐藏 subagent 会话时直接报错，不新开会话，调用方按失败处理；
 - 可传 `agentPreset` 显式指定该会话使用的 agent preset：不传时新会话按宿主默认组合创建，续接时优先恢复会话里记录的 preset；工作流插件用它把机器人节点落到普通工作 preset（默认 `standard`），避免继承编排器的 persona 与工具集；
 - **每个会话都要交回 JSON**：服务会注册 scoped 工具 `structured_output`，结果出现在 `result.structured`。可传 `outputSchema` 约束这个工具的 JSON Schema，不传时接受任意对象；最后一条回复本身是 JSON 对象（含 ```json 代码块）时同样算交回；
-- 可传 `routes`（合法的工作流 route 名列表）：结束时没有交回合法 JSON、或（工作流节点有出边时）`next` 不在 `routes` 里，服务会在**同一个会话**里补一条消息，说明当前问题和合法 route，要求重新回复，最多 `resultRetries` 次；重试用尽仍不合法时 `stopReason` 为 `error`，`error` 里写明追问了几次；
+- 可传 `routes`（合法的工作流 route 名列表）：结束时没有交回合法 JSON、或（工作流节点有出边时）`next` 不在 `routes` 里，服务会在**同一个会话**里补一条消息，说明当前问题和合法 route，要求重新回复，最多 `resultRetries` 次；重试用尽仍不合法时 `stopReason` 为 `error`，`error` 里写明追问了几次。工作流还可以用 `reason: 'invalid-output'` 与可选的 `detail` 追问「结果不符合节点声明的 output schema」，服务会把 detail 原样附在追问消息里；
 - **走正常审批策略**：机器人是普通会话，未显式传 `approval`（或传 `'ask'`）时沿用部署的审批策略，可以在会话里请求工具审批或向用户提问；只有显式 `approval: 'never'` 才强制拒绝（无头场景）。机器人会话是**运行时根会话**，续接时也不挂回父会话；工作流不会注入行为提示词；
 - **没有默认超时**：不传 `timeoutMs` 时会话按自己的节奏跑完（旧版本默认 10 分钟，已移除）。需要硬截止时显式传正的 `timeoutMs`（毫秒）；超时 / 取消时中断会话，再尽量收集已经产生的输出，`stopReason` 为 `timeout` / `aborted`；
-- 读取结果后自动释放该轮的 live agent（会话日志仍然保留，可在侧边栏回看）；续接同一个会话不会新开会话；
+- 读取结果后自动释放该轮的 live agent（会话日志仍然保留，可在侧边栏回看）；续接同一个会话不会新开会话。DSH 在 `session/disposed` 时会向客户端发 `api-session/removed`，所以释放后服务会用宿主 `sessionController.list()` 取回这条仍然持久化的会话并补发一次 `api-session/added`：节点结束时它不会从侧边栏消失，运行页的「打开会话」也仍然能进入。`sessionController` 不存在（headless 组合）或读列表失败时只记一条 warn，不影响节点结果；
 - 续接前的压缩来自宿主 `compaction` 服务（`@deepseek-ai/dsh-compaction-basic`）。桌面 profile 默认禁用它：缺失时续接仍会继续，但 `compacted` 为 `false`，`compactionError` 说明“压缩服务不可用”，页面会提示；需要真正压缩时在插件页启用该服务。
 
 ### 非阻塞调用：`dispatchSession()` / `openSession()` / `startSession({ wait: false })`
@@ -348,9 +348,9 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 | --- | --- |
 | `readResult({ sinceSeq? })` | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }` |
 | `send(text, { compactFirst? })` | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq |
-| `retryReport({ routes?, reason? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题）；没有额度时返回 `null` |
+| `retryReport({ routes?, reason?, detail? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题；`reason: 'invalid-output'` 时附上 `detail`）；没有额度时返回 `null` |
 | `cancel(reason?)` | 取消当前轮，等它落定后返回已经写下的结果 |
-| `dispose()` | 只释放这一轮的 live agent，会话日志仍然保留 |
+| `dispose()` | 只释放这一轮的 live agent，会话日志仍然保留；释放后服务会把这条仍然持久化的会话补通告回客户端（`api-session/added`），所以侧边栏与「打开会话」都不受影响 |
 
 所有机器人会话都是普通顶层会话；`openSession()` 遇到旧版 `origin: 'subagent'` 的隐藏会话会直接报错，不会把它当成可见会话继续。
 

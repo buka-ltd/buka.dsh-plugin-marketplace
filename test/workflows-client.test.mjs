@@ -223,14 +223,15 @@ async function loadClient() {
        *
        * @param {Array<any>} states
        * @param {(key: string) => string} [t] 词典函数；默认原样返回 key
+       * @param {(name: string) => any} [getService] Client Service 查找函数
        * @returns {any}
        */
-      render(states, t = (key) => key) {
+      render(states, t = (key) => key, getService = () => null) {
         stateQueue.length = 0
         stateQueue.push(...states)
         stateIndex = 0
         stateUpdates.length = 0
-        return components.page({ t, getService: () => null })
+        return components.page({ t, getService })
       },
       updates: () => stateUpdates,
     }
@@ -1806,4 +1807,58 @@ test('client: the settings dialog validates hours and disables fields when archi
   assert.equal(inputs.length, 2)
   assert.equal(inputs[0].props.disabled, true, 'hours are not editable while the archive is off')
   assert.equal(inputs[1].props.disabled, true)
+})
+
+test('client: opening a node session refreshes a client list that does not know it yet', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  /** @type {string[]} */
+  const calls = []
+  const sessions = {
+    list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+    async refresh() {
+      calls.push('refresh')
+    },
+  }
+  const uiWorkspace = {
+    openSession(sessionId) {
+      calls.push(`open:${sessionId}`)
+    },
+  }
+  const tree = client.render(detailStates(data, 'publish'), (key) => key, (name) => {
+    if (name === 'sessions') return sessions
+    if (name === 'uiWorkspace') return uiWorkspace
+    return null
+  })
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openSession'))
+  assert.ok(openButton, 'the node session offers an open action')
+  await openButton.props.onClick()
+  assert.deepEqual(calls, ['refresh', 'open:session-1'], 'a stale client list is refreshed before opening')
+})
+
+test('client: opening a known node session does not refresh the client list', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  /** @type {string[]} */
+  const calls = []
+  const sessions = {
+    list: { getSnapshot: () => ({ ids: ['session-1'], byId: { 'session-1': {} } }) },
+    async refresh() {
+      calls.push('refresh')
+    },
+  }
+  const uiWorkspace = {
+    openSession(sessionId) {
+      calls.push(`open:${sessionId}`)
+    },
+  }
+  const tree = client.render(detailStates(data, 'publish'), (key) => key, (name) => {
+    if (name === 'sessions') return sessions
+    if (name === 'uiWorkspace') return uiWorkspace
+    return null
+  })
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openSession'))
+  assert.ok(openButton)
+  await openButton.props.onClick()
+  assert.deepEqual(calls, ['open:session-1'], 'a known session opens without a list refresh')
 })

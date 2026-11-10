@@ -45,6 +45,7 @@ function v2Definition() {
         type: 'robot',
         robot: 'coder',
         summary: '实现导出功能',
+        output: { type: 'object', properties: {} },
         next: [{ to: 'test', name: '提交测试', prompt: '检查实现：{{nodes.dev.text}}' }],
       },
       {
@@ -52,6 +53,7 @@ function v2Definition() {
         type: 'robot',
         robot: 'tester',
         summary: '验证导出功能',
+        output: { type: 'object', properties: {} },
         maxVisits: 5,
         next: [
           { to: 'dev', name: '测试打回', prompt: '修复：{{nodes.test.text}}' },
@@ -79,6 +81,7 @@ function gateDefinition() {
         type: 'robot',
         robot: 'writer',
         summary: '写发布说明',
+        output: { type: 'object', properties: {} },
         next: [{ to: 'gate', name: '提交审批' }],
       },
       {
@@ -94,6 +97,7 @@ function gateDefinition() {
         type: 'robot',
         robot: 'publisher',
         summary: '发布',
+        output: { type: 'object', properties: {} },
         next: [{ to: 'done', name: '完成' }],
       },
       { id: 'done', type: 'end', status: 'completed' },
@@ -290,7 +294,7 @@ test('format v2: describePlan exposes the route names of each robot node', () =>
   const terminal = {
     nodes: [
       { id: 'start', type: 'start', next: [{ to: 'dev', name: '开始', prompt: '做一件事。' }] },
-      { id: 'dev', type: 'robot', robot: 'coder' },
+      { id: 'dev', type: 'robot', robot: 'coder', output: { type: 'object', properties: {} } },
     ],
   }
   const terminalPlan = planOf(terminal)
@@ -367,6 +371,34 @@ test('run: renderNodePrompt renders the edge prompt with template values', () =>
     'wf-abc',
   )
   assert.equal(prompt, '目标：写发布说明；调研：三点（第 2 步，运行 wf-abc）')
+})
+
+test('run: renderNodePrompt appends the declared result contract', () => {
+  const prompt = renderNodePrompt(
+    {
+      id: 'dev',
+      output: {
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      },
+      next: [{ to: 'done', name: '完成' }],
+    },
+    '做一件事。',
+    {},
+    { goal: 'g' },
+    1,
+    'wf-contract',
+  )
+  assert.ok(prompt.startsWith('做一件事。\n\n---\nResult contract (added by the workflow):'))
+  assert.match(prompt, /"summary"/)
+  assert.match(prompt, /"next"/)
+  assert.match(prompt, /"attachments"/)
+  assert.match(prompt, /final assistant text/)
+  assert.match(prompt, /not a place for the answer itself/)
+
+  // 升级前的快照没有 output：prompt 保持原样。
+  assert.equal(renderNodePrompt({ id: 'old' }, '做一件事。', {}, { goal: 'g' }, 1, 'wf-old'), '做一件事。')
 })
 
 test('run: renderNodePrompt requires an incoming edge prompt and never falls back to the node', () => {

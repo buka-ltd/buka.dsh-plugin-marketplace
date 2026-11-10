@@ -10,7 +10,7 @@
  * - `buka_workflow_execution_output`：某次执行的输出与附件清单；
  * - `buka_workflow_execution_attachment`：列出附件，或分段读取一个附件。
  *
- * 总览刻意不返回 prompt / 交付物正文 / 附件内容 / 边的 prompt，避免把整份运行记录塞进
+ * 总览刻意不返回 prompt / 最终文本 / 附件内容 / 边的 prompt，避免把整份运行记录塞进
  * 上下文；需要细节时按执行序号单独取。本模块不 import DSH 包，`defineTool`
  * 由入口注入，便于用假 store 单测。
  *
@@ -564,7 +564,7 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
     defineTool({
       name: 'buka_workflow_overview',
       description:
-        'Inspect the workflow run this robot session belongs to. Returns a compact node graph (node ids, types, summaries, states, edges), the current status, and the numbered execution list in execution order. It never returns prompts, deliverables, edge prompts or other execution details: use buka_workflow_execution_input / buka_workflow_execution_output with an execution number from this list when you need the details of one execution.',
+        'Inspect the workflow run this robot session belongs to. Returns a compact node graph (node ids, types, summaries, states, edges), the current status, and the numbered execution list in execution order. It never returns prompts, final texts, edge prompts or other execution details: use buka_workflow_execution_input / buka_workflow_execution_output with an execution number from this list when you need the details of one execution.',
       parameters: {},
       output: {
         schema: {
@@ -668,7 +668,7 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
     defineTool({
       name: 'buka_workflow_execution_output',
       description:
-        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its deliverable text, structured JSON result, attachment manifest, route, stop reason and error; a gate execution returns its decision. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
+        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a gate execution returns its decision. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
       parameters: {
         seq: {
           type: 'number',

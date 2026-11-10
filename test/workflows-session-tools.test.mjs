@@ -25,6 +25,7 @@ const DEFINITION = {
       type: 'robot',
       robot: 'writer',
       summary: '写草稿',
+      output: { type: 'object', properties: { status: { type: 'string' } }, required: ['status'] },
       next: [{ to: 'review', name: 'pass' }],
     },
     {

@@ -12,7 +12,7 @@
  *   nodes/<seq>-<id>/
  *     result.json       节点结果全文（run.json 里只留预览；机器人会话的只读
  *                       工具从这里读某次执行的 prompt / 输出）
- *     attachments/      该次执行声明的附件文件
+ *     attachments/      该次执行的附件文件
  * ```
  *
  * 旧记录的 `nodes/<seq>-<id>.json` 仍然可以读取（新执行只写目录布局），
@@ -562,7 +562,7 @@ export class WorkflowRunStore {
   }
 
   /**
-   * 把节点声明的附件复制到该次执行的节点目录，返回稳定清单。
+   * 把节点返回的附件复制到该次执行的节点目录，返回稳定清单。
    *
    * @param {string} runId
    * @param {number} seq

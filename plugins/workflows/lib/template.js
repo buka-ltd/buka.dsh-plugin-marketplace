@@ -12,6 +12,9 @@
  * 路径不存在时抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
  * 不会把空提示词交给机器人。
  *
+ * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
+ * `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。
+ *
  * @module @buka/dsh-plugin-workflows/template
  */
 
@@ -35,6 +38,46 @@ export class TemplateError extends Error {
 }
 
 /**
+ * 解析一个占位符里的路径（不含花括号）。
+ *
+ * @param {unknown} raw
+ * @returns {{ path: string, error?: undefined } | { path?: undefined, error: string }}
+ */
+export function parsePlaceholder(raw) {
+  const path = String(raw).trim()
+  if (path === '') return { error: 'empty template placeholder' }
+  if (!PATH_PATTERN.test(path)) return { error: `invalid template path "${path}"` }
+  return { path }
+}
+
+/**
+ * 列出模板里出现的所有占位符路径，并收集语法错误；不求值。
+ *
+ * 定义校验用它检查 `{{nodes.<id>.data.<path>}}` 是否落在目标节点声明的
+ * `output` 里；规则与运行时 `renderTemplate` 保持一致。
+ *
+ * @param {unknown} template
+ * @returns {{ paths: string[], errors: string[] }}
+ */
+export function inspectTemplate(template) {
+  if (typeof template !== 'string') return { paths: [], errors: ['template must be a string'] }
+  /** @type {string[]} */
+  const paths = []
+  /** @type {string[]} */
+  const errors = []
+  template.replace(PLACEHOLDER, (_match, raw) => {
+    const parsed = parsePlaceholder(raw)
+    if (parsed.error !== undefined) {
+      errors.push(parsed.error)
+      return ''
+    }
+    paths.push(parsed.path)
+    return ''
+  })
+  return { paths, errors }
+}
+
+/**
  * 渲染一个 prompt 模板。
  *
  * @param {string} template
@@ -44,11 +87,9 @@ export class TemplateError extends Error {
 export function renderTemplate(template, context) {
   if (typeof template !== 'string') throw new TemplateError('template must be a string')
   return template.replace(PLACEHOLDER, (_match, raw) => {
-    const path = String(raw).trim()
-    if (path === '') throw new TemplateError('empty template placeholder', path)
-    if (!PATH_PATTERN.test(path)) {
-      throw new TemplateError(`invalid template path "${path}"`, path)
-    }
+    const parsed = parsePlaceholder(raw)
+    if (parsed.error !== undefined) throw new TemplateError(parsed.error, String(raw).trim())
+    const path = parsed.path
     const value = getPath(context, path)
     if (value === undefined) {
       throw new TemplateError(`template path "${path}" is not available yet`, path)
