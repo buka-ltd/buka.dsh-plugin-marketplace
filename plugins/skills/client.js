@@ -20,7 +20,7 @@
  *   类型（`probe=1`，只读 tree，不阻塞列表），标题行标出「npx skills」
  *   「Claude Code 市场」或「不可用」。展开后的每个 skill 右侧有「安装」按钮：
  *   点一下就把这一个 skill 装到全局（Host 交给 `npx skills add -g`），已经装过
- *   的显示「已安装」标记而不是按钮。
+ *   的显示为禁用的「已安装」按钮（带对勾图标），不提供重复安装的入口。
  *
  * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
  * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
@@ -55,6 +55,7 @@ window.__ModuleLoader__.load({
       Toast,
       StateDot,
       IconBranchOutlineRegular,
+      IconCheckOutlineRegular,
       IconChevronRightOutlineRegular,
       IconDownloadOutlineRegular,
       IconPlusOutlineRegular,
@@ -1353,9 +1354,11 @@ window.__ModuleLoader__.load({
       /**
        * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 安装入口）。
        *
-       * skill 叶子右侧根据状态显示「安装」按钮 / 「安装中…」/「已安装」：
+       * skill 叶子右侧根据状态显示「安装」按钮 / 「安装中…」/ 禁用的「已安装」按钮：
        * 已安装的判断只看全局安装列表（名字按 npx 的 sanitize 规则归一），
        * 不依赖仓库来源，所以同一个 skill 从别的仓库装过也不给重复安装按钮。
+       * 已安装用禁用按钮而不是 `Tag`：它和其它行的安装按钮占同一个操作位，
+       * 按钮外形让「这里本来能点、只是已装过」一眼可见。
        *
        * @param {{ id: string, source: string }} repo 一条收藏
        * @param {object} node Host 返回的树节点
@@ -1404,7 +1407,17 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'buka-skills-treeSkillAction' },
               installed
-                ? h(Tag, { tone: 'success' }, t('installedBadge'))
+                ? h(
+                    Button,
+                    {
+                      variant: 'outline',
+                      size: 'sm',
+                      disabled: true,
+                      icon: h(IconCheckOutlineRegular, { size: 13 }),
+                      'aria-label': `${t('installedBadge')} ${node.name}`,
+                    },
+                    t('installedBadge'),
+                  )
                 : busy
                   ? h(
                       'span',

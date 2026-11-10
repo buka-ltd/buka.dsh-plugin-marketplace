@@ -7,7 +7,8 @@
  *
  * - 安装走 Host 路由 `POST /buka-skills/install`，请求体只传来源与仓库里的路径，
  *   名字与是否存在由 Host 的仓库列表决定；
- * - skill 叶子右侧：未安装显示「安装」按钮，安装中显示状态点，已安装显示标记；
+ * - skill 叶子右侧：未安装显示「安装」按钮，安装中显示状态点，已安装显示禁用的
+ *   「已安装」按钮（与安装按钮同一操作位，外形一致但不可点）；
  * - 已安装按 `npx skills` 的目录名规则归一后与全局安装列表比较，不看来源；
  * - 安装成功只重读「已安装」列表，不重建仓库树；失败用 Toast 提示。
  *
@@ -72,17 +73,21 @@ test('安装走独立的 Host 路由，与卸载分开', () => {
   assert.ok(!install.includes('skill:'), '浏览器不该自己决定要安装的名字')
 })
 
-test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装', () => {
+test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装的禁用按钮', () => {
   const tree = section('function renderTreeNode(repo, node)', '\n      /**')
   assert.ok(tree.includes('const installed = installedSkillKeys.has(skillKeyOf(node.name))'), '没有按目录键判断已安装')
   assert.ok(tree.includes('const busy = installing === installKeyOf(repo, node)'), '没有按组合键判断安装中')
   assert.ok(tree.includes("icon: h(IconDownloadOutlineRegular, { size: 13 })"), '安装按钮没有下载图标')
   assert.ok(tree.includes("onClick: () => installSkill(repo, node)"), '安装按钮没有触发安装')
   assert.ok(tree.includes('disabled: installing !== null'), '安装请求进行中应禁用其它安装按钮')
-  assert.ok(
-    tree.includes("t('installedBadge')") && tree.includes("h(Tag, { tone: 'success' }"),
-    '已安装应显示成功色标记而不是按钮',
-  )
+  // 已安装的分支在「安装中」之前：它应该是一个禁用的按钮，不是 Tag。
+  const installedBranch = tree.slice(tree.indexOf("className: 'buka-skills-treeSkillAction'"), tree.indexOf(': busy'))
+  assert.ok(installedBranch.includes("h(IconCheckOutlineRegular, { size: 13 })"), '已安装按钮没有对勾图标')
+  assert.ok(installedBranch.includes("t('installedBadge')"), '已安装按钮应显示「已安装」文案')
+  assert.ok(installedBranch.includes('disabled: true'), '已安装应显示禁用的按钮')
+  assert.ok(installedBranch.includes("variant: 'outline'"), '已安装按钮应与安装按钮同款（outline）')
+  assert.ok(installedBranch.includes("size: 'sm'"), '已安装按钮应与安装按钮同尺寸（sm）')
+  assert.ok(!installedBranch.includes('h(Tag'), '已安装不该再用 Tag 显示')
   assert.ok(tree.includes("t('installing')"), '安装中应显示「安装中…」')
   assert.ok(tree.includes("t('install')"), '未安装应显示「安装」')
   assert.ok(tree.includes("className: 'buka-skills-treeSkillAction'"), '缺少右侧操作区')
