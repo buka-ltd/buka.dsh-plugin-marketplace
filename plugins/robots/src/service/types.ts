@@ -78,7 +78,7 @@ export interface RobotSessionObserver {
     detail?: string
   }): string | null
   getPlanMode(): { active: boolean; pending?: boolean } | null
-  setPlanMode(active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop' | null
+  setPlanMode(active: boolean): void
   cancel(reason?: string): Promise<Record<string, unknown>>
   dispose(): Promise<void>
 }
@@ -112,6 +112,8 @@ export interface SessionEventLike {
     readonly name?: unknown
     readonly callId?: unknown
     readonly toolCallId?: unknown
+    /** `plan/mode` 事件的状态值（整值替换）。 */
+    readonly active?: unknown
   } | null
 }
 
@@ -173,10 +175,26 @@ export interface AgentsServiceLike {
   resume(options: ResumeAgentOptionsLike): Promise<AgentHandleLike>
 }
 
-/** plan 模式服务的最小形状。 */
-export interface PlanModeServiceLike {
-  get(agent: LiveAgent): { active: boolean; pending?: boolean } | null
-  set(agent: LiveAgent, active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop'
+/** 命令注册表服务返回的一次执行结果；只关心命令是否被解析到。 */
+export interface CommandExecutionLike {
+  readonly commandId?: unknown
+  readonly result?: { readonly kind?: unknown } | null
+}
+
+/**
+ * 命令注册表服务（DSH 的 `commands`）的最小形状。
+ *
+ * DSH 里 plan 模式的用户入口就是 `/plan` 命令；服务按 `agent` 作用域解析
+ * 命令，所以 profile 根部的插件也能把命令执行在某个具体会话上，不需要拿到
+ * 被 isolate 在会话 preset 里的 plan 模式服务实例。
+ */
+export interface CommandsServiceLike {
+  execute?(
+    agent: LiveAgent,
+    line: string,
+    attachments: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<CommandExecutionLike | undefined>
 }
 
 /** 会话标题服务的最小形状。 */

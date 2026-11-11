@@ -1189,16 +1189,42 @@ test('robots service: approval defaults to the deployment policy; never forces r
 })
 
 /**
+ * dispatch / openSession 用的假 `commands` 服务：把 plan 模式当作真实的 `/plan`
+ * 命令入口——记录调用，并在会话日志里写命令生命周期与 `plan/mode` 事件（真实
+ * DSH 的 plan-mode 插件就是这样持久化状态的）。
+ *
+ * @returns {{ state: Record<string, any>, service: Record<string, any> }}
+ */
+function makePlanCommands({ available = true } = {}) {
+  const state = { lines: [], agents: [] }
+  const service = {
+    async execute(agent, line) {
+      if (!available) return undefined
+      state.lines.push(line)
+      state.agents.push(agent?.id)
+      const commandId = `cmd-${state.lines.length}`
+      const session = agent?.session
+      session?.append?.('command/run', { commandId, name: 'plan' })
+      session?.append?.('plan/mode', { active: line !== '/plan off' })
+      session?.append?.('command/done', { commandId, kind: 'success' })
+      return { commandId, result: { kind: 'success' } }
+    },
+  }
+  return { state, service }
+}
+
+/**
  * dispatch / openSession 用的最小假上下文：visible 会话 + 可追加的会话事件。
+ * 默认不提供根作用域的 `planMode` 服务，与 desktop/web 的组成一致。
  *
  * @returns {{ ctx: Record<string, any>, state: Record<string, any>, agent: Record<string, any> }}
  */
-function makeDispatchContext({ sessionListError, noSessionController, noEmit, planMode } = {}) {
+function makeDispatchContext({ sessionListError, noSessionController, noEmit, commands } = {}) {
   const events = []
   const state = {
     events,
     followups: [],
-    // 记录 dispatch / resume 期间的调用顺序：`planMode` 必须早于 `followup`。
+    // 记录 dispatch / resume 期间的调用顺序：plan 命令必须早于 followup。
     trace: [],
     disposed: false,
     createOptions: null,
@@ -1208,16 +1234,12 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, pl
     emitted: [],
     warnings: [],
   }
-  if (planMode !== undefined && typeof planMode.set === 'function') {
-    const originalSet = planMode.set.bind(planMode)
-    planMode.set = (agent, active) => {
-      state.trace.push(`planMode:${active === true ? 'on' : 'off'}`)
-      return originalSet(agent, active)
-    }
-  }
   const session = {
     get seq() {
       return events.length
+    },
+    append(type, data) {
+      events.push({ type, seq: events.length, data })
     },
     snapshotEvents(from = 0) {
       return events.slice(from)
@@ -1316,7 +1338,7 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, pl
     },
     get(name) {
       if (name === 'agents') return agents
-      if (name === 'planMode') return planMode
+      if (name === 'commands') return commands
       if (name === 'agentDefaultModel') {
         return { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
       }
@@ -1458,22 +1480,11 @@ test('robots service: a missing session list or a failing list never breaks rele
   }
 })
 
-test('robots service: planMode is applied before the first prompt and the handle can read / clear it', async () => {
+test('robots service: a plan node runs /plan against the agent before the first prompt', async () => {
   const home = await makeRobotHome()
   try {
-    const planMode = {
-      active: false,
-      calls: [],
-      get() {
-        return { active: this.active }
-      },
-      set(agent, active) {
-        this.calls.push({ agentId: agent?.id, active })
-        this.active = active === true
-        return this.active === true ? 'committed' : 'committed'
-      },
-    }
-    const fake = makeDispatchContext({ planMode })
+    const planCommands = makePlanCommands()
+    const fake = makeDispatchContext({ commands: planCommands.service })
     const service = new RobotSessionService({
       ctx: fake.ctx,
       robotsDir: home.robotsDir,
@@ -1485,28 +1496,85 @@ test('robots service: planMode is applied before the first prompt and the handle
       prompt: 'plan it',
       planMode: true,
     })
-    // 首轮 prompt 之前必须已经切换模式。
-    assert.deepEqual(fake.state.trace.slice(0, 2), ['planMode:on', 'followup'])
-    assert.equal(planMode.active, true)
+    assert.deepEqual(planCommands.state.lines, ['/plan'], 'plan mode is entered with /plan')
+    assert.deepEqual(
+      planCommands.state.agents,
+      [fake.agent.id],
+      '/plan is executed against the robot agent',
+    )
+    const types = fake.state.events.map((event) => event.type)
+    const planIndex = types.indexOf('plan/mode')
+    const promptIndex = types.indexOf('user/message')
+    assert.ok(
+      planIndex >= 0 && planIndex < promptIndex,
+      'plan mode is applied before the first prompt',
+    )
     assert.deepEqual(handle.getPlanMode(), { active: true })
-    handle.setPlanMode(false)
-    assert.equal(planMode.active, false)
-
-    // 普通节点显式传 false：下一次 dispatch 会在第一轮前确保退出。
-    const next = await service.dispatchSession({
-      robot: 'writer',
-      prompt: 'work',
-      sessionId: handle.sessionId,
-      planMode: false,
-    })
-    assert.deepEqual(fake.state.trace.slice(-2), ['planMode:off', 'followup'])
-    await next.dispose()
+    await handle.dispose()
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
 })
 
-test('robots service: requesting planMode without the plan-mode service fails before creating a session', async () => {
+test('robots service: a resumed plan node runs /plan before continuing the session', async () => {
+  const home = await makeRobotHome()
+  try {
+    const planCommands = makePlanCommands()
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const first = await service.dispatchSession({ robot: 'writer', prompt: 'first' })
+    await first.dispose()
+    const resumed = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'plan next',
+      sessionId: first.sessionId,
+      planMode: true,
+    })
+    assert.deepEqual(planCommands.state.lines, ['/plan'])
+    const types = fake.state.events.map((event) => event.type)
+    const planIndex = types.lastIndexOf('plan/mode')
+    const promptIndex = types.lastIndexOf('user/message')
+    assert.ok(
+      planIndex >= 0 && planIndex < promptIndex,
+      'plan mode is applied before the continuation prompt',
+    )
+    await resumed.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: a plan node fails clearly when the agent cannot run /plan, and the session is released', async () => {
+  const home = await makeRobotHome()
+  try {
+    const planCommands = makePlanCommands({ available: false })
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    await assert.rejects(
+      () => service.dispatchSession({ robot: 'writer', prompt: 'plan it', planMode: true }),
+      /plan mode is unavailable in this composition/u,
+    )
+    assert.notEqual(
+      fake.state.createOptions,
+      null,
+      'the command entry is checked against the created agent',
+    )
+    assert.equal(fake.state.disposed, true, 'the created agent is released')
+    assert.equal(fake.state.followups.length, 0)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: requesting planMode without a command entry fails before creating a session', async () => {
   const home = await makeRobotHome()
   try {
     const fake = makeDispatchContext()
@@ -1522,9 +1590,92 @@ test('robots service: requesting planMode without the plan-mode service fails be
     assert.equal(
       fake.state.createOptions,
       null,
-      'no robot session is created when plan mode is unavailable',
+      'no robot session is created when the plan command entry is unavailable',
     )
     assert.equal(fake.state.followups.length, 0)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: /plan off only runs when the session log says plan mode is active', async () => {
+  const home = await makeRobotHome()
+  try {
+    const planCommands = makePlanCommands()
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+
+    // 新会话的普通节点：没有残留状态，不碰命令入口。
+    const normal = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'work',
+      planMode: false,
+    })
+    assert.deepEqual(planCommands.state.lines, [])
+    await normal.dispose()
+
+    // plan 节点进入过 plan 模式：复用同一会话的普通节点先把它清掉。
+    const plan = await service.dispatchSession({ robot: 'writer', prompt: 'plan', planMode: true })
+    assert.deepEqual(planCommands.state.lines, ['/plan'])
+    await plan.dispose()
+    const reused = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'work',
+      sessionId: plan.sessionId,
+      planMode: false,
+    })
+    assert.deepEqual(planCommands.state.lines, ['/plan', '/plan off'])
+    await reused.dispose()
+
+    // 已经退出后再进入普通节点：无残留，不再重复清理。
+    const again = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'work more',
+      sessionId: plan.sessionId,
+      planMode: false,
+    })
+    assert.deepEqual(planCommands.state.lines, ['/plan', '/plan off'])
+    await again.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: the observer reads plan state from the session log and clears it best-effort', async () => {
+  const home = await makeRobotHome()
+  try {
+    const planCommands = makePlanCommands()
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    const handle = await service.dispatchSession({ robot: 'writer', prompt: 'work' })
+    assert.deepEqual(handle.getPlanMode(), { active: false })
+
+    fake.agent.session.append('plan/mode', { active: true })
+    assert.deepEqual(handle.getPlanMode(), { active: true })
+
+    handle.setPlanMode(false)
+    await Promise.resolve()
+    assert.deepEqual(planCommands.state.lines, ['/plan off'])
+    assert.deepEqual(handle.getPlanMode(), { active: false })
+
+    // 已经退出：再次清理是 no-op，不会再发命令。
+    handle.setPlanMode(false)
+    await Promise.resolve()
+    assert.deepEqual(planCommands.state.lines, ['/plan off'])
+
+    handle.setPlanMode(true)
+    await Promise.resolve()
+    assert.deepEqual(planCommands.state.lines, ['/plan off', '/plan'])
+    assert.deepEqual(handle.getPlanMode(), { active: true })
+    await handle.dispose()
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }

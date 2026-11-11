@@ -61,6 +61,31 @@ export function readSessionOutcome(
 }
 
 /**
+ * 从会话日志读 plan 模式状态。
+ *
+ * DSH 的 plan 模式把状态记成 `plan/mode` 事件（整值替换），最后一条就是当前
+ * 提交状态；读不到事件时按未激活处理。这样不需要拿到被 `isolate` 在会话
+ * preset 里的 planMode 服务实例，profile 根部的插件也能判断某个会话是否还
+ * 停在 plan 模式。
+ *
+ */
+export function readPlanModeActive(session: SessionLike | undefined): boolean {
+  const events =
+    typeof session?.snapshotEvents === 'function'
+      ? session.snapshotEvents(0)
+      : typeof session?.ownEvents === 'function'
+        ? session.ownEvents()
+        : []
+  let active = false
+  for (const event of events) {
+    if (event?.type === 'plan/mode' && typeof event?.data?.active === 'boolean') {
+      active = event.data.active
+    }
+  }
+  return active
+}
+
+/**
  * 把 `turn/end.reason` 映射成节点结果里的 stopReason。
  *
  */

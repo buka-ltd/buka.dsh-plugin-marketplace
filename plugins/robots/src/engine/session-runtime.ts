@@ -17,12 +17,23 @@ import { RobotSessionStop } from './errors.ts'
 const SETTLE_AFTER_CANCEL_MS = 2000
 
 /**
- * 从 composition 里取一个可选服务：先走 `ctx.get`，拿不到再读直接挂载的
- * 同名字段。服务形状以本文件实际调用为准。
+ * 从 composition 里取一个可选服务：先走 `ctx.get`（cordis 里表示服务可以
+ * 不存在），拿不到再读直接挂载的同名字段（旧式 / 测试替身上下文）。服务形状
+ * 以本文件实际调用为准。
+ *
+ * 直接属性读取在 cordis 里表示「必需注入」：服务不存在、或被 `isolate`
+ * 隔离在别的作用域时，会抛 `cannot get property "…" without inject`。可选
+ * 服务的缺失是正常状态，绝不能把异常带进调用方，所以这里把整段读取包进
+ * try/catch，失败时按不存在处理。
  */
 export function optionalService<T>(ctx: Context, name: string): T | undefined {
-  const direct = (ctx as unknown as Record<string, unknown>)[name]
-  return (ctx.get?.(name) ?? direct) as T | undefined
+  try {
+    const viaGet = ctx?.get?.(name)
+    if (viaGet !== undefined) return viaGet as T
+    return (ctx as unknown as Record<string, unknown>)?.[name] as T | undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
