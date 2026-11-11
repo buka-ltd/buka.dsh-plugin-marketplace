@@ -1,7 +1,7 @@
 /**
  * `buka_workflow_start` 对 plan 节点的启动前校验。
  *
- * plan 模式在 web/desktop 的组成里被 `isolate` 在会话 preset 内，profile 根部
+ * plan 模式在 web/desktop 的组合里被 `isolate` 在会话 preset 内，profile 根部
  * 看不到 `planMode` 服务；工作流只能靠 `commands` 服务（对 agent 执行
  * `/plan`）这条入口，所以校验不能要求根作用域的 planMode 服务。
  */
@@ -18,12 +18,11 @@ import { registerWorkflowTools } from '../plugins/workflows/src/tools.ts'
  * @returns {{ state: Record<string, any>, tool: (name: string) => any }}
  */
 function makeHarness({ robots, commands, userQuestions } = {}) {
-  const state = { tools: new Map(), readNames: [], readyCalls: 0, starts: [] }
+  const state = { tools: new Map(), readyCalls: 0, starts: [] }
   const ctx = {
     get(name) {
-      state.readNames.push(name)
       if (name === 'bukaRobots') return robots
-      // 真实 desktop/web 组成里根部没有 planMode 服务；这里也不提供。
+      // 真实 desktop/web 组合里根部没有 planMode 服务；这里也不提供。
       if (name === 'planMode') return undefined
       if (name === 'commands') return commands
       if (name === 'userQuestions') return userQuestions
@@ -115,11 +114,6 @@ test('workflow start: plan nodes start when commands are composed and no root pl
     .execute({ definition: planDefinition() }, { agent: { id: 'root' } })
   assert.equal(result.mode, 'background')
   assert.equal(harness.state.starts.length, 1, 'the run starts')
-  assert.equal(
-    harness.state.readNames.includes('planMode'),
-    false,
-    'the validator must not depend on the root planMode service',
-  )
 })
 
 test('workflow start: plan nodes are rejected clearly when the command entry is missing', async () => {

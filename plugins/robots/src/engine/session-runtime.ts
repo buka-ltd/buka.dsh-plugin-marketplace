@@ -27,11 +27,12 @@ const SETTLE_AFTER_CANCEL_MS = 2000
  * try/catch，失败时按不存在处理。
  */
 export function optionalService<T>(ctx: Context, name: string): T | undefined {
+  const viaGet = ctx?.get?.(name)
+  if (viaGet !== undefined) return viaGet as T
   try {
-    const viaGet = ctx?.get?.(name)
-    if (viaGet !== undefined) return viaGet as T
     return (ctx as unknown as Record<string, unknown>)?.[name] as T | undefined
   } catch {
+    // 直接属性读取被 cordis 的注入检查拒绝：按服务不存在处理。
     return undefined
   }
 }

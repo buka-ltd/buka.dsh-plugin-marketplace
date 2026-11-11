@@ -7,7 +7,17 @@
  * @module @buka/dsh-plugin-robots/engine/session-events
  */
 
-import type { LiveAgent, SessionLike } from '../service/types.ts'
+import type { LiveAgent, SessionEventLike, SessionLike } from '../service/types.ts'
+
+/**
+ * 会话日志里 `sinceSeq` 之后的事件；没有事件源时返回空数组。
+ *
+ */
+function sessionEvents(session: SessionLike | undefined, sinceSeq: number = 0): SessionEventLike[] {
+  if (typeof session?.snapshotEvents === 'function') return session.snapshotEvents(sinceSeq)
+  if (typeof session?.ownEvents === 'function') return session.ownEvents()
+  return []
+}
 
 /**
  * 从会话日志里取一次轮次（`sinceSeq` 之后）的 assistant 文本、结束原因，以及
@@ -19,12 +29,7 @@ export function readSessionTurn(
   session: SessionLike | undefined,
   sinceSeq: number = 0,
 ): { text: string; stopReason: string; turnEnded: boolean; turnEndSeq: number | null } {
-  const events =
-    typeof session?.snapshotEvents === 'function'
-      ? session.snapshotEvents(sinceSeq)
-      : typeof session?.ownEvents === 'function'
-        ? session.ownEvents()
-        : []
+  const events = sessionEvents(session, sinceSeq)
   let text = ''
   let reason: { kind?: unknown } | null | undefined
   let turnEnded = false
@@ -70,12 +75,7 @@ export function readSessionOutcome(
  *
  */
 export function readPlanModeActive(session: SessionLike | undefined): boolean {
-  const events =
-    typeof session?.snapshotEvents === 'function'
-      ? session.snapshotEvents(0)
-      : typeof session?.ownEvents === 'function'
-        ? session.ownEvents()
-        : []
+  const events = sessionEvents(session)
   let active = false
   for (const event of events) {
     if (event?.type === 'plan/mode' && typeof event?.data?.active === 'boolean') {

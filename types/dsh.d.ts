@@ -24,6 +24,8 @@ declare module '@deepseek-ai/cordis' {
     locale: LocaleService
     /** 界面侧设置表单镜像：读写 Host 的 volatile 配置。 */
     configForms: ConfigFormsService
+    /** 命令注册表服务：对目标 agent 执行 `/plan` 这类斜杠命令。 */
+    commands: CommandsService | undefined
   }
 
   interface Events {
@@ -110,6 +112,22 @@ export interface ConfigForm {
 export interface ConfigFormsService {
   /** 按 Host 插件行的命名空间取表单镜像。 */
   get(namespace: string): ConfigForm
+}
+
+/**
+ * 命令注册表：宿主按 agent 作用域解析 `/plan` 这类用户命令。
+ *
+ * plan 模式在会话 preset 里被 isolate，根作用域的插件只能通过这条命令入口
+ * 驱动某个具体会话，而不是直接拿 planMode 服务实例。
+ */
+export interface CommandsService {
+  /** 对目标 agent 执行一条斜杠命令；名称或语法不可解析时返回 undefined。 */
+  execute?(
+    agent: unknown,
+    line: string,
+    attachments: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<unknown> | unknown
 }
 
 /**

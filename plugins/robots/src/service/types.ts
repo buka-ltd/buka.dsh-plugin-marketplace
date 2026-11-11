@@ -77,7 +77,7 @@ export interface RobotSessionObserver {
       | string
     detail?: string
   }): string | null
-  getPlanMode(): { active: boolean; pending?: boolean } | null
+  getPlanMode(): { active: boolean } | null
   setPlanMode(active: boolean): void
   cancel(reason?: string): Promise<Record<string, unknown>>
   dispose(): Promise<void>
@@ -175,9 +175,8 @@ export interface AgentsServiceLike {
   resume(options: ResumeAgentOptionsLike): Promise<AgentHandleLike>
 }
 
-/** 命令注册表服务返回的一次执行结果；只关心命令是否被解析到。 */
+/** 一次命令执行的结果；这里只关心成功 / 失败。 */
 export interface CommandExecutionLike {
-  readonly commandId?: unknown
   readonly result?: { readonly kind?: unknown } | null
 }
 

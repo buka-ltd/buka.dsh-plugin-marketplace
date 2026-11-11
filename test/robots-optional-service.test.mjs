@@ -1,9 +1,9 @@
 /**
  * 真实 cordis 上下文里的可选服务读取回归。
  *
- * 默认 web/desktop 组成把 `planMode` 服务 isolate 在会话 preset 的
- * `planning` 组里；profile 根部的插件（robots）读它时必须按"不存在"处理，
- * 不能因为 cordis 的注入检查而抛错。
+ * 默认 web/desktop 组合把 `planMode` 服务 isolate 在会话 preset 的
+ * `planning` 组里；profile 根部的插件读这类可选服务时必须按"不存在"处理，
+ * 不能因为 cordis 的注入检查而抛错。`planMode` 只是这次回归的起因样本。
  */
 
 import assert from 'node:assert/strict'

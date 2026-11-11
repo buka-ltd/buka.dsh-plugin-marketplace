@@ -102,6 +102,18 @@ const PLAN_MODE_UNAVAILABLE =
   'plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a robot node with mode "plan"'
 
 /**
+ * 命令是否解析并成功执行：没解析到（undefined）或结果是成功以外的 kind 都算
+ * 没成功，返回失败原因。
+ *
+ */
+function commandFailure(execution: unknown): string | undefined {
+  const result = (execution as { result?: { kind?: unknown } | null }).result
+  const kind = result?.kind
+  if (kind === undefined || kind === 'success') return undefined
+  return typeof kind === 'string' ? kind : 'error'
+}
+
+/**
  * 释放 agent 后重新通告会话时，读取宿主会话列表的最长时间。
  *
  * 通告只是可读性补偿，不能因为宿主列表很慢就拖住释放流程。
@@ -893,28 +905,26 @@ export class RobotSessionService {
   }
 
   /**
-   * plan 模式的入口：DSH 里就是用户对会话执行的 `/plan` 命令（`commands`
-   * 服务按 `agent` 作用域解析命令）。返回 undefined 表示这个组成没有可用的
+   * 命令注册表服务：DSH 里 plan 模式的入口就是用户对会话执行的 `/plan` 命令，
+   * 服务按 `agent` 作用域解析命令。返回 undefined 表示这个组合没有可用的命令
    * 入口。
    *
    */
-  #planModeEntry(): Required<CommandsServiceLike> | undefined {
+  #commandsService(): Required<CommandsServiceLike> | undefined {
     const commands = optionalService<CommandsServiceLike>(this.ctx, 'commands')
-    if (commands === undefined || commands === null || typeof commands.execute !== 'function') {
-      return undefined
-    }
+    if (commands === undefined || typeof commands.execute !== 'function') return undefined
     return commands as Required<CommandsServiceLike>
   }
 
   /**
-   * 创建 / 恢复会话之前检查请求能否满足：要求进入 plan 模式但组成里没有命令
+   * 创建 / 恢复会话之前检查请求能否满足：要求进入 plan 模式但组合里没有命令
    * 入口时直接失败，避免留下一个没人接管模式的会话。命令是否真的能对目标
    * agent 执行，要等 agent 创建后才能确认，由 `#applyPlanMode()` 负责。
    *
    */
   #assertPlanModeRequest(request: RobotSessionRequest): void {
     if (request?.planMode !== true) return
-    if (this.#planModeEntry() === undefined) throw new Error(PLAN_MODE_UNAVAILABLE)
+    if (this.#commandsService() === undefined) throw new Error(PLAN_MODE_UNAVAILABLE)
   }
 
   /**
@@ -923,7 +933,7 @@ export class RobotSessionService {
    * `true` 进入、`false` 确保退出、省略表示不改变。DSH 的 plan 模式是会话级
    * 状态，对 profile 根部插件唯一可用的入口是命令：对目标 agent 执行
    * `/plan`（与用户在会话里输入 `/plan` 完全相同），退出用 `/plan off`。
-   * 不能直接读 `planMode` 服务实例——在 web/desktop 的组成里它被 `isolate`
+   * 不能直接读 `planMode` 服务实例——在 web/desktop 的组合里它被 `isolate`
    * 在会话 preset 内，根作用域既看不到、也不该依赖它。
    *
    * 进入必须发生在第一轮之前：此时没有开放 turn，命令会立即写入 `plan/mode`，
@@ -938,7 +948,7 @@ export class RobotSessionService {
   ): Promise<void> {
     const requested = request?.planMode
     if (requested !== true && requested !== false) return
-    const commands = this.#planModeEntry()
+    const commands = this.#commandsService()
     if (commands === undefined) {
       if (requested === true) throw new Error(PLAN_MODE_UNAVAILABLE)
       return
@@ -954,7 +964,22 @@ export class RobotSessionService {
         [],
         signal ?? new AbortController().signal,
       )
-      if (requested === true && execution === undefined) throw new Error(PLAN_MODE_UNAVAILABLE)
+      if (execution === undefined) {
+        if (requested === true) throw new Error(PLAN_MODE_UNAVAILABLE)
+      } else {
+        const failure = commandFailure(execution)
+        if (failure !== undefined) {
+          // 进入失败必须让节点失败：静默按普通模式跑完会违背 plan 节点的语义。
+          if (requested === true) {
+            throw new Error(
+              `plan mode could not be entered: the /plan command reported "${failure}"; refusing to run the node in normal mode`,
+            )
+          }
+          this.ctx?.logger?.warn?.(
+            `buka-robots: /plan off reported "${failure}" for robot session "${String(agent?.id ?? '')}"`,
+          )
+        }
+      }
     } catch (error) {
       if (requested === true) throw error
       this.ctx?.logger?.warn?.(
@@ -1216,7 +1241,7 @@ export class RobotSessionService {
        * 是否仍停在计划阶段。
        *
        */
-      getPlanMode(): { active: boolean; pending?: boolean } | null {
+      getPlanMode(): { active: boolean } | null {
         const session = agent?.session
         if (session === undefined || session === null) return null
         try {
@@ -1235,21 +1260,20 @@ export class RobotSessionService {
        *
        */
       setPlanMode(active: boolean): void {
-        const commands = service.#planModeEntry()
+        const commands = service.#commandsService()
         if (commands === undefined) return
         if (active !== true && !readPlanModeActive(agent?.session)) return
         const line = active === true ? '/plan' : '/plan off'
-        try {
-          const pending = commands.execute(agent, line, [], new AbortController().signal)
-          void Promise.resolve(pending).catch((error) => {
-            service.ctx?.logger?.warn?.(
-              `buka-robots: could not ${active === true ? 'enter' : 'leave'} plan mode for robot session "${observer.sessionId}": ${describeError(error)}`,
-            )
-          })
-        } catch (error) {
+        const warn = (error: unknown) => {
           service.ctx?.logger?.warn?.(
             `buka-robots: could not ${active === true ? 'enter' : 'leave'} plan mode for robot session "${observer.sessionId}": ${describeError(error)}`,
           )
+        }
+        try {
+          const pending = commands.execute(agent, line, [], new AbortController().signal)
+          void Promise.resolve(pending).catch(warn)
+        } catch (error) {
+          warn(error)
         }
       },
       /**
@@ -1468,12 +1492,7 @@ export {
   STRUCTURED_OUTPUT_TOOL,
   structuredSubmittedSince,
 } from './engine/result.ts'
-export {
-  mapTurnEnd,
-  readPlanModeActive,
-  readSessionOutcome,
-  readSessionTurn,
-} from './engine/session-events.ts'
+export { mapTurnEnd, readSessionOutcome, readSessionTurn } from './engine/session-events.ts'
 export { summarizeRobot } from './engine/summary.ts'
 export type {
   AgentDefaultModelLike,

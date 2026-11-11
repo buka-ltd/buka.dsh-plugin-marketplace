@@ -12,8 +12,6 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Buka Robots 服务（`@buka/dsh-plugin-robots` 提供）；未安装时为 undefined。 */
     bukaRobots: BukaRobotsService | undefined
-    /** 命令注册表服务；plan 节点通过对 agent 执行 `/plan` 进入 plan 模式。 */
-    commands: CommandsService | undefined
   }
 }
 
@@ -28,16 +26,4 @@ export interface BukaRobotsService {
   avatarMap?: () => Promise<unknown> | unknown
   /** 新版服务支持在投递首轮 prompt 前切换 plan 模式。 */
   supportsPlanMode?: unknown
-}
-
-/** 命令注册表服务里本插件用到的部分。 */
-export interface CommandsService {
-  [key: string]: unknown
-  /** 对目标 agent 执行一条斜杠命令；名称不可解析时返回 undefined。 */
-  execute?: (
-    agent: unknown,
-    line: string,
-    attachments: readonly unknown[],
-    signal: AbortSignal,
-  ) => Promise<unknown> | unknown
 }

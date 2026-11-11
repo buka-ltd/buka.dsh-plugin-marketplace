@@ -153,8 +153,6 @@ function makeFakeContext({
 } = {}) {
   const state = {
     createOptions: null,
-    // 记录 dispatch / resume 期间的调用顺序：`planMode` 必须早于 `followup`。
-    trace: [],
     // DSH 的 session-title 服务替身：记录显式命名调用；已有标题时不覆盖。
     sessionTitle: sessionTitle ?? null,
     sessionTitles: [],
@@ -207,7 +205,6 @@ function makeFakeContext({
         session: sessionWithText('robot finished'),
         followup(message) {
           state.followups.push(message)
-          state.trace.push('followup')
         },
         whenIdle: () => idle,
         cancel() {
@@ -281,7 +278,6 @@ function makeFakeContext({
         },
         followup(message) {
           state.resumedFollowups.push(message)
-          state.trace.push('followup')
           // 模拟一轮：用户消息 → assistant 文本 → turn/end。
           session.seq += 1
           state.resumedEvents.push({ type: 'user/message', seq: session.seq, data: {} })
@@ -1195,7 +1191,7 @@ test('robots service: approval defaults to the deployment policy; never forces r
  *
  * @returns {{ state: Record<string, any>, service: Record<string, any> }}
  */
-function makePlanCommands({ available = true } = {}) {
+function makePlanCommands({ available = true, kind = 'success' } = {}) {
   const state = { lines: [], agents: [] }
   const service = {
     async execute(agent, line) {
@@ -1205,9 +1201,9 @@ function makePlanCommands({ available = true } = {}) {
       const commandId = `cmd-${state.lines.length}`
       const session = agent?.session
       session?.append?.('command/run', { commandId, name: 'plan' })
-      session?.append?.('plan/mode', { active: line !== '/plan off' })
-      session?.append?.('command/done', { commandId, kind: 'success' })
-      return { commandId, result: { kind: 'success' } }
+      if (kind === 'success') session?.append?.('plan/mode', { active: line !== '/plan off' })
+      session?.append?.('command/done', { commandId, kind })
+      return { commandId, result: { kind } }
     },
   }
   return { state, service }
@@ -1215,7 +1211,7 @@ function makePlanCommands({ available = true } = {}) {
 
 /**
  * dispatch / openSession 用的最小假上下文：visible 会话 + 可追加的会话事件。
- * 默认不提供根作用域的 `planMode` 服务，与 desktop/web 的组成一致。
+ * 默认不提供根作用域的 `planMode` 服务，与 desktop/web 的组合一致。
  *
  * @returns {{ ctx: Record<string, any>, state: Record<string, any>, agent: Record<string, any> }}
  */
@@ -1224,8 +1220,6 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, co
   const state = {
     events,
     followups: [],
-    // 记录 dispatch / resume 期间的调用顺序：plan 命令必须早于 followup。
-    trace: [],
     disposed: false,
     createOptions: null,
     resumeOptions: null,
@@ -1253,7 +1247,6 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, co
     session,
     followup(message) {
       state.followups.push(message)
-      state.trace.push('followup')
       events.push({ type: 'user/message', seq: events.length, data: {} })
       events.push({
         type: 'assistant/message',
@@ -1543,6 +1536,29 @@ test('robots service: a resumed plan node runs /plan before continuing the sessi
       'plan mode is applied before the continuation prompt',
     )
     await resumed.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('robots service: a plan node fails clearly when /plan reports an error', async () => {
+  const home = await makeRobotHome()
+  try {
+    // 命令入口存在、但执行没有成功（例如被同名命令影子覆盖 / handler 报错）：
+    // 不能静默按普通模式把节点跑完。
+    const planCommands = makePlanCommands({ kind: 'error' })
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new RobotSessionService({
+      ctx: fake.ctx,
+      robotsDir: home.robotsDir,
+      registryFile: home.registryFile,
+    })
+    await assert.rejects(
+      () => service.dispatchSession({ robot: 'writer', prompt: 'plan it', planMode: true }),
+      /plan mode could not be entered/u,
+    )
+    assert.equal(fake.state.followups.length, 0, 'the node does not run in normal mode')
+    assert.equal(fake.state.disposed, true, 'the created agent is released')
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }
