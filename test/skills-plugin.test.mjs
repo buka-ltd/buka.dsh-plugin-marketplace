@@ -12,7 +12,14 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-
+import { cleanOutput, createNpxRunner } from '../packages/plugin-kit/src/npx.ts'
+import {
+  addSavedRepo,
+  listSavedRepos,
+  normalizeRepoSource,
+  removeSavedRepo,
+  repoStoreFile,
+} from '../plugins/skills/src/repo-store.ts'
 import {
   collectGlobalSkills,
   globalRoots,
@@ -22,26 +29,24 @@ import {
   resolveHomes,
   scanRoot,
   uninstallGlobalSkill,
-} from '../plugins/skills/lib/skill-store.js'
-import { cleanOutput, createNpxRunner } from '../plugins/skills/lib/npx.js'
-import {
-  addSavedRepo,
-  listSavedRepos,
-  normalizeRepoSource,
-  removeSavedRepo,
-  repoStoreFile,
-} from '../plugins/skills/lib/repo-store.js'
+} from '../plugins/skills/src/skill-store.ts'
 
 /** 在 `<dir>/SKILL.md` 写一个最小可发现的 skill。 */
 async function writeSkill(dir, name, description) {
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`)
+  await fs.writeFile(
+    path.join(dir, 'SKILL.md'),
+    `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`,
+  )
 }
 
 /** 把 lockfile 写回磁盘。 */
 async function writeLock(homes, skills) {
   await fs.mkdir(homes.agentsHome, { recursive: true })
-  await fs.writeFile(path.join(homes.agentsHome, '.skill-lock.json'), JSON.stringify({ version: 3, skills }))
+  await fs.writeFile(
+    path.join(homes.agentsHome, '.skill-lock.json'),
+    JSON.stringify({ version: 3, skills }),
+  )
 }
 
 test('全局 skills 扫描与 npx 判定', async () => {
@@ -53,7 +58,10 @@ test('全局 skills 扫描与 npx 判定', async () => {
 
     await writeSkill(path.join(agentsSkills, 'npx-skill'), 'npx-skill', 'managed by npx')
     await writeSkill(path.join(agentsSkills, 'manual-skill'), 'manual-skill', 'installed by hand')
-    await fs.writeFile(path.join(agentsSkills, 'flat-skill.md'), '---\nname: flat-skill\ndescription: flat\n---\n')
+    await fs.writeFile(
+      path.join(agentsSkills, 'flat-skill.md'),
+      '---\nname: flat-skill\ndescription: flat\n---\n',
+    )
     // 同名但落在 ~/.dsh/skills：即便 lockfile 里有同名记录，也不算 npx 管理。
     await writeSkill(path.join(dshSkills, 'npx-skill'), 'npx-skill', 'same name under dsh')
     await writeSkill(path.join(dshSkills, 'dsh-skill'), 'dsh-skill', 'dsh only')
@@ -72,15 +80,27 @@ test('全局 skills 扫描与 npx 判定', async () => {
     ])
 
     const scanned = await scanRoot({ scope: 'agents', skillsDir: agentsSkills })
-    assert.deepEqual(scanned.map((one) => one.id).sort(), ['flat-skill', 'manual-skill', 'npx-skill'])
+    assert.deepEqual(scanned.map((one) => one.id).sort(), [
+      'flat-skill',
+      'manual-skill',
+      'npx-skill',
+    ])
     assert.equal(scanned.find((one) => one.id === 'flat-skill').kind, 'file')
 
     const snapshot = await collectGlobalSkills({
       homes,
       env: {},
       summaries: [
-        { name: 'npx-skill', description: 'summary description', path: path.join(agentsSkills, 'npx-skill', 'SKILL.md') },
-        { name: 'flat-skill', description: 'flat summary', path: path.join(agentsSkills, 'flat-skill.md') },
+        {
+          name: 'npx-skill',
+          description: 'summary description',
+          path: path.join(agentsSkills, 'npx-skill', 'SKILL.md'),
+        },
+        {
+          name: 'flat-skill',
+          description: 'flat summary',
+          path: path.join(agentsSkills, 'flat-skill.md'),
+        },
       ],
     })
     const byKey = new Map(snapshot.skills.map((one) => [`${one.scope}:${one.id}`, one]))
@@ -103,7 +123,8 @@ test('全局 skills 扫描与 npx 判定', async () => {
     )
 
     for (const good of ['ok-name_1.2', 'a']) assert.equal(isSafeSkillId(good), true)
-    for (const bad of ['../x', 'a/b', '.hidden', '', 'x y']) assert.equal(isSafeSkillId(bad), false, String(bad))
+    for (const bad of ['../x', 'a/b', '.hidden', '', 'x y'])
+      assert.equal(isSafeSkillId(bad), false, String(bad))
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -214,13 +235,45 @@ test('卸载：~/.dsh 下的 skill 永远本地删除；非法输入被拒绝', 
       npxCalls += 1
       return { ok: true }
     }
-    const result = await uninstallGlobalSkill({ homes, scope: 'dsh', id: 'dsh-skill', runNpx: notCalled, env: {} })
+    const result = await uninstallGlobalSkill({
+      homes,
+      scope: 'dsh',
+      id: 'dsh-skill',
+      runNpx: notCalled,
+      env: {},
+    })
     assert.deepEqual({ ok: result.ok, method: result.method }, { ok: true, method: 'local' })
     assert.equal(npxCalls, 0)
 
-    assert.equal((await uninstallGlobalSkill({ homes, scope: 'agents', id: 'missing', runNpx: notCalled, env: {} })).code, 'not-found')
-    assert.equal((await uninstallGlobalSkill({ homes, scope: 'nope', id: 'x', runNpx: notCalled, env: {} })).code, 'invalid-scope')
-    assert.equal((await uninstallGlobalSkill({ homes, scope: 'agents', id: '../etc', runNpx: notCalled, env: {} })).code, 'invalid-id')
+    assert.equal(
+      (
+        await uninstallGlobalSkill({
+          homes,
+          scope: 'agents',
+          id: 'missing',
+          runNpx: notCalled,
+          env: {},
+        })
+      ).code,
+      'not-found',
+    )
+    assert.equal(
+      (await uninstallGlobalSkill({ homes, scope: 'nope', id: 'x', runNpx: notCalled, env: {} }))
+        .code,
+      'invalid-scope',
+    )
+    assert.equal(
+      (
+        await uninstallGlobalSkill({
+          homes,
+          scope: 'agents',
+          id: '../etc',
+          runNpx: notCalled,
+          env: {},
+        })
+      ).code,
+      'invalid-id',
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -237,7 +290,10 @@ test('lockfile 不存在时不算 npx 管理；环境变量可覆盖根目录', 
 
     const snapshot = await collectGlobalSkills({ homes, env: {} })
     assert.equal(snapshot.lock.exists, false)
-    assert.equal(snapshot.skills.some((one) => one.managedByNpx), false)
+    assert.equal(
+      snapshot.skills.some((one) => one.managedByNpx),
+      false,
+    )
 
     assert.deepEqual(resolveHomes({ DSH_HOME: '/tmp/d', DSH_AGENTS_HOME: '/tmp/a' }), {
       agentsHome: '/tmp/a',
@@ -265,7 +321,8 @@ test('npx runner：参数顺序、退出码与输出', { skip: process.platform 
 
     const argsFile = path.join(root, 'args.txt')
     await writeFakeNpx(path.join(root, 'bin-ok'), 'printf \'%s\\n\' "$@" > "$ARGS_FILE"')
-    const ok = await createNpxRunner(homes, {
+    const ok = await createNpxRunner({
+      cwd: homes.agentsHome,
       env: { ...process.env, PATH: path.join(root, 'bin-ok'), ARGS_FILE: argsFile },
     })(['remove', 'demo', '--global', '--yes'])
     assert.equal(ok.ok, true)
@@ -279,7 +336,8 @@ test('npx runner：参数顺序、退出码与输出', { skip: process.platform 
     ])
 
     await writeFakeNpx(path.join(root, 'bin-fail'), 'echo "fake failure" >&2\nexit 2')
-    const failed = await createNpxRunner(homes, {
+    const failed = await createNpxRunner({
+      cwd: homes.agentsHome,
       env: { ...process.env, PATH: path.join(root, 'bin-fail') },
     })(['remove', 'demo', '--global', '--yes'])
     assert.equal(failed.ok, false)
@@ -343,18 +401,33 @@ test('lockfile 损坏或版本过旧时不下结论，agents 下的卸载被拒�
     assert.equal(corrupt.lock.corrupt, true)
     assert.equal(corrupt.skills.find((one) => one.id === 'broken').managedByNpx, false)
 
-    const refused = await uninstallGlobalSkill({ homes, scope: 'agents', id: 'broken', runNpx: notCalled, env: {} })
+    const refused = await uninstallGlobalSkill({
+      homes,
+      scope: 'agents',
+      id: 'broken',
+      runNpx: notCalled,
+      env: {},
+    })
     assert.equal(refused.ok, false)
     assert.equal(refused.code, 'lock-unreadable')
     assert.equal(npxCalls, 0)
     // 目录没有被删：宁可不卸载，也不留下 lock 记录与悬空链接。
     await fs.access(path.join(agentsSkills, 'broken'))
 
-    await fs.writeFile(lockPath, JSON.stringify({ version: 2, skills: { broken: { source: 'a/b' } } }))
+    await fs.writeFile(
+      lockPath,
+      JSON.stringify({ version: 2, skills: { broken: { source: 'a/b' } } }),
+    )
     assert.equal((await collectGlobalSkills({ homes, env: {} })).lock.corrupt, true)
 
     // ~/.dsh 下的 skill 不依赖 npx lockfile，仍然可以本地删除。
-    const dshResult = await uninstallGlobalSkill({ homes, scope: 'dsh', id: 'dsh-skill', runNpx: notCalled, env: {} })
+    const dshResult = await uninstallGlobalSkill({
+      homes,
+      scope: 'dsh',
+      id: 'dsh-skill',
+      runNpx: notCalled,
+      env: {},
+    })
     assert.deepEqual({ ok: dshResult.ok, method: dshResult.method }, { ok: true, method: 'local' })
   } finally {
     await fs.rm(root, { recursive: true, force: true })
@@ -383,7 +456,10 @@ test('同一名字的目录与平铺文件只保留目录', async () => {
   try {
     const skillsDir = path.join(root, 'agents', 'skills')
     await writeSkill(path.join(skillsDir, 'dup'), 'dup', 'directory form')
-    await fs.writeFile(path.join(skillsDir, 'dup.md'), '---\nname: dup\ndescription: flat form\n---\n')
+    await fs.writeFile(
+      path.join(skillsDir, 'dup.md'),
+      '---\nname: dup\ndescription: flat form\n---\n',
+    )
 
     const scanned = await scanRoot({ scope: 'agents', skillsDir })
     const matches = scanned.filter((one) => one.id === 'dup')
@@ -394,7 +470,9 @@ test('同一名字的目录与平铺文件只保留目录', async () => {
   }
 })
 
-test('npx runner：超时后及时返回失败并杀掉子进程', { skip: process.platform === 'win32' }, async () => {
+test('npx runner：超时后及时返回失败并杀掉子进程', {
+  skip: process.platform === 'win32',
+}, async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-npx-'))
   try {
     const homes = { agentsHome: path.join(root, 'agents') }
@@ -403,14 +481,18 @@ test('npx runner：超时后及时返回失败并杀掉子进程', { skip: proce
     await writeFakeNpx(binDir, 'sleep 30')
 
     const started = Date.now()
-    const result = await createNpxRunner(homes, {
+    const result = await createNpxRunner({
+      cwd: homes.agentsHome,
       env: { ...process.env, PATH: binDir },
       timeoutMs: 500,
     })(['remove', 'demo', '--global', '--yes'])
 
     assert.equal(result.ok, false)
     assert.match(result.message, /超时/u)
-    assert.ok(Date.now() - started < 15_000, 'timeout should settle promptly instead of waiting for the child')
+    assert.ok(
+      Date.now() - started < 15_000,
+      'timeout should settle promptly instead of waiting for the child',
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -435,7 +517,18 @@ test('收藏来源规范化：GitHub 链接收敛成 owner/repo，非法输入�
     ],
   ])
   for (const [input, expected] of cases) assert.equal(normalizeRepoSource(input), expected, input)
-  for (const bad of ['', '   ', '-g', '--global', 'a b', 'owner/repo/extra', '../etc', 'https://', 'ftp://x/y', 'a\nb']) {
+  for (const bad of [
+    '',
+    '   ',
+    '-g',
+    '--global',
+    'a b',
+    'owner/repo/extra',
+    '../etc',
+    'https://',
+    'ftp://x/y',
+    'a\nb',
+  ]) {
     assert.equal(normalizeRepoSource(bad), null, JSON.stringify(bad))
   }
   assert.equal(normalizeRepoSource(`a/${'b'.repeat(301)}`), null)
@@ -455,7 +548,11 @@ test('收藏仓库：添加、去重、持久化与移除', async () => {
       { exists: false, corrupt: false, repos: [] },
     )
 
-    const first = await addSavedRepo({ homes, source: 'https://github.com/Vercel-Labs/agent-skills.git', note: ' 前端常用 ' })
+    const first = await addSavedRepo({
+      homes,
+      source: 'https://github.com/Vercel-Labs/agent-skills.git',
+      note: ' 前端常用 ',
+    })
     assert.equal(first.ok, true)
     assert.equal(first.repo.source, 'Vercel-Labs/agent-skills')
     assert.equal(first.repo.id, 'vercel-labs/agent-skills')
@@ -487,7 +584,10 @@ test('收藏仓库：添加、去重、持久化与移除', async () => {
     assert.equal((await listSavedRepos({ homes })).repos.length, 1)
     assert.equal((await removeSavedRepo({ homes, id: 'missing/repo' })).code, 'not-found')
     assert.equal((await addSavedRepo({ homes, source: 'a b' })).code, 'invalid-source')
-    assert.equal((await addSavedRepo({ homes, source: 'a/b', note: 'x'.repeat(201) })).code, 'invalid-note')
+    assert.equal(
+      (await addSavedRepo({ homes, source: 'a/b', note: 'x'.repeat(201) })).code,
+      'invalid-note',
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -502,11 +602,14 @@ test('收藏文件损坏或版本未知时拒绝写入，不覆盖原文件', as
 
     await fs.writeFile(file, '{ this is not json')
     const corrupt = await listSavedRepos({ homes })
-    assert.deepEqual({ exists: corrupt.exists, corrupt: corrupt.corrupt, repos: corrupt.repos }, {
-      exists: true,
-      corrupt: true,
-      repos: [],
-    })
+    assert.deepEqual(
+      { exists: corrupt.exists, corrupt: corrupt.corrupt, repos: corrupt.repos },
+      {
+        exists: true,
+        corrupt: true,
+        repos: [],
+      },
+    )
     assert.equal((await addSavedRepo({ homes, source: 'a/b' })).code, 'store-unreadable')
     assert.equal((await removeSavedRepo({ homes, id: 'a/b' })).code, 'store-unreadable')
     assert.equal(await fs.readFile(file, 'utf8'), '{ this is not json')
@@ -519,10 +622,19 @@ test('收藏文件损坏或版本未知时拒绝写入，不覆盖原文件', as
 })
 
 test('SKILL.md frontmatter 的 description 解析', () => {
-  assert.equal(parseFrontmatterDescription('---\nname: demo\ndescription: inline text\n---\n\n# Demo\n'), 'inline text')
-  assert.equal(parseFrontmatterDescription('---\r\nname: demo\r\ndescription: crlf text\r\n---\r\n'), 'crlf text')
+  assert.equal(
+    parseFrontmatterDescription('---\nname: demo\ndescription: inline text\n---\n\n# Demo\n'),
+    'inline text',
+  )
+  assert.equal(
+    parseFrontmatterDescription('---\r\nname: demo\r\ndescription: crlf text\r\n---\r\n'),
+    'crlf text',
+  )
   assert.equal(parseFrontmatterDescription('---\ndescription: "quoted text"\n---\n'), 'quoted text')
-  assert.equal(parseFrontmatterDescription("---\ndescription: 'single quoted'\n---\n"), 'single quoted')
+  assert.equal(
+    parseFrontmatterDescription("---\ndescription: 'single quoted'\n---\n"),
+    'single quoted',
+  )
   assert.equal(
     parseFrontmatterDescription('---\ndescription: >\n  folded line one\n  folded line two\n---\n'),
     'folded line one folded line two',
@@ -542,7 +654,11 @@ test('注册表没有摘要时，描述回退读取 SKILL.md', async () => {
   try {
     const homes = { agentsHome: path.join(root, 'agents'), dshHome: path.join(root, 'dsh') }
     const agentsSkills = path.join(homes.agentsHome, 'skills')
-    await writeSkill(path.join(agentsSkills, 'from-disk'), 'from-disk', 'description from the file itself')
+    await writeSkill(
+      path.join(agentsSkills, 'from-disk'),
+      'from-disk',
+      'description from the file itself',
+    )
 
     const snapshot = await collectGlobalSkills({ homes, summaries: [], env: {} })
     const entry = snapshot.skills.find((one) => one.id === 'from-disk')
@@ -552,9 +668,18 @@ test('注册表没有摘要时，描述回退读取 SKILL.md', async () => {
     const withSummary = await collectGlobalSkills({
       homes,
       env: {},
-      summaries: [{ name: 'from-disk', description: 'description from registry', path: path.join(agentsSkills, 'from-disk', 'SKILL.md') }],
+      summaries: [
+        {
+          name: 'from-disk',
+          description: 'description from registry',
+          path: path.join(agentsSkills, 'from-disk', 'SKILL.md'),
+        },
+      ],
     })
-    assert.equal(withSummary.skills.find((one) => one.id === 'from-disk').description, 'description from registry')
+    assert.equal(
+      withSummary.skills.find((one) => one.id === 'from-disk').description,
+      'description from registry',
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

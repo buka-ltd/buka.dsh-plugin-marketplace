@@ -10,9 +10,9 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { validateDefinition } from '../plugins/workflows/lib/definition.js'
-import { WorkflowRunStore } from '../plugins/workflows/lib/run-store.js'
-import { WorkflowSupervisor } from '../plugins/workflows/lib/supervisor.js'
+import { validateDefinition } from '../plugins/workflows/src/definition.ts'
+import { WorkflowRunStore } from '../plugins/workflows/src/run-store.ts'
+import { WorkflowSupervisor } from '../plugins/workflows/src/supervisor.ts'
 
 /**
  * 假 Host：全局事件总线 + 假 robots 服务。
@@ -36,7 +36,15 @@ function harness({
   const sessions = new Map()
   const script = [...results]
   const userScript = [...userAnswers]
-  const calls = { dispatch: [], open: [], sends: [], disposals: [], approval: 0, user: [], planMode: [] }
+  const calls = {
+    dispatch: [],
+    open: [],
+    sends: [],
+    disposals: [],
+    approval: 0,
+    user: [],
+    planMode: [],
+  }
   let counter = 0
   let retries = 0
 
@@ -45,9 +53,7 @@ function harness({
   }
 
   const nextResult = () =>
-    script.length > 0
-      ? script.shift()
-      : { text: 'done', stopReason: 'completed' }
+    script.length > 0 ? script.shift() : { text: 'done', stopReason: 'completed' }
 
   const makeHandle = (state, request, resumed) => {
     /** @type {Record<string, any>} */
@@ -86,12 +92,18 @@ function harness({
         state.turnEnded = false
         state.turnSeq += 1
         handle.startSeq = state.turnSeq
-        if (autoFinish) setImmediate(() => finish(state.sessionId, state.result.stopReason ?? 'completed'))
+        if (autoFinish)
+          setImmediate(() => finish(state.sessionId, state.result.stopReason ?? 'completed'))
         return handle.startSeq
       },
       async cancel(reason) {
         state.cancelled = reason
-        return { sessionId: state.sessionId, text: state.result?.text ?? '', stopReason: 'aborted', turnEnded: false }
+        return {
+          sessionId: state.sessionId,
+          text: state.result?.text ?? '',
+          stopReason: 'aborted',
+          turnEnded: false,
+        }
       },
       async dispose() {
         calls.disposals.push(state.sessionId)
@@ -131,7 +143,11 @@ function harness({
     if (state === undefined || state.disposed === true) return
     state.turnEnded = true
     state.turnSeq += 1
-    emit('session/event', { id: sessionId }, { type: 'turn/end', seq: state.turnSeq, data: { reason: { kind } } })
+    emit(
+      'session/event',
+      { id: sessionId },
+      { type: 'turn/end', seq: state.turnSeq, data: { reason: { kind } } },
+    )
   }
 
   const robots = {
@@ -238,7 +254,11 @@ async function makeStore() {
  */
 function planOf(definition) {
   const parsed = validateDefinition(definition)
-  assert.equal(parsed.ok, true, parsed.errors.map((error) => `${error.path}: ${error.message}`).join('; '))
+  assert.equal(
+    parsed.ok,
+    true,
+    parsed.errors.map((error) => `${error.path}: ${error.message}`).join('; '),
+  )
   return parsed.plan
 }
 
@@ -304,7 +324,9 @@ const LOOP = {
 test('supervisor: a turn/end event advances the run without an awaited session result', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ results: [{ text: 'work done', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      results: [{ text: 'work done', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -314,7 +336,10 @@ test('supervisor: a turn/end event advances the run without an awaited session r
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'run completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'run completion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].text, 'work done')
@@ -336,7 +361,10 @@ test('supervisor: a turn/end event advances the run without an awaited session r
     assert.equal(host.calls.dispatch[0].outputSchema.properties.abort.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.summary.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.attachments.type, 'array')
-    assert.match(host.calls.dispatch[0].outputSchema.properties.attachments.description, /independent data or files/)
+    assert.match(
+      host.calls.dispatch[0].outputSchema.properties.attachments.description,
+      /independent data or files/,
+    )
     assert.equal(run.steps[0].route, '完成')
     assert.equal(run.steps[0].routeTo, 'done')
     const results = await store.readNodeResults(started.runId)
@@ -353,7 +381,9 @@ test('supervisor: a turn/end event advances the run without an awaited session r
 test('supervisor: indexes robot sessions from persisted runs for read-only tools', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ results: [{ text: 'work done', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      results: [{ text: 'work done', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const first = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     first.attachRobots(host.robots)
@@ -363,7 +393,10 @@ test('supervisor: indexes robot sessions from persisted runs for read-only tools
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'index run completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'index run completion',
+    )
     const completed = await store.readRun(started.runId)
     const sessionId = completed.steps[0].sessionId
     assert.equal(typeof sessionId, 'string')
@@ -375,7 +408,11 @@ test('supervisor: indexes robot sessions from persisted runs for read-only tools
     assert.equal(second.sessionRun(sessionId), null, 'index is built lazily / on startup')
     await second.ensureSessionIndex()
     assert.deepEqual(second.sessionRun(sessionId), { runId: started.runId })
-    assert.equal(second.sessionRun('root'), null, 'the creating root session is not a robot session')
+    assert.equal(
+      second.sessionRun('root'),
+      null,
+      'the creating root session is not a robot session',
+    )
     await second.dispose()
     await first.dispose()
   } finally {
@@ -452,7 +489,10 @@ test('supervisor: node results record prompt and text truncation flags', async (
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'truncation flags')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'truncation flags',
+    )
     const persisted = await store.readNodeResults(started.runId)
     assert.equal(persisted[0].prompt, 'do the w')
     assert.equal(persisted[0].promptTruncated, true)
@@ -476,7 +516,11 @@ test('supervisor: node attachments are copied, recorded and embedded into the ne
       goal: '附件传递',
       maxSteps: 10,
       nodes: [
-        { id: 'start', type: 'start', next: [{ to: 'dev', name: '开始', prompt: 'produce the note' }] },
+        {
+          id: 'start',
+          type: 'start',
+          next: [{ to: 'dev', name: '开始', prompt: 'produce the note' }],
+        },
         {
           id: 'dev',
           type: 'robot',
@@ -523,11 +567,19 @@ test('supervisor: node attachments are copied, recorded and embedded into the ne
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'attachment run completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'attachment run completion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 2)
     assert.deepEqual(run.steps[0].attachments, [
-      { index: 0, name: 'result.md', bytes: Buffer.byteLength('ATTACHMENT-CONTENT\n'), description: 'note' },
+      {
+        index: 0,
+        name: 'result.md',
+        bytes: Buffer.byteLength('ATTACHMENT-CONTENT\n'),
+        description: 'note',
+      },
     ])
     assert.deepEqual(run.steps[0].data.attachments, run.steps[0].attachments)
     assert.equal(host.calls.dispatch.length, 2)
@@ -568,7 +620,10 @@ test('supervisor: a missing attachment path fails the node with a clear error', 
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'attachment failure')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'attachment failure',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps[0].status, 'failed')
     assert.deepEqual(run.steps[0].attachments, [])
@@ -602,7 +657,10 @@ test('supervisor: a loop records every entry of the same node in steps and sessi
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'loop completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'loop completion',
+    )
     const run = await store.readRun(started.runId)
     assert.deepEqual(
       run.steps.map((step) => `${step.nodeId}:${step.visit}`),
@@ -640,7 +698,10 @@ test('supervisor: a node missing JSON is asked again in the same session', async
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'result retry')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'result retry',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /next|JSON/i)
@@ -653,7 +714,10 @@ test('supervisor: a node missing JSON is asked again in the same session', async
 test('supervisor: a disposed session is resumed and the node continues', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ autoFinish: false, results: [{ text: 'first', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      autoFinish: false,
+      results: [{ text: 'first', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -671,12 +735,23 @@ test('supervisor: a disposed session is resumed and the node continues', async (
       return run?.active?.[0]?.recovering === true || run?.active?.[0]?.recoveryAttempts > 0
     }, 'recovery start')
     // openSession 后 send 一条恢复 prompt；让它在同一会话里完成。
-    host.result(sessionId, { text: 'continued', structured: { next: '完成' }, stopReason: 'completed' })
+    host.result(sessionId, {
+      text: 'continued',
+      structured: { next: '完成' },
+      stopReason: 'completed',
+    })
     host.finish(sessionId)
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'recovered completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'recovered completion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.open.length, 1)
-    assert.equal(host.calls.open[0].planMode, false, 'a normal node clears stale plan mode on recovery')
+    assert.equal(
+      host.calls.open[0].planMode,
+      false,
+      'a normal node clears stale plan mode on recovery',
+    )
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /interrupted/i)
     assert.equal(run.steps[0].text, 'continued')
@@ -702,7 +777,10 @@ test('supervisor: a disposed session that cannot reopen terminates the run witho
     })
     const sessionId = started.run.active[0].sessionId
     host.dispose(sessionId)
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'recovery failure')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'recovery failure',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].stopReason, 'error')
@@ -735,7 +813,10 @@ test('supervisor: a robot session creation failure fails the run with the servic
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'creation failure')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'creation failure',
+    )
     const run = await store.readRun(started.runId)
     assert.match(run.error, /could not create a visible robot session/)
     assert.match(run.error, /refusing to fall back/)
@@ -764,7 +845,10 @@ test('supervisor: a substitute session from an old robots service is rejected', 
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'substitute rejection')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'substitute rejection',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].stopReason, 'error')
@@ -781,7 +865,10 @@ test('supervisor: a hidden subagent handle fails the node instead of being sched
   try {
     const host = harness()
     const dispatch = host.robots.dispatchSession.bind(host.robots)
-    host.robots.dispatchSession = async (request) => ({ ...(await dispatch(request)), mode: 'subagent' })
+    host.robots.dispatchSession = async (request) => ({
+      ...(await dispatch(request)),
+      mode: 'subagent',
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -791,7 +878,10 @@ test('supervisor: a hidden subagent handle fails the node instead of being sched
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'hidden handle failure')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'hidden handle failure',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].stopReason, 'error')
@@ -838,7 +928,10 @@ test('supervisor: resumeAll finalizes a turn that completed before the restart',
       error: null,
     }
     await store.create({ run, definition, plan })
-    const host = harness({ autoFinish: false, results: [{ text: 'already done', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      autoFinish: false,
+      results: [{ text: 'already done', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     host.sessions.set('session-recover', {
       sessionId: 'session-recover',
       prompt: 'do the work',
@@ -851,7 +944,10 @@ test('supervisor: resumeAll finalizes a turn that completed before the restart',
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     await supervisor.resumeAll()
-    await waitFor(async () => (await store.readRun(run.runId))?.status === 'completed', 'host recovery')
+    await waitFor(
+      async () => (await store.readRun(run.runId))?.status === 'completed',
+      'host recovery',
+    )
     const persisted = await store.readRun(run.runId)
     assert.equal(persisted.steps.length, 1)
     assert.equal(persisted.steps[0].text, 'already done')
@@ -864,7 +960,10 @@ test('supervisor: resumeAll finalizes a turn that completed before the restart',
 test('supervisor: cancel stops the run and ignores late turns', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ autoFinish: false, results: [{ text: 'slow', stopReason: 'completed' }] })
+    const host = harness({
+      autoFinish: false,
+      results: [{ text: 'slow', stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -890,7 +989,10 @@ test('supervisor: no timer by default; an explicit timeout cancels the node', as
   const { store, dir } = await makeStore()
   try {
     // 默认不超时：等 80ms 仍然 running。
-    const host = harness({ autoFinish: false, results: [{ text: 'long', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      autoFinish: false,
+      results: [{ text: 'long', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -903,18 +1005,26 @@ test('supervisor: no timer by default; an explicit timeout cancels the node', as
     await new Promise((resolve) => setTimeout(resolve, 80))
     assert.equal((await store.readRun(started.runId)).status, 'running')
     const sessionId = started.run.active[0].sessionId
-    host.result(sessionId, { text: 'long done', structured: { next: '完成' }, stopReason: 'completed' })
+    host.result(sessionId, {
+      text: 'long done',
+      structured: { next: '完成' },
+      stopReason: 'completed',
+    })
     host.finish(sessionId)
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'default no timeout')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'default no timeout',
+    )
 
     // 显式 timeoutMs：节点失败并标 timedOut。
     const explicit = {
       ...SIMPLE,
-      nodes: SIMPLE.nodes.map((node) =>
-        node.id === 'work' ? { ...node, timeoutMs: 20 } : node,
-      ),
+      nodes: SIMPLE.nodes.map((node) => (node.id === 'work' ? { ...node, timeoutMs: 20 } : node)),
     }
-    const slowHost = harness({ autoFinish: false, results: [{ text: 'slow', stopReason: 'completed' }] })
+    const slowHost = harness({
+      autoFinish: false,
+      results: [{ text: 'slow', stopReason: 'completed' }],
+    })
     const second = new WorkflowSupervisor({ ctx: slowHost.ctx, store, logger: slowHost.ctx.logger })
     second.attachRobots(slowHost.robots)
     const timed = await second.start({
@@ -923,7 +1033,10 @@ test('supervisor: no timer by default; an explicit timeout cancels the node', as
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(timed.runId))?.status === 'failed', 'explicit timeout')
+    await waitFor(
+      async () => (await store.readRun(timed.runId))?.status === 'failed',
+      'explicit timeout',
+    )
     const timedRun = await store.readRun(timed.runId)
     assert.equal(timedRun.steps[0].timedOut, true)
     assert.equal(timedRun.steps[0].stopReason, 'timeout')
@@ -950,7 +1063,13 @@ const USER = {
       title: '发布确认',
       detail: '是否发布？',
       next: [
-        { to: 'publish', name: 'approve', label: '同意发布', description: '直接发布', prompt: 'publish it' },
+        {
+          to: 'publish',
+          name: 'approve',
+          label: '同意发布',
+          description: '直接发布',
+          prompt: 'publish it',
+        },
         { to: 'done', name: 'reject', label: '取消' },
       ],
       questions: [{ id: 'notes', header: '备注', question: '还有什么要说明？' }],
@@ -999,13 +1118,10 @@ test('supervisor: user runs foreground, waits for the user and continues', async
       host.calls.user[0].questions.map((question) => question.id),
       ['route', 'notes'],
     )
-    assert.deepEqual(
-      host.calls.user[0].questions[0].options,
-      [
-        { label: '同意发布', description: '直接发布' },
-        { label: '取消' },
-      ],
-    )
+    assert.deepEqual(host.calls.user[0].questions[0].options, [
+      { label: '同意发布', description: '直接发布' },
+      { label: '取消' },
+    ])
     const userStep = run.steps.find((step) => step.nodeId === 'confirm')
     assert.equal(userStep.type, 'user')
     assert.equal(userStep.status, 'completed')
@@ -1052,7 +1168,14 @@ test('supervisor: a skipped user choice cancels the run', async () => {
   try {
     const host = harness({
       results: [{ text: 'prepared', structured: { next: '准备完成' }, stopReason: 'completed' }],
-      userAnswers: [{ answers: [{ id: 'route', selected: [] }, { id: 'notes', selected: [], custom: '再想想' }] }],
+      userAnswers: [
+        {
+          answers: [
+            { id: 'route', selected: [] },
+            { id: 'notes', selected: [], custom: '再想想' },
+          ],
+        },
+      ],
     })
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -1067,7 +1190,10 @@ test('supervisor: a skipped user choice cancels the run', async () => {
     assert.equal(userStep.status, 'cancelled')
     assert.equal(userStep.route, null)
     assert.match(run.result.message, /submitted without a choice/u)
-    assert.equal(run.steps.some((step) => step.nodeId === 'publish'), false)
+    assert.equal(
+      run.steps.some((step) => step.nodeId === 'publish'),
+      false,
+    )
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -1183,7 +1309,10 @@ test('supervisor: restart recovery rehydrates attachments into the next prompt',
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     await supervisor.resumeAll()
-    await waitFor(async () => (await store.readRun(run.runId))?.status === 'completed', 'recovered attachment')
+    await waitFor(
+      async () => (await store.readRun(run.runId))?.status === 'completed',
+      'recovered attachment',
+    )
     assert.equal(host.calls.dispatch.length, 1)
     assert.match(host.calls.dispatch[0].prompt, /RESTART-CONTENT/)
     await supervisor.dispose()
@@ -1228,7 +1357,9 @@ test('supervisor: resumeAll sends a continuation prompt for a turn that never fi
       error: null,
     }
     await store.create({ run, definition, plan })
-    const host = harness({ results: [{ text: 'continued', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      results: [{ text: 'continued', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     host.sessions.set('session-unfinished', {
       sessionId: 'session-unfinished',
       prompt: 'do the work',
@@ -1241,7 +1372,10 @@ test('supervisor: resumeAll sends a continuation prompt for a turn that never fi
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     await supervisor.resumeAll()
-    await waitFor(async () => (await store.readRun(run.runId))?.status === 'completed', 'unfinished recovery')
+    await waitFor(
+      async () => (await store.readRun(run.runId))?.status === 'completed',
+      'unfinished recovery',
+    )
     const persisted = await store.readRun(run.runId)
     assert.equal(host.calls.open.length, 1)
     assert.equal(host.calls.sends.length, 1)
@@ -1393,7 +1527,10 @@ test('supervisor: a missing next is retried in the same session', async () => {
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'missing next retry')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'missing next retry',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /next/i)
@@ -1421,7 +1558,10 @@ test('supervisor: an unknown next is retried with the allowed routes', async () 
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'unknown next retry')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'unknown next retry',
+    )
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /完成/)
   } finally {
@@ -1468,7 +1608,10 @@ test('supervisor: a result that does not match the declared output is retried in
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'invalid output retry')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'invalid output retry',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /invalid-output/)
@@ -1502,7 +1645,10 @@ test('supervisor: exhausting the retries for an invalid output fails the node wi
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'invalid output exhaustion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'invalid output exhaustion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps[0].status, 'failed')
     assert.match(run.steps[0].error, /invalid workflow output for node "work"/)
@@ -1516,7 +1662,10 @@ test('supervisor: exhausting the retries for an invalid output fails the node wi
 test('supervisor: pending question and approval are recorded and cleared', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ autoFinish: false, results: [{ text: 'waiting', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const host = harness({
+      autoFinish: false,
+      results: [{ text: 'waiting', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
@@ -1537,11 +1686,17 @@ test('supervisor: pending question and approval are recorded and cleared', async
       { agent: { id: sessionId }, questions: [{ id: 'q1', header: '确认', question: '继续吗？' }] },
       () => questionAnswer,
     )
-    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction?.kind === 'question', 'question record')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.pendingInteraction?.kind === 'question',
+      'question record',
+    )
     const withQuestion = await store.readRun(started.runId)
     assert.equal(withQuestion.pendingInteraction.questions[0].question, '继续吗？')
     releaseQuestion({ answers: [] })
-    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction === null, 'question cleared')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.pendingInteraction === null,
+      'question cleared',
+    )
 
     let releaseApproval
     const approvalAnswer = new Promise((resolve) => {
@@ -1552,11 +1707,17 @@ test('supervisor: pending question and approval are recorded and cleared', async
       { agent: { id: sessionId }, toolName: 'bash', reason: 'needs permission' },
       () => approvalAnswer,
     )
-    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction?.kind === 'approval', 'approval record')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.pendingInteraction?.kind === 'approval',
+      'approval record',
+    )
     const withApproval = await store.readRun(started.runId)
     assert.equal(withApproval.pendingInteraction.toolName, 'bash')
     releaseApproval('allowed-once')
-    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction === null, 'approval cleared')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.pendingInteraction === null,
+      'approval cleared',
+    )
 
     await supervisor.cancel(started.runId)
   } finally {
@@ -1569,7 +1730,11 @@ test('supervisor: a valid abort ends the run as failed without following an edge
   try {
     const host = harness({
       results: [
-        { text: 'cannot', structured: { abort: '缺少访问生产环境的凭据' }, stopReason: 'completed' },
+        {
+          text: 'cannot',
+          structured: { abort: '缺少访问生产环境的凭据' },
+          stopReason: 'completed',
+        },
       ],
     })
     const definition = SIMPLE
@@ -1581,7 +1746,10 @@ test('supervisor: a valid abort ends the run as failed without following an edge
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'aborted run')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'aborted run',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].status, 'failed')
@@ -1634,7 +1802,10 @@ test('supervisor: abort does not need the declared output fields', async () => {
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'aborted strict output')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'aborted strict output',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps[0].aborted, true)
     assert.equal(run.steps[0].error, '输出无法生成')
@@ -1649,7 +1820,9 @@ test('supervisor: abort on a terminal robot node fails instead of completing', a
   const { store, dir } = await makeStore()
   try {
     const host = harness({
-      results: [{ text: 'cannot', structured: { abort: '没有可用的数据源' }, stopReason: 'completed' }],
+      results: [
+        { text: 'cannot', structured: { abort: '没有可用的数据源' }, stopReason: 'completed' },
+      ],
     })
     const definition = {
       goal: '终止节点主动终止',
@@ -1672,7 +1845,10 @@ test('supervisor: abort on a terminal robot node fails instead of completing', a
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'terminated abort')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'terminated abort',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps[0].aborted, true)
     assert.equal(run.result.aborted, true)
@@ -1700,7 +1876,10 @@ test('supervisor: next and abort together are retried in the same session', asyn
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'ambiguous abort retry')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'ambiguous abort retry',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /ambiguous-result/u)
@@ -1731,7 +1910,10 @@ test('supervisor: an empty abort reason is retried, then fails as invalid output
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'invalid abort exhausted')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'invalid abort exhausted',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.sends.length, 2)
     assert.match(host.calls.sends[0].text, /invalid-abort/u)
@@ -1785,14 +1967,21 @@ test('supervisor: resumeAll finalizes a completed abort result as an aborted run
       prompt: 'do the work',
       turnSeq: 1,
       turnEnded: true,
-      result: { text: 'cannot', structured: { abort: '恢复后发现无法完成' }, stopReason: 'completed' },
+      result: {
+        text: 'cannot',
+        structured: { abort: '恢复后发现无法完成' },
+        stopReason: 'completed',
+      },
       disposed: false,
       cancelled: null,
     })
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     await supervisor.resumeAll()
-    await waitFor(async () => (await store.readRun(run.runId))?.status === 'failed', 'recovered abort')
+    await waitFor(
+      async () => (await store.readRun(run.runId))?.status === 'failed',
+      'recovered abort',
+    )
     const persisted = await store.readRun(run.runId)
     assert.equal(persisted.steps.length, 1)
     assert.equal(persisted.steps[0].recovered, true)
@@ -1808,7 +1997,13 @@ test('supervisor: a valid abort wins over session recovery', async () => {
   const { store, dir } = await makeStore()
   try {
     const host = harness({
-      results: [{ text: 'cannot', structured: { abort: '会话断开前已确认无法继续' }, stopReason: 'aborted' }],
+      results: [
+        {
+          text: 'cannot',
+          structured: { abort: '会话断开前已确认无法继续' },
+          stopReason: 'aborted',
+        },
+      ],
     })
     const definition = SIMPLE
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
@@ -1819,7 +2014,10 @@ test('supervisor: a valid abort wins over session recovery', async () => {
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'abort before recovery')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'abort before recovery',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps[0].aborted, true)
     assert.equal(run.result.aborted, true)
@@ -1877,7 +2075,10 @@ test('supervisor: fan-out runs tasks concurrently and the join fires after all i
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'concurrent completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'concurrent completion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 4, 'planner + 3 tasks')
     assert.deepEqual(
@@ -1945,7 +2146,10 @@ test('supervisor: a join waits only for its started inputs and supports overlap'
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'overlap completion')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'overlap completion',
+    )
     const run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 4, 'planner + started tasks (t4 未启动)')
     // t4 没有启动，所以两个 join 都不等它；t2 同时喂给 x 和 y。
@@ -1963,7 +2167,11 @@ const PLAN = {
   goal: '先计划再实施',
   maxSteps: 10,
   nodes: [
-    { id: 'start', type: 'start', next: [{ to: 'implement', name: '开始', prompt: '先给计划，批准后再实施。' }] },
+    {
+      id: 'start',
+      type: 'start',
+      next: [{ to: 'implement', name: '开始', prompt: '先给计划，批准后再实施。' }],
+    },
     {
       id: 'implement',
       type: 'robot',
@@ -1981,8 +2189,14 @@ const PLAN = {
 test('supervisor: plan nodes dispatch with planMode true and normal nodes with false', async () => {
   const { store, dir } = await makeStore()
   try {
-    const normal = harness({ results: [{ text: 'done', structured: { next: '完成' }, stopReason: 'completed' }] })
-    const normalSupervisor = new WorkflowSupervisor({ ctx: normal.ctx, store, logger: normal.ctx.logger })
+    const normal = harness({
+      results: [{ text: 'done', structured: { next: '完成' }, stopReason: 'completed' }],
+    })
+    const normalSupervisor = new WorkflowSupervisor({
+      ctx: normal.ctx,
+      store,
+      logger: normal.ctx.logger,
+    })
     normalSupervisor.attachRobots(normal.robots)
     const normalStarted = await normalSupervisor.start({
       plan: planOf(SIMPLE),
@@ -1991,7 +2205,10 @@ test('supervisor: plan nodes dispatch with planMode true and normal nodes with f
       mode: 'background',
     })
     assert.equal(normal.calls.dispatch[0].planMode, false)
-    await waitFor(async () => (await store.readRun(normalStarted.runId))?.status === 'completed', 'normal completion')
+    await waitFor(
+      async () => (await store.readRun(normalStarted.runId))?.status === 'completed',
+      'normal completion',
+    )
 
     const plan = harness({ autoFinish: false, results: [{ text: '', stopReason: 'completed' }] })
     const planSupervisor = new WorkflowSupervisor({ ctx: plan.ctx, store, logger: plan.ctx.logger })
@@ -2006,9 +2223,16 @@ test('supervisor: plan nodes dispatch with planMode true and normal nodes with f
     const planSessionId = planStarted.run.active[0].sessionId
     // 模拟用户批准：plan 模式已退出，机器人实施完并交回结果。
     plan.sessions.get(planSessionId).planMode = false
-    plan.result(planSessionId, { text: 'done', structured: { next: '完成' }, stopReason: 'completed' })
+    plan.result(planSessionId, {
+      text: 'done',
+      structured: { next: '完成' },
+      stopReason: 'completed',
+    })
     plan.finish(planSessionId)
-    await waitFor(async () => (await store.readRun(planStarted.runId))?.status === 'completed', 'plan completion')
+    await waitFor(
+      async () => (await store.readRun(planStarted.runId))?.status === 'completed',
+      'plan completion',
+    )
     const run = await store.readRun(planStarted.runId)
     assert.equal(run.steps[0].mode, 'plan')
     assert.ok(
@@ -2052,7 +2276,10 @@ test('supervisor: a dismissed plan review waits for the user instead of retrying
       },
       () => answer,
     )
-    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction?.planReview === true, 'plan review recorded')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.pendingInteraction?.planReview === true,
+      'plan review recorded',
+    )
     resolveAnswer({ answers: [] })
     host.result(sessionId, { text: '', stopReason: 'completed' })
     host.finish(sessionId)
@@ -2064,9 +2291,16 @@ test('supervisor: a dismissed plan review waits for the user instead of retrying
 
     // 用户批准后（plan 模式已退出）这一轮正常交回结果并路由。
     host.sessions.get(sessionId).planMode = false
-    host.result(sessionId, { text: 'implemented', structured: { next: '完成' }, stopReason: 'completed' })
+    host.result(sessionId, {
+      text: 'implemented',
+      structured: { next: '完成' },
+      stopReason: 'completed',
+    })
     host.finish(sessionId)
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'after approval')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'completed',
+      'after approval',
+    )
     run = await store.readRun(started.runId)
     assert.equal(run.steps.length, 1)
     assert.equal(run.steps[0].text, 'implemented')
@@ -2098,7 +2332,10 @@ test('supervisor: a plan node that stops in plan mode is nudged once, then fails
 
     host.result(sessionId, { text: '', stopReason: 'completed' })
     host.finish(sessionId)
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'second stop fails')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'second stop fails',
+    )
     run = await store.readRun(started.runId)
     assert.match(run.error, /without presenting a plan/u)
   } finally {
@@ -2118,7 +2355,10 @@ test('supervisor: an old robots service without supportsPlanMode fails the plan 
       agent: { id: 'root' },
       mode: 'background',
     })
-    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'capability failure')
+    await waitFor(
+      async () => (await store.readRun(started.runId))?.status === 'failed',
+      'capability failure',
+    )
     const run = await store.readRun(started.runId)
     assert.match(run.error, /supportsPlanMode is missing/u)
     assert.equal(host.calls.dispatch.length, 0, 'no session is dispatched without the capability')

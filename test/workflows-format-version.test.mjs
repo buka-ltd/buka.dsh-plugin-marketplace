@@ -12,10 +12,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import {
-  WORKFLOW_FORMAT_VERSION,
-  WorkflowRunStore,
-} from '../plugins/workflows/lib/run-store.js'
+import { WORKFLOW_FORMAT_VERSION, WorkflowRunStore } from '../plugins/workflows/src/run-store.ts'
 
 /**
  * 建一个临时根目录：`runs/` 是运行目录，`settings.json` 是它的同级文件。
@@ -107,7 +104,11 @@ test('store format v3: purges runs whose run.json or definition.json is not the 
   // 当前版本的运行要保留。
   await writeRunDirectory(runsDir, 'wf-current', {
     run: sampleRun('wf-current', { seq: 3 }),
-    definition: { version: WORKFLOW_FORMAT_VERSION, runId: 'wf-current', definition: { start: 'a' } },
+    definition: {
+      version: WORKFLOW_FORMAT_VERSION,
+      runId: 'wf-current',
+      definition: { start: 'a' },
+    },
   })
 
   const logs = []
@@ -122,8 +123,14 @@ test('store format v3: purges runs whose run.json or definition.json is not the 
   assert.equal(await store.readRun('wf-old-definition'), null)
   assert.ok(await store.readRun('wf-current'))
   // 清退数量与原因都要写日志，方便排查「运行怎么没了」。
-  assert.ok(logs.some((message) => message.includes('wf-old-run')), logs.join('\n'))
-  assert.ok(logs.some((message) => message.includes('2')), logs.join('\n'))
+  assert.ok(
+    logs.some((message) => message.includes('wf-old-run')),
+    logs.join('\n'),
+  )
+  assert.ok(
+    logs.some((message) => message.includes('2')),
+    logs.join('\n'),
+  )
 })
 
 test('store format v3: deletes runs with a missing or corrupt run/definition snapshot', async (t) => {
@@ -172,7 +179,10 @@ test('store format v3: every directory purged also resets the sequence counter',
     definition: { version: 1, runId: 'wf-old-b' },
   })
   // 旧计数器已经推到很大的号；旧运行都没了就应该回到 #1。
-  await fs.writeFile(path.join(runsDir, 'sequence.json'), `${JSON.stringify({ version: 1, next: 9 })}\n`)
+  await fs.writeFile(
+    path.join(runsDir, 'sequence.json'),
+    `${JSON.stringify({ version: 1, next: 9 })}\n`,
+  )
 
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -195,7 +205,10 @@ test('store format v3: keeps the sequence counter when current-version runs rema
     run: sampleRun('wf-current', { seq: 4 }),
     definition: { version: WORKFLOW_FORMAT_VERSION, runId: 'wf-current' },
   })
-  await fs.writeFile(path.join(runsDir, 'sequence.json'), `${JSON.stringify({ version: 3, next: 12 })}\n`)
+  await fs.writeFile(
+    path.join(runsDir, 'sequence.json'),
+    `${JSON.stringify({ version: 3, next: 12 })}\n`,
+  )
 
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -269,7 +282,11 @@ test('store format v3: listRuns reports waitingForUser from pendingInteraction',
     run: sampleRun('wf-idle', { status: 'running', createdAt: now - 1000 }),
     definition: { start: 'a' },
   })
-  await store.save({ ...(await store.readRun('wf-idle')), status: 'running', pendingInteraction: null })
+  await store.save({
+    ...(await store.readRun('wf-idle')),
+    status: 'running',
+    pendingInteraction: null,
+  })
   // 用户介入节点等待作答也计入 waitingForUser。
   await store.create({
     run: sampleRun('wf-user-waiting', { status: 'waiting', createdAt: now - 3000 }),

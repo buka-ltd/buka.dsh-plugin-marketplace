@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "../../.build/robots",
+    "tsBuildInfoFile": "../../.build/robots.tsbuildinfo"
+  },
+  "include": ["src", "../../types"]
+}

@@ -1,12 +1,4 @@
 {
-  "title": {
-    "en": "Buka Bell",
-    "zh-cn": "Buka 提示音"
-  },
-  "description": {
-    "en": "Plays a sound when an agent finishes a task, waits for your input, has a plan sent back for changes, or is stopped manually. Each moment opens its own sound list where one click selects and plays; Back returns. Includes macOS system sounds and the bundled “你干嘛~哎哟” clip; “None” turns a moment off.",
-    "zh-cn": "任务结束、等待你输入、计划被退回修改、手动终止任务时播放提示音。点一行进入该时机的独立声音列表，点一项即选中并试听，点「返回」回来；候选含 macOS 系统自带音与插件自带的「你干嘛~哎哟」梗语音，「无」表示不播放。"
-  },
   "icon": "./icon.svg",
   "author": "Buka Ltd",
   "homepage": "https://github.com/buka-ltd/buka.dsh-plugin-marketplace/tree/main/plugins/bell",

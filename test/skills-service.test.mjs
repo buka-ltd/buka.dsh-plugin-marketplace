@@ -17,8 +17,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { addSavedRepo, repoStoreFile } from '../plugins/skills/lib/repo-store.js'
-import { SERVICE_NAME, SkillsCatalogService } from '../plugins/skills/lib/service.js'
+import { addSavedRepo, repoStoreFile } from '../plugins/skills/src/repo-store.ts'
+import { SERVICE_NAME, SkillsCatalogService } from '../plugins/skills/src/service.ts'
 
 /** 建一个临时 DSH home，并在测试结束后删除。 */
 async function tempHomes(t) {
@@ -28,7 +28,7 @@ async function tempHomes(t) {
 }
 
 /** GitHub tree API 的 URL，测试里拼断言用。 */
-function treeUrl(owner, repo, branch = 'HEAD') {
+function _treeUrl(owner, repo, branch = 'HEAD') {
   return `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`
 }
 
@@ -47,7 +47,10 @@ function createFetch(repos) {
   const fetchImpl = async (url) => {
     calls.push(url)
 
-    const treeMatch = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/git\/trees\/([^?]+)\?recursive=1$/u.exec(url)
+    const treeMatch =
+      /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/git\/trees\/([^?]+)\?recursive=1$/u.exec(
+        url,
+      )
     if (treeMatch !== null) {
       const spec = repos[`${treeMatch[1]}/${treeMatch[2]}`.toLowerCase()]
       if (spec === undefined) return new Response(null, { status: 404 })
@@ -59,7 +62,9 @@ function createFetch(repos) {
       )
     }
 
-    const rawMatch = /^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/[^/]+\/(.+)$/u.exec(url)
+    const rawMatch = /^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/[^/]+\/(.+)$/u.exec(
+      url,
+    )
     if (rawMatch !== null) {
       const spec = repos[`${rawMatch[1]}/${rawMatch[2]}`.toLowerCase()]
       const content = spec?.contents?.[decodeURIComponent(rawMatch[3])]
@@ -245,7 +250,12 @@ test('listSkills：npx 仓库里清单声明的 skill 带 plugin 名，其余为
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'npx-skills')
   assert.deepEqual(result.skills, [
-    { name: 'declared', description: 'In the plugin', path: 'skills/declared/SKILL.md', plugin: 'demo-plugin' },
+    {
+      name: 'declared',
+      description: 'In the plugin',
+      path: 'skills/declared/SKILL.md',
+      plugin: 'demo-plugin',
+    },
     { name: 'plain', description: 'Not declared', path: 'skills/plain/SKILL.md', plugin: null },
   ])
 })

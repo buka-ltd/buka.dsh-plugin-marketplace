@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { normalizePresets, resolveWorkflowAccess } from '../plugins/workflows/lib/access.js'
+import { normalizePresets, resolveWorkflowAccess } from '../plugins/workflows/src/access.ts'
 
 /**
  * 造一个最小会话对象。
@@ -27,7 +27,9 @@ function session(header = {}) {
  */
 function services(options = {}) {
   const preset = options.preset === undefined ? 'workflow-orchestrator' : options.preset
-  const live = session(options.parentSession === undefined ? {} : { parentSession: options.parentSession })
+  const live = session(
+    options.parentSession === undefined ? {} : { parentSession: options.parentSession },
+  )
   return {
     sessions: {
       get(id) {

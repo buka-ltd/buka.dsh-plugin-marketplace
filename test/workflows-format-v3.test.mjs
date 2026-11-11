@@ -9,12 +9,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { describePlan, validateDefinition } from '../plugins/workflows/lib/definition.js'
-import * as routing from '../plugins/workflows/lib/routing.js'
+import { describePlan, validateDefinition } from '../plugins/workflows/src/definition.ts'
+import * as routing from '../plugins/workflows/src/routing.ts'
 import {
-  SESSION_TITLE_MAX_BYTES,
-  WorkflowCancelledError,
-  WorkflowRunError,
   answersValue,
   buildUserQuestions,
   clipUtf8,
@@ -22,8 +19,11 @@ import {
   renderUserDetail,
   resolveUserAnswer,
   robotSessionTitle,
+  SESSION_TITLE_MAX_BYTES,
   toToolRun,
-} from '../plugins/workflows/lib/run.js'
+  WorkflowCancelledError,
+  WorkflowRunError,
+} from '../plugins/workflows/src/run.ts'
 
 /**
  * 一份最小的 format 3 定义：start -> dev <-> test -> done。
@@ -168,7 +168,10 @@ test('format v3: when is rejected on robot and user edges', () => {
   assert.equal(robotParsed.ok, false)
   const robotError = robotParsed.errors.find((item) => item.path === 'nodes[1].next[0].when')
   assert.ok(robotError, errorText(robotParsed))
-  assert.equal(robotError.message, 'when was removed; select the next edge with the JSON "next" route')
+  assert.equal(
+    robotError.message,
+    'when was removed; select the next edge with the JSON "next" route',
+  )
 
   const userEdge = userDefinition()
   userEdge.nodes[2].next[0].when = { field: 'status', equals: 'ok' }
@@ -176,7 +179,10 @@ test('format v3: when is rejected on robot and user edges', () => {
   assert.equal(userParsed.ok, false)
   const userError = userParsed.errors.find((item) => item.path === 'nodes[2].next[0].when')
   assert.ok(userError, errorText(userParsed))
-  assert.equal(userError.message, 'when was removed; select the next edge with the JSON "next" route')
+  assert.equal(
+    userError.message,
+    'when was removed; select the next edge with the JSON "next" route',
+  )
 })
 
 test('format v3: robot next must be an edge array, not a string shorthand', () => {
@@ -208,7 +214,9 @@ test('format v3: every edge leaving a robot node needs a unique name', () => {
   ]
   const duplicateParsed = validateDefinition(duplicate)
   assert.equal(duplicateParsed.ok, false)
-  const duplicateError = duplicateParsed.errors.find((item) => item.path === 'nodes[2].next[1].name')
+  const duplicateError = duplicateParsed.errors.find(
+    (item) => item.path === 'nodes[2].next[1].name',
+  )
   assert.ok(duplicateError, errorText(duplicateParsed))
   assert.match(duplicateError.message, /duplicate edge name "打回"/u)
 })
@@ -260,7 +268,11 @@ test('format v3: edges accept an optional success / failure tone without affecti
       ['reject', 'failure'],
     ],
   )
-  assert.equal(userPlan.nodes.review.next[0].label, '同意发布', 'tone does not touch the user-facing label')
+  assert.equal(
+    userPlan.nodes.review.next[0].label,
+    '同意发布',
+    'tone does not touch the user-facing label',
+  )
 })
 
 test('format v3: an edge tone must be "success" or "failure"', () => {
@@ -302,7 +314,10 @@ test('format v3: edges entering a robot need a prompt; edges into user/end must 
   promptToUser.nodes[1].next[0].prompt = '用户节点不跑会话'
   const userParsed = validateDefinition(promptToUser)
   assert.equal(userParsed.ok, false)
-  assert.match(userParsed.errors.map((error) => error.path).join('\n'), /nodes\[1\]\.next\[0\]\.prompt/u)
+  assert.match(
+    userParsed.errors.map((error) => error.path).join('\n'),
+    /nodes\[1\]\.next\[0\]\.prompt/u,
+  )
 })
 
 test('format v3: robot nodes do not carry a prompt and the start node is required', () => {
@@ -319,7 +334,10 @@ test('format v3: robot nodes do not carry a prompt and the start node is require
   noStart.nodes.shift()
   const noStartParsed = validateDefinition(noStart)
   assert.equal(noStartParsed.ok, false)
-  assert.match(errorText(noStartParsed), /start: a workflow definition needs exactly one node with type "start"/u)
+  assert.match(
+    errorText(noStartParsed),
+    /start: a workflow definition needs exactly one node with type "start"/u,
+  )
 
   const legacyTopLevelStart = v3Definition()
   legacyTopLevelStart.start = 'dev'
@@ -379,15 +397,24 @@ test('format v3: gate is rejected with a migration error', () => {
 test('format v3: user node validation', () => {
   const missingTitle = userDefinition()
   delete missingTitle.nodes[2].title
-  assert.match(errorText(validateDefinition(missingTitle)), /nodes\[2\]\.title: must be a non-empty title/u)
+  assert.match(
+    errorText(validateDefinition(missingTitle)),
+    /nodes\[2\]\.title: must be a non-empty title/u,
+  )
 
   const missingLabel = userDefinition()
   delete missingLabel.nodes[2].next[0].label
-  assert.match(errorText(validateDefinition(missingLabel)), /nodes\[2\]\.next\[0\]\.label: .*non-empty label/u)
+  assert.match(
+    errorText(validateDefinition(missingLabel)),
+    /nodes\[2\]\.next\[0\]\.label: .*non-empty label/u,
+  )
 
   const duplicateLabel = userDefinition()
   duplicateLabel.nodes[2].next[1].label = '同意发布'
-  assert.match(errorText(validateDefinition(duplicateLabel)), /nodes\[2\]\.next\[1\]\.label: duplicate option label/u)
+  assert.match(
+    errorText(validateDefinition(duplicateLabel)),
+    /nodes\[2\]\.next\[1\]\.label: duplicate option label/u,
+  )
 
   const legacyApprove = userDefinition()
   legacyApprove.nodes[2].onApprove = { to: 'publish', prompt: '发布' }
@@ -399,7 +426,10 @@ test('format v3: user node validation', () => {
   const nothing = userDefinition()
   nothing.nodes[2].next = []
   delete nothing.nodes[2].questions
-  assert.match(errorText(validateDefinition(nothing)), /needs at least one outgoing edge .* or one extra question/u)
+  assert.match(
+    errorText(validateDefinition(nothing)),
+    /needs at least one outgoing edge .* or one extra question/u,
+  )
 
   const withOutput = userDefinition()
   withOutput.nodes[2].output = { type: 'object', properties: {} }
@@ -418,7 +448,10 @@ test('format v3: user node validation', () => {
 
   const noQuestionText = userDefinition()
   noQuestionText.nodes[2].questions = [{ id: 'notes' }]
-  assert.match(errorText(validateDefinition(noQuestionText)), /nodes\[2\]\.questions\[0\]\.question: must be a non-empty question/u)
+  assert.match(
+    errorText(validateDefinition(noQuestionText)),
+    /nodes\[2\]\.questions\[0\]\.question: must be a non-empty question/u,
+  )
 })
 
 test('format v3: user detail templates are validated', () => {
@@ -491,11 +524,18 @@ test('routing: resolveRoute follows the JSON next route name', () => {
   assert.deepEqual(routing.resolveRoute(node, { next: 'fix' }), {
     rule: { to: 'fix', name: 'fix', prompt: '修复' },
   })
-  assert.deepEqual(routing.resolveRoute(node, { next: ' give-up ' }), { rule: { to: 'done', name: 'give-up' } })
+  assert.deepEqual(routing.resolveRoute(node, { next: ' give-up ' }), {
+    rule: { to: 'done', name: 'give-up' },
+  })
 })
 
 test('routing: resolveRoute reports missing, unknown and terminal routes', () => {
-  const node = { next: [{ to: 'a', name: 'yes' }, { to: 'b', name: 'no' }] }
+  const node = {
+    next: [
+      { to: 'a', name: 'yes' },
+      { to: 'b', name: 'no' },
+    ],
+  }
 
   const missing = routing.resolveRoute(node, {})
   assert.equal(missing.rule, undefined)
@@ -515,7 +555,12 @@ test('routing: resolveRoute reports missing, unknown and terminal routes', () =>
 })
 
 test('routing: exports resolveRoute and resolveAbort', () => {
-  assert.deepEqual(Object.keys(routing).sort(), ['MAX_ABORT_REASON_LENGTH', 'resolveAbort', 'resolveRoute', 'resolveRoutes'])
+  assert.deepEqual(Object.keys(routing).sort(), [
+    'MAX_ABORT_REASON_LENGTH',
+    'resolveAbort',
+    'resolveRoute',
+    'resolveRoutes',
+  ])
 })
 
 test('run: renderNodePrompt renders the edge prompt with template values', () => {
@@ -555,21 +600,41 @@ test('run: renderNodePrompt appends the declared result contract', () => {
   assert.match(prompt, /not a place for the answer itself/)
 
   // 升级前的快照没有 output：prompt 保持原样。
-  assert.equal(renderNodePrompt({ id: 'old' }, '做一件事。', {}, { goal: 'g' }, 1, 'wf-old'), '做一件事。')
+  assert.equal(
+    renderNodePrompt({ id: 'old' }, '做一件事。', {}, { goal: 'g' }, 1, 'wf-old'),
+    '做一件事。',
+  )
 })
 
 test('run: renderNodePrompt requires an incoming edge prompt and never falls back to the node', () => {
   for (const edgePrompt of [null, undefined, '', '   ']) {
     assert.throws(
-      () => renderNodePrompt({ id: 'dev', prompt: '节点 prompt' }, edgePrompt, {}, { goal: 'g' }, 1, 'wf-1'),
-      (error) => error instanceof WorkflowRunError && /robot node "dev" has no prompt on its incoming edge/u.test(error.message),
+      () =>
+        renderNodePrompt(
+          { id: 'dev', prompt: '节点 prompt' },
+          edgePrompt,
+          {},
+          { goal: 'g' },
+          1,
+          'wf-1',
+        ),
+      (error) =>
+        error instanceof WorkflowRunError &&
+        /robot node "dev" has no prompt on its incoming edge/u.test(error.message),
     )
   }
 
   // 渲染结果为空也算没有 prompt。
   assert.throws(
     () =>
-      renderNodePrompt({ id: 'dev' }, '{{nodes.dev.text}}', { dev: { text: '' } }, { goal: 'g' }, 1, 'wf-1'),
+      renderNodePrompt(
+        { id: 'dev' },
+        '{{nodes.dev.text}}',
+        { dev: { text: '' } },
+        { goal: 'g' },
+        1,
+        'wf-1',
+      ),
     /has no prompt on its incoming edge/u,
   )
 })
@@ -583,7 +648,10 @@ test('run: renderUserDetail renders the detail template', () => {
     'wf-1',
   )
   assert.equal(detail, '请检查 草稿（第 3 步）')
-  assert.equal(renderUserDetail({ id: 'review', title: '确认', detail: '' }, {}, { goal: 'g' }, 1, 'wf-1'), '')
+  assert.equal(
+    renderUserDetail({ id: 'review', title: '确认', detail: '' }, {}, { goal: 'g' }, 1, 'wf-1'),
+    '',
+  )
 })
 
 test('run: buildUserQuestions turns edges into the route question and appends extra questions', () => {
@@ -594,10 +662,7 @@ test('run: buildUserQuestions turns edges into the route question and appends ex
       id: 'route',
       header: '发布确认',
       question: '请检查草稿后选择。',
-      options: [
-        { label: '同意发布', description: '直接发布' },
-        { label: '打回' },
-      ],
+      options: [{ label: '同意发布', description: '直接发布' }, { label: '打回' }],
     },
     {
       id: 'notes',
@@ -610,7 +675,10 @@ test('run: buildUserQuestions turns edges into the route question and appends ex
   // 只有 questions、没有出边时没有 route 问题。
   const noEdges = { ...node, next: [] }
   const onlyQuestions = buildUserQuestions(noEdges, '')
-  assert.deepEqual(onlyQuestions.map((question) => question.id), ['notes'])
+  assert.deepEqual(
+    onlyQuestions.map((question) => question.id),
+    ['notes'],
+  )
   assert.equal(onlyQuestions[0].question, '还有什么要说明？')
 })
 
@@ -634,7 +702,10 @@ test('run: resolveUserAnswer maps the chosen label to the edge and normalizes an
 
   // 用户跳过选择（只填自定义文本）→ cancelled，不再路由。
   const skipped = resolveUserAnswer(node, {
-    answers: [{ id: 'route', selected: [], custom: '我再想想' }, { id: 'notes', selected: [], custom: '稍后' }],
+    answers: [
+      { id: 'route', selected: [], custom: '我再想想' },
+      { id: 'notes', selected: [], custom: '稍后' },
+    ],
   })
   assert.equal(skipped.ok, true)
   assert.equal(skipped.cancelled, true)
@@ -674,7 +745,14 @@ test('run: answersValue indexes normalized answers by question id', () => {
 })
 
 test('run: toToolRun carries pendingUser, pendingInteraction and the existing run fields', () => {
-  const interaction = { kind: 'question', nodeId: 'dev', visit: 1, seq: 1, robot: 'coder', askedAt: 123 }
+  const interaction = {
+    kind: 'question',
+    nodeId: 'dev',
+    visit: 1,
+    seq: 1,
+    robot: 'coder',
+    askedAt: 123,
+  }
   const pendingUser = { nodeId: 'review', title: '发布确认', options: [], questions: [] }
   const run = {
     runId: 'wf-1',
@@ -783,7 +861,10 @@ test('format v3: robot nodes accept mode "plan" and describePlan exposes it', ()
 test('format v3: goal mode and unknown modes are rejected', () => {
   const goal = v3Definition()
   goal.nodes[1].mode = 'goal'
-  assert.match(errorText(validateDefinition(goal)), /nodes\[1\]\.mode: mode "goal" is not supported yet/u)
+  assert.match(
+    errorText(validateDefinition(goal)),
+    /nodes\[1\]\.mode: mode "goal" is not supported yet/u,
+  )
 
   const unknown = v3Definition()
   unknown.nodes[1].mode = 'fast'
@@ -793,13 +874,22 @@ test('format v3: goal mode and unknown modes are rejected', () => {
 test('format v3: mode is rejected on non-robot nodes', () => {
   const start = v3Definition()
   start.nodes[0].mode = 'plan'
-  assert.match(errorText(validateDefinition(start)), /nodes\[0\]\.mode: is only supported on robot nodes/u)
+  assert.match(
+    errorText(validateDefinition(start)),
+    /nodes\[0\]\.mode: is only supported on robot nodes/u,
+  )
 
   const user = userDefinition()
   user.nodes[2].mode = 'plan'
-  assert.match(errorText(validateDefinition(user)), /nodes\[2\]\.mode: is only supported on robot nodes/u)
+  assert.match(
+    errorText(validateDefinition(user)),
+    /nodes\[2\]\.mode: is only supported on robot nodes/u,
+  )
 
   const end = v3Definition()
   end.nodes[3].mode = 'plan'
-  assert.match(errorText(validateDefinition(end)), /nodes\[3\]\.mode: is only supported on robot nodes/u)
+  assert.match(
+    errorText(validateDefinition(end)),
+    /nodes\[3\]\.mode: is only supported on robot nodes/u,
+  )
 })

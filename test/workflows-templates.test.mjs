@@ -7,16 +7,15 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-
+import { buildTemplateGraph, layoutRunGraph } from '../plugins/workflows/src/graph.ts'
 import {
-  WORKFLOW_TEMPLATES,
   describeTemplate,
   findTemplate,
   listTemplates,
   summarizeTemplates,
   validateTemplates,
-} from '../plugins/workflows/lib/templates.js'
-import { buildTemplateGraph, layoutRunGraph } from '../plugins/workflows/lib/graph.js'
+  WORKFLOW_TEMPLATES,
+} from '../plugins/workflows/src/templates.ts'
 
 test('templates: the shipped catalog is non-empty, valid and uniquely identified', () => {
   assert.ok(Array.isArray(WORKFLOW_TEMPLATES), 'templates are an array')
@@ -27,7 +26,10 @@ test('templates: the shipped catalog is non-empty, valid and uniquely identified
     assert.equal(typeof template.id, 'string')
     assert.equal(typeof template.name, 'string')
     assert.equal(typeof template.description, 'string')
-    assert.ok(Array.isArray(template.nodes) && template.nodes.length > 0, 'each template has a flow')
+    assert.ok(
+      Array.isArray(template.nodes) && template.nodes.length > 0,
+      'each template has a flow',
+    )
     assert.equal(ids.has(template.id), false, `template id "${template.id}" is unique`)
     ids.add(template.id)
   }
@@ -41,7 +43,11 @@ test('templates: abstract robot roles never collide with concrete robot names', 
     for (const node of robots) {
       assert.equal(typeof node.robot, 'string')
       assert.notEqual(node.robot.trim(), '')
-      assert.equal(Object.hasOwn(node, 'output'), false, `template "${template.id}" node "${node.id}" stays abstract (no output)`)
+      assert.equal(
+        Object.hasOwn(node, 'output'),
+        false,
+        `template "${template.id}" node "${node.id}" stays abstract (no output)`,
+      )
     }
   }
 })
@@ -77,7 +83,7 @@ test('templates: every template builds a renderable node graph', () => {
     assert.ok(model, `template "${template.id}" builds a graph model`)
     assert.equal(model.nodes.length, template.nodes.length, 'every node is in the graph')
     const graph = { ...model, ...layoutRunGraph(model) }
-    assert.equal(graph.rows.length, template.nodes.length, 'every node gets a row')
+    assert.equal(graph.positions.length, template.nodes.length, 'every node gets a position')
     for (const edge of graph.edges) {
       assert.equal(typeof edge.d, 'string')
       assert.notEqual(edge.d, '', `edge ${edge.from}->${edge.to} has a path`)
@@ -88,8 +94,14 @@ test('templates: every template builds a renderable node graph', () => {
 })
 
 test('templates: validateTemplates rejects malformed catalogs', () => {
-  assert.deepEqual(validateTemplates(null), { ok: false, errors: ['templates must be a non-empty array'] })
-  assert.deepEqual(validateTemplates([]), { ok: false, errors: ['templates must be a non-empty array'] })
+  assert.deepEqual(validateTemplates(null), {
+    ok: false,
+    errors: ['templates must be a non-empty array'],
+  })
+  assert.deepEqual(validateTemplates([]), {
+    ok: false,
+    errors: ['templates must be a non-empty array'],
+  })
 
   // 缺少必填字段。
   const missingFields = validateTemplates([{ nodes: [] }])
@@ -100,7 +112,12 @@ test('templates: validateTemplates rejects malformed catalogs', () => {
   assert.ok(missingFields.errors.some((message) => message.includes('.nodes')))
 
   // 重复 id。
-  const base = { id: 'dup', name: 'n', description: 'd', nodes: [{ id: 'start', type: 'start', next: [] }] }
+  const base = {
+    id: 'dup',
+    name: 'n',
+    description: 'd',
+    nodes: [{ id: 'start', type: 'start', next: [] }],
+  }
   const duplicated = validateTemplates([base, { ...base, nodes: base.nodes }])
   assert.equal(duplicated.ok, false)
   assert.ok(duplicated.errors.some((message) => message.includes('duplicates template "dup"')))

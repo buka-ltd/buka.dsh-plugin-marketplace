@@ -1,40 +1,30 @@
 {
   "name": "@buka/dsh-plugin-robots",
-  "version": "0.10.0",
-  "description": "Adds a Robots page to the sidebar that creates and manages its own robots: a robot is a directory under ~/.cache/dsh-plugin-robots/robots mounted as a DSH workspace, with project-level skills installed through npx skills, an editable AGENTS.md, and a one-click session. Every robot has a preset avatar and a one-sentence responsibility statement (the buka_robots tool returns it so a workflow orchestrator can decide whether to use that robot), and the ctx.bukaRobots service exposes list(), avatarMap(), a blocking startSession and non-blocking dispatchSession / openSession with an observable handle (dispatchSession / openSession also accept an optional planMode flag that switches the session into DSH plan mode before the first prompt, and the handle can read and clear that mode; the service advertises supportsPlanMode); every robot session always submits a structured JSON result through the scoped structured_output tool (optionally constrained by outputSchema and workflow route names, with bounded result retries and an optional abortable escape for workflow nodes), runs as a normal runtime-root conversation under the normal approval policy, and can be continued by session id after compacting its history. Installing the plugin also ships the robot-builder mode (an agent preset carried by its bundle patch) that interviews the user, drafts the robot AGENTS.md, then creates and mounts the robot through the preset-gated buka_robot_build tool. On a fresh install (an empty registry) the plugin seeds two preset robots — 软件工程师 (software engineer) and 质量保障工程师 (QA engineer) — as ordinary, editable robots.",
+  "version": "0.11.0",
+  "description": "在侧边栏管理机器人工作区：安装项目级 skills、编辑 AGENTS.md、一键打开会话并指派职责。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./client": "./client.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "icon": "./icon.svg",
   "files": [
-    "lib/index.js",
-    "lib/robot-store.js",
-    "lib/avatar.js",
-    "lib/service.js",
-    "lib/presets.js",
-    "lib/access.js",
-    "lib/builder.js",
-    "lib/build-tool.js",
-    "lib/list-tool.js",
-    "lib/npx.js",
-    "lib/reveal.js",
-    "client.js",
+    "lib",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "docs"
   ],
   "engines": {
     "node": ">=22.20",
-    "dsh": ">=0.2.1-rc.5 <0.3.0"
+    "dsh": ">=0.2.1-rc.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
   },
   "dependencies": {

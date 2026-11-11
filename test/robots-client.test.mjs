@@ -12,7 +12,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-const CLIENT_PATH = path.resolve('plugins/robots/client.js')
+const CLIENT_PATH = path.resolve('plugins/robots/lib/client.js')
 
 /** 每次载入换一个 URL，绕过 ESM 的模块缓存。 */
 let loadSequence = 0
@@ -143,7 +143,11 @@ async function loadClient() {
       h(
         'div',
         { className: 'x-modal' },
-        h('div', { className: 'x-modalHead' }, h('span', { className: 'x-modalTitle' }, props.title)),
+        h(
+          'div',
+          { className: 'x-modalHead' },
+          h('span', { className: 'x-modalTitle' }, props.title),
+        ),
         h('div', { className: 'x-modalBody' }, props.children),
         h('div', { className: 'x-modalFooter' }, props.footer),
       ),
@@ -162,7 +166,9 @@ async function loadClient() {
     return h(
       'div',
       { className: 'x-tabs' },
-      ...(props.items ?? []).map((item) => h('button', { key: item.value, className: 'x-tab' }, item.label)),
+      ...(props.items ?? []).map((item) =>
+        h('button', { key: item.value, className: 'x-tab' }, item.label),
+      ),
     )
   }
 
@@ -228,7 +234,8 @@ async function loadClient() {
     head: { appendChild() {} },
   }
   try {
-    const url = `${pathToFileURL(CLIENT_PATH).href}?smoke=${(loadSequence += 1)}`
+    loadSequence += 1
+    const url = `${pathToFileURL(CLIENT_PATH).href}?smoke=${loadSequence}`
     await import(url)
     assert.ok(clientModule, 'client module should register through window.__ModuleLoader__')
     clientModule.apply({
@@ -434,7 +441,9 @@ test('机器人页：卡片与职责页签展示职责，创建对话框带职�
     '职责页签排在 AGENTS.md 之前',
   )
   assert.ok(
-    detail.texts.includes('工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。'),
+    detail.texts.includes(
+      '工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。',
+    ),
   )
   assert.ok(detail.texts.includes('保存'), '有改动时显示保存按钮')
   const draftField = findNode(
@@ -446,14 +455,18 @@ test('机器人页：卡片与职责页签展示职责，创建对话框带职�
   // 默认 AGENTS.md 页签不显示职责编辑器。
   const agentsTab = client.render(states({ data: listData(), selectedName: 'writer' }))
   assert.equal(
-    findNode(agentsTab, (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责'),
+    findNode(
+      agentsTab,
+      (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责',
+    ),
     null,
   )
 
   // 创建对话框里也能直接填职责。
   const createField = findNode(
     client.render(states({ data: listData(), dialogOpen: true })),
-    (node) => node.type === 'textarea' && node.props?.placeholder === '例如：负责把会议记录整理成三点结论',
+    (node) =>
+      node.type === 'textarea' && node.props?.placeholder === '例如：负责把会议记录整理成三点结论',
   )
   assert.ok(createField)
 })
@@ -487,7 +500,9 @@ test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名
   assert.ok(dialog.texts.includes('重命名机器人'))
   assert.ok(dialog.texts.includes('新名称'))
   assert.ok(
-    dialog.texts.includes('重命名会改机器人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个机器人下。'),
+    dialog.texts.includes(
+      '重命名会改机器人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个机器人下。',
+    ),
   )
   assert.ok(dialog.texts.includes('保存'))
   assert.ok(dialog.texts.includes('取消'))
@@ -515,9 +530,15 @@ test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名
     '改了新名称后保存可用',
   )
   const emptyButtons = saveButtons({ ...dialogStates, renameDraft: '   ' })
-  assert.ok(emptyButtons.every((node) => node.props?.disabled === true), '新名称为空时保存禁用')
+  assert.ok(
+    emptyButtons.every((node) => node.props?.disabled === true),
+    '新名称为空时保存禁用',
+  )
   const savingButtons = saveButtons({ ...dialogStates, renameDraft: 'author', renameSaving: true })
-  assert.ok(savingButtons.every((node) => node.props?.disabled === true), '保存中禁用')
+  assert.ok(
+    savingButtons.every((node) => node.props?.disabled === true),
+    '保存中禁用',
+  )
 
   // 失败提示留在对话框里。
   const failed = collect(
@@ -545,7 +566,8 @@ test('机器人页：列表整行点击进详情，行内动作统一为 outline
 
   const card = findNode(
     tree,
-    (node) => node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
+    (node) =>
+      node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
   )
   assert.ok(card, '列表里有机器人卡片')
   assert.equal(typeof card.props?.onClick, 'function', '整行可点击进入详情')
@@ -558,7 +580,11 @@ test('机器人页：列表整行点击进详情，行内动作统一为 outline
   )
   assert.ok(titleButton, '机器人名是进入详情的按钮')
   let stopped = false
-  titleButton.props.onClick({ stopPropagation: () => { stopped = true } })
+  titleButton.props.onClick({
+    stopPropagation: () => {
+      stopped = true
+    },
+  })
   assert.equal(stopped, true, '点标题不再冒泡到整行')
 
   // 行内动作：新会话 / 删除；删除与其它动作同一套 outline 按钮（危险色），
@@ -575,7 +601,9 @@ test('机器人页：列表整行点击进详情，行内动作统一为 outline
   assert.equal(
     findNode(
       tree,
-      (node) => node.type === 'button' && String(node.props?.className ?? '').includes('buka-robots-iconDanger'),
+      (node) =>
+        node.type === 'button' &&
+        String(node.props?.className ?? '').includes('buka-robots-iconDanger'),
     ),
     null,
     '列表里不再有裸图标删除按钮',
@@ -587,7 +615,8 @@ test('机器人页：列表整行点击进详情，行内动作统一为 outline
   const busyTree = client.render(busyStates)
   const busyCard = findNode(
     busyTree,
-    (node) => node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
+    (node) =>
+      node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
   )
   assert.ok(!String(busyCard.props?.className).includes('is-clickable'), '写操作中整行不可点')
   const busyTitle = findNode(

@@ -11,9 +11,12 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { validateDefinition } from '../plugins/workflows/lib/definition.js'
-import { WorkflowRunStore } from '../plugins/workflows/lib/run-store.js'
-import { createSessionToolVisibility, createWorkflowSessionTools } from '../plugins/workflows/lib/session-tools.js'
+import { validateDefinition } from '../plugins/workflows/src/definition.ts'
+import { WorkflowRunStore } from '../plugins/workflows/src/run-store.ts'
+import {
+  createSessionToolVisibility,
+  createWorkflowSessionTools,
+} from '../plugins/workflows/src/session-tools.ts'
 
 const DEFINITION = {
   goal: '写发布说明',
@@ -59,7 +62,11 @@ async function makeStore() {
  */
 function planOf(definition) {
   const parsed = validateDefinition(definition)
-  assert.equal(parsed.ok, true, parsed.errors.map((error) => `${error.path}: ${error.message}`).join('; '))
+  assert.equal(
+    parsed.ok,
+    true,
+    parsed.errors.map((error) => `${error.path}: ${error.message}`).join('; '),
+  )
   return parsed.plan
 }
 
@@ -70,7 +77,12 @@ function planOf(definition) {
  * @param {(value: string) => string | null} resolveSession
  * @returns {Promise<{ store: WorkflowRunStore, dir: string, tools: Record<string, any> }>}
  */
-async function writeRun({ run, definition = DEFINITION, sessionId = 'session-dev', resolveSession }) {
+async function writeRun({
+  run,
+  definition = DEFINITION,
+  sessionId = 'session-dev',
+  resolveSession,
+}) {
   const { store, dir } = await makeStore()
   await store.create({ run, definition, plan: planOf(definition) })
   const tools = Object.fromEntries(
@@ -150,7 +162,15 @@ async function completedRun(runId) {
         visits: 1,
         createdAt: now - 900,
         entries: [
-          { nodeId: 'dev', visit: 1, seq: 1, sessionId: 'session-dev', at: now - 900, resumed: false, compacted: false },
+          {
+            nodeId: 'dev',
+            visit: 1,
+            seq: 1,
+            sessionId: 'session-dev',
+            at: now - 900,
+            resumed: false,
+            compacted: false,
+          },
         ],
       },
     ],
@@ -180,7 +200,10 @@ test('session tools: overview exposes graph, states, summaries and execution ord
       stopReason: 'completed',
     })
 
-    const overview = await tools.buka_workflow_overview.execute({}, { agent: { id: 'session-dev' } })
+    const overview = await tools.buka_workflow_overview.execute(
+      {},
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(overview.run.seq, 7)
     assert.equal(overview.run.status, 'completed')
     assert.deepEqual(
@@ -193,15 +216,21 @@ test('session tools: overview exposes graph, states, summaries and execution ord
       ],
     )
     assert.equal(overview.nodes.find((node) => node.id === 'dev').summary, '写草稿')
-    assert.deepEqual(overview.edges.map((edge) => [edge.from, edge.to, edge.names]), [
-      ['start', 'dev', ['开始']],
-      ['dev', 'review', ['pass']],
-      ['review', 'done', ['approve', 'reject']],
-    ])
-    assert.deepEqual(overview.executions.map((execution) => [execution.seq, execution.nodeId, execution.status]), [
-      [1, 'dev', 'completed'],
-      [2, 'review', 'completed'],
-    ])
+    assert.deepEqual(
+      overview.edges.map((edge) => [edge.from, edge.to, edge.names]),
+      [
+        ['start', 'dev', ['开始']],
+        ['dev', 'review', ['pass']],
+        ['review', 'done', ['approve', 'reject']],
+      ],
+    )
+    assert.deepEqual(
+      overview.executions.map((execution) => [execution.seq, execution.nodeId, execution.status]),
+      [
+        [1, 'dev', 'completed'],
+        [2, 'review', 'completed'],
+      ],
+    )
     const serialized = JSON.stringify(overview)
     assert.doesNotMatch(serialized, /PROMPT-DEV|OUTPUT-DEV|用户说明/)
     const rendered = tools.buka_workflow_overview.output.render({}, overview)[0].text
@@ -227,17 +256,20 @@ test('session tools: input reads the robot prompt and the user title/instruction
       status: 'completed',
       stopReason: 'completed',
     })
-    const robot = await tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
+    const robot = await tools.buka_workflow_execution_input.execute(
+      { seq: 1 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(robot.type, 'robot')
     assert.equal(robot.robot, 'writer')
     assert.equal(robot.input, 'PROMPT-DEV')
     assert.equal(robot.truncated, false)
-    assert.match(
-      tools.buka_workflow_execution_input.output.render({}, robot)[0].text,
-      /PROMPT-DEV/,
-    )
+    assert.match(tools.buka_workflow_execution_input.output.render({}, robot)[0].text, /PROMPT-DEV/)
 
-    const user = await tools.buka_workflow_execution_input.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
+    const user = await tools.buka_workflow_execution_input.execute(
+      { seq: 2 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(user.type, 'user')
     assert.equal(user.robot, null)
     assert.equal(user.status, 'completed')
@@ -265,7 +297,10 @@ test('session tools: output reads deliverable, structured data and user answers'
       stopReason: 'completed',
       route: 'pass',
     })
-    const robot = await tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
+    const robot = await tools.buka_workflow_execution_output.execute(
+      { seq: 1 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(robot.status, 'completed')
     assert.equal(robot.stopReason, 'completed')
     assert.equal(robot.output, 'OUTPUT-DEV')
@@ -277,7 +312,10 @@ test('session tools: output reads deliverable, structured data and user answers'
       /OUTPUT-DEV/,
     )
 
-    const user = await tools.buka_workflow_execution_output.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
+    const user = await tools.buka_workflow_execution_output.execute(
+      { seq: 2 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(user.type, 'user')
     assert.equal(user.output, '选择：同意\n备注：（可以发布）')
     assert.equal(user.route, 'approve')
@@ -334,10 +372,7 @@ test('session tools: output lists attachments and the attachment tool reads them
       { agent: { id: 'session-dev' } },
     )
     assert.deepEqual(output.attachments, expectedManifest)
-    assert.match(
-      tools.buka_workflow_execution_output.output.render({}, output)[0].text,
-      /note\.md/,
-    )
+    assert.match(tools.buka_workflow_execution_output.output.render({}, output)[0].text, /note\.md/)
 
     const listed = await tools.buka_workflow_execution_attachment.execute(
       { seq: 1 },
@@ -378,7 +413,10 @@ test('session tools: output lists attachments and the attachment tool reads them
         ),
       /available: note\.md, payload\.bin/,
     )
-    const overview = await tools.buka_workflow_overview.execute({}, { agent: { id: 'session-dev' } })
+    const overview = await tools.buka_workflow_overview.execute(
+      {},
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(overview.executions[0].attachments, 2)
   } finally {
     await fs.rm(workspace, { recursive: true, force: true })
@@ -475,12 +513,22 @@ test('session tools: current running execution exposes input but not output', as
       promptTruncated: false,
       status: 'running',
     })
-    const overview = await tools.buka_workflow_overview.execute({}, { agent: { id: 'session-run' } })
-    assert.deepEqual(overview.executions.map((execution) => [execution.seq, execution.status]), [[1, 'running']])
-    const input = await tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-run' } })
+    const overview = await tools.buka_workflow_overview.execute(
+      {},
+      { agent: { id: 'session-run' } },
+    )
+    assert.deepEqual(
+      overview.executions.map((execution) => [execution.seq, execution.status]),
+      [[1, 'running']],
+    )
+    const input = await tools.buka_workflow_execution_input.execute(
+      { seq: 1 },
+      { agent: { id: 'session-run' } },
+    )
     assert.equal(input.input, 'RUNNING-PROMPT')
     await assert.rejects(
-      () => tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-run' } }),
+      () =>
+        tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-run' } }),
       /still running/,
     )
   } finally {
@@ -520,14 +568,18 @@ test('session tools: a waiting user node exposes input but not output', async ()
   }
   const { dir, tools } = await writeRun({ run })
   try {
-    const input = await tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
+    const input = await tools.buka_workflow_execution_input.execute(
+      { seq: 1 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(input.type, 'user')
     assert.equal(input.status, 'waiting')
     assert.match(input.input, /发布确认/)
     assert.match(input.input, /GATE-DETAIL/)
     assert.match(input.input, /同意/)
     await assert.rejects(
-      () => tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
+      () =>
+        tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
       /waiting for the user/,
     )
   } finally {
@@ -549,9 +601,15 @@ test('session tools: truncation flags are returned', async () => {
       status: 'completed',
       stopReason: 'completed',
     })
-    const input = await tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
+    const input = await tools.buka_workflow_execution_input.execute(
+      { seq: 1 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(input.truncated, true)
-    const output = await tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
+    const output = await tools.buka_workflow_execution_output.execute(
+      { seq: 1 },
+      { agent: { id: 'session-dev' } },
+    )
     assert.equal(output.truncated, true)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -571,11 +629,13 @@ test('session tools: unknown seq, missing binding and missing run fail clearly',
       stopReason: 'completed',
     })
     await assert.rejects(
-      () => tools.buka_workflow_execution_input.execute({ seq: 99 }, { agent: { id: 'session-dev' } }),
+      () =>
+        tools.buka_workflow_execution_input.execute({ seq: 99 }, { agent: { id: 'session-dev' } }),
       /execution #99 was not found/,
     )
     await assert.rejects(
-      () => tools.buka_workflow_execution_output.execute({ seq: 0 }, { agent: { id: 'session-dev' } }),
+      () =>
+        tools.buka_workflow_execution_output.execute({ seq: 0 }, { agent: { id: 'session-dev' } }),
       /positive integer/,
     )
 
@@ -608,11 +668,13 @@ test('session tools: unknown seq, missing binding and missing run fail clearly',
       force: true,
     })
     await assert.rejects(
-      () => tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
+      () =>
+        tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
       /no recorded output/,
     )
     await assert.rejects(
-      () => tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
+      () =>
+        tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
       /no recorded input/,
     )
   } finally {

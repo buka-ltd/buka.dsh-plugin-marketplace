@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "../../.build/workflows",
+    "tsBuildInfoFile": "../../.build/workflows.tsbuildinfo"
+  },
+  "include": ["src", "../../types"]
+}

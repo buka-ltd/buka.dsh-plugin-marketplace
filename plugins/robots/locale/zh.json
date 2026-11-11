@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Buka 机器人",
-    "description": "在侧边栏新增「机器人」页面。机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，只有这里创建的机器人才归插件管理。每个机器人可以用 npx skills 安装项目级 skills、编辑自己的 AGENTS.md、一键打开会话；工作区被删掉后还能重新挂载。每个机器人还带一个预设头像与一句职责（对应 description 字段，类似 skill 的 description）：只读工具 buka_robots 会把它返回给编排器，工作流据此选择机器人。插件通过 ctx.bukaRobots 服务向其他插件（例如 Buka Workflows）开放 list()、avatarMap()、阻塞的 startSession() 与非阻塞的 dispatchSession() / openSession()（后者返回可观测句柄）；dispatchSession() / openSession() 还接受可选的 planMode：投递第一轮 prompt 之前把会话切到 DSH plan 模式，句柄可以读取 / 清除该模式；服务公开 supportsPlanMode 供工作流在启动前做能力检查；每个机器人会话都交回结构化 JSON 结果（scoped 工具 structured_output，可传 outputSchema 与工作流出边名约束，错了有次数上限的追问，工作流节点可传 abortable 允许用 abort 主动终止），并且是运行时根会话、走正常审批策略。安装插件还会多出一个「机器人构建」模式：新建会话时可选，它先问清机器人要做什么，起草 AGENTS.md，再用只对该模式可见的 buka_robot_build 工具创建并挂载机器人。全新安装（登记表为空）时插件会自动补上「软件工程师」与「质量保障工程师」两个预设机器人，它们与普通机器人一样可编辑、可删除。每个机器人都可以重命名：机器人目录会一并改名，登记表条目就地更新、DSH 工作区按新路径重建，已有会话日志保留但不再列在这个机器人下。"
+    "description": "在侧边栏新增「机器人」页面：机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，可以装项目级 skills、编辑自己的 AGENTS.md，并带预设头像与一句职责。安装插件还会多出「机器人构建」模式、全新安装时自动补两个可编辑的预设机器人，其他插件通过 ctx.bukaRobots 服务使用它们。",
+    "detail": "docs/DETAIL.zh.md"
   }
 }

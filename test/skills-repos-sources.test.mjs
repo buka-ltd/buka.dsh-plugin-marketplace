@@ -20,9 +20,9 @@ import {
   classifyRepoSource,
   listSavedRepos,
   normalizeRepoSource,
-  repoStoreFile,
   repoKey,
-} from '../plugins/skills/lib/repo-store.js'
+  repoStoreFile,
+} from '../plugins/skills/src/repo-store.ts'
 
 /** 建一个临时 DSH home，并在测试结束后删除。 */
 async function tempHomes(t) {
@@ -53,7 +53,10 @@ test('classifyRepoSource：任意 git 地址原样保留且可列出', () => {
   const cases = new Map([
     ['https://gitlab.com/group/repo', 'https://gitlab.com/group/repo'],
     ['https://gitlab.com/group/repo.git/', 'https://gitlab.com/group/repo.git'],
-    ['https://git.example.com:8443/team/skills.git', 'https://git.example.com:8443/team/skills.git'],
+    [
+      'https://git.example.com:8443/team/skills.git',
+      'https://git.example.com:8443/team/skills.git',
+    ],
     ['ssh://git@gitlab.com/group/repo.git', 'ssh://git@gitlab.com/group/repo.git'],
     ['git://example.com/a/b.git', 'git://example.com/a/b.git'],
     ['git@gitlab.com:group/sub/repo.git', 'git@gitlab.com:group/sub/repo.git'],
@@ -100,12 +103,16 @@ test('classifyRepoSource：本地绝对路径规范化且可列出', () => {
     ['file:///Users/me/My%20Skills', '/Users/me/My Skills'],
   ])
   for (const [source, expected] of cases) {
-    assert.deepEqual(classifyRepoSource(source), {
-      ok: true,
-      kind: 'local',
-      source: expected,
-      listable: true,
-    }, source)
+    assert.deepEqual(
+      classifyRepoSource(source),
+      {
+        ok: true,
+        kind: 'local',
+        source: expected,
+        listable: true,
+      },
+      source,
+    )
   }
 
   if (process.platform === 'win32') {
@@ -126,12 +133,16 @@ test('classifyRepoSource：本地绝对路径规范化且可列出', () => {
 
 test('classifyRepoSource：包名可收藏但不可列出', () => {
   for (const source of ['notion', '@scope/pkg']) {
-    assert.deepEqual(classifyRepoSource(source), {
-      ok: true,
-      kind: 'package',
+    assert.deepEqual(
+      classifyRepoSource(source),
+      {
+        ok: true,
+        kind: 'package',
+        source,
+        listable: false,
+      },
       source,
-      listable: false,
-    }, source)
+    )
   }
 })
 
@@ -176,7 +187,11 @@ test('收藏：git 地址与本地路径写入规范化后的来源并按小写�
   const homes = await tempHomes(t)
   const file = repoStoreFile(homes)
 
-  const git = await addSavedRepo({ homes, source: 'https://gitlab.com/Group/Repo.git/', note: '组内 skills' })
+  const git = await addSavedRepo({
+    homes,
+    source: 'https://gitlab.com/Group/Repo.git/',
+    note: '组内 skills',
+  })
   assert.equal(git.ok, true)
   assert.equal(git.repo.source, 'https://gitlab.com/Group/Repo.git')
   assert.equal(git.repo.id, 'https://gitlab.com/group/repo.git')
@@ -190,7 +205,10 @@ test('收藏：git 地址与本地路径写入规范化后的来源并按小写�
   assert.equal(local.repo.id, '/tmp/skills')
 
   const localDuplicate = await addSavedRepo({ homes, source: '/tmp/skills' })
-  assert.deepEqual({ ok: localDuplicate.ok, code: localDuplicate.code }, { ok: false, code: 'duplicate' })
+  assert.deepEqual(
+    { ok: localDuplicate.ok, code: localDuplicate.code },
+    { ok: false, code: 'duplicate' },
+  )
 
   const listed = await listSavedRepos({ homes })
   assert.deepEqual(
@@ -203,7 +221,10 @@ test('收藏：git 地址与本地路径写入规范化后的来源并按小写�
 
 test('收藏：web 链接与包名照旧可收藏', async (t) => {
   const homes = await tempHomes(t)
-  const web = await addSavedRepo({ homes, source: 'https://github.com/acme/demo/tree/main/skills/x' })
+  const web = await addSavedRepo({
+    homes,
+    source: 'https://github.com/acme/demo/tree/main/skills/x',
+  })
   assert.equal(web.ok, true)
   assert.equal(web.repo.source, 'https://github.com/acme/demo/tree/main/skills/x')
   const pkg = await addSavedRepo({ homes, source: 'notion' })

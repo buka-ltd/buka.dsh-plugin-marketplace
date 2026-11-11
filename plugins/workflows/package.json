@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-workflows",
-  "version": "0.10.0",
-  "description": "Lets an orchestrator preset create and schedule a one-off workflow node graph at runtime (format 3): each robot keeps one session for the whole run; later entries compact that session (host compaction service @deepseek-ai/dsh-compaction-basic) before sending the new edge prompt under the normal worker preset, a user node is a user-intervention entry point that pauses the graph for a decision, a manual action the user must perform, or feedback on a result only a human can see - it has a required title, an optional templated detail, next edges that are the user's choices with a user-facing label, and optional questions for extra answers, all of which feed later prompts as template variables; definitions containing user nodes run in the foreground with an active caller turn because the native question card needs one, while runs without user nodes return the run id once the first node is dispatched and a host-side supervisor drives them from global session events (it never awaits the session result); there is no default node timeout (an explicit robot timeoutMs is the only hard deadline), interrupted sessions are resumed in the same session; if that fails the run fails with an explicit error and never opens a substitute session, unfinished runs are resumed after a host restart except runs that contain user nodes (their question card cannot be recreated), and run data uses workflow format 3 (WORKFLOW_FORMAT_VERSION=3): a gate node is rejected with a migration error, old-version runs are purged on startup, run numbering restarts at #1 and settings.json (archive settings) is preserved. A robot node may also set \"mode\": \"plan\": its session enters DSH plan mode before the prompt, the robot presents its plan through the native plan review card, and after the user approves it carries out the plan and returns the node result; this is one node, not a separate approval node, and the run page shows a waiting notice while the review is open. Every robot node must declare output, a JSON Schema object for its result JSON; the engine merges next, the built-in abort escape and the built-in attachments capability into the scoped structured_output tool (plain-text JSON is accepted and validated the same way) and validates edge-prompt template variables against the declared schemas at plan time; when the node has outgoing edges the JSON must carry exactly one of next and abort: next is one of those edge names, or a non-empty list of them to fan out into concurrent branches, and the observer follows each next and its prompt automatically - there is no when condition and no extra judge agent. A terminal robot node still returns JSON but no next. A valid abort ends the run as failed with the node's reason, follows no edge, and does not require the declared output fields; ambiguous or malformed next/abort results are retried in the same session. Edges are { to, name, prompt }: name is the unique route key of that robot node, and prompt explains the task for that entry plus the meaning of each next value. A join node (type join) collects concurrent fan-out branches: it declares inputs (the robot node ids to wait for) and one outgoing edge, fires once when every input that was actually started in that fan-out has completed, and ignores inputs that never started, so overlapping groups are supported. Robots are normal sessions: runtime roots under the normal approval policy, so they can request tool approvals or ask the user questions from inside their own conversation (the run page shows a pending-interaction notice with an open-session action), and the workflow injects no behavior prompts - only the task, the declared result contract and the path meanings. Every robot node session also gets four read-only workflow tools available when its recorded session id belongs to a run: buka_workflow_overview returns a compact node graph, node summaries/states and the ordered execution list without prompts or final texts; buka_workflow_execution_input and buka_workflow_execution_output return one execution's exact input or recorded output plus its attachment manifest; buka_workflow_execution_attachment lists or reads one attachment in bounded chunks. Attachments are a built-in capability of every robot node for independent data/files (binaries, archives, traces, large datasets), not a channel for the answer itself: a node may return an optional attachments array of workspace-relative paths, the observer copies those files into that execution's node directory, records a stable manifest, and later prompts can use {{nodes.<id>.attachments.<index>.text/.path/.name/.bytes/.description}} so independent files are read on demand instead of being pasted into the prompt; visibility is rebuilt from run records, so the tools remain available after the run ends or DSH restarts when the robot session is reopened. A read-only sidebar page observes every persisted run as a git-log-like node graph: cross-row and loop edges use nested side lanes that never cross, every edge carries a mid-path arrow and each cycle reads as two opposite arrows, duplicate rules to the same target merge into one line, revisited nodes show ×N, and nodes the run never reached stay gray. Robot capsules also show that robot's preset avatar, user capsules show their title, and every capsule is labelled with the creator-written step summary, which also becomes the title of the detail panel (the node id stays as a small code label); the panel shows the executor and that node's robot session once with an open-session action (a node that ran in several sessions (legacy records) lists each one and marks the running one), plus one tab per execution with the rendered task, the final text, status, time and duration, the route that execution took, a pending-interaction notice when a robot is waiting for the user, a waiting-for-you notice with an open-session action when a user node is waiting, and tags for recovered or timed-out executions and history-compacted repeated entries (robot sessions are titled with the run goal and robot name, so the sidebar shows which run and robot each conversation belongs to), and previous / next links at the bottom that walk the run in both directions; the output tab shows the final text itself, while the JSON route and business fields stay in the run record and are never dumped as a key/value table or raw JSON. A robot result without a valid next route is asked again inside the same session (bounded result retries) before the node may fail. Definitions may contain loops, bounded by maxSteps and per-node maxVisits. The legend footer stays pinned to the bottom of the page. Every transition is an edge with a creator-written name and prompt: one start node carries the first robot prompt on its outgoing edge, every edge entering a robot node carries the prompt for that entry, and a user node's next edges are labelled choices whose picked label maps back to a route. Hovering an edge on the run page turns it into a solid, slightly thicker line, dims the other edges, and pins only its name in a small chip at the edge midpoint (never its prompt), so a loop can send the same robot node back with different instructions without adding a second fix node. Every run is numbered in creation order with a persistent, increasing sequence number (#N; within one format version deleting old runs never reuses or rewinds numbers, while upgrading to format 3 purges old runs and restarts at #1), and the page's auto-archive settings can archive runs by the hour - archived after 24 hours and deleted after 168 hours by default.",
+  "version": "0.12.0",
+  "description": "用编排 preset 创建并运行一次性工作流，在关键节点停下来等待人工介入。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -9,35 +9,22 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json",
-    "./client": "./client.js"
+    "./client": "./lib/client.js"
   },
   "icon": "./icon.svg",
   "files": [
-    "lib/index.js",
-    "lib/access.js",
-    "lib/definition.js",
-    "lib/output.js",
-    "lib/settings.js",
-    "lib/template.js",
-    "lib/routing.js",
-    "lib/run.js",
-    "lib/attachments.js",
-    "lib/supervisor.js",
-    "lib/session-tools.js",
-    "lib/graph.js",
-    "lib/run-store.js",
-    "lib/templates.js",
-    "client.js",
+    "lib",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "docs"
   ],
   "engines": {
     "node": ">=22.20",
-    "dsh": ">=0.2.1-rc.5 <0.3.0"
+    "dsh": ">=0.2.1-rc.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
   },
   "dependencies": {

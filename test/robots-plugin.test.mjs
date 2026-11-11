@@ -8,11 +8,15 @@
  */
 
 import assert from 'node:assert/strict'
-import { promises as fs, readFileSync } from 'node:fs'
+import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-
+import { cleanOutput, parseSkillList } from '../packages/plugin-kit/src/npx.ts'
+import {
+  AVATARS,
+  DEFAULT_AVATAR_ID as UI_DEFAULT_AVATAR_ID,
+} from '../packages/plugin-ui/src/avatars.ts'
 import {
   AVATAR_IDS,
   DEFAULT_AVATAR_ID,
@@ -20,14 +24,13 @@ import {
   isAvatarId,
   pickDefaultAvatar,
   resolveAvatar,
-} from '../plugins/robots/lib/avatar.js'
-import { cleanOutput, parseSkillList } from '../plugins/robots/lib/npx.js'
-import { PRESET_ROBOTS, seedPresetRobots } from '../plugins/robots/lib/presets.js'
-import { revealCommand, revealDirectory } from '../plugins/robots/lib/reveal.js'
+} from '../plugins/robots/src/avatar.ts'
+import { PRESET_ROBOTS, seedPresetRobots } from '../plugins/robots/src/presets.ts'
+import { revealCommand, revealDirectory } from '../plugins/robots/src/reveal.ts'
 import {
   AGENTS_MAX_READ_BYTES,
-  CLAUDE_FILE,
   addRobot,
+  CLAUDE_FILE,
   defaultRobotsRoot,
   emptyAgentsFile,
   ensureClaudeLink,
@@ -37,21 +40,21 @@ import {
   normalizeRobotDescription,
   parseFrontmatter,
   pluginCacheDir,
+  ROBOT_DESCRIPTION_MAX_LENGTH,
   readAgentsFile,
   readClaudeLink,
   readRobotRegistry,
   removeRobot,
   renameRobot,
   resolveRobotRegistryFile,
-  setRobotAvatar,
   resolveRobotsDir,
   robotDirectory,
-  ROBOT_DESCRIPTION_MAX_LENGTH,
   scanProjectSkills,
+  setRobotAvatar,
   setRobotDescription,
   writeAgentsFile,
   writeRobotRegistry,
-} from '../plugins/robots/lib/robot-store.js'
+} from '../plugins/robots/src/robot-store.ts'
 
 /**
  * 建一个临时根目录。
@@ -173,8 +176,14 @@ test('插件全局目录、机器人根目录与登记文件路径', async () =>
     )
 
     const pluginDir = path.join(cache, 'dsh-plugin-robots')
-    assert.equal(resolveRobotRegistryFile(path.join(pluginDir, 'robots')), path.join(pluginDir, 'robots.json'))
-    assert.equal(resolveRobotRegistryFile(path.join(root, 'custom')), path.join(root, 'robots.json'))
+    assert.equal(
+      resolveRobotRegistryFile(path.join(pluginDir, 'robots')),
+      path.join(pluginDir, 'robots.json'),
+    )
+    assert.equal(
+      resolveRobotRegistryFile(path.join(root, 'custom')),
+      path.join(root, 'robots.json'),
+    )
   } finally {
     await removeRoot(root)
   }
@@ -229,7 +238,10 @@ test('项目级 skills 扫描：目录、平铺、frontmatter 缺省与 lockfile
       }),
     )
     // 悬挂符号链接：单个坏条目不参与扫描，也不让整次扫描抛错。
-    await fs.symlink(path.join(workspace, 'missing-target'), path.join(workspace, '.agents', 'skills', 'dangling'))
+    await fs.symlink(
+      path.join(workspace, 'missing-target'),
+      path.join(workspace, '.agents', 'skills', 'dangling'),
+    )
 
     const { skills } = await scanProjectSkills(workspace)
     assert.deepEqual(
@@ -237,9 +249,21 @@ test('项目级 skills 扫描：目录、平铺、frontmatter 缺省与 lockfile
       ['bar', 'baz', 'flat-skill', 'foo'],
     )
     const byName = new Map(skills.map((skill) => [skill.name, skill]))
-    assert.deepEqual(byName.get('foo'), { name: 'foo', description: 'does foo things', source: 'owner/repo' })
-    assert.deepEqual(byName.get('bar'), { name: 'bar', description: '', source: 'https://github.com/owner/bar' })
-    assert.deepEqual(byName.get('baz'), { name: 'baz', description: 'claude code copy', source: null })
+    assert.deepEqual(byName.get('foo'), {
+      name: 'foo',
+      description: 'does foo things',
+      source: 'owner/repo',
+    })
+    assert.deepEqual(byName.get('bar'), {
+      name: 'bar',
+      description: '',
+      source: 'https://github.com/owner/bar',
+    })
+    assert.deepEqual(byName.get('baz'), {
+      name: 'baz',
+      description: 'claude code copy',
+      source: null,
+    })
     assert.deepEqual(byName.get('flat-skill'), {
       name: 'flat-skill',
       description: 'flat description',
@@ -321,12 +345,24 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
     assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: [], file })
 
     const entries = [
-      { name: 'writer', path: path.join(robotsDir, 'writer'), createdAt: '2026-01-02T03:04:05.000Z' },
-      { name: 'painter', path: path.join(robotsDir, 'painter'), createdAt: '2026-02-03T04:05:06.000Z' },
+      {
+        name: 'writer',
+        path: path.join(robotsDir, 'writer'),
+        createdAt: '2026-01-02T03:04:05.000Z',
+      },
+      {
+        name: 'painter',
+        path: path.join(robotsDir, 'painter'),
+        createdAt: '2026-02-03T04:05:06.000Z',
+      },
     ]
     await writeRobotRegistry({ file, robots: entries })
     // 写回时一定会落下具体头像：没有指定就按名字分配。
-    const written = entries.map((entry) => ({ ...entry, avatar: defaultAvatarFor(entry.name), description: '' }))
+    const written = entries.map((entry) => ({
+      ...entry,
+      avatar: defaultAvatarFor(entry.name),
+      description: '',
+    }))
     assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: written, file })
 
     if (process.platform !== 'win32') {
@@ -335,7 +371,11 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
 
     // 覆盖写之后权限仍然收紧，且不残留临时文件。
     await writeRobotRegistry({ file, robots: entries.slice(0, 1) })
-    assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: written.slice(0, 1), file })
+    assert.deepEqual(await readRobotRegistry({ file }), {
+      version: 1,
+      robots: written.slice(0, 1),
+      file,
+    })
     if (process.platform !== 'win32') {
       assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
     }
@@ -397,7 +437,13 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
     const filtered = await readRobotRegistry({ file })
     assert.equal(filtered.corrupt, undefined)
     assert.deepEqual(filtered.robots, [
-      { name: 'ok', path: '/abs/ok', createdAt: '2026-01-01T00:00:00.000Z', avatar: '', description: '' },
+      {
+        name: 'ok',
+        path: '/abs/ok',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        avatar: '',
+        description: '',
+      },
     ])
   } finally {
     await removeRoot(root)
@@ -426,7 +472,10 @@ test('addRobot / removeRobot：目录、模板、插到最前、同名复用、�
     // 创建机器人时自动把 CLAUDE.md 做成指向 AGENTS.md 的软链接。
     const claudeLink = path.join(writer.robot.path, CLAUDE_FILE)
     assert.equal((await fs.lstat(claudeLink)).isSymbolicLink(), true)
-    assert.equal(path.resolve(writer.robot.path, await fs.readlink(claudeLink)), path.join(writer.robot.path, 'AGENTS.md'))
+    assert.equal(
+      path.resolve(writer.robot.path, await fs.readlink(claudeLink)),
+      path.join(writer.robot.path, 'AGENTS.md'),
+    )
     assert.deepEqual(await readClaudeLink(writer.robot.path), {
       exists: true,
       symlink: true,
@@ -461,7 +510,11 @@ test('addRobot / removeRobot：目录、模板、插到最前、同名复用、�
     assert.equal(restored.created, false)
     assert.deepEqual(restored.robot, painter.robot)
     assert.equal((await fs.stat(restored.robot.path)).isDirectory(), true)
-    assert.ok((await fs.readFile(path.join(restored.robot.path, 'AGENTS.md'), 'utf8')).startsWith('# AGENTS.md'))
+    assert.ok(
+      (await fs.readFile(path.join(restored.robot.path, 'AGENTS.md'), 'utf8')).startsWith(
+        '# AGENTS.md',
+      ),
+    )
 
     // 非法名字：抛 code=invalid-name。
     await assert.rejects(
@@ -506,7 +559,7 @@ test('listRobots：挂载 join、目录缺失、skills/agents 汇总与损坏容
 
     const writer = await addRobot({ robotsDir, file, name: 'writer' })
     const painter = await addRobot({ robotsDir, file, name: 'painter' })
-    const ghost = await addRobot({ robotsDir, file, name: 'ghost' })
+    const _ghost = await addRobot({ robotsDir, file, name: 'ghost' })
 
     // writer 里装一个项目级 skill，并写一份 lockfile。
     await writeSkill(
@@ -769,7 +822,11 @@ test('setRobotAvatar：只改登记表、旧登记表兜底、错误码明确', 
     assert.equal(registry.robots[0].avatar, 'owl')
     // 目录与 AGENTS.md 不受影响。
     assert.equal((await fs.stat(writer.robot.path)).isDirectory(), true)
-    assert.ok((await fs.readFile(path.join(writer.robot.path, 'AGENTS.md'), 'utf8')).startsWith('# AGENTS.md'))
+    assert.ok(
+      (await fs.readFile(path.join(writer.robot.path, 'AGENTS.md'), 'utf8')).startsWith(
+        '# AGENTS.md',
+      ),
+    )
 
     await assert.rejects(
       () => setRobotAvatar({ file, name: 'writer', avatar: 'dragon' }),
@@ -785,7 +842,13 @@ test('setRobotAvatar：只改登记表、旧登记表兜底、错误码明确', 
       file,
       JSON.stringify({
         version: 1,
-        robots: [{ name: 'legacy', path: path.join(robotsDir, 'legacy'), createdAt: '2026-01-01T00:00:00.000Z' }],
+        robots: [
+          {
+            name: 'legacy',
+            path: path.join(robotsDir, 'legacy'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
       }),
     )
     const legacy = await readRobotRegistry({ file })
@@ -807,29 +870,22 @@ test('setRobotAvatar：只改登记表、旧登记表兜底、错误码明确', 
 })
 
 test('头像契约：Host 与两个浏览器一半共用同一组 id、emoji 与底色', () => {
-  const robotClient = readFileSync(path.resolve('plugins/robots/client.js'), 'utf8')
-  const workflowClient = readFileSync(path.resolve('plugins/workflows/client.js'), 'utf8')
-
-  /** 机器人页：`{ id: 'sprout', emoji: '🌱', color: '#34A853', labelKey: ... }`。 */
-  const robotPresets = [...robotClient.matchAll(/\{ id: '([a-z]+)', emoji: '([^']+)', color: '(#[0-9A-F]{6})'/gu)].map(
-    (match) => ({ id: match[1], emoji: match[2], color: match[3] }),
-  )
+  // 预设表只有一份，在 packages/plugin-ui；两个浏览器一半都从它派生。
   assert.deepEqual(
-    robotPresets.map((preset) => preset.id),
+    AVATARS.map((preset) => preset.id),
     [...AVATAR_IDS],
-    '机器人页的预设顺序与 Host 的 lib/avatar.js 一致',
+    '界面侧预设顺序与 Host 的 lib/avatar.js 一致',
   )
+  assert.equal(UI_DEFAULT_AVATAR_ID, DEFAULT_AVATAR_ID, '默认头像与 Host 一致')
 
-  /** 工作流节点图：`sprout: { emoji: '🌱', color: '#34A853' },`。 */
-  const start = workflowClient.indexOf('const AVATARS = {')
-  const end = workflowClient.indexOf('function avatarPreset', start)
-  assert.ok(start >= 0 && end > start, 'workflows client keeps an AVATARS table')
-  const workflowPresets = [
-    ...workflowClient.slice(start, end).matchAll(/([a-z]+): \{ emoji: '([^']+)', color: '(#[0-9A-F]{6})' \}/gu),
-  ].map((match) => ({ id: match[1], emoji: match[2], color: match[3] }))
-  assert.deepEqual(workflowPresets, robotPresets, '工作流节点图与机器人页的显示表逐个一致')
+  // emoji / 底色 / 词典 key 是契约的一部分：id 唯一、格式正确，编码与 Host 同序。
+  assert.equal(new Set(AVATARS.map((preset) => preset.id)).size, AVATARS.length, 'id 不重复')
+  for (const preset of AVATARS) {
+    assert.match(preset.emoji, /\S/u, `${preset.id} 有 emoji`)
+    assert.match(preset.color, /^#[0-9A-F]{6}$/u, `${preset.id} 的底色是六位十六进制`)
+    assert.match(preset.labelKey, /^avatar[A-Z][A-Za-z]*$/u, `${preset.id} 有词典 key`)
+  }
 })
-
 
 test('历史遗留的 robot 头像 id 不在预设里，会按名字哈希落回其它预设', () => {
   assert.equal(AVATAR_IDS.includes('robot'), false)
@@ -854,7 +910,10 @@ test('机器人描述：空白折叠、上限、登记表与列表读写', async
       description: '  把会议记录\n整理成三点结论  ',
     })
     assert.equal(writer.robot.description, '把会议记录 整理成三点结论')
-    assert.equal((await readRobotRegistry({ file })).robots[0].description, '把会议记录 整理成三点结论')
+    assert.equal(
+      (await readRobotRegistry({ file })).robots[0].description,
+      '把会议记录 整理成三点结论',
+    )
 
     // listRobots 把描述带给页面。
     const listed = await listRobots({ file, robotsDir })
@@ -894,7 +953,13 @@ test('机器人描述：空白折叠、上限、登记表与列表读写', async
     assert.equal(plain.robot.description, '')
     await writeRobotRegistry({
       file,
-      robots: [{ name: 'legacy', path: path.join(robotsDir, 'legacy'), createdAt: '2026-01-01T00:00:00.000Z' }],
+      robots: [
+        {
+          name: 'legacy',
+          path: path.join(robotsDir, 'legacy'),
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
     })
     assert.equal((await readRobotRegistry({ file })).robots[0].description, '')
 
@@ -920,7 +985,10 @@ test('机器人描述：空白折叠、上限、登记表与列表读写', async
         ],
       }),
     )
-    assert.equal((await readRobotRegistry({ file })).robots[0].description.length, ROBOT_DESCRIPTION_MAX_LENGTH)
+    assert.equal(
+      (await readRobotRegistry({ file })).robots[0].description.length,
+      ROBOT_DESCRIPTION_MAX_LENGTH,
+    )
   } finally {
     await removeRoot(root)
   }
@@ -935,7 +1003,9 @@ test('renameRobot：改目录与登记表、保留条目字段、模板只在未
 
     const writer = await addRobot({ robotsDir, file, name: 'writer', description: '写发布说明' })
     await addRobot({ robotsDir, file, name: 'painter' })
-    const before = (await readRobotRegistry({ file })).robots.find((robot) => robot.name === 'writer')
+    const before = (await readRobotRegistry({ file })).robots.find(
+      (robot) => robot.name === 'writer',
+    )
 
     const moved = await renameRobot({ robotsDir, file, name: 'writer', newName: 'author' })
     assert.equal(moved.renamed, true)
@@ -983,9 +1053,17 @@ test('renameRobot：改目录与登记表、保留条目字段、模板只在未
     // 用户改过的 AGENTS.md 不动。
     const edited = await addRobot({ robotsDir, file, name: 'edited' })
     await fs.writeFile(path.join(edited.robot.path, 'AGENTS.md'), '# 我自己的说明\n')
-    const editedMoved = await renameRobot({ robotsDir, file, name: 'edited', newName: 'edited-next' })
+    const editedMoved = await renameRobot({
+      robotsDir,
+      file,
+      name: 'edited',
+      newName: 'edited-next',
+    })
     assert.equal(editedMoved.agentsRewritten, false)
-    assert.equal(await fs.readFile(path.join(editedMoved.robot.path, 'AGENTS.md'), 'utf8'), '# 我自己的说明\n')
+    assert.equal(
+      await fs.readFile(path.join(editedMoved.robot.path, 'AGENTS.md'), 'utf8'),
+      '# 我自己的说明\n',
+    )
 
     // 旧登记表缺头像：按旧名字兜底后写回，改名不会让头像换一个。
     const legacyPath = await realpathOr(path.join(robotsDir, 'legacy'))
@@ -1000,7 +1078,12 @@ test('renameRobot：改目录与登记表、保留条目字段、模板只在未
         ],
       }),
     )
-    const legacyMoved = await renameRobot({ robotsDir, file, name: 'legacy', newName: 'legacy-next' })
+    const legacyMoved = await renameRobot({
+      robotsDir,
+      file,
+      name: 'legacy',
+      newName: 'legacy-next',
+    })
     assert.equal(legacyMoved.robot.avatar, resolveAvatar('', 'legacy'))
   } finally {
     await removeRoot(root)
@@ -1065,7 +1148,12 @@ test('renameRobot：同名 no-op、名称/目录冲突、未知与缺失目录�
     // 只改大小写：macOS 默认大小写不敏感，目标「已存在」其实是同一个目录，
     // 不能被误判成 name-taken；Linux 上本来就是普通改名。
     await addRobot({ robotsDir, file, name: 'writer-case' })
-    const cased = await renameRobot({ robotsDir, file, name: 'writer-case', newName: 'Writer-Case' })
+    const cased = await renameRobot({
+      robotsDir,
+      file,
+      name: 'writer-case',
+      newName: 'Writer-Case',
+    })
     assert.equal(cased.renamed, true)
     assert.equal(cased.robot.name, 'Writer-Case')
     assert.ok(

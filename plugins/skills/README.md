@@ -11,10 +11,10 @@
 
 DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个根目录，其中两个是全局的：
 
-| 来源 | 根目录 | 典型写入方 |
-| --- | --- | --- |
+| 来源          | 根目录                                            | 典型写入方                    |
+| ------------- | ------------------------------------------------- | ----------------------------- |
 | `user-agents` | `~/.agents/skills`（可用 `DSH_AGENTS_HOME` 覆盖） | `npx skills add -g`、手工安装 |
-| `user-dsh` | `~/.dsh/skills`（可用 `DSH_HOME` 覆盖） | 手工安装 |
+| `user-dsh`    | `~/.dsh/skills`（可用 `DSH_HOME` 覆盖）           | 手工安装                      |
 
 页面对这两个目录做与 DSH 相同的一层扫描：`<name>/SKILL.md` 目录或平铺的 `<name>.md`。工作区里的 `项目/.agents/skills` 只对那个项目生效，不在此列出。
 
@@ -34,10 +34,10 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 ## 卸载方式
 
-| skill 来源 | 卸载动作 |
-| --- | --- |
+| skill 来源           | 卸载动作                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | 被 `npx skills` 管理 | `npx skills remove <name> --global --yes`：由该工具同时删除规范副本、各 agent 目录里的链接/副本，以及 lockfile 记录 |
-| 手工安装 | 直接删除扫描到的目录（或平铺的 `.md` 文件） |
+| 手工安装             | 直接删除扫描到的目录（或平铺的 `.md` 文件）                                                                         |
 
 两种方式都会在执行后确认目标真的消失；命令退出码为 0 但目录仍在时按失败返回原因。卸载是破坏性操作，安装会改写全局目录与 `npx skills` 的 lockfile；两者都只放在页面按钮上，不开放给模型工具。
 
@@ -85,10 +85,10 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 展开一个可用的收藏后，每个 skill 右侧都有操作入口：
 
-| 状态 | 显示 | 行为 |
-| --- | --- | --- |
-| 未安装 | 「安装」按钮（下载图标） | 点一下把这个 skill 装到全局，其它行的按钮在请求期间一并禁用 |
-| 安装中 | 状态点 + 「安装中…」 | Host 正在执行 `npx skills add`，只影响请求的那一行 |
+| 状态   | 显示                                                   | 行为                                                                |
+| ------ | ------------------------------------------------------ | ------------------------------------------------------------------- |
+| 未安装 | 「安装」按钮（下载图标）                               | 点一下把这个 skill 装到全局，其它行的按钮在请求期间一并禁用         |
+| 安装中 | 状态点 + 「安装中…」                                   | Host 正在执行 `npx skills add`，只影响请求的那一行                  |
 | 已安装 | 禁用的「已安装」按钮（对勾图标，与安装按钮同款同尺寸） | 两个全局根里任何一个已有同名 skill 都算；要重装先去「已安装」里卸载 |
 
 安装命令等价于：
@@ -124,7 +124,7 @@ Host 侧的约束：
 
 ## 对外服务（Host Service）
 
-插件在 Host 一侧注册一个 Cordis 服务 `ctx.bukaSkills`（服务名常量 `SERVICE_NAME = 'bukaSkills'`，定义在 `lib/service.js`）。页面与 `buka_skills` 工具用的是同一个实例，所以页面展开过的树、另一个插件随后调服务，命中的是同一份缓存与同一批在途请求。
+插件在 Host 一侧注册一个 Cordis 服务 `ctx.bukaSkills`（服务名常量 `SERVICE_NAME = 'bukaSkills'`，定义在 `src/service.ts`）。页面与 `buka_skills` 工具用的是同一个实例，所以页面展开过的树、另一个插件随后调服务，命中的是同一份缓存与同一批在途请求。
 
 消费方声明依赖即可，不要 `import` 本包的实现：
 
@@ -140,11 +140,11 @@ export function apply(ctx) {
 
 ### 方法
 
-| 方法 | 返回 | 说明 |
-| --- | --- | --- |
-| `listRepositories({ refresh? })` | `{ file, exists, corrupt, repositories }` | 收藏的仓库，按收藏文件顺序；每条带 `kind`（`npx-skills` / `claude-code-marketplace` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因 |
-| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path, plugin }`，`plugin` 是仓库清单里显式声明它所属的插件名（npx skills 与 marketplace 都适用），没有归入插件时为 `null` |
-| `listPlugins({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, plugins }` | Claude Code marketplace 里声明的插件，每个 `{ name, root, description, skills }`；没有 skill 的插件也会出现（`skills: []`） |
+| 方法                                | 返回                                                                          | 说明                                                                                                                                                                                    |
+| ----------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listRepositories({ refresh? })`    | `{ file, exists, corrupt, repositories }`                                     | 收藏的仓库，按收藏文件顺序；每条带 `kind`（`npx-skills` / `claude-code-marketplace` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因                                       |
+| `listSkills({ source, refresh? })`  | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }`  | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path, plugin }`，`plugin` 是仓库清单里显式声明它所属的插件名（npx skills 与 marketplace 都适用），没有归入插件时为 `null` |
+| `listPlugins({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, plugins }` | Claude Code marketplace 里声明的插件，每个 `{ name, root, description, skills }`；没有 skill 的插件也会出现（`skills: []`）                                                             |
 
 本地路径来源的 `ref` 是 `worktree`、`sha` 为空串；git 来源的 `ref` 是 `HEAD`、`sha` 取克隆当前的提交号。
 
@@ -153,37 +153,42 @@ export function apply(ctx) {
 ### 语义
 
 - 只读：收藏的增删与 skill 的安装 / 卸载都是页面上的用户操作，不通过服务暴露；
-- 仓库读取（GitHub API、本地目录扫描、git 克隆）复用 `lib/repo-skills.js` 的 TTL 缓存（30 分钟），`refresh: true` 绕过；同一来源的并发调用合并成一次请求；
+- 仓库读取（GitHub API、本地目录扫描、git 克隆）复用 `src/repo-skills.ts` 的 TTL 缓存（30 分钟），`refresh: true` 绕过；同一来源的并发调用合并成一次请求；
 - `listPlugins()` 的完整插件列表来自 `.claude-plugin/marketplace.json`，`listSkills()` 与页面展开的树来自同一次拉取；
 - 收藏文件损坏时 `listRepositories()` 如实返回 `corrupt: true` 与空列表，不猜测、不写回。
 
-需要类型提示时可以从子路径导入导出的类：`import { SkillsCatalogService } from '@buka/dsh-plugin-skills/service'`（仅用于 JSDoc/类型；运行时请用 `ctx.bukaSkills`）。
+对外只通过 `ctx.bukaSkills` 使用服务；不要 import 本包的实现（`package.json` 没有导出 `/service` 子路径）。
 
 ## 结构
 
-| 文件 | 作用 |
-| --- | --- |
-| `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client` 与 `locale` / `icon` 导出 |
-| `cordis.patch.yml` | bundle 层唯一的一行：把自己作为 `skill-buka-skills` 插入组成 |
-| `lib/index.js` | Host 一半：注册列表 / 卸载 / 安装 / 收藏 / 仓库 skills 树路由与 `buka_skills` 工具，并把 `ctx.bukaSkills` 服务注册进 composition；安装与卸载共用一条 npx 串行队列 |
-| `lib/service.js` | 对外服务 `ctx.bukaSkills`：`listRepositories()` / `listSkills()` / `listPlugins()`；持有仓库请求的并发合并与 TTL 缓存入口，不依赖 DSH 包，便于单独测试 |
-| `lib/skill-store.js` | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试 |
-| `lib/npx.js` | 定位 `npx`（PATH → mise/nvm/Volta/Homebrew → npm 自带 `npx-cli.js`）并执行 `npx skills`（安装、卸载），失败信息带命令名与输出 |
-| `lib/skill-install.js` | 「安装」按钮背后的逻辑：只接受收藏来源、按 Host 读到的仓库列表定位 skill、交给 `npx skills add -g`，安装后确认 `SKILL.md` 落到 `~/.agents/skills`；拒绝已安装与 `DSH_AGENTS_HOME` 指到 npx 不会写的位置，不依赖 DSH 包，便于单独测试 |
-| `lib/repo-store.js` | 收藏来源的规范化与分类（GitHub / 任意 git 地址 / 本地路径 / 网页链接 / 包名）/ 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包 |
-| `lib/repo-skills.js` | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树（npx 仓库按 CLI 的清单方式平铺 / 按仓库清单显式声明的插件分组）并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
-| `lib/local-source.js` | 本地目录的读取抽象：递归遍历（跳过依赖 / 构建目录，有深度、条数、单文件大小上限）与限定在根目录内的文件读取，输出与 GitHub 树一致的形状，便于单独测试 |
-| `lib/git-source.js` | 任意 git 地址的克隆缓存：`git clone --depth 1` 到 `buka-skills/cache/git/`，刷新时 fetch / reset，离线复用旧克隆；git 不在 `PATH` 与 clone 失败分别报 `git-unavailable` / `git-failed`，便于单独测试 |
-| `client.js` | 浏览器一半：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；顶部两个 Tab（已安装 / 收藏）都通过 Host 路由取数与操作，收藏用 `Modal` 对话框录入仓库与备注；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage，重开 DSH 时先恢复再校正；树里每个 skill 的「安装」按钮走 Host 的安装路由，成功只重读已安装列表；UI 复用 DSH 基座模块 `@deepseek-ai/dsh-client-ui-primitives`，不需要额外声明 external |
-| `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
-| `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
-| `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`（插件安装卡片），不需要激活插件 |
+| 文件                                           | 作用                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package.json`                                 | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client`、`files` 含 `lib`、`locale` / `icon` 导出                                                                                                                                                                                                                                            |
+| `cordis.patch.yml`                             | bundle 层唯一的一行：把自己作为 `skill-buka-skills` 插入组成                                                                                                                                                                                                                                                                                          |
+| `src/index.ts`                                 | Host 入口：装配路由与 `buka_skills` 工具、把 `ctx.bukaSkills` 服务注册进 composition；安装与卸载共用一条 npx 串行队列；只做装配                                                                                                                                                                                                                       |
+| `src/service.ts`                               | 对外服务 `ctx.bukaSkills`：`listRepositories()` / `listSkills()` / `listPlugins()`；持有仓库请求的并发合并与 TTL 缓存入口，不依赖 DSH 包，便于单独测试                                                                                                                                                                                                |
+| `src/skill-store.ts`                           | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试                                                                                                                                                                                                                                                                    |
+| `src/skill-install.ts`                         | 「安装」按钮背后的逻辑：只接受收藏来源、按 Host 读到的仓库列表定位 skill、交给 `npx skills add -g`，安装后确认 `SKILL.md` 落到 `~/.agents/skills`；拒绝已安装与 `DSH_AGENTS_HOME` 指到 npx 不会写的位置，不依赖 DSH 包，便于单独测试                                                                                                                  |
+| `src/repo-store.ts`                            | 收藏来源的规范化与分类（GitHub / 任意 git 地址 / 本地路径 / 网页链接 / 包名）/ 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包                                                                                                                                                                                                              |
+| `src/repo-skills.ts`                           | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树（npx 仓库按 CLI 的清单方式平铺 / 按仓库清单显式声明的插件分组）并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
+| `src/repo/**`                                  | 仓库读取的实现细节：缓存、发现规则、分组、GitHub API、marketplace 清单、失败分类、本地 / git 来源与树模型                                                                                                                                                                                                                                             |
+| `src/local-source.ts`                          | 本地目录的读取抽象：递归遍历（跳过依赖 / 构建目录，有深度、条数、单文件大小上限）与限定在根目录内的文件读取，输出与 GitHub 树一致的形状，便于单独测试                                                                                                                                                                                                 |
+| `src/git-source.ts`                            | 任意 git 地址的克隆缓存：`git clone --depth 1` 到 `buka-skills/cache/git/`，刷新时 fetch / reset，离线复用旧克隆；git 不在 `PATH` 与 clone 失败分别报 `git-unavailable` / `git-failed`，便于单独测试                                                                                                                                                  |
+| `src/routes.ts`、`src/tools.ts`、`src/http.ts` | 包内路由、`buka_skills` 只读工具与请求 / 响应辅助；npx 的定位与执行来自 `@buka/plugin-kit` 的 `createNpxRunner`                                                                                                                                                                                                                                       |
+| `src/client/index.ts`                          | 浏览器一半入口：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；只导出 `inject` / `apply`                                                                                                                                                                                                                                      |
+| `src/client/**`                                | 两个 Tab（已安装 / 收藏）、页面状态、请求、词典与样式；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage                                                                                                                                                                                                                                |
+| `lib/index.js`                                 | 构建产物（ESM）：Host 一半的运行文件；不手改                                                                                                                                                                                                                                                                                                          |
+| `lib/client.js`                                | 构建产物：界面一半的运行文件，外层是 `window.__ModuleLoader__.load({...})` 外壳；不手改                                                                                                                                                                                                                                                               |
+| `market.json`                                  | 只在市场上挂牌用的展示信息（分类、标签、关键词、图标等），不随包发布                                                                                                                                                                                                                                                                                  |
+| `icon.svg`                                     | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/`                                                                                                                                                                                                                                                                                          |
+| `locale/*.json`                                | 展示文案的唯一来源：`meta.title` / `meta.description` / `meta.detail`，不需要激活插件                                                                                                                                                                                                                                                                 |
+| `docs/DETAIL.md`、`docs/DETAIL.zh.md`          | 市场详情页长文，由对应 locale 的 `meta.detail` 指向                                                                                                                                                                                                                                                                                                   |
 
-Host 一半依赖 `@deepseek-ai/dsh-tools` 的 `defineTool` 来注册工具；它由 DSH 运行时提供，本地 `link:` 调试时若解析不到，可在插件目录单独装一次（`pnpm install --ignore-workspace`）。
+Host 一半依赖 `@deepseek-ai/dsh-tools` 的 `defineTool` 来注册工具；它由 DSH 运行时提供。本地 `link:` 调试时若解析不到，先确认仓库根已经跑过 `pnpm install`（开发依赖都在根），不要把开发依赖写进插件清单。
 
 ## 验证安装
 
-在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「Skills」图标、点开能看到列表即成功。本地调试也可以直接装目录：
+在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「Skills」图标、点开能看到列表即成功。本地调试也可以直接装目录（先确保 `plugins/skills/lib/` 已由 `pnpm run build:code && pnpm run build:clients` 生成）：
 
 ```bash
 dsh plugin --profile <profile> add "link:$PWD/plugins/skills"

@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Buka Skills",
-    "description": "列出对所有会话生效的全局 skills 并按来源选择正确的卸载方式，同时记下常用的 npx skills 来源（owner/repo、GitHub/GitLab 链接、任意 git 地址或本地绝对路径），仓库可展开成带缓存的 skills 树，树里每个 skill 都能一键安装到全局。"
+    "description": "在侧边栏新增「Skills」页面：已安装列出对所有会话生效的全局 skills，并按来源选择正确的卸载方式；收藏用来记下常用的 npx skills 来源。每个可列出的来源都会自动判定并展开成带缓存的 skills 树，树里每个 skill 都能一键安装到全局。",
+    "detail": "docs/DETAIL.zh.md"
   }
 }

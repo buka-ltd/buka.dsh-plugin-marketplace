@@ -11,21 +11,18 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { defaultAvatarFor } from '../plugins/robots/lib/avatar.js'
+import { defaultAvatarFor } from '../plugins/robots/src/avatar.ts'
+import { addRobot, resolveRobotRegistryFile } from '../plugins/robots/src/robot-store.ts'
 import {
-  addRobot,
-  resolveRobotRegistryFile,
-} from '../plugins/robots/lib/robot-store.js'
-import {
-  RobotSessionService,
   mapTurnEnd,
   parseStructuredText,
+  RobotSessionService,
   readSessionOutcome,
   resultFailureMessage,
   resultRetryPrompt,
   structuredSubmittedSince,
   summarizeRobot,
-} from '../plugins/robots/lib/service.js'
+} from '../plugins/robots/src/service.ts'
 
 test('robots service: summarizeRobot strips AGENTS.md bodies and keeps orchestration fields', () => {
   const summary = summarizeRobot({
@@ -36,12 +33,16 @@ test('robots service: summarizeRobot strips AGENTS.md bodies and keeps orchestra
     mounted: true,
     workspaceId: 'ws-1',
     description: '把会议记录整理成三点结论',
-    skills: [{ name: 'convex', description: 'db' , content: 'x' }],
+    skills: [{ name: 'convex', description: 'db', content: 'x' }],
     agents: { exists: true, bytes: 42, modifiedAt: '2026-01-02T00:00:00.000Z', content: '# big' },
     claude: { exists: true, symlink: true, mode: 'symlink', target: 'AGENTS.md' },
   })
   assert.equal(summary.name, 'writer')
-  assert.equal(summary.avatar, defaultAvatarFor('writer'), 'missing avatar falls back deterministically')
+  assert.equal(
+    summary.avatar,
+    defaultAvatarFor('writer'),
+    'missing avatar falls back deterministically',
+  )
   assert.equal(summary.mounted, true)
   assert.equal(summary.workspaceId, 'ws-1')
   assert.equal(summary.description, '把会议记录整理成三点结论')
@@ -71,20 +72,41 @@ test('robots service: readSessionOutcome returns the last assistant text and tur
       },
       {
         type: 'assistant/message',
-        data: { message: { content: [{ type: 'text', text: 'final' }, { type: 'text', text: 'line two' }] } },
+        data: {
+          message: {
+            content: [
+              { type: 'text', text: 'final' },
+              { type: 'text', text: 'line two' },
+            ],
+          },
+        },
       },
       { type: 'turn/end', data: { reason: { kind: 'completed' } } },
     ],
   }
-  assert.deepEqual(readSessionOutcome(session), { text: 'final\nline two', stopReason: 'completed' })
-  assert.deepEqual(readSessionOutcome({ ownEvents: () => [] }), { text: '', stopReason: 'completed' })
+  assert.deepEqual(readSessionOutcome(session), {
+    text: 'final\nline two',
+    stopReason: 'completed',
+  })
+  assert.deepEqual(readSessionOutcome({ ownEvents: () => [] }), {
+    text: '',
+    stopReason: 'completed',
+  })
 
   // 续接时只读 startSeq 之后的事件，不会把上一轮的文本当成本轮结果。
   const continued = {
     ownEvents: () => [
-      { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: 'old' }] } } },
+      {
+        type: 'assistant/message',
+        seq: 1,
+        data: { message: { content: [{ type: 'text', text: 'old' }] } },
+      },
       { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
-      { type: 'assistant/message', seq: 3, data: { message: { content: [{ type: 'text', text: 'new' }] } } },
+      {
+        type: 'assistant/message',
+        seq: 3,
+        data: { message: { content: [{ type: 'text', text: 'new' }] } },
+      },
       { type: 'turn/end', seq: 4, data: { reason: { kind: 'completed' } } },
     ],
   }
@@ -128,7 +150,6 @@ function makeFakeContext({
   sessionListError,
   noSessionController,
   noEmit,
-  planMode,
 } = {}) {
   const state = {
     createOptions: null,
@@ -271,7 +292,11 @@ function makeFakeContext({
             data: { message: { content: [{ type: 'text', text: '{"passed":true}' }] } },
           })
           session.seq += 1
-          const event = { type: 'turn/end', seq: session.seq, data: { reason: { kind: 'completed' } } }
+          const event = {
+            type: 'turn/end',
+            seq: session.seq,
+            data: { reason: { kind: 'completed' } },
+          }
           state.resumedEvents.push(event)
           for (const handler of state.resumedHandlers) handler(session, event)
           resolveIdle()
@@ -448,8 +473,17 @@ test('robots service: avatarMap is a lightweight name -> avatar lookup', async (
       JSON.stringify({
         version: 1,
         robots: [
-          { name: 'writer', path: path.join(home.robotsDir, 'writer'), createdAt: '2026-01-01T00:00:00.000Z', avatar: 'panda' },
-          { name: 'legacy', path: path.join(home.robotsDir, 'legacy'), createdAt: '2026-01-01T00:00:00.000Z' },
+          {
+            name: 'writer',
+            path: path.join(home.robotsDir, 'writer'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            avatar: 'panda',
+          },
+          {
+            name: 'legacy',
+            path: path.join(home.robotsDir, 'legacy'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
         ],
       }),
     )
@@ -576,7 +610,11 @@ test('robots service: the structured tool falls back to a generic object schema'
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
-    const session = await service.startSession({ robot: 'writer', prompt: 'do it', timeoutMs: 5000 })
+    const session = await service.startSession({
+      robot: 'writer',
+      prompt: 'do it',
+      timeoutMs: 5000,
+    })
     assert.deepEqual(state.registered[0].parameters, { type: 'object', additionalProperties: true })
 
     state.finishIdle()
@@ -692,7 +730,10 @@ test('robots service: unknown robot is rejected before creating an agent', async
       robotsDir: home.robotsDir,
       registryFile: home.registryFile,
     })
-    await assert.rejects(() => service.startSession({ robot: 'nobody', prompt: 'x' }), /unknown robot/)
+    await assert.rejects(
+      () => service.startSession({ robot: 'nobody', prompt: 'x' }),
+      /unknown robot/,
+    )
     assert.equal(state.createOptions, null)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
@@ -743,7 +784,9 @@ test('robots service: a repeated entry compacts the same session and sends the n
 test('robots service: compaction failure does not lose the continued turn', async () => {
   const home = await makeRobotHome()
   try {
-    const { ctx, state } = makeFakeContext({ compactionError: new Error('summary model unavailable') })
+    const { ctx, state } = makeFakeContext({
+      compactionError: new Error('summary model unavailable'),
+    })
     const service = new RobotSessionService({
       ctx,
       robotsDir: home.robotsDir,
@@ -1019,7 +1062,10 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   assert.match(invalidAbort, /`abort` field in your last JSON result must be a non-empty string/u)
   assert.match(invalidAbort, /set `abort` to a short non-empty reason/u)
   // 没有 abortable 时不能把 abort 作为出口塞给节点。
-  assert.doesNotMatch(resultRetryPrompt(1, 2, { reason: 'missing-next', routes: ['done'] }), /`abort`/u)
+  assert.doesNotMatch(
+    resultRetryPrompt(1, 2, { reason: 'missing-next', routes: ['done'] }),
+    /`abort`/u,
+  )
   // 没有路由时不要把 next 强塞给节点。
   assert.doesNotMatch(resultRetryPrompt(1, 2, {}), /`next`/)
 
@@ -1038,7 +1084,6 @@ test('robots service: retry helpers parse JSON replies and detect submitted stru
   assert.equal(structuredSubmittedSince(session, 3), false)
   assert.equal(structuredSubmittedSince({ ownEvents: () => [] }), false)
 })
-
 
 test('robots service: retryReport accepts routes/reason and is bounded', async () => {
   const home = await makeRobotHome()
@@ -1092,7 +1137,11 @@ test('robots service: approval defaults to the deployment policy; never forces r
 
     // 省略 approval：保持部署策略。
     const omitted = makeFakeContext()
-    const omittedSession = await makeService(omitted).startSession({ robot: 'writer', prompt: 'do it', timeoutMs: 5000 })
+    const omittedSession = await makeService(omitted).startSession({
+      robot: 'writer',
+      prompt: 'do it',
+      timeoutMs: 5000,
+    })
     assert.deepEqual(omitted.state.approvalPolicies, [])
     omitted.state.finishIdle()
     await omittedSession.result
@@ -1187,7 +1236,9 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, pl
       events.push({
         type: 'assistant/message',
         seq: events.length,
-        data: { message: { content: [{ type: 'text', text: `dispatch done ${state.followups.length}` }] } },
+        data: {
+          message: { content: [{ type: 'text', text: `dispatch done ${state.followups.length}` }] },
+        },
       })
       events.push({ type: 'turn/end', seq: events.length, data: { reason: { kind: 'completed' } } })
     },
@@ -1195,7 +1246,11 @@ function makeDispatchContext({ sessionListError, noSessionController, noEmit, pl
     cancel() {
       state.cancelled = true
     },
-    ctx: { on() { return () => {} } },
+    ctx: {
+      on() {
+        return () => {}
+      },
+    },
   }
   const handle = {
     agent,
@@ -1351,7 +1406,11 @@ test('robots service: releasing a dispatched agent re-announces the durable sess
     const handle = await service.dispatchSession({ robot: 'writer', prompt: 'do the work' })
     await handle.dispose()
     assert.equal(fake.state.disposed, true)
-    assert.equal(fake.state.sessionListCalls, 1, 'the host session list is read once after disposing')
+    assert.equal(
+      fake.state.sessionListCalls,
+      1,
+      'the host session list is read once after disposing',
+    )
     const announced = fake.state.emitted.filter(([event]) => event === 'api-session/added')
     assert.equal(announced.length, 1, 'the durable session is announced back to the client')
     assert.equal(announced[0][1].sessionId, handle.sessionId)
@@ -1421,7 +1480,11 @@ test('robots service: planMode is applied before the first prompt and the handle
       registryFile: home.registryFile,
     })
     assert.equal(service.supportsPlanMode, true)
-    const handle = await service.dispatchSession({ robot: 'writer', prompt: 'plan it', planMode: true })
+    const handle = await service.dispatchSession({
+      robot: 'writer',
+      prompt: 'plan it',
+      planMode: true,
+    })
     // 首轮 prompt 之前必须已经切换模式。
     assert.deepEqual(fake.state.trace.slice(0, 2), ['planMode:on', 'followup'])
     assert.equal(planMode.active, true)
@@ -1456,7 +1519,11 @@ test('robots service: requesting planMode without the plan-mode service fails be
       () => service.dispatchSession({ robot: 'writer', prompt: 'plan it', planMode: true }),
       /plan mode is unavailable in this composition/u,
     )
-    assert.equal(fake.state.createOptions, null, 'no robot session is created when plan mode is unavailable')
+    assert.equal(
+      fake.state.createOptions,
+      null,
+      'no robot session is created when plan mode is unavailable',
+    )
     assert.equal(fake.state.followups.length, 0)
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })

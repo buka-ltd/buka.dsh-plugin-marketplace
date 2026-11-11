@@ -9,14 +9,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  LANE_GAP,
-  RAIL_BASE,
-  RAIL_PAD,
-  ROW_GAP,
-  ROW_HEIGHT,
   buildRunGraph,
+  LAYER_GAP,
   layoutRunGraph,
-} from '../plugins/workflows/lib/graph.js'
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  SIDE_PAD,
+} from '../plugins/workflows/src/graph.ts'
 
 /**
  * 手工构造落盘的定义快照（不经过 definition.js 校验）。
@@ -34,7 +33,10 @@ function snapshot(raw) {
   return {
     plan: {
       goal: typeof raw?.goal === 'string' ? raw.goal : '',
-      start: typeof raw?.start === 'string' && raw.start !== '' ? raw.start : (startNode?.id ?? ids[0] ?? ''),
+      start:
+        typeof raw?.start === 'string' && raw.start !== ''
+          ? raw.start
+          : (startNode?.id ?? ids[0] ?? ''),
       maxSteps: Number.isInteger(raw?.maxSteps) ? raw.maxSteps : 64,
       nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
       order: ids,
@@ -57,12 +59,32 @@ function edgeOf(edges, from, to) {
   return edge
 }
 
+/**
+ * 找 layout 里的一个节点坐标。
+ *
+ * @param {ReturnType<typeof layoutRunGraph>} layout
+ * @param {string} id
+ * @returns {{ id: string, layer: number, x: number, y: number }}
+ */
+function positionOf(layout, id) {
+  const position = layout.positions.find((item) => item.id === id)
+  assert.ok(position, `expected a position for ${id}`)
+  return position
+}
+
 test('graph: linear run marks the reached end node and the traversed edge', () => {
   const definition = snapshot({
     goal: 'linear',
     start: 'work',
     nodes: [
-      { id: 'work', type: 'robot', robot: 'writer', summary: '写一份草稿', prompt: 'do it', next: 'end' },
+      {
+        id: 'work',
+        type: 'robot',
+        robot: 'writer',
+        summary: '写一份草稿',
+        prompt: 'do it',
+        next: 'end',
+      },
       { id: 'end', type: 'end', status: 'completed' },
     ],
   })
@@ -113,27 +135,31 @@ test('graph: linear run marks the reached end node and the traversed edge', () =
   assert.equal(edge.traversed, true)
 
   const layout = layoutRunGraph(graph)
-  assert.equal(layout.rowHeight, ROW_HEIGHT)
-  assert.equal(layout.rowGap, ROW_GAP)
-  assert.equal(layout.width, RAIL_BASE + RAIL_PAD)
-  assert.equal(layout.height, 2 * ROW_HEIGHT + ROW_GAP)
-  assert.deepEqual(layout.rows, [
-    { id: 'work', index: 0, y: ROW_HEIGHT / 2 },
-    { id: 'end', index: 1, y: ROW_HEIGHT + ROW_GAP + ROW_HEIGHT / 2 },
-  ])
-  const edgeLayout = layout.edges[0]
-  assert.equal(edgeLayout.lane, 0, 'adjacent downward edges stay on the rail')
+  assert.equal(layout.nodeWidth, NODE_WIDTH)
+  assert.equal(layout.nodeHeight, NODE_HEIGHT)
+  assert.equal(layout.layerGap, LAYER_GAP)
+  assert.equal(layout.positions.length, 2, 'every node gets a position')
+  const workPos = positionOf(layout, 'work')
+  const endPos = positionOf(layout, 'end')
+  assert.equal(workPos.layer, 0)
+  assert.equal(endPos.layer, 1, 'a linear chain puts each node on its own layer')
+  assert.equal(workPos.x, endPos.x, 'a single child stays vertically aligned under its parent')
+  assert.equal(workPos.y, SIDE_PAD + NODE_HEIGHT / 2)
+  assert.equal(endPos.y, SIDE_PAD + NODE_HEIGHT + LAYER_GAP + NODE_HEIGHT / 2)
+  const edgeLayout = edgeOf(layout.edges, 'work', 'end')
+  assert.equal(edgeLayout.side, 'center')
+  assert.equal(edgeLayout.lane, 0, 'adjacent-layer edges need no side lane')
   assert.equal(
     edgeLayout.d,
-    `M${RAIL_BASE},${ROW_HEIGHT / 2} L${RAIL_BASE},${ROW_HEIGHT + ROW_GAP + ROW_HEIGHT / 2}`,
+    `M${workPos.x},${workPos.y + NODE_HEIGHT / 2} L${endPos.x},${endPos.y - NODE_HEIGHT / 2}`,
   )
-  assert.equal(layout.dotX, RAIL_BASE, 'without loop lanes the rail keeps its base x')
-  const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
   assert.deepEqual(edgeLayout.arrow, {
-    x: RAIL_BASE,
-    y: (rowOf.get('work').y + rowOf.get('end').y) / 2,
+    x: workPos.x,
+    y: (workPos.y + NODE_HEIGHT / 2 + endPos.y - NODE_HEIGHT / 2) / 2,
     angle: 90,
   })
+  assert.equal(layout.width, NODE_WIDTH + 4 * SIDE_PAD)
+  assert.equal(layout.height, NODE_HEIGHT + LAYER_GAP + NODE_HEIGHT + 2 * SIDE_PAD)
 })
 
 test('graph: robot nodes carry the avatar from the robots avatar map', () => {
@@ -141,7 +167,14 @@ test('graph: robot nodes carry the avatar from the robots avatar map', () => {
     goal: 'avatars',
     start: 'work',
     nodes: [
-      { id: 'work', type: 'robot', robot: 'writer', summary: '写一份草稿', prompt: 'do it', next: 'review' },
+      {
+        id: 'work',
+        type: 'robot',
+        robot: 'writer',
+        summary: '写一份草稿',
+        prompt: 'do it',
+        next: 'review',
+      },
       { id: 'review', type: 'robot', robot: 'reviewer', prompt: 'review it', next: 'end' },
       { id: 'end', type: 'end', status: 'completed' },
     ],
@@ -205,7 +238,16 @@ test('graph: routing highlights only the taken branch', () => {
     current: null,
     pendingUser: null,
     steps: [
-      { seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, route: 'ok', routeTo: 'ok_end' },
+      {
+        seq: 1,
+        nodeId: 'work',
+        type: 'robot',
+        status: 'completed',
+        startedAt: 1,
+        finishedAt: 2,
+        route: 'ok',
+        routeTo: 'ok_end',
+      },
     ],
     result: { status: 'completed', lastNode: 'ok_end' },
   }
@@ -222,15 +264,24 @@ test('graph: routing highlights only the taken branch', () => {
   assert.equal(graph.nodes.find((node) => node.id === 'bad_end').state, 'idle')
 
   const layout = layoutRunGraph(graph)
-  // 同一行顺序：work、ok_end、bad_end；跨行的分支边绕到右侧 lane。
-  const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
-  assert.equal(rowOf.get('work').index, 0)
-  assert.equal(rowOf.get('ok_end').index, 1)
-  assert.equal(rowOf.get('bad_end').index, 2)
-  assert.equal(rowOf.get('bad_end').y, 2 * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT / 2)
-  assert.equal(edgeOf(layout.edges, 'work', 'ok_end').lane, 0)
-  assert.equal(edgeOf(layout.edges, 'work', 'bad_end').lane, 1)
-  assert.equal(layout.width, RAIL_BASE + LANE_GAP + RAIL_PAD)
+  const workPos = positionOf(layout, 'work')
+  const okPos = positionOf(layout, 'ok_end')
+  const badPos = positionOf(layout, 'bad_end')
+  assert.equal(workPos.layer, 0)
+  assert.equal(okPos.layer, 1, 'fan-out branches are one layer below the source')
+  assert.equal(badPos.layer, 1)
+  assert.equal(okPos.y, badPos.y, 'parallel sibling nodes share the same row')
+  assert.notEqual(okPos.x, badPos.x, 'parallel nodes are laid out side by side')
+  assert.equal(
+    workPos.x,
+    (okPos.x + badPos.x) / 2,
+    'the parent sits centred above its two children',
+  )
+  for (const edge of layout.edges) {
+    assert.equal(edge.side, 'center', 'adjacent-layer fan-out edges need no side lane')
+    assert.equal(edge.lane, 0)
+  }
+  assert.equal(layout.height, NODE_HEIGHT + LAYER_GAP + NODE_HEIGHT + 2 * SIDE_PAD)
 })
 
 test('graph: a terminal user node keeps its title and ends the run', () => {
@@ -280,7 +331,9 @@ test('graph: a terminal user node keeps its title and ends the run', () => {
   // 用户节点没有会话 / 决策字段。
   assert.equal(ask.sessionId, null)
   assert.equal(Object.hasOwn(ask, 'decision'), false)
-  assert.equal(layoutRunGraph(graph).height, ROW_HEIGHT)
+  const lone = layoutRunGraph(graph)
+  assert.equal(lone.positions.length, 1)
+  assert.equal(lone.height, NODE_HEIGHT + 2 * SIDE_PAD)
 })
 
 test('graph: user edges are choices with labels and the chosen path is traversed', () => {
@@ -296,8 +349,20 @@ test('graph: user edges are choices with labels and the chosen path is traversed
           { to: 'reject_path', name: 'revise', label: '打回' },
         ],
       },
-      { id: 'approve_path', type: 'robot', robot: 'publisher', prompt: 'publish', next: [{ to: 'done', name: '完成' }] },
-      { id: 'reject_path', type: 'robot', robot: 'writer', prompt: 'revise', next: [{ to: 'done', name: '完成' }] },
+      {
+        id: 'approve_path',
+        type: 'robot',
+        robot: 'publisher',
+        prompt: 'publish',
+        next: [{ to: 'done', name: '完成' }],
+      },
+      {
+        id: 'reject_path',
+        type: 'robot',
+        robot: 'writer',
+        prompt: 'revise',
+        next: [{ to: 'done', name: '完成' }],
+      },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   })
@@ -345,18 +410,25 @@ test('graph: user edges are choices with labels and the chosen path is traversed
   assert.equal(graph.nodes.find((node) => node.id === 'reject_path').state, 'idle')
   assert.equal(graph.nodes.find((node) => node.id === 'done').state, 'completed')
 
-  // 拓扑行序保持定义顺序：ask、approve_path、reject_path、done。
   const layout = layoutRunGraph(graph)
-  const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
-  assert.equal(rowOf.get('reject_path').index, 2)
-  assert.equal(rowOf.get('done').index, 3)
-  assert.equal(rowOf.get('done').y, 3 * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT / 2)
-  // 相邻边留在主干；两条跨两行的边各自占一条 lane。
-  assert.equal(edgeOf(layout.edges, 'ask', 'approve_path').lane, 0)
-  assert.equal(edgeOf(layout.edges, 'reject_path', 'done').lane, 0)
-  assert.equal(edgeOf(layout.edges, 'ask', 'reject_path').lane, 1)
-  assert.equal(edgeOf(layout.edges, 'approve_path', 'done').lane, 2)
-  assert.equal(layout.width, RAIL_BASE + 2 * LANE_GAP + RAIL_PAD)
+  const askPos = positionOf(layout, 'ask')
+  const approvePos = positionOf(layout, 'approve_path')
+  const rejectPos = positionOf(layout, 'reject_path')
+  const donePos = positionOf(layout, 'done')
+  assert.equal(askPos.layer, 0)
+  assert.equal(approvePos.layer, 1)
+  assert.equal(rejectPos.layer, 1)
+  assert.equal(donePos.layer, 2)
+  assert.equal(approvePos.y, rejectPos.y, 'the two choices sit on the same row')
+  assert.equal(
+    donePos.x,
+    (approvePos.x + rejectPos.x) / 2,
+    'the join node is centred below both branches',
+  )
+  for (const edge of layout.edges) {
+    assert.equal(edge.side, 'center')
+    assert.equal(edge.lane, 0, 'every edge here connects adjacent layers directly')
+  }
 })
 
 test('graph: the running node and the waiting user node carry live state', () => {
@@ -365,7 +437,12 @@ test('graph: the running node and the waiting user node carry live state', () =>
     nodes: [
       { id: 'a', type: 'robot', robot: 'r1', prompt: 'a', next: 'b' },
       { id: 'b', type: 'robot', robot: 'r2', prompt: 'b', next: 'ask' },
-      { id: 'ask', type: 'user', title: '确认', next: [{ to: 'done', name: 'continue', label: '继续' }] },
+      {
+        id: 'ask',
+        type: 'user',
+        title: '确认',
+        next: [{ to: 'done', name: 'continue', label: '继续' }],
+      },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   })
@@ -376,7 +453,9 @@ test('graph: the running node and the waiting user node carry live state', () =>
       status: 'running',
       current: { nodeId: 'b', visit: 1, type: 'robot' },
       pendingUser: null,
-      steps: [{ seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 }],
+      steps: [
+        { seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
+      ],
       result: null,
     },
     definition,
@@ -413,8 +492,22 @@ test('graph: without a definition snapshot the steps become a linear chain', () 
       current: null,
       pendingUser: null,
       steps: [
-        { seq: 1, nodeId: 'first', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
-        { seq: 2, nodeId: 'second', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
+        {
+          seq: 1,
+          nodeId: 'first',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 1,
+          finishedAt: 2,
+        },
+        {
+          seq: 2,
+          nodeId: 'second',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 3,
+          finishedAt: 4,
+        },
       ],
       result: { status: 'completed', lastNode: 'second' },
     },
@@ -429,7 +522,7 @@ test('graph: without a definition snapshot the steps become a linear chain', () 
   assert.equal(graph.nodes.find((node) => node.id === 'first').state, 'completed')
 })
 
-test('graph: an old record with an unreachable node keeps it on its own row and flags it', () => {
+test('graph: an old record with an unreachable node keeps it in the first layer and flags it', () => {
   // 新定义会在校验阶段拒绝不可达节点；这里手工构造定义快照，模拟修复前落盘的旧记录。
   const raw = {
     start: 'a',
@@ -466,9 +559,14 @@ test('graph: an old record with an unreachable node keeps it on its own row and 
   assert.equal(graph.nodes.find((node) => node.id === 'a').unreachable, false)
   assert.equal(graph.nodes.find((node) => node.id === 'b').unreachable, false)
   const layout = layoutRunGraph(graph)
-  const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
-  assert.equal(rowOf.get('orphan').index, 2)
-  assert.equal(rowOf.get('orphan').y, 2 * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT / 2)
+  const startPos = positionOf(layout, 'a')
+  const orphanPos = positionOf(layout, 'orphan')
+  assert.equal(orphanPos.layer, 0, 'a node with no parents starts in the first layer')
+  assert.equal(orphanPos.y, startPos.y, 'it shares the first row with the declared start')
+  assert.ok(
+    orphanPos.x > startPos.x,
+    'unreachable roots are spread to the right, not stacked on top of the start',
+  )
 })
 
 test('graph: backward edges and self loops are routed to the side', () => {
@@ -498,15 +596,16 @@ test('graph: backward edges and self loops are routed to the side', () => {
   const layout = layoutRunGraph(graph)
   const backward = edgeOf(layout.edges, 'b', 'a')
   assert.match(backward.d, /^M.*C/u, 'back edges turn into a side lane')
+  assert.equal(backward.side, 'right')
   assert.equal(backward.lane, 1)
   assert.equal(backward.arrow.angle, -90, 'the arrow points back up')
   const selfLoop = layout.edges.find((edge) => edge.from === 'loop' && edge.to === 'loop')
   assert.ok(selfLoop)
   assert.match(selfLoop.d, /^M.*C/u)
   assert.equal(selfLoop.lane, 1)
-  // 绕行线还在轨道右侧，主干仍从 RAIL_BASE 开始。
-  assert.equal(layout.dotX, RAIL_BASE)
-  assert.equal(layout.width, RAIL_BASE + LANE_GAP + RAIL_PAD)
+  assert.equal(selfLoop.side, 'right')
+  // 两条边共用同一条右侧 lane（层区间不重叠），所以宽度只多出一侧的留白。
+  assert.equal(layout.width, NODE_WIDTH + 4 * SIDE_PAD)
 })
 
 test('graph: a loop run counts revisits and marks the back edge', () => {
@@ -600,29 +699,37 @@ test('graph: a loop run counts revisits and marks the back edge', () => {
   assert.equal(untouched.traversed, false)
 
   const layout = layoutRunGraph(graph)
-  const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
-  // 拓扑行序：check、fix、skip、done——没走到的 skip 仍在 done 上方，不会误导。
-  assert.equal(rowOf.get('check').index, 0)
-  assert.equal(rowOf.get('fix').index, 1)
-  assert.equal(rowOf.get('skip').index, 2)
-  assert.equal(rowOf.get('done').index, 3)
+  const checkPos = positionOf(layout, 'check')
+  const fixPos = positionOf(layout, 'fix')
+  const skipPos = positionOf(layout, 'skip')
+  const donePos = positionOf(layout, 'done')
+  assert.equal(checkPos.layer, 0)
+  assert.equal(fixPos.layer, 1)
+  assert.equal(skipPos.layer, 1, 'the loop body and the untaken branch are parallel')
+  assert.equal(donePos.layer, 2)
+  assert.equal(fixPos.y, skipPos.y, 'parallel nodes share one row')
   const backEdge = edgeOf(layout.edges, 'fix', 'check')
-  assert.equal(backEdge.lane, 1, 'the one-row loop uses the inner lane')
+  assert.equal(backEdge.side, 'left', 'a loop on the left branch may route on the left side')
+  assert.equal(backEdge.lane, 1)
   assert.equal(backEdge.arrow.angle, -90, 'the back edge points back up')
   // 循环不再画图标：回边 + 正向边的两个箭头围成环即可。
   assert.equal('glyph' in backEdge, false)
   const intoDone = edgeOf(layout.edges, 'check', 'done')
-  assert.equal(intoDone.lane, 3, 'the widest branch is pushed to the outermost lane')
+  assert.equal(intoDone.side, 'right', 'the long forward branch uses the other side of the graph')
+  assert.equal(intoDone.lane, 1)
+  assert.ok(backEdge.lane <= intoDone.lane, 'both sides allocate lanes independently')
   const intoSkip = edgeOf(layout.edges, 'check', 'skip')
-  assert.equal(intoSkip.lane, 2, 'the untaken branch sits between the loop and the end branch')
-  assert.ok(backEdge.lane < intoDone.lane, 'the nested loop stays inside the branch lane')
+  assert.equal(intoSkip.side, 'center', 'an adjacent-layer branch connects directly')
+  assert.equal(intoSkip.lane, 0)
   const skippedEdge = edgeOf(layout.edges, 'skip', 'done')
   assert.equal(skippedEdge.loop, false, 'an untaken branch is not a cycle edge')
+  assert.equal(skippedEdge.side, 'center')
   assert.equal(skippedEdge.arrow.angle, 90, 'a plain branch edge still points downward')
-  assert.equal(layout.dotX, RAIL_BASE)
-  assert.equal(layout.width, RAIL_BASE + 3 * LANE_GAP + RAIL_PAD)
-  assert.ok(backEdge.d.endsWith(`,${rowOf.get('check').y}`), 'the back edge ends on the check dot')
-  assertNoCrossings(layout)
+  assert.ok(
+    backEdge.d.endsWith(`,${checkPos.y + NODE_HEIGHT / 2}`),
+    'the back edge ends on the check node bottom port',
+  )
+  assertNoLaneOverlap(layout)
 })
 
 test('graph: several named edges pointing at the same target merge into one drawn edge', () => {
@@ -651,7 +758,15 @@ test('graph: several named edges pointing at the same target merge into one draw
       current: null,
       pendingUser: null,
       steps: [
-        { seq: 1, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, data: { ok: true } },
+        {
+          seq: 1,
+          nodeId: 'check',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 1,
+          finishedAt: 2,
+          data: { ok: true },
+        },
       ],
       result: { status: 'completed', lastNode: 'done' },
     },
@@ -659,7 +774,11 @@ test('graph: several named edges pointing at the same target merge into one draw
   })
   assert.ok(graph)
   const toDone = edgeOf(graph.edges, 'check', 'done')
-  assert.deepEqual(toDone.names, ['通过', '已是最新'], 'two rules with the same target become one edge')
+  assert.deepEqual(
+    toDone.names,
+    ['通过', '已是最新'],
+    'two rules with the same target become one edge',
+  )
   assert.equal('rules' in toDone, false)
   assert.equal('whens' in toDone, false)
   assert.equal('hasDefault' in toDone, false)
@@ -709,7 +828,11 @@ test('graph: an optional edge tone is carried for rendering only', () => {
   assert.equal(merged.tone, 'success', 'the first edge with a tone decides the merged line')
   assert.deepEqual(merged.names, ['通过', '已是最新'], 'tone does not change the edge name merge')
   assert.equal(edgeOf(graph.edges, 'check', 'fix').tone, 'failure')
-  assert.equal(edgeOf(graph.edges, 'fix', 'check').tone, '', 'an unknown tone is normalized to no color')
+  assert.equal(
+    edgeOf(graph.edges, 'fix', 'check').tone,
+    '',
+    'an unknown tone is normalized to no color',
+  )
   assert.equal(merged.traversed, true, 'tone never affects the traversed state')
 
   // 没有 plan 的原始定义快照走同一条归一化路径：tone 同样保留。
@@ -718,7 +841,6 @@ test('graph: an optional edge tone is carried for rendering only', () => {
   assert.equal(edgeOf(rawGraph.edges, 'check', 'done').tone, 'success')
   assert.equal(edgeOf(rawGraph.edges, 'check', 'fix').tone, 'failure')
 })
-
 
 /**
  * 把一条 layout 边采样成折线（支持 M / L / C 三种路径命令）。
@@ -766,52 +888,53 @@ function sampleEdge(edge) {
 }
 
 /**
- * 两段线段是否相交；平行、共线的一律忽略。
- *
- * @param {{x:number,y:number}} a
- * @param {{x:number,y:number}} b
- * @param {{x:number,y:number}} c
- * @param {{x:number,y:number}} d
- * @returns {{x:number,y:number} | null}
- */
-function segmentIntersection(a, b, c, d) {
-  const denominator = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x)
-  if (Math.abs(denominator) < 1e-9) return null
-  const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / denominator
-  const u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / denominator
-  if (t < 0 || t > 1 || u < 0 || u > 1) return null
-  return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) }
-}
-
-/**
- * 断言整张图里没有落在节点圆点之外的交叉。
+ * 同一侧、同一 lane 的边在层区间上不能重叠；同一层的节点之间不能重叠。
  *
  * @param {ReturnType<typeof layoutRunGraph>} layout
  * @returns {void}
  */
-function assertNoCrossings(layout) {
-  const lines = layout.edges.map((edge) => sampleEdge(edge))
-  const dots = layout.rows.map((row) => ({ x: layout.dotX, y: row.y }))
-  for (let left = 0; left < lines.length; left += 1) {
-    for (let right = left + 1; right < lines.length; right += 1) {
-      for (let i = 0; i + 1 < lines[left].length; i += 1) {
-        for (let j = 0; j + 1 < lines[right].length; j += 1) {
-          const hit = segmentIntersection(lines[left][i], lines[left][i + 1], lines[right][j], lines[right][j + 1])
-          if (hit === null) continue
-          // 连线允许在节点圆点处汇合，只禁止圆点之外交叉。
-          const atDot = dots.some((dot) => Math.hypot(dot.x - hit.x, dot.y - hit.y) < 8)
-          assert.ok(
-            atDot,
-            `edges ${layout.edges[left].from}->${layout.edges[left].to} and ` +
-              `${layout.edges[right].from}->${layout.edges[right].to} cross at ${JSON.stringify(hit)}`,
-          )
-        }
+function assertNoLaneOverlap(layout) {
+  const intervalOf = (edge) => {
+    const fromLayer = positionOf(layout, edge.from).layer
+    const toLayer = positionOf(layout, edge.to).layer
+    const start = Math.min(fromLayer, toLayer)
+    const end = fromLayer === toLayer ? start + 0.5 : Math.max(fromLayer, toLayer)
+    return { start, end }
+  }
+  for (const side of ['left', 'right']) {
+    const edges = layout.edges.filter((edge) => edge.side === side)
+    for (let left = 0; left < edges.length; left += 1) {
+      for (let right = left + 1; right < edges.length; right += 1) {
+        if (edges[left].lane !== edges[right].lane) continue
+        const first = intervalOf(edges[left])
+        const second = intervalOf(edges[right])
+        assert.equal(
+          first.start < second.end && second.start < first.end,
+          false,
+          `edges ${edges[left].from}->${edges[left].to} and ${edges[right].from}->${edges[right].to} ` +
+            `share the ${side} lane ${edges[left].lane} with overlapping layers`,
+        )
       }
+    }
+  }
+  /** @type {Map<number, Array<{ x: number, y: number }>>} */
+  const byLayer = new Map()
+  for (const position of layout.positions) {
+    if (!byLayer.has(position.layer)) byLayer.set(position.layer, [])
+    byLayer.get(position.layer).push(position)
+  }
+  for (const positions of byLayer.values()) {
+    positions.sort((left, right) => left.x - right.x)
+    for (let index = 1; index < positions.length; index += 1) {
+      assert.ok(
+        positions[index].x - positions[index - 1].x >= NODE_WIDTH,
+        'nodes in one layer never overlap horizontally',
+      )
     }
   }
 }
 
-test('graph: nested arcs never cross on a loop run', () => {
+test('graph: same-side lanes nest without sharing a lane', () => {
   const definition = snapshot({
     goal: '反复检查直到通过',
     start: 'check',
@@ -839,16 +962,32 @@ test('graph: nested arcs never cross on a loop run', () => {
       current: null,
       pendingUser: null,
       steps: [
-        { seq: 1, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, data: { ok: false } },
+        {
+          seq: 1,
+          nodeId: 'check',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 1,
+          finishedAt: 2,
+          data: { ok: false },
+        },
         { seq: 2, nodeId: 'fix', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
-        { seq: 3, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 5, finishedAt: 6, data: { ok: true } },
+        {
+          seq: 3,
+          nodeId: 'check',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 5,
+          finishedAt: 6,
+          data: { ok: true },
+        },
       ],
       result: { status: 'completed', lastNode: 'done' },
     },
     definition,
   })
   assert.ok(graph)
-  assertNoCrossings(layoutRunGraph(graph))
+  assertNoLaneOverlap(layoutRunGraph(graph))
 })
 
 test('graph: long output and long prompts are truncated for the card', () => {
@@ -856,7 +995,10 @@ test('graph: long output and long prompts are truncated for the card', () => {
   const longPrompt = `task ${'y'.repeat(400)}`
   const definition = snapshot({
     start: 'work',
-    nodes: [{ id: 'work', type: 'robot', robot: 'r', prompt: longPrompt, next: 'end' }, { id: 'end', type: 'end' }],
+    nodes: [
+      { id: 'work', type: 'robot', robot: 'r', prompt: longPrompt, next: 'end' },
+      { id: 'end', type: 'end' },
+    ],
   })
   const graph = buildRunGraph({
     run: {
@@ -864,7 +1006,17 @@ test('graph: long output and long prompts are truncated for the card', () => {
       status: 'completed',
       current: null,
       pendingUser: null,
-      steps: [{ seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, text: longText }],
+      steps: [
+        {
+          seq: 1,
+          nodeId: 'work',
+          type: 'robot',
+          status: 'completed',
+          startedAt: 1,
+          finishedAt: 2,
+          text: longText,
+        },
+      ],
       result: { status: 'completed', lastNode: 'end' },
     },
     definition,
@@ -916,7 +1068,9 @@ test('graph: edges carry their names, merging rules to one target', () => {
     status: 'running',
     current: { nodeId: 'b' },
     pendingUser: null,
-    steps: [{ seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 }],
+    steps: [
+      { seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
+    ],
     result: null,
   }
   const graph = buildRunGraph({ run, definition })
@@ -940,7 +1094,11 @@ test('graph: a start node is a completed marker, not a step', () => {
   const definition = snapshot({
     goal: 'dev/test loop',
     nodes: [
-      { id: 'start', type: 'start', next: [{ to: 'dev', name: '开始开发', prompt: '实现导出功能。' }] },
+      {
+        id: 'start',
+        type: 'start',
+        next: [{ to: 'dev', name: '开始开发', prompt: '实现导出功能。' }],
+      },
       {
         id: 'dev',
         type: 'robot',
@@ -967,10 +1125,48 @@ test('graph: a start node is a completed marker, not a step', () => {
     current: null,
     pendingUser: null,
     steps: [
-      { seq: 1, nodeId: 'dev', visit: 1, type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, text: '初版' },
-      { seq: 2, nodeId: 'test', visit: 1, type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4, text: '打回', data: { passed: false } },
-      { seq: 3, nodeId: 'dev', visit: 2, type: 'robot', status: 'completed', startedAt: 5, finishedAt: 6, text: '修复' },
-      { seq: 4, nodeId: 'test', visit: 2, type: 'robot', status: 'completed', startedAt: 7, finishedAt: 8, text: '通过', data: { passed: true } },
+      {
+        seq: 1,
+        nodeId: 'dev',
+        visit: 1,
+        type: 'robot',
+        status: 'completed',
+        startedAt: 1,
+        finishedAt: 2,
+        text: '初版',
+      },
+      {
+        seq: 2,
+        nodeId: 'test',
+        visit: 1,
+        type: 'robot',
+        status: 'completed',
+        startedAt: 3,
+        finishedAt: 4,
+        text: '打回',
+        data: { passed: false },
+      },
+      {
+        seq: 3,
+        nodeId: 'dev',
+        visit: 2,
+        type: 'robot',
+        status: 'completed',
+        startedAt: 5,
+        finishedAt: 6,
+        text: '修复',
+      },
+      {
+        seq: 4,
+        nodeId: 'test',
+        visit: 2,
+        type: 'robot',
+        status: 'completed',
+        startedAt: 7,
+        finishedAt: 8,
+        text: '通过',
+        data: { passed: true },
+      },
     ],
     result: { status: 'completed', lastNode: 'done' },
   }
@@ -986,8 +1182,8 @@ test('graph: a start node is a completed marker, not a step', () => {
   assert.deepEqual(startEdge.names, ['开始开发'])
   assert.deepEqual(edgeOf(graph.edges, 'test', 'dev').names, ['测试打回'])
   const layout = layoutRunGraph(graph)
-  assert.equal(layout.rows[0].id, 'start')
-  assert.equal(layout.rows.length, 4)
+  assert.equal(positionOf(layout, 'start').layer, 0)
+  assert.equal(layout.positions.length, 4)
 })
 
 test('graph: a plan robot node keeps its mode flag', () => {
@@ -1021,4 +1217,147 @@ test('graph: a plan robot node keeps its mode flag', () => {
   assert.equal(work.mode, 'plan')
   const end = graph.nodes.find((node) => node.id === 'end')
   assert.equal(end.mode, null)
+})
+
+test('graph: every edge starts and ends on a node port', () => {
+  const definition = snapshot({
+    start: 'start',
+    nodes: [
+      {
+        id: 'start',
+        type: 'start',
+        next: [
+          { to: 'a', name: 'a' },
+          { to: 'b', name: 'b' },
+        ],
+      },
+      { id: 'a', type: 'robot', robot: 'r', prompt: 'a', next: [{ to: 'end', name: 'done' }] },
+      { id: 'b', type: 'robot', robot: 'r', prompt: 'b', next: [{ to: 'end', name: 'done' }] },
+      { id: 'end', type: 'end', status: 'completed' },
+    ],
+  })
+  const graph = buildRunGraph({
+    run: {
+      runId: 'wf-test-ports',
+      status: 'completed',
+      current: null,
+      pendingUser: null,
+      steps: [],
+      result: { status: 'completed', lastNode: 'end' },
+    },
+    definition,
+  })
+  assert.ok(graph)
+  const layout = layoutRunGraph(graph)
+  for (const edge of layout.edges) {
+    const from = positionOf(layout, edge.from)
+    const to = positionOf(layout, edge.to)
+    const points = sampleEdge(edge)
+    const first = points[0]
+    const last = points[points.length - 1]
+    const down = to.layer > from.layer
+    const expectedStart = { x: from.x, y: from.y + (down ? NODE_HEIGHT / 2 : -NODE_HEIGHT / 2) }
+    const expectedEnd = { x: to.x, y: to.y + (down ? -NODE_HEIGHT / 2 : NODE_HEIGHT / 2) }
+    assert.ok(
+      Math.abs(first.x - expectedStart.x) < 0.01 && Math.abs(first.y - expectedStart.y) < 0.01,
+      `edge ${edge.from}->${edge.to} starts on the source port`,
+    )
+    assert.ok(
+      Math.abs(last.x - expectedEnd.x) < 0.01 && Math.abs(last.y - expectedEnd.y) < 0.01,
+      `edge ${edge.from}->${edge.to} ends on the target port`,
+    )
+  }
+})
+
+test('graph: self loops can route on both the left and the right side', () => {
+  const definition = snapshot({
+    start: 'start',
+    nodes: [
+      {
+        id: 'start',
+        type: 'start',
+        next: [
+          { to: 'left', name: 'l' },
+          { to: 'right', name: 'r' },
+        ],
+      },
+      {
+        id: 'left',
+        type: 'robot',
+        robot: 'r',
+        prompt: 'l',
+        next: [
+          { to: 'left', name: 'loop' },
+          { to: 'end', name: 'done' },
+        ],
+      },
+      {
+        id: 'right',
+        type: 'robot',
+        robot: 'r',
+        prompt: 'r',
+        next: [
+          { to: 'right', name: 'loop' },
+          { to: 'end', name: 'done' },
+        ],
+      },
+      { id: 'end', type: 'end', status: 'completed' },
+    ],
+  })
+  const graph = buildRunGraph({
+    run: {
+      runId: 'wf-test-both-sides',
+      status: 'completed',
+      current: null,
+      pendingUser: null,
+      steps: [],
+      result: { status: 'completed', lastNode: 'end' },
+    },
+    definition,
+  })
+  assert.ok(graph)
+  const layout = layoutRunGraph(graph)
+  const leftLoop = layout.edges.find((edge) => edge.from === 'left' && edge.to === 'left')
+  const rightLoop = layout.edges.find((edge) => edge.from === 'right' && edge.to === 'right')
+  assert.ok(leftLoop)
+  assert.ok(rightLoop)
+  assert.equal(leftLoop.side, 'left', 'a loop on the left side uses a left lane')
+  assert.equal(rightLoop.side, 'right', 'a loop on the right side uses a right lane')
+  assert.ok(
+    positionOf(layout, 'left').y === positionOf(layout, 'right').y,
+    'both loops are parallel',
+  )
+})
+
+test('graph: the same graph always lays out the same way', () => {
+  const definition = snapshot({
+    start: 'check',
+    nodes: [
+      {
+        id: 'check',
+        type: 'robot',
+        robot: 'r',
+        prompt: 'check',
+        next: [
+          { to: 'done', name: 'pass' },
+          { to: 'fix', name: 'fix' },
+        ],
+      },
+      { id: 'fix', type: 'robot', robot: 'r', prompt: 'fix', next: 'check' },
+      { id: 'done', type: 'end' },
+    ],
+  })
+  const graph = buildRunGraph({
+    run: {
+      runId: 'wf-test-stable',
+      status: 'completed',
+      current: null,
+      pendingUser: null,
+      steps: [],
+      result: { status: 'completed', lastNode: 'done' },
+    },
+    definition,
+  })
+  assert.ok(graph)
+  assert.deepEqual(layoutRunGraph(graph), layoutRunGraph(graph))
 })

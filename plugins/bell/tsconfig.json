@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "../../.build/bell",
+    "tsBuildInfoFile": "../../.build/bell.tsbuildinfo"
+  },
+  "include": ["src", "../../types"]
+}

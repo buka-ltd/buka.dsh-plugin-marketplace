@@ -18,20 +18,20 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { ensureGitClone, gitCloneDir } from '../plugins/skills/lib/git-source.js'
+import { ensureGitClone, gitCloneDir } from '../plugins/skills/src/git-source.ts'
 import {
   LOCAL_FILE_MAX_BYTES,
   LOCAL_TREE_MAX_DEPTH,
   LOCAL_TREE_MAX_ENTRIES,
   openLocalRepo,
-} from '../plugins/skills/lib/local-source.js'
+} from '../plugins/skills/src/local-source.ts'
 import {
-  REPO_SKILLS_CACHE_VERSION,
   fetchRepoSkills,
   probeRepoKind,
+  REPO_SKILLS_CACHE_VERSION,
   repoSkillsCacheFile,
-} from '../plugins/skills/lib/repo-skills.js'
-import { repoKey } from '../plugins/skills/lib/repo-store.js'
+} from '../plugins/skills/src/repo-skills.ts'
+import { repoKey } from '../plugins/skills/src/repo-store.ts'
 
 /** 建一个临时 DSH home，并在测试结束后删除。 */
 async function tempHomes(t) {
@@ -97,8 +97,16 @@ test('local：扫描 npx skills 布局，probeRepoKind 与 fetchRepoSkills 都�
   const { homes, root } = await tempHomes(t)
   const fixture = path.join(root, 'repo')
   await writeRel(fixture, 'README.md', '# demo\n')
-  await writeRel(fixture, 'skills/find-skills/SKILL.md', '---\nname: find-skills\ndescription: Find it\n---\n')
-  await writeRel(fixture, 'skills/core/batch/SKILL.md', '---\nname: batch\ndescription: Batch it\n---\n')
+  await writeRel(
+    fixture,
+    'skills/find-skills/SKILL.md',
+    '---\nname: find-skills\ndescription: Find it\n---\n',
+  )
+  await writeRel(
+    fixture,
+    'skills/core/batch/SKILL.md',
+    '---\nname: batch\ndescription: Batch it\n---\n',
+  )
   // 这些目录按 SKIP_DIRS 跳过，里面的 SKILL.md 不能被收进来。
   await writeRel(fixture, 'node_modules/dep/SKILL.md', '---\nname: dep\n---\n')
 
@@ -270,7 +278,10 @@ test('local：遍历深度超限标记 truncated，readFile 只读 root 内并�
   const opened = await openLocalRepo(fixture)
   assert.equal(opened.ok, true)
   assert.equal(opened.truncated, true, '超过深度上限要标记截断')
-  assert.deepEqual(opened.tree.map((entry) => entry.path), ['SKILL.md'])
+  assert.deepEqual(
+    opened.tree.map((entry) => entry.path),
+    ['SKILL.md'],
+  )
 
   // readFile：正常文件可读，越界 / 反斜杠 / 绝对路径 / 超限都返回 null。
   assert.equal(await opened.readFile('SKILL.md'), '---\nname: shallow\ndescription: Shallow\n---\n')
@@ -308,7 +319,10 @@ test('local：跳过 node_modules / .git / dist / build / __pycache__', async (t
 
   const opened = await openLocalRepo(fixture)
   assert.equal(opened.ok, true)
-  assert.deepEqual(opened.tree.map((entry) => entry.path), ['ok/SKILL.md'])
+  assert.deepEqual(
+    opened.tree.map((entry) => entry.path),
+    ['ok/SKILL.md'],
+  )
 })
 
 test('local：文件条数超过 LOCAL_TREE_MAX_ENTRIES 时截断', async (t) => {
@@ -334,7 +348,11 @@ test('local：文件条数超过 LOCAL_TREE_MAX_ENTRIES 时截断', async (t) =>
 test('git：clone 参数、缓存目录与二次复用', async (t) => {
   const { homes, root } = await tempHomes(t)
   const fixture = path.join(root, 'fixture')
-  await writeRel(fixture, 'skills/git-skill/SKILL.md', '---\nname: git-skill\ndescription: From git\n---\n')
+  await writeRel(
+    fixture,
+    'skills/git-skill/SKILL.md',
+    '---\nname: git-skill\ndescription: From git\n---\n',
+  )
   const { runGit, cloneCalls } = createGit({ fixture, sha: 'sha-1' })
   const url = 'https://gitlab.com/group/repo.git'
 
@@ -447,11 +465,21 @@ test('git：ENOENT 返回 git-unavailable，带 stderr 的失败返回 git-faile
 test('git：fetchRepoSkills 端到端列树、缓存命中，refresh 触发更新', async (t) => {
   const { homes, root } = await tempHomes(t)
   const fixture = path.join(root, 'fixture')
-  await writeRel(fixture, 'skills/git-skill/SKILL.md', '---\nname: git-skill\ndescription: From git\n---\n')
+  await writeRel(
+    fixture,
+    'skills/git-skill/SKILL.md',
+    '---\nname: git-skill\ndescription: From git\n---\n',
+  )
   const url = 'https://gitlab.com/group/repo.git'
   const { runGit, calls, cloneCalls } = createGit({ fixture, sha: 'git-sha' })
 
-  const first = await fetchRepoSkills({ homes, source: url, fetchImpl: neverFetch, runGit, now: 1000 })
+  const first = await fetchRepoSkills({
+    homes,
+    source: url,
+    fetchImpl: neverFetch,
+    runGit,
+    now: 1000,
+  })
   assert.equal(first.ok, true)
   assert.equal(first.kind, 'npx-skills')
   assert.equal(first.source, url)
@@ -476,7 +504,13 @@ test('git：fetchRepoSkills 端到端列树、缓存命中，refresh 触发更�
   assert.equal(cache.entries[repoKey(url)].ref, 'HEAD')
 
   const callsAfterFirst = calls.length
-  const cached = await fetchRepoSkills({ homes, source: url, fetchImpl: neverFetch, runGit, now: 1001 })
+  const cached = await fetchRepoSkills({
+    homes,
+    source: url,
+    fetchImpl: neverFetch,
+    runGit,
+    now: 1001,
+  })
   assert.equal(cached.ok, true)
   assert.equal(cached.cached, true)
   assert.equal(cached.sha, 'git-sha')
@@ -498,7 +532,13 @@ test('git：fetchRepoSkills 端到端列树、缓存命中，refresh 触发更�
   )
   assert.ok(calls.some((one) => one.args[0] === '-C' && one.args[2] === 'reset'))
 
-  const probed = await probeRepoKind({ homes, source: url, fetchImpl: neverFetch, runGit, now: 1003 })
+  const probed = await probeRepoKind({
+    homes,
+    source: url,
+    fetchImpl: neverFetch,
+    runGit,
+    now: 1003,
+  })
   assert.equal(probed.ok, true)
   assert.equal(probed.kind, 'npx-skills')
   assert.equal(probed.cached, true, '完整缓存命中时探测不再访问来源')

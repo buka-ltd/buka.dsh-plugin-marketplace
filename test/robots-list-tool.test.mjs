@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { ROBOTS_LIST_TOOL_NAME, createRobotsListTool } from '../plugins/robots/lib/list-tool.js'
+import { createRobotsListTool, ROBOTS_LIST_TOOL_NAME } from '../plugins/robots/src/list-tool.ts'
 
 /** 假快照：两个机器人，一个有 2 个 skill、另一个 0 个。 */
 const SNAPSHOT = {
@@ -81,7 +81,10 @@ test('createRobotsListTool：工具名、输出 schema 与依赖校验', () => {
   assert.equal(robotProps.agentsFile.required, true)
 
   assert.throws(() => createRobotsListTool(), /defineTool is required/)
-  assert.throws(() => createRobotsListTool({ defineTool: fakeDefineTool }), /listRobots is required/)
+  assert.throws(
+    () => createRobotsListTool({ defineTool: fakeDefineTool }),
+    /listRobots is required/,
+  )
 })
 
 test('createRobotsListTool：默认输出包含技能清单，并把调用参数传给 listRobots', async () => {
@@ -89,8 +92,13 @@ test('createRobotsListTool：默认输出包含技能清单，并把调用参数
   const tool = makeTool({ calls })
   const result = await tool.execute({}, { agent: { id: 'whatever' } })
 
-  assert.deepEqual(calls, [{ file: '/robots.json', workspaceRegistry: { mounted: true }, robotsDir: '/robots' }])
-  assert.deepEqual(result.robots.map((robot) => robot.name), ['writer', 'painter'])
+  assert.deepEqual(calls, [
+    { file: '/robots.json', workspaceRegistry: { mounted: true }, robotsDir: '/robots' },
+  ])
+  assert.deepEqual(
+    result.robots.map((robot) => robot.name),
+    ['writer', 'painter'],
+  )
   assert.deepEqual(result.robots[0].skills, [{ name: 'foo' }, { name: 'bar' }])
   assert.deepEqual(result.robots[1].skills, [])
   assert.equal(result.robots[1].description, '')
@@ -124,13 +132,22 @@ test('createRobotsListTool：可见时渲染技能数量，0 个也显示', asyn
   const tool = makeTool({ isSkillsVisible: () => true })
   const result = await tool.execute({}, { agent: { id: 'standard' } })
   const rendered = tool.output.render({}, result)[0].text
-  assert.match(rendered, /^- writer — 写代码 \(\/robots\/writer\) · 2 skills · AGENTS\.md · mounted as ws-1$/mu)
-  assert.match(rendered, /^- painter — \(no description\) \(\/robots\/painter\) · 0 skills · no AGENTS\.md · not mounted$/mu)
+  assert.match(
+    rendered,
+    /^- writer — 写代码 \(\/robots\/writer\) · 2 skills · AGENTS\.md · mounted as ws-1$/mu,
+  )
+  assert.match(
+    rendered,
+    /^- painter — \(no description\) \(\/robots\/painter\) · 0 skills · no AGENTS\.md · not mounted$/mu,
+  )
 })
 
 test('createRobotsListTool：登记表损坏与空列表有独立文案', async () => {
   const broken = makeTool({ snapshot: { ...SNAPSHOT, corrupt: true, robots: [] } })
-  const brokenText = broken.output.render({}, { corrupt: true, registry: '/robots.json', robots: [] })[0].text
+  const brokenText = broken.output.render(
+    {},
+    { corrupt: true, registry: '/robots.json', robots: [] },
+  )[0].text
   assert.match(brokenText, /registry is unreadable: \/robots\.json/u)
 
   const empty = makeTool({ snapshot: { ...SNAPSHOT, robots: [] } })

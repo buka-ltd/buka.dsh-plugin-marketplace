@@ -1,0 +1,157 @@
+/**
+ * 页面词典：英文与简体中文各一份，键完全相同。
+ *
+ * `apply()` 把两份词典注册到 `NS` 命名空间；页面里的 `t()` 由
+ * `ctx.locale.bind(NS)` 提供。
+ *
+ * @module @buka/dsh-plugin-skills/client/dictionary
+ */
+
+/** 词典命名空间。 */
+const NS = 'buka-skills'
+
+/** 翻译函数：词典命名空间里取文案。 */
+type Translate = (key: string) => string
+
+/** 英文文案。 */
+const en = {
+  panel: 'Skills',
+  title: 'Skills',
+  tabsLabel: 'Skill sections',
+  tabInstalled: 'Installed',
+  tabRepos: 'Saved',
+  refresh: 'Refresh',
+  loading: 'Loading…',
+  loadFailed: 'Request failed:',
+  empty: 'No global skills are installed.',
+  badgeNpx: 'npx skills',
+  badgeManual: 'manual',
+  uninstall: 'Uninstall',
+  uninstalling: 'Uninstalling…',
+  confirmRemove: 'Uninstall',
+  cancel: 'Cancel',
+  close: 'Close',
+  confirmNpx:
+    'npx skills will remove this skill: the copy in ~/.agents/skills, the links in agent directories, and its lockfile entry.',
+  confirmLocal: 'This skill was not installed by npx skills, so its directory is deleted directly.',
+  removedWithNpx: 'Removed with npx skills:',
+  removedLocally: 'Deleted directly:',
+  failed: 'Uninstall failed:',
+  noLock: 'npx skills lockfile not found, so every skill is treated as manually installed:',
+  corruptLock:
+    'The npx skills lockfile exists but cannot be used, so skills under ~/.agents are shown as manual and cannot be uninstalled here until it is fixed:',
+  warningsLabel: 'Some skill directories could not be read:',
+  repoEmpty: 'No saved skill repositories yet.',
+  dialogTitle: 'Save repository',
+  fieldSource: 'Repository',
+  fieldNote: 'Note',
+  addPlaceholder: 'owner/repo, a GitHub/GitLab link, a git URL, or an absolute path',
+  notePlaceholder: 'Optional',
+  add: 'Save',
+  adding: 'Saving…',
+  added: 'Saved:',
+  removeRepo: 'Delete',
+  removing: 'Deleting…',
+  removed: 'Deleted:',
+  duplicate: 'Already saved:',
+  invalidSource:
+    'Invalid source: use owner/repo, a GitHub/GitLab or other git URL, a local absolute path, an http(s) link, or a package name. Package names can be saved but not expanded.',
+  invalidNote: 'The note is limited to 200 characters.',
+  storeUnreadable: 'The saved-repos file cannot be parsed; fix or delete it first:',
+  addFailed: 'Could not save:',
+  removeFailed: 'Could not remove:',
+  installedBadge: 'installed',
+  install: 'Install',
+  installing: 'Installing…',
+  installedToast: 'Installed:',
+  installFailed: 'Install failed:',
+  installMissing:
+    'This skill is no longer in the repository list. Refresh the repository and try again.',
+  expandRepo: 'Show skills',
+  collapseRepo: 'Hide skills',
+  treeLoading: 'Loading skills…',
+  treeEmpty: 'No installable skills found in this repository.',
+  treeFailed: 'Could not load skills:',
+  treeNotFound: 'Repository not found or not accessible.',
+  treeRateLimited: 'GitHub API rate limit reached. Try again later.',
+  treeUnsupported: 'Package names and web links cannot list skills.',
+  treeUnavailable:
+    'This repository is neither an npx skills repository nor a Claude Code marketplace.',
+  treeGitUnavailable: 'Git is not installed or not on PATH, so git repositories cannot be read.',
+  kindNpx: 'npx skills',
+  kindMarketplace: 'Claude Code marketplace',
+  kindUnavailable: 'unavailable',
+  retry: 'Retry',
+}
+
+/** 简体中文文案。 */
+const zh: Record<keyof typeof en, string> = {
+  panel: 'Skills',
+  title: 'Skills',
+  tabsLabel: 'Skills 页面分区',
+  tabInstalled: '已安装',
+  tabRepos: '收藏',
+  refresh: '刷新',
+  loading: '正在读取…',
+  loadFailed: '请求失败：',
+  empty: '还没有安装任何全局 skill。',
+  badgeNpx: 'npx skills',
+  badgeManual: 'manual',
+  uninstall: '卸载',
+  uninstalling: '正在卸载…',
+  confirmRemove: '确认卸载',
+  cancel: '取消',
+  close: '关闭',
+  confirmNpx:
+    '这是 npx skills 安装的 skill：会删除 ~/.agents/skills 里的副本、各 agent 目录里的链接，以及 lockfile 记录。',
+  confirmLocal: '这个 skill 不是 npx skills 安装的，将直接删除它的目录。',
+  removedWithNpx: '已通过 npx skills 卸载：',
+  removedLocally: '已直接删除：',
+  failed: '卸载失败：',
+  noLock: '没有找到 npx skills 的 lockfile，所有 skill 都会按手工安装处理：',
+  corruptLock:
+    'npx skills 的 lockfile 存在却无法使用：~/.agents 下的 skill 暂按手工安装展示，修好它之前不能在这里卸载：',
+  warningsLabel: '部分 skills 目录无法读取：',
+  repoEmpty: '还没有收藏任何仓库。',
+  dialogTitle: '收藏',
+  fieldSource: '仓库',
+  fieldNote: '备注',
+  addPlaceholder: 'owner/repo、GitHub/GitLab 链接、git 地址或绝对路径',
+  notePlaceholder: '可选',
+  add: '收藏',
+  adding: '收藏中…',
+  added: '已收藏：',
+  removeRepo: '删除',
+  removing: '删除中…',
+  removed: '已删除：',
+  duplicate: '已经收藏过：',
+  invalidSource:
+    '来源格式不对：支持 owner/repo、GitHub/GitLab 等 git 地址、本地绝对路径、http(s) 链接或包名；包名可以收藏但不能展开。',
+  invalidNote: '备注最长 200 个字符。',
+  storeUnreadable: '收藏文件无法解析，请先修复或删除它：',
+  addFailed: '收藏失败：',
+  removeFailed: '删除失败：',
+  installedBadge: '已安装',
+  install: '安装',
+  installing: '安装中…',
+  installedToast: '已安装：',
+  installFailed: '安装失败：',
+  installMissing: '仓库列表里已经找不到这个 skill，刷新仓库后再试。',
+  expandRepo: '展开 skills',
+  collapseRepo: '收起 skills',
+  treeLoading: '正在获取 skills…',
+  treeEmpty: '这个仓库里没有找到可安装的 skill。',
+  treeFailed: '获取 skills 失败：',
+  treeNotFound: '仓库不存在或无权访问。',
+  treeRateLimited: 'GitHub 接口限流，稍后再试。',
+  treeUnsupported: '包名和网页链接不能列出 skills。',
+  treeUnavailable: '这个仓库不可用：既不是 npx skills 仓库，也不是 Claude Code marketplace。',
+  treeGitUnavailable: '没有找到 git（不在 PATH 上），无法读取 git 仓库。',
+  kindNpx: 'npx skills',
+  kindMarketplace: 'Claude Code 市场',
+  kindUnavailable: '不可用',
+  retry: '重试',
+}
+
+export type { Translate }
+export { en, NS, zh }

@@ -6,12 +6,12 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { marketInstallTarget, parseMarketIndex } from '../scripts/lib/format.mjs'
-import { loadMarket, normalizeRemote, sourceUrlFromEnvironment } from '../scripts/lib/market.mjs'
+import { marketInstallTarget, parseMarketIndex } from '../scripts/lib/format.ts'
+import { loadMarket, normalizeRemote, sourceUrlFromEnvironment } from '../scripts/lib/market.ts'
 
 const PUBLIC_URL = 'https://buka-ltd.github.io/buka.dsh-plugin-marketplace/index.json'
-const BUILD_SCRIPT = fileURLToPath(new URL('../scripts/build.mjs', import.meta.url))
-const CHECK_SCRIPT = fileURLToPath(new URL('../scripts/check.mjs', import.meta.url))
+const BUILD_SCRIPT = fileURLToPath(new URL('../scripts/build.ts', import.meta.url))
+const CHECK_SCRIPT = fileURLToPath(new URL('../scripts/check.ts', import.meta.url))
 
 const ROOT_MARKET = {
   title: { en: 'Buka DSH Plugins', 'zh-cn': 'Buka DSH 插件市场' },
@@ -41,7 +41,10 @@ function git(root, args) {
 function writeFile(root, file, content) {
   const full = path.join(root, file)
   mkdirSync(path.dirname(full), { recursive: true })
-  writeFileSync(full, typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`)
+  writeFileSync(
+    full,
+    typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`,
+  )
 }
 
 /** 在 fixture 仓库里跑真实脚本；env 里的 undefined 表示清掉该变量。 */
@@ -59,12 +62,19 @@ function runNode(root, script, args = [], env = {}) {
   })
 }
 
-function writeBundle(root, directory, manifest, market) {
+function writeBundle(root, directory, manifest, market, locale) {
   writeFile(root, `plugins/${directory}/package.json`, manifest)
-  writeFile(root, `plugins/${directory}/cordis.patch.yml`, `- insert:\n    - id: ${directory}\n      name: '${manifest.name}'\n`)
+  writeFile(
+    root,
+    `plugins/${directory}/cordis.patch.yml`,
+    `- insert:\n    - id: ${directory}\n      name: '${manifest.name}'\n`,
+  )
   writeFile(root, `plugins/${directory}/lib/index.js`, 'export const name = "fixture"\n')
   writeFile(root, `plugins/${directory}/icon.svg`, '<svg xmlns="http://www.w3.org/2000/svg"/>\n')
   if (market !== undefined) writeFile(root, `plugins/${directory}/market.json`, market)
+  for (const [language, meta] of Object.entries(locale ?? {})) {
+    writeFile(root, `plugins/${directory}/locale/${language}.json`, { meta })
+  }
 }
 
 /**
@@ -90,12 +100,14 @@ function makeRepo(options = {}) {
       dsh: { manifestVersion: 1, bundle: { patch: './cordis.patch.yml' } },
     },
     {
-      title: { en: 'Buka Hello' },
-      description: { en: 'A minimal bundle' },
       icon: './icon.svg',
       category: 'tools',
       labels: ['stable'],
       keywords: ['hello'],
+    },
+    {
+      en: { title: 'Buka Hello', description: 'A minimal bundle' },
+      zh: { title: 'Buka 问候', description: '一个最小的 bundle' },
     },
   )
 
@@ -110,7 +122,12 @@ function makeRepo(options = {}) {
       engines: { dsh: '>=0.2.1-rc.5 <0.3.0' },
       dsh: { manifestVersion: 1, bundle: { patch: './cordis.patch.yml' } },
     },
-    options.secretListed === true ? { title: { en: 'Secret' }, listed: true } : { listed: false },
+    options.secretListed === true ? { listed: true } : { listed: false },
+    // 文案唯一来源是 locale，未挂牌的插件也要有：装好后插件页一样要显示它。
+    {
+      en: { title: 'Secret', description: 'A secret bundle' },
+      zh: { title: 'Secret', description: '一个未挂牌的 bundle' },
+    },
   )
 
   git(root, ['init', '-q', '-b', 'main'])
@@ -134,11 +151,19 @@ test('从插件目录生成索引，并钉住该目录的提交', (t) => {
 
   const entry = market.index.plugins[0]
   assert.equal(entry.name, '@buka/dsh-plugin-hello')
+  assert.deepEqual(entry.title, { en: 'Buka Hello', 'zh-cn': 'Buka 问候' })
+  assert.deepEqual(entry.description, { en: 'A minimal bundle', 'zh-cn': '一个最小的 bundle' })
   assert.equal(entry.metadata.category, 'tools')
   assert.deepEqual(entry.metadata.labels, ['stable'])
   assert.equal(entry.icon, 'icons/hello.svg')
-  assert.deepEqual(entry.repository, { url: 'https://github.com/buka-ltd/demo', directory: 'plugins/hello' })
-  assert.deepEqual(market.assets.map((asset) => asset.to), ['icons/hello.svg'])
+  assert.deepEqual(entry.repository, {
+    url: 'https://github.com/buka-ltd/demo',
+    directory: 'plugins/hello',
+  })
+  assert.deepEqual(
+    market.assets.map((asset) => asset.to),
+    ['icons/hello.svg'],
+  )
 
   const version = entry.versions[0]
   assert.equal(version.version, '0.1.0')
@@ -183,7 +208,9 @@ test('build 用 DSH_MARKET_SOURCE_URL 固定安装来源', (t) => {
 
   const out = mkdtempSync(path.join(tmpdir(), 'dsh-market-out-'))
   t.after(() => rmSync(out, { recursive: true, force: true }))
-  runNode(root, BUILD_SCRIPT, ['--out', out], { DSH_MARKET_SOURCE_URL: 'https://github.com/buka-ltd/mirror' })
+  runNode(root, BUILD_SCRIPT, ['--out', out], {
+    DSH_MARKET_SOURCE_URL: 'https://github.com/buka-ltd/mirror',
+  })
   const pinned = JSON.parse(readFileSync(path.join(out, 'index.json'), 'utf8'))
   assert.equal(pinned.plugins[0].versions[0].source.url, 'https://github.com/buka-ltd/mirror')
   assert.equal(pinned.plugins[0].repository.url, 'https://github.com/buka-ltd/mirror')
@@ -228,6 +255,67 @@ test('listed: false 默认不进索引，改成 true 才挂牌', (t) => {
   )
 })
 
+test('标题与简介从 locale 的 meta 生成，market.json 只留挂牌字段', (t) => {
+  const root = makeRepo()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const marketInfo = JSON.parse(readFileSync(path.join(root, 'plugins/hello/market.json'), 'utf8'))
+  assert.equal(Object.hasOwn(marketInfo, 'title'), false)
+  assert.equal(Object.hasOwn(marketInfo, 'description'), false)
+
+  writeFile(root, 'plugins/hello/locale/en.json', {
+    meta: { title: 'Hello from locale', description: 'Locale description' },
+  })
+  writeFile(root, 'plugins/hello/locale/zh.json', {
+    meta: { title: '来自 locale 的标题' },
+  })
+
+  const entry = loadMarket({ root }).index.plugins[0]
+  assert.deepEqual(entry.title, { en: 'Hello from locale', 'zh-cn': '来自 locale 的标题' })
+  assert.deepEqual(entry.description, { en: 'Locale description' })
+
+  // market.json 里残留旧的 title/description 不再参与生成，只提醒迁移
+  writeFile(root, 'plugins/hello/market.json', {
+    title: { en: 'Stale title' },
+    description: { en: 'Stale description' },
+    icon: './icon.svg',
+    category: 'tools',
+    labels: ['stable'],
+    keywords: ['hello'],
+  })
+  const moved = loadMarket({ root })
+  assert.deepEqual(moved.index.plugins[0].title, {
+    en: 'Hello from locale',
+    'zh-cn': '来自 locale 的标题',
+  })
+  assert.ok(
+    moved.problems.some((problem) => problem.message.includes('title/description 已废弃')),
+    moved.problems.map((problem) => problem.message).join('\n'),
+  )
+})
+
+test('locale 缺 en 文案是错误，不会悄悄回退成包名', (t) => {
+  const root = makeRepo()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const errors = () =>
+    loadMarket({ root })
+      .problems.filter((problem) => problem.level === 'error')
+      .map((problem) => problem.message)
+
+  rmSync(path.join(root, 'plugins/hello/locale'), { recursive: true, force: true })
+  assert.ok(
+    errors().some((message) => message.includes('缺少 locale/en.json')),
+    errors().join('\n'),
+  )
+
+  writeFile(root, 'plugins/hello/locale/en.json', { meta: { title: 'Only a title' } })
+  assert.ok(
+    errors().some((message) => message.includes('locale/en.json 缺少 meta.description')),
+    errors().join('\n'),
+  )
+})
+
 test('缺少 market.json 与包名不符都是错误，不会被静默跳过', (t) => {
   const root = makeRepo()
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -238,22 +326,47 @@ test('缺少 market.json 与包名不符都是错误，不会被静默跳过', (
   let messages = loadMarket({ root })
     .problems.filter((problem) => problem.level === 'error')
     .map((problem) => problem.message)
-  assert.ok(messages.some((message) => message.includes('缺少 market.json')), messages.join('\n'))
+  assert.ok(
+    messages.some((message) => message.includes('缺少 market.json')),
+    messages.join('\n'),
+  )
 
-  writeFile(root, 'plugins/secret/market.json', { title: { en: 'Secret' }, listed: true })
-  writeFile(root, 'plugins/secret/package.json', { name: 'wrong-name', version: '0.0.1', dsh: { manifestVersion: 1, bundle: { patch: './cordis.patch.yml' } } })
+  writeFile(root, 'plugins/secret/market.json', { listed: true })
+  writeFile(root, 'plugins/secret/locale/en.json', {
+    meta: { title: 'Secret', description: 'A secret bundle' },
+  })
+  writeFile(root, 'plugins/secret/package.json', {
+    name: 'wrong-name',
+    version: '0.0.1',
+    dsh: { manifestVersion: 1, bundle: { patch: './cordis.patch.yml' } },
+  })
   git(root, ['add', '-A'])
   git(root, ['commit', '-q', '-m', 'chore: 改错包名'])
   messages = loadMarket({ root })
     .problems.filter((problem) => problem.level === 'error')
     .map((problem) => problem.message)
-  assert.ok(messages.some((message) => message.includes('@buka/dsh-plugin-secret')), messages.join('\n'))
+  assert.ok(
+    messages.some((message) => message.includes('@buka/dsh-plugin-secret')),
+    messages.join('\n'),
+  )
 })
 
 test('origin 的常见写法归一成 https 仓库地址', () => {
-  assert.equal(normalizeRemote('git@github.com:buka-ltd/demo.git'), 'https://github.com/buka-ltd/demo')
-  assert.equal(normalizeRemote('ssh://git@github.com/buka-ltd/demo.git'), 'https://github.com/buka-ltd/demo')
-  assert.equal(normalizeRemote('https://github.com/buka-ltd/demo.git'), 'https://github.com/buka-ltd/demo')
-  assert.equal(normalizeRemote('https://github.com/buka-ltd/demo'), 'https://github.com/buka-ltd/demo')
+  assert.equal(
+    normalizeRemote('git@github.com:buka-ltd/demo.git'),
+    'https://github.com/buka-ltd/demo',
+  )
+  assert.equal(
+    normalizeRemote('ssh://git@github.com/buka-ltd/demo.git'),
+    'https://github.com/buka-ltd/demo',
+  )
+  assert.equal(
+    normalizeRemote('https://github.com/buka-ltd/demo.git'),
+    'https://github.com/buka-ltd/demo',
+  )
+  assert.equal(
+    normalizeRemote('https://github.com/buka-ltd/demo'),
+    'https://github.com/buka-ltd/demo',
+  )
   assert.throws(() => normalizeRemote('file:///tmp/demo'), /--source-url/u)
 })

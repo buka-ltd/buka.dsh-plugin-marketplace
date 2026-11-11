@@ -1,12 +1,12 @@
 {
   "name": "@buka/dsh-plugin-bell",
-  "version": "0.5.0",
-  "description": "Play a system notification sound when a DSH agent finishes a task, waits for user input, has a plan sent back for changes, or is stopped manually; every sound is chosen in Settings and can be set to none",
+  "version": "0.6.0",
+  "description": "任务结束、等待输入、计划退回或手动终止时播放提示音，每个时机可单独选声音。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./client": "./client.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
@@ -14,18 +14,18 @@
   "icon": "./icon.svg",
   "files": [
     "lib",
-    "client.js",
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
-    "assets/voice.mp3"
+    "assets/voice.mp3",
+    "docs"
   ],
   "engines": {
     "node": ">=22.20",
-    "dsh": ">=0.2.1-rc.5 <0.3.0"
+    "dsh": ">=0.2.1-rc.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5"
+    "@deepseek-ai/cordis": "~4.1.0"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.5"

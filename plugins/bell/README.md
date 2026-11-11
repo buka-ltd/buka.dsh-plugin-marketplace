@@ -6,12 +6,12 @@
 
 ## 什么时候响
 
-| 提示音 | 触发时机 | 依据 |
-| --- | --- | --- |
-| 完成音 | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + `ctx.agents.roots()`，完成前先看 `turn/end` 的原因 |
-| 等待音 | `ask_user_question` 发起提问、plan review 等待确认、工具调用请求审批 | Host waterfall 事件 `user-questions/request`、`approval/request` |
-| 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型 | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因 |
-| 手动终止音 | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务 | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user` |
+| 提示音       | 触发时机                                                                    | 依据                                                                          |
+| ------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 完成音       | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + `ctx.agents.roots()`，完成前先看 `turn/end` 的原因 |
+| 等待音       | `ask_user_question` 发起提问、plan review 等待确认、工具调用请求审批        | Host waterfall 事件 `user-questions/request`、`approval/request`              |
+| 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型                            | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因                    |
+| 手动终止音   | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务                           | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user`                 |
 
 **手动终止不响完成音**：点终止按钮会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因：`aborted` 且取消来源是 `user` 时改播手动终止音（默认「你干嘛~哎哟」）；会话归档、父级取消、插件卸载同样以 aborted 收尾，但它们不是手动停止，保持静音。记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然按那一轮的原因响。
 
@@ -68,40 +68,41 @@
 
 ## 平台
 
-| 平台 | 完成音 | 等待音 | 计划被退回音 | 手动终止音 |
-| --- | --- | --- | --- | --- |
-| macOS | 设置页选中的声音（默认 `Basso`） | 设置页选中的声音（默认 `Submarine`） | 设置页选中的声音（默认「无」） | 设置页选中的声音（默认「你干嘛~哎哟」） |
-| Windows | `SystemSounds.Exclamation` | `SystemSounds.Asterisk` | `SystemSounds.Question` | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
-| Linux | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上） | `dialog-information.oga`（同上） | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
+| 平台    | 完成音                                                         | 等待音                               | 计划被退回音                     | 手动终止音                                          |
+| ------- | -------------------------------------------------------------- | ------------------------------------ | -------------------------------- | --------------------------------------------------- |
+| macOS   | 设置页选中的声音（默认 `Basso`）                               | 设置页选中的声音（默认 `Submarine`） | 设置页选中的声音（默认「无」）   | 设置页选中的声音（默认「你干嘛~哎哟」）             |
+| Windows | `SystemSounds.Exclamation`                                     | `SystemSounds.Asterisk`              | `SystemSounds.Question`          | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
+| Linux   | `complete.oga`（`paplay`，退路 `canberra-gtk-play` / `aplay`） | `message.oga`（同上）                | `dialog-information.oga`（同上） | 设置页选中的声音（默认「你干嘛~哎哟」，文件播放器） |
 
 Windows / Linux 的完成 / 等待 / 计划三列是**没选**「你干嘛~哎哟」时的平台默认声音；选中梗语音时（手动终止的默认就是它）改由上面说的文件播放器播放，与系统声音表无关，播放器都没装时静音。
 
 ## 素材版权
 
-`assets/voice.mp3` 是网络公开的二创梗语音片段（含公众人物声音），版权归原作者所有，**仅供个人学习交流使用**，请勿用于商业用途。仓库里代码的 MIT 许可（见根目录）**不覆盖**这个文件；要商用请自行替换成无版权素材（换文件即可，路径写在 `lib/sounds.js` 的 `CUSTOM_SOUNDS` 里；不用就把这个候选从 `CUSTOM_SOUNDS` 与 `client.js` 的 `CUSTOM_SOUNDS` 里一起删掉）。
+`assets/voice.mp3` 是网络公开的二创梗语音片段（含公众人物声音），版权归原作者所有，**仅供个人学习交流使用**，请勿用于商业用途。仓库里代码的 MIT 许可（见根目录）**不覆盖**这个文件；要商用请自行替换成无版权素材（换文件即可，路径写在 `src/sounds.ts` 的 `CUSTOM_SOUNDS` 里；不用就把这个候选从 `CUSTOM_SOUNDS` 与 `src/client/components/settings.ts` 的同名候选里一起删掉）。
 
 ## 结构
 
-| 文件 | 作用 |
-| --- | --- |
-| `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch` 声明它是 bundle、`dsh.client` 声明浏览器一半、`locale` / `icon` 导出让 Plugins 页展示 |
-| `cordis.patch.yml` | bundle 层唯一的一行：把自己作为 `sound-buka-bell` 插入组成 |
-| `lib/index.js` | Host 一半：导出 `name` / `inject` / `Config` / `apply`，监听生命周期事件、读 volatile 声音配置、调用播放器，并注册试听路由 `POST /buka-bell/preview` |
-| `lib/sounds.js` | 零依赖的候选表与播放命令：macOS 系统声音清单、自带音频、四个默认值、各平台播放器、试听路由路径、`isPlayableSound` 校验；单测直接导入它 |
-| `client.js` | 浏览器一半：在 设置 → 提示音 注册两级页面——四行总览，点一行进入该时机的独立声音列表；点一项同时写配置（`ctx.configForms`）并请求 Host 试听路由，点「返回」才回到总览 |
-| `assets/voice.mp3` | 声音列表里「你干嘛~哎哟」的音频；随包发布，播放时按 `import.meta.url` 定位 |
-| `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
-| `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
-| `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
+| 文件                                             | 作用                                                                                                                                                       |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package.json`                                   | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch` 声明它是 bundle、`dsh.client` 声明浏览器一半、`files` 含 `lib`、`locale` / `icon` 导出让 Plugins 页展示 |
+| `cordis.patch.yml`                               | bundle 层唯一的一行：把自己作为 `sound-buka-bell` 插入组成                                                                                                 |
+| `src/index.ts`                                   | Host 入口：导出 `name` / `inject` / `Config` / `apply`，装配监听、播放器与试听路由；只做装配                                                               |
+| `src/sounds.ts`                                  | 零依赖的候选表与播放命令：macOS 系统声音清单、自带音频、四个默认值、各平台播放器、试听路由路径、`isPlayableSound` 校验；单测直接导入它                     |
+| `src/player.ts`、`src/watch.ts`、`src/routes.ts` | 播放器、四个时机的监听与 `POST /buka-bell/preview` 试听路由                                                                                                |
+| `src/client/index.ts`                            | 界面入口：在 设置 → 提示音 注册两级页面；只导出 `inject` / `apply`                                                                                         |
+| `src/client/**`                                  | 页面组件、词典、样式与试听请求；文案与逻辑从入口之外的模块导入                                                                                             |
+| `lib/index.js`                                   | 构建产物（ESM）：Host 一半的运行文件；由 `pnpm run build:code && pnpm run build:clients` 生成，不手改                                                      |
+| `lib/client.js`                                  | 构建产物：界面一半的运行文件，外层是 `window.__ModuleLoader__.load({...})` 外壳；不手改                                                                    |
+| `assets/voice.mp3`                               | 声音列表里「你干嘛~哎哟」的音频；随包发布，播放时按 `import.meta.url` 定位                                                                                 |
+| `market.json`                                    | 只在市场上挂牌用的展示信息（分类、标签、关键词、图标等），不随包发布                                                                                       |
+| `icon.svg`                                       | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/`                                                                                               |
+| `locale/*.json`                                  | 展示文案的唯一来源：`meta.title` / `meta.description` / `meta.detail`，不需要激活插件                                                                      |
+| `docs/DETAIL.md`、`docs/DETAIL.zh.md`            | 市场详情页长文，由对应 locale 的 `meta.detail` 指向                                                                                                        |
 
-Host 一半依赖 `@deepseek-ai/schemastery` 来声明 Config（只有 `.volatile()` 字段能被设置页热更新）。市场安装时会由 pnpm 自动安装；本地 `link:` 安装调试时，如果缺少该依赖，可以在插件目录单独装一次：
-
-```bash
-cd plugins/bell && pnpm install --ignore-workspace
-```
+Host 一半依赖 `@deepseek-ai/schemastery` 来声明 Config（只有 `.volatile()` 字段能被设置页热更新）。市场安装时会由 pnpm 自动安装；本地 `link:` 调试时如果它没有解析到，先确认仓库根已经跑过 `pnpm install`（开发依赖都装在根，插件的 `package.json` 里不写开发依赖）。
 
 ## 验证安装
 
 在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库的索引地址，安装后在 **设置 → 提示音** 看到四行提示音、点一行进入独立声音列表即成功。
 
-本地调试也可以直接装目录：`dsh plugin --profile <profile> add "link:$PWD/plugins/bell"`。
+本地调试也可以直接装目录（先确保 `plugins/bell/lib/` 已由 `pnpm run build:code && pnpm run build:clients` 生成）：`dsh plugin --profile <profile> add "link:$PWD/plugins/bell"`。

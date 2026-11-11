@@ -8,19 +8,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { validateDefinition } from '../plugins/workflows/lib/definition.js'
+import { validateDefinition } from '../plugins/workflows/src/definition.ts'
 import {
+  buildResultSchema,
+  MAX_OUTPUT_PROPERTIES,
   MAX_OUTPUT_SCHEMA_BYTES,
   MAX_OUTPUT_SCHEMA_DEPTH,
-  MAX_OUTPUT_PROPERTIES,
-  buildResultSchema,
   outputProblems,
   parseOutputSchema,
   renderOutputContract,
   resolveOutputPath,
   routeNamesOf,
-} from '../plugins/workflows/lib/output.js'
-import { inspectTemplate } from '../plugins/workflows/lib/template.js'
+} from '../plugins/workflows/src/output.ts'
+import { inspectTemplate } from '../plugins/workflows/src/template.ts'
 
 /**
  * @param {unknown} raw
@@ -29,7 +29,9 @@ import { inspectTemplate } from '../plugins/workflows/lib/template.js'
 function parse(raw) {
   /** @type {Array<{ path: string, message: string }>} */
   const errors = []
-  const schema = parseOutputSchema(raw, 'nodes[1].output', (path, message) => errors.push({ path, message }))
+  const schema = parseOutputSchema(raw, 'nodes[1].output', (path, message) =>
+    errors.push({ path, message }),
+  )
   return { schema, errors }
 }
 
@@ -77,7 +79,10 @@ test('output: the top level must be an object schema', () => {
 })
 
 test('output: unsupported keywords, malformed required and bad shapes are rejected', () => {
-  assert.match(errorText(parse({ type: 'object', pattern: 'x' })), /not a supported JSON Schema keyword/u)
+  assert.match(
+    errorText(parse({ type: 'object', pattern: 'x' })),
+    /not a supported JSON Schema keyword/u,
+  )
 
   const dangling = parse({ type: 'object', properties: { a: { type: 'string' } }, required: ['b'] })
   assert.match(errorText(dangling), /"b" is not declared in properties/u)
@@ -92,10 +97,16 @@ test('output: unsupported keywords, malformed required and bad shapes are reject
   const badName = parse({ type: 'object', properties: { 'bad.name': { type: 'string' } } })
   assert.match(errorText(badName), /must match \[A-Za-z0-9_-\]/u)
 
-  const itemsOnString = parse({ type: 'object', properties: { a: { type: 'string', items: { type: 'string' } } } })
+  const itemsOnString = parse({
+    type: 'object',
+    properties: { a: { type: 'string', items: { type: 'string' } } },
+  })
   assert.match(errorText(itemsOnString), /only allowed on array schemas/u)
 
-  const propsOnString = parse({ type: 'object', properties: { a: { type: 'string', properties: {} } } })
+  const propsOnString = parse({
+    type: 'object',
+    properties: { a: { type: 'string', properties: {} } },
+  })
   assert.match(errorText(propsOnString), /only allowed on object schemas/u)
 
   const oneOfMixed = parse({
@@ -150,7 +161,8 @@ test('output: depth, property count and serialized size are bounded', () => {
 
   /** @type {Record<string, any>} */
   const tooMany = {}
-  for (let index = 0; index <= MAX_OUTPUT_PROPERTIES; index += 1) tooMany[`f${index}`] = { type: 'string' }
+  for (let index = 0; index <= MAX_OUTPUT_PROPERTIES; index += 1)
+    tooMany[`f${index}`] = { type: 'string' }
   assert.match(errorText(parse({ type: 'object', properties: tooMany })), /at most 64 properties/u)
 
   /** @type {Record<string, any>} */
@@ -160,7 +172,10 @@ test('output: depth, property count and serialized size are bounded', () => {
   }
   const large = parse({ type: 'object', properties: tooLarge })
   assert.equal(large.schema, null)
-  assert.match(errorText(large), new RegExp(`at most ${Math.round(MAX_OUTPUT_SCHEMA_BYTES / 1024)} KiB`, 'u'))
+  assert.match(
+    errorText(large),
+    new RegExp(`at most ${Math.round(MAX_OUTPUT_SCHEMA_BYTES / 1024)} KiB`, 'u'),
+  )
 })
 
 test('output: buildResultSchema merges next and the built-in attachments capability', () => {
@@ -180,7 +195,10 @@ test('output: buildResultSchema merges next and the built-in attachments capabil
   }
   const before = JSON.parse(JSON.stringify(node.output))
   const schema = buildResultSchema(node)
-  assert.deepEqual(schema.properties.next.oneOf.map((branch) => branch.type), ['string', 'array'])
+  assert.deepEqual(
+    schema.properties.next.oneOf.map((branch) => branch.type),
+    ['string', 'array'],
+  )
   assert.deepEqual(schema.properties.next.oneOf[0].enum, ['交稿', '完成'])
   assert.deepEqual(schema.properties.next.oneOf[1].items.enum, ['交稿', '完成'])
   assert.deepEqual(schema.required, ['summary'], 'next is optional because abort can replace it')
@@ -191,7 +209,11 @@ test('output: buildResultSchema merges next and the built-in attachments capabil
   assert.match(schema.properties.attachments.description, /never put the answer itself/u)
   assert.deepEqual(node.output, before, 'the declaration must not be mutated')
 
-  const terminal = buildResultSchema({ id: 'done', type: 'robot', output: { type: 'object', properties: {} } })
+  const terminal = buildResultSchema({
+    id: 'done',
+    type: 'robot',
+    output: { type: 'object', properties: {} },
+  })
   assert.equal(Object.hasOwn(terminal.properties, 'next'), false)
   assert.equal(terminal.properties.abort.type, 'string')
   assert.deepEqual(terminal.required, undefined)
@@ -285,7 +307,12 @@ test('output: outputProblems validates the declared result JSON', () => {
 
   // 顶层 next / abort / attachments 是引擎字段，不参与声明字段校验。
   assert.deepEqual(
-    outputProblems(node, { status: 'ok', next: '完成', abort: 'cannot continue', attachments: ['a'] }),
+    outputProblems(node, {
+      status: 'ok',
+      next: '完成',
+      abort: 'cannot continue',
+      attachments: ['a'],
+    }),
     [],
   )
 
@@ -293,7 +320,10 @@ test('output: outputProblems validates the declared result JSON', () => {
   assert.deepEqual(outputProblems({ id: 'old', type: 'robot' }, { anything: true }), [])
 
   const oneOfNode = {
-    output: { type: 'object', properties: { value: { oneOf: [{ type: 'string' }, { type: 'number' }] } } },
+    output: {
+      type: 'object',
+      properties: { value: { oneOf: [{ type: 'string' }, { type: 'number' }] } },
+    },
   }
   assert.deepEqual(outputProblems(oneOfNode, { value: 3 }), [])
   assert.match(outputProblems(oneOfNode, { value: true })[0], /oneOf variant/u)
@@ -323,13 +353,18 @@ test('output: renderOutputContract states the final-text and attachment rules', 
 })
 
 test('template: inspectTemplate extracts paths and reports syntax errors', () => {
-  const inspected = inspectTemplate('目标 {{goal}}；{{nodes.dev.data.summary}}；{{ nodes.dev.text }}')
+  const inspected = inspectTemplate(
+    '目标 {{goal}}；{{nodes.dev.data.summary}}；{{ nodes.dev.text }}',
+  )
   assert.deepEqual(inspected.paths, ['goal', 'nodes.dev.data.summary', 'nodes.dev.text'])
   assert.deepEqual(inspected.errors, [])
 
   const broken = inspectTemplate('{{}} {{bad path}}')
   assert.deepEqual(broken.paths, [])
-  assert.deepEqual(broken.errors, ['empty template placeholder', 'invalid template path "bad path"'])
+  assert.deepEqual(broken.errors, [
+    'empty template placeholder',
+    'invalid template path "bad path"',
+  ])
 })
 
 test('definition: output is required on robot nodes and rejected on fixed nodes', () => {
@@ -354,7 +389,10 @@ test('definition: output is required on robot nodes and rejected on fixed nodes'
     ],
   })
   // done 不可达且带 output：两条错误都应出现。
-  assert.match(fixed.errors.map((error) => error.message).join('\n'), /only supported on robot nodes/u)
+  assert.match(
+    fixed.errors.map((error) => error.message).join('\n'),
+    /only supported on robot nodes/u,
+  )
 })
 
 test('definition: prompt references are checked against the declared output', () => {
@@ -379,7 +417,9 @@ test('definition: prompt references are checked against the declared output', ()
     ],
   })
 
-  const ok = validateDefinition(withPrompt('read {{nodes.dev.data.status}} and {{nodes.dev.data.meta.kind}}'))
+  const ok = validateDefinition(
+    withPrompt('read {{nodes.dev.data.status}} and {{nodes.dev.data.meta.kind}}'),
+  )
   assert.equal(ok.ok, true, ok.errors.map((error) => error.message).join('; '))
 
   const missing = validateDefinition(withPrompt('read {{nodes.dev.data.missing}}'))
@@ -396,11 +436,17 @@ test('definition: prompt references are checked against the declared output', ()
   )
 
   const nonRobot = validateDefinition(withPrompt('read {{nodes.done.text}}'))
-  assert.match(nonRobot.errors.map((error) => error.message).join('\n'), /only robot and user nodes provide/u)
+  assert.match(
+    nonRobot.errors.map((error) => error.message).join('\n'),
+    /only robot and user nodes provide/u,
+  )
 
   const reserved = validateDefinition(withPrompt('read {{nodes.dev.data.next}}'))
   assert.match(reserved.errors.map((error) => error.message).join('\n'), /reserved field "next"/u)
-  assert.match(reserved.errors.map((error) => error.message).join('\n'), /use \{\{nodes\.dev\.route\}\}/u)
+  assert.match(
+    reserved.errors.map((error) => error.message).join('\n'),
+    /use \{\{nodes\.dev\.route\}\}/u,
+  )
 
   const syntax = validateDefinition(withPrompt('read {{bad path}}'))
   assert.match(syntax.errors.map((error) => error.message).join('\n'), /invalid template path/u)
@@ -426,7 +472,8 @@ test('definition: user answer fields and attachments are checked by node type', 
             to: 'publish',
             name: 'approve',
             label: '批准',
-            prompt: 'decided {{nodes.review.route}}；备注 {{nodes.review.answers.notes.custom}}；选择 {{nodes.review.answers.route.selected}}',
+            prompt:
+              'decided {{nodes.review.route}}；备注 {{nodes.review.answers.notes.custom}}；选择 {{nodes.review.answers.route.selected}}',
           },
           { to: 'done', name: 'reject', label: '取消' },
         ],
@@ -448,35 +495,45 @@ test('definition: user answer fields and attachments are checked by node type', 
   const wrong = base()
   wrong.nodes[2].next[0].prompt = 'decision {{nodes.dev.answers.notes.custom}}'
   assert.match(
-    validateDefinition(wrong).errors.map((error) => error.message).join('\n'),
+    validateDefinition(wrong)
+      .errors.map((error) => error.message)
+      .join('\n'),
     /only user nodes provide/u,
   )
 
   const unknownQuestion = base()
   unknownQuestion.nodes[2].next[0].prompt = 'x {{nodes.review.answers.missing.custom}}'
   assert.match(
-    validateDefinition(unknownQuestion).errors.map((error) => error.message).join('\n'),
+    validateDefinition(unknownQuestion)
+      .errors.map((error) => error.message)
+      .join('\n'),
     /unknown question id "missing"/u,
   )
 
   const badAnswerField = base()
   badAnswerField.nodes[2].next[0].prompt = 'x {{nodes.review.answers.notes.value}}'
   assert.match(
-    validateDefinition(badAnswerField).errors.map((error) => error.message).join('\n'),
+    validateDefinition(badAnswerField)
+      .errors.map((error) => error.message)
+      .join('\n'),
     /use \.selected or \.custom/u,
   )
 
   const dataOnUser = base()
   dataOnUser.nodes[2].next[0].prompt = 'data {{nodes.review.data.ok}}'
   assert.match(
-    validateDefinition(dataOnUser).errors.map((error) => error.message).join('\n'),
+    validateDefinition(dataOnUser)
+      .errors.map((error) => error.message)
+      .join('\n'),
     /only robot nodes provide/u,
   )
 
   const decisionRemoved = base()
   decisionRemoved.nodes[2].next[0].prompt = 'old {{nodes.review.decision}}'
   assert.match(
-    validateDefinition(decisionRemoved).errors.map((error) => error.message).join('\n'),
+    validateDefinition(decisionRemoved)
+      .errors.map((error) => error.message)
+      .join('\n'),
     /removed gate node/u,
   )
 

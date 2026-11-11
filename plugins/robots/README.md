@@ -31,25 +31,25 @@
 
 bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里叫「模式」，与工作流插件的「工作流编排」同一机制）：
 
-| 项 | 值 |
-| --- | --- |
-| preset id | `robot-builder` |
-| 显示名 | 机器人构建 |
-| 顺序 | 10（`standard` 之后、`workflow-orchestrator` 之前） |
+| 项        | 值                                                  |
+| --------- | --------------------------------------------------- |
+| preset id | `robot-builder`                                     |
+| 显示名    | 机器人构建                                          |
+| 顺序      | 10（`standard` 之后、`workflow-orchestrator` 之前） |
 
 新建会话时选「机器人构建」，agent 会先问清这个机器人要做什么，再给出名字、头像、一句职责与完整的 AGENTS.md 草稿，等用户确认后调用 `buka_robot_build` 创建机器人、写 AGENTS.md 并挂到工作区；**已有机器人要改名时也走同一个工具**：传 `name`（旧名）+ `newName`（新名）+ `update: true`，先和用户确认再改——改名会移动目录、重建工作区，旧会话不再列在该机器人下；最后告诉用户机器人在哪、怎么开新会话、建议在「技能」页装哪些 skills。它不做机器人自己的工作，也不会创建或改名用户没要求的机器人。
 
-- 写入口 `buka_robot_build` 只对 `builderPresets` 点名的 preset 的**根会话**可见：其他 preset、由它 spawn 出来的子会话都看不到，直接调用也会被 `assertAccess` 挡住（见 `lib/access.js`）。组成里没有 `sessions` / `agentPresets` 服务时收紧为不可见——写操作宁可不可用，也不暴露给普通会话。
+- 写入口 `buka_robot_build` 只对 `builderPresets` 点名的 preset 的**根会话**可见：其他 preset、由它 spawn 出来的子会话都看不到，直接调用也会被 `assertAccess` 挡住（见 `src/access.ts`）。组成里没有 `sessions` / `agentPresets` 服务时收紧为不可见——写操作宁可不可用，也不暴露给普通会话。
 - 前提是组成里有 `@deepseek-ai/dsh-agent-preset` 与 `@deepseek-ai/dsh-agent-preset-registry`（Web / 桌面组合自带）；没有 preset 服务的纯 headless 组成里，页面照常工作，只是没有这个模式。
 - 想换成自己的 preset：把 Config 的 `builderPresets` 改成对应 id；留空表示不按 preset 收窄（所有会话都能看到写工具，不推荐）。
 - 想改预设的身份或文案：用 profile 补丁按补丁行 id `preset-robot-builder` 覆写这一行的 `config`（`id` 重复会让声明加载失败，所以不要直接再加一个同 id 的 preset）。`builderPresets` 只决定谁能调用写工具，不改变 preset 自身。
 
 ## 存放位置
 
-| 项 | 默认位置 |
-| --- | --- |
-| 插件全局目录 | `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-robots` |
-| 机器人根目录 | `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-robots/robots` |
+| 项             | 默认位置                                                    |
+| -------------- | ----------------------------------------------------------- |
+| 插件全局目录   | `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-robots`             |
+| 机器人根目录   | `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-robots/robots`      |
 | 机器人登记文件 | `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-robots/robots.json` |
 
 机器人根目录可以用插件 Config 覆盖；登记文件固定放在机器人根目录的父目录下
@@ -57,11 +57,11 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 
 ```yaml
 - id: page-buka-robots
-  name: '@buka/dsh-plugin-robots'
+  name: "@buka/dsh-plugin-robots"
   config:
     robotsDir: ~/robots
     resultRetries: 2
-    builderPresets: ['robot-builder']
+    builderPresets: ["robot-builder"]
     seedPresets: true
 ```
 
@@ -99,12 +99,12 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 
 ## 预设机器人
 
-插件随包发布两个预设机器人，作为全新安装的起步默认值（见 `lib/presets.js`）：
+插件随包发布两个预设机器人，作为全新安装的起步默认值（见 `src/presets.ts`）：
 
-| 名字 | 头像 | 职责 |
-| --- | --- | --- |
-| 软件工程师 | 🚀 `rocket` | 负责软件功能的设计与实现：写代码、修 bug、重构、跑测试、整理提交 |
-| 质量保障工程师 | 🦉 `owl` | 负责质量保障：设计并执行测试、检查覆盖率、回归验证、审查变更是否引入风险 |
+| 名字           | 头像        | 职责                                                                     |
+| -------------- | ----------- | ------------------------------------------------------------------------ |
+| 软件工程师     | 🚀 `rocket` | 负责软件功能的设计与实现：写代码、修 bug、重构、跑测试、整理提交         |
+| 质量保障工程师 | 🦉 `owl`    | 负责质量保障：设计并执行测试、检查覆盖率、回归验证、审查变更是否引入风险 |
 
 - 种子只在**登记表为空**（全新安装 / 清空）时执行一次：读完登记表，缺哪个补哪个，然后正常挂载成
   工作区。已有机器人的用户不会被塞进预设，删除预设后也不会在下次启动被补回。
@@ -114,9 +114,9 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 ## 头像
 
 头像只存预设 id（例如 `panda`），显示用的 emoji 与底色由两个浏览器一半各自维护一份
-同一 id 的映射：本插件的 `client.js`（机器人页）与工作流插件的 `client.js`（节点图）。
-所以 **id 是跨插件的稳定契约**，增删预设时要同步三处：`lib/avatar.js`、`client.js`、
-`plugins/workflows/client.js`。
+同一 id 的映射：本插件的 `src/client/avatar.ts`（机器人页）与工作流插件的 `src/client/avatars.ts`（节点图）。
+所以 **id 是跨插件的稳定契约**，增删预设时要同步三处：`src/avatar.ts`、`src/client/avatar.ts`、
+`plugins/workflows/src/client/avatars.ts`。
 
 预设：`sprout` 🌱、`sun` ☀️、`cat` 🐱、`fox` 🦊、`panda` 🐼、`owl` 🦉、`whale` 🐳、
 `octopus` 🐙、`bee` 🐝、`rocket` 🚀、`dino` 🦖、`ghost` 👻、`penguin` 🐧、`unicorn` 🦄、
@@ -140,11 +140,11 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
 
 ## 项目级 skills
 
-| 根目录 | 说明 |
-| --- | --- |
-| `<机器人目录>/.agents/skills` | 规范副本（`npx skills add -a universal` 的落点） |
+| 根目录                        | 说明                                                                  |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `<机器人目录>/.agents/skills` | 规范副本（`npx skills add -a universal` 的落点）                      |
 | `<机器人目录>/.claude/skills` | Claude Code 的落点；由 `npx skills add -a claude-code` 建到上面的链接 |
-| `<机器人目录>/.dsh/skills` | DSH 自己的项目级根目录（手工安装时可能出现在这里） |
+| `<机器人目录>/.dsh/skills`    | DSH 自己的项目级根目录（手工安装时可能出现在这里）                    |
 
 页面把这三个根下的 `<name>/SKILL.md` 与平铺的 `<name>.md` 都列出来（同名只列一次），名称/描述取 frontmatter；安装来源从 `<机器人目录>/skills-lock.json` 读。
 
@@ -197,25 +197,25 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
   - **AGENTS.md**：标题右侧是保存按钮（有改动才可用），等宽文本域占满剩余高度，不展示目录与链接状态；
   - **技能**：已安装列表（可移除）与「安装 skills」按钮。安装按钮打开对话框：填来源或点 Skills 收藏夹里的
     仓库 → 「读取 skills」拿到清单 → 勾选（默认全选、已安装禁用、支持全选/取消全选）→ 安装选中的。
-  所有操作结果用 Toast 提示，失败时显示 Host 返回的错误码说明；安装失败与读清单失败都在对话框里保留命令输出。
+    所有操作结果用 Toast 提示，失败时显示 Host 返回的错误码说明；安装失败与读清单失败都在对话框里保留命令输出。
 
 页面只做展示与触发：目录、登记表、AGENTS.md、npx skills 都走 Host 一半的包内路由；工作区的注册/删除走 DSH 自己的 Client Service（`workspaces`），这样侧边栏工作区列表能同步刷新。
 
 ## 路由
 
-| 路由 | 作用 |
-| --- | --- |
-| `GET /buka-robots/list` | 登记表里的机器人 + 挂载状态 + 项目 skills + AGENTS.md 状态 |
-| `POST /buka-robots/create` | 在 `robotsDir` 下建机器人目录、写 AGENTS.md 模板、登记到 `robots.json`；可带 `avatar`（不传则自动分配）与 `description` |
-| `POST /buka-robots/rename` | 把机器人目录改名为 `newName`、就地更新登记表 `name` / `path`，并在新路径重建 DSH 工作区（删除旧工作区注册）；已有会话日志保留但不再挂在该机器人下 |
-| `POST /buka-robots/avatar` | 改某个机器人的头像 id（只动登记表） |
-| `POST /buka-robots/description` | 改某个机器人的职责（只动登记表；工作流用它选机器人） |
-| `POST /buka-robots/remove` | 只删除登记条目（目录、文件保留） |
-| `POST /buka-robots/agents` | 写入某个机器人的 `AGENTS.md`（并补 `CLAUDE.md` 链接） |
-| `POST /buka-robots/skills/available` | 执行 `npx skills add <source> --list`，返回可安装的 skills 与已安装名单 |
-| `POST /buka-robots/skills/install` | 只安装请求里的 `skills`，同时落 `.agents/skills` 与 `.claude/skills` |
-| `POST /buka-robots/skills/remove` | 在机器人目录里执行 `npx skills remove` 并返回新的 skills |
-| `POST /buka-robots/reveal` | 用系统文件管理器打开机器人目录（macOS 的 Finder / Windows 资源管理器 / Linux `xdg-open`） |
+| 路由                                 | 作用                                                                                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /buka-robots/list`              | 登记表里的机器人 + 挂载状态 + 项目 skills + AGENTS.md 状态                                                                                        |
+| `POST /buka-robots/create`           | 在 `robotsDir` 下建机器人目录、写 AGENTS.md 模板、登记到 `robots.json`；可带 `avatar`（不传则自动分配）与 `description`                           |
+| `POST /buka-robots/rename`           | 把机器人目录改名为 `newName`、就地更新登记表 `name` / `path`，并在新路径重建 DSH 工作区（删除旧工作区注册）；已有会话日志保留但不再挂在该机器人下 |
+| `POST /buka-robots/avatar`           | 改某个机器人的头像 id（只动登记表）                                                                                                               |
+| `POST /buka-robots/description`      | 改某个机器人的职责（只动登记表；工作流用它选机器人）                                                                                              |
+| `POST /buka-robots/remove`           | 只删除登记条目（目录、文件保留）                                                                                                                  |
+| `POST /buka-robots/agents`           | 写入某个机器人的 `AGENTS.md`（并补 `CLAUDE.md` 链接）                                                                                             |
+| `POST /buka-robots/skills/available` | 执行 `npx skills add <source> --list`，返回可安装的 skills 与已安装名单                                                                           |
+| `POST /buka-robots/skills/install`   | 只安装请求里的 `skills`，同时落 `.agents/skills` 与 `.claude/skills`                                                                              |
+| `POST /buka-robots/skills/remove`    | 在机器人目录里执行 `npx skills remove` 并返回新的 skills                                                                                          |
+| `POST /buka-robots/reveal`           | 用系统文件管理器打开机器人目录（macOS 的 Finder / Windows 资源管理器 / Linux `xdg-open`）                                                         |
 
 除 `create` / `remove` 外，其余请求都用机器人名字（`name`）寻址（`rename` 另带 `newName`），路径由 Host 从登记表读取，客户端不能传任意路径。所有路由沿用 web 组合的信任栅栏（`connection.requestRejection`），只接受本机已认证的同源请求。
 
@@ -226,29 +226,33 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 
 ## 结构
 
-| 文件 | 作用 |
-| --- | --- |
-| `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client`、`locale` / `icon` 导出 |
-| `cordis.patch.yml` | bundle 层两条 insert：`page-buka-robots`（本插件）与 `preset-robot-builder`（随包发布的「机器人构建」preset） |
-| `lib/index.js` | Host 一半：插件入口、`robotsDir` / `builderPresets` 配置、包内路由（含 `POST /buka-robots/rename`）、`buka_robots` 只读工具与 `buka_robot_build` 的注册与可见性判定 |
-| `lib/list-tool.js` | `buka_robots` 的工具定义、输出 schema（`skills` 可选）与 `render`：按调用方 preset 决定是否带技能清单；`defineTool` 与 `listRobots` 由入口注入，便于单测 |
-| `lib/robot-store.js` | 名称校验、目录创建与重命名（连目录一起改、失败回滚）、AGENTS.md 模板、frontmatter、项目 skills 扫描、AGENTS.md 读写、机器人登记表与头像写入、挂载状态汇总；不依赖 DSH 运行时，便于单测 |
-| `lib/avatar.js` | 预设头像 id、默认分配与校验；id 是跨插件契约，浏览器一半各自维护 emoji / 底色映射 |
-| `lib/access.js` | 两处可见性判定：`buka_robot_build` 只放行点名 preset 的根会话（preset 服务缺失时收紧为不可见）；`buka_robots` 的技能清单对工作流编排 preset 固定隐藏（识别不出调用方时保持可见）。都是纯函数，便于单测 |
-| `lib/builder.js` | 一次「构建」的语义：请求规范化、已存在机器人要 `update: true`、改名（`newName`）移动目录并重建工作区、写 AGENTS.md、补 CLAUDE.md 链接、按规范路径判断挂载并只在需要时 `workspaceRegistry.create()`；不依赖 DSH 包，便于单测 |
-| `lib/build-tool.js` | `buka_robot_build` 的工具定义、参数（含 `newName`）/ 结果 schema（含 `renamed` / `previousName`）与 `render`；`defineTool` 由入口注入，便于单测 |
-| `lib/presets.js` | 随包发布的两个预设机器人（软件工程师 / 质量保障工程师）与其种子逻辑；只在登记表为空时初始化，幂等；不依赖 DSH 包，便于单测 |
-| `lib/service.js` | 对外 Host Service `ctx.bukaRobots`：`list()`、`avatarMap()`、阻塞的 `startSession()`、非阻塞的 `dispatchSession()`（返回 `readResult` / `send` / `retryReport` / `cancel` / `dispose` 可观测句柄）与只 resume、不发 prompt 的 `openSession()`；新开会话或按 `sessionId` 续接同一会话，续接前先 compact；每个会话都要求交回 JSON（scoped `structured_output`，可用 `outputSchema` 约束），不合法时按 `resultRetries` 追问；默认不限时；不依赖 DSH 包（`defineTool` 由入口注入），便于单测 |
-| `lib/npx.js` | 定位 `npx`、在机器人目录里执行 `skills add` / `skills remove`，并解析 `--list` 的文本清单 |
-| `lib/reveal.js` | 按平台选择文件管理器命令（`open` / `explorer` / `xdg-open`）并打开机器人目录 |
-| `client.js` | 浏览器一半：`sidebar.panellist` 图标 + `main` 面板；列表页与配置页（含重命名入口与对话框）；文案走 `ctx.locale` |
-| `market.json` | 只在市场上挂牌用的展示信息，不随包发布 |
-| `icon.svg` | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/` |
-| `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
-| 仓库根 `test/robots-plugin.test.mjs` | robot-store、头像契约、预设机器人种子与 npx 输出清理的单测 |
-| 仓库根 `test/robots-client.test.mjs` | 浏览器一半的渲染冒烟：列表卡片与各对话框 |
-| 仓库根 `test/robots-builder.test.mjs` | 可见性判定（含技能清单隐藏）、构建 / 挂载与工具映射的单测 |
-| 仓库根 `test/robots-list-tool.test.mjs` | `buka_robots` 的输出映射、技能清单隐藏与渲染文本的单测 |
+| 文件                                    | 作用                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package.json`                          | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client`、`files` 含 `lib`、`locale` / `icon` 导出                                                                                                                                                                                                                                                                                                                                                                               |
+| `cordis.patch.yml`                      | bundle 层两条 insert：`page-buka-robots`（本插件）与 `preset-robot-builder`（随包发布的「机器人构建」preset）                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/index.ts`                          | Host 入口：`robotsDir` / `builderPresets` 配置、装配路由与工具；只做装配                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/list-tool.ts`                      | `buka_robots` 的工具定义、输出 schema（`skills` 可选）与 `render`：按调用方 preset 决定是否带技能清单；`defineTool` 与 `listRobots` 由入口注入，便于单测                                                                                                                                                                                                                                                                                                                                 |
+| `src/robot-store.ts`                    | 名称校验、目录创建与重命名（连目录一起改、失败回滚）、AGENTS.md 模板、frontmatter、项目 skills 扫描、AGENTS.md 读写、机器人登记表与头像写入、挂载状态汇总；不依赖 DSH 运行时，便于单测                                                                                                                                                                                                                                                                                                   |
+| `src/avatar.ts`                         | 预设头像 id、默认分配与校验；id 是跨插件契约，浏览器一半各自维护 emoji / 底色映射                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/access.ts`                         | 两处可见性判定：`buka_robot_build` 只放行点名 preset 的根会话（preset 服务缺失时收紧为不可见）；`buka_robots` 的技能清单对工作流编排 preset 固定隐藏（识别不出调用方时保持可见）。都是纯函数，便于单测                                                                                                                                                                                                                                                                                   |
+| `src/builder.ts`                        | 一次「构建」的语义：请求规范化、已存在机器人要 `update: true`、改名（`newName`）移动目录并重建工作区、写 AGENTS.md、补 CLAUDE.md 链接、按规范路径判断挂载并只在需要时 `workspaceRegistry.create()`；不依赖 DSH 包，便于单测                                                                                                                                                                                                                                                              |
+| `src/build-tool.ts`                     | `buka_robot_build` 的工具定义、参数（含 `newName`）/ 结果 schema（含 `renamed` / `previousName`）与 `render`；`defineTool` 由入口注入，便于单测                                                                                                                                                                                                                                                                                                                                          |
+| `src/presets.ts`                        | 随包发布的两个预设机器人（软件工程师 / 质量保障工程师）与其种子逻辑；只在登记表为空时初始化，幂等；不依赖 DSH 包，便于单测                                                                                                                                                                                                                                                                                                                                                               |
+| `src/service.ts`                        | 对外 Host Service `ctx.bukaRobots`：`list()`、`avatarMap()`、阻塞的 `startSession()`、非阻塞的 `dispatchSession()`（返回 `readResult` / `send` / `retryReport` / `cancel` / `dispose` 可观测句柄）与只 resume、不发 prompt 的 `openSession()`；新开会话或按 `sessionId` 续接同一会话，续接前先 compact；每个会话都要求交回 JSON（scoped `structured_output`，可用 `outputSchema` 约束），不合法时按 `resultRetries` 追问；默认不限时；不依赖 DSH 包（`defineTool` 由入口注入），便于单测 |
+| `src/routes/**`                         | 包内 HTTP 路由；skills 路由用 `@buka/plugin-kit` 的 `createNpxRunner` / `parseSkillList` 执行并解析 `npx skills`                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/reveal.ts`                         | 按平台选择文件管理器命令（`open` / `explorer` / `xdg-open`）并打开机器人目录                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `src/client/index.ts`                   | 浏览器一半入口：`sidebar.panellist` 图标 + `main` 面板的注册；只导出 `inject` / `apply`                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/client/**`                         | 列表页、配置页（含重命名入口与对话框）、状态、词典与样式；文案走 `ctx.locale`                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `lib/index.js`                          | 构建产物（ESM）：Host 一半的运行文件；不手改                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `lib/client.js`                         | 构建产物：界面一半的运行文件，外层是 `window.__ModuleLoader__.load({...})` 外壳；不手改                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `market.json`                           | 只在市场上挂牌用的展示信息，不随包发布                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `icon.svg`                              | Discover 页与 Plugins 详情页图标，构建时复制到 `dist/icons/`                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `locale/*.json`                         | 展示文案的唯一来源：`meta.title` / `meta.description` / `meta.detail`，不需要激活插件                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `docs/DETAIL.md`、`docs/DETAIL.zh.md`   | 市场详情页长文，由对应 locale 的 `meta.detail` 指向                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 仓库根 `test/robots-plugin.test.mjs`    | robot-store、头像契约、预设机器人种子与 npx 输出清理的单测                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 仓库根 `test/robots-client.test.mjs`    | 浏览器一半的渲染冒烟：列表卡片与各对话框                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 仓库根 `test/robots-builder.test.mjs`   | 可见性判定（含技能清单隐藏）、构建 / 挂载与工具映射的单测                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 仓库根 `test/robots-list-tool.test.mjs` | `buka_robots` 的输出映射、技能清单隐藏与渲染文本的单测                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ## 对外 Service：`ctx.bukaRobots`
 
@@ -295,7 +299,10 @@ const handle = await ctx.bukaRobots.dispatchSession({
   robot: robots[0].name,
   prompt: '检查登录页并跑测试，结束时交回 JSON：{ next: "pass" | "fix", status, summary }。',
   routes: ['pass', 'fix'], // 工作流节点的出边名；结果里的 next 必须是其中之一
-  outputSchema: { type: 'object', properties: { next: { enum: ['pass', 'fix'] }, abort: { type: 'string' } } },
+  outputSchema: {
+    type: 'object',
+    properties: { next: { enum: ['pass', 'fix'] }, abort: { type: 'string' } },
+  },
   abortable: true, // 允许节点用 { "abort": "原因" } 主动终止；默认 false
 })
 // handle.startSeq 是这一轮的起点；调用方只处理自己登记过的会话事件。
@@ -303,14 +310,17 @@ const turn = handle.readResult() // { sessionId, text, stopReason, turnEnded, st
 // turn.turnEnded 为 true 才表示这一轮真的结束；中断后恢复时先用它检查上一轮是否其实已经完成。
 
 // 恢复：只打开已有会话（resume / attach），不发 prompt。
-const resumed = await ctx.bukaRobots.openSession({ robot: robots[0].name, sessionId: turn.sessionId })
+const resumed = await ctx.bukaRobots.openSession({
+  robot: robots[0].name,
+  sessionId: turn.sessionId,
+})
 const check = resumed.readResult({ sinceSeq: handle.startSeq })
 if (check.turnEnded !== true) {
   await resumed.send('继续完成刚才的任务', { compactFirst: true }) // 同一会话再发一条
   const continued = resumed.readResult({ sinceSeq: resumed.startSeq })
 }
 await resumed.cancel('timeout') // 取消当前轮，返回已经写下的内容
-await resumed.dispose()         // 只释放 live agent，会话日志保留
+await resumed.dispose() // 只释放 live agent，会话日志保留
 ```
 
 `startSession()` 的行为（默认 `wait: true`，保持“投递后等会话结束再返回结果”的阻塞语义；传 `wait: false` 等价于 `dispatchSession()`，见下文）：
@@ -339,15 +349,15 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 
 句柄字段：`mode`（固定 `session`）、`sessionId`、`robot`、`cwd`、`resumed`、`compacted`、`compactionError?`、`startSeq`（这一轮的起点序号），以及：
 
-| 方法 | 作用 |
-| --- | --- |
-| `readResult({ sinceSeq? })` | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }` |
-| `send(text, { compactFirst? })` | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq |
+| 方法                                                     | 作用                                                                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readResult({ sinceSeq? })`                              | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }`                                        |
+| `send(text, { compactFirst? })`                          | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq                                                                                       |
 | `retryReport({ routes?, abortable?, reason?, detail? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题；`reason: 'invalid-output'` 时附上 `detail`，`abortable: true` 时同时给出 abort 出口）；没有额度时返回 `null` |
-| `getPlanMode()` | 读当前 live agent 的 DSH plan 状态 `{ active, pending? }`；组合里没有 plan-mode 服务时返回 `null` |
-| `setPlanMode(active)` | 设置 / 清除 plan 模式，返回 `committed` / `queued` / `cancelled` / `noop`；服务缺失时返回 `null` |
-| `cancel(reason?)` | 取消当前轮，等它落定后返回已经写下的结果 |
-| `dispose()` | 只释放这一轮的 live agent，会话日志仍然保留；释放后服务会把这条仍然持久化的会话补通告回客户端（`api-session/added`），所以侧边栏与「打开会话」都不受影响 |
+| `getPlanMode()`                                          | 读当前 live agent 的 DSH plan 状态 `{ active, pending? }`；组合里没有 plan-mode 服务时返回 `null`                                                                   |
+| `setPlanMode(active)`                                    | 设置 / 清除 plan 模式，返回 `committed` / `queued` / `cancelled` / `noop`；服务缺失时返回 `null`                                                                    |
+| `cancel(reason?)`                                        | 取消当前轮，等它落定后返回已经写下的结果                                                                                                                            |
+| `dispose()`                                              | 只释放这一轮的 live agent，会话日志仍然保留；释放后服务会把这条仍然持久化的会话补通告回客户端（`api-session/added`），所以侧边栏与「打开会话」都不受影响            |
 
 所有机器人会话都是普通顶层会话；`openSession()` 遇到旧版 `origin: 'subagent'` 的隐藏会话会直接报错，不会把它当成可见会话继续。
 
@@ -357,7 +367,7 @@ await resumed.dispose()         // 只释放 live agent，会话日志保留
 
 ## 验证安装
 
-在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「机器人」图标、点开能看到机器人列表即成功。本地调试也可以直接装目录：
+在 DSH 里：**Plugins → More（Experimental plugins）→ Custom plugin markets → Discover** 添加本仓库索引地址，安装后侧边栏出现「机器人」图标、点开能看到机器人列表即成功。本地调试也可以直接装目录（先确保 `plugins/robots/lib/` 已由 `pnpm run build:code && pnpm run build:clients` 生成）：
 
 ```bash
 dsh plugin --profile <profile> add "link:$PWD/plugins/robots"

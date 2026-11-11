@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 
 /** 与 DSH 的 `VARIABLE_NAME` 一致。 */
@@ -49,10 +49,14 @@ function renderPromptText(text, section, variables = RUNTIME_VARIABLES) {
     }
     const name = group[0].slice(2, -2)
     if (!VARIABLE_NAME.test(name)) {
-      throw new Error(`malformed prompt variable reference "{{${name}}}" in section "${section}" (variable names match ${String(VARIABLE_NAME)})`)
+      throw new Error(
+        `malformed prompt variable reference "{{${name}}}" in section "${section}" (variable names match ${String(VARIABLE_NAME)})`,
+      )
     }
     if (!Object.hasOwn(variables, name)) {
-      throw new Error(`unknown prompt variable "{{${name}}}" in section "${section}"; registered variables: ${Object.keys(variables).join(', ') || '(none)'}`)
+      throw new Error(
+        `unknown prompt variable "{{${name}}}" in section "${section}"; registered variables: ${Object.keys(variables).join(', ') || '(none)'}`,
+      )
     }
     result += text.slice(last, open) + variables[name]
     last = open + group[0].length
@@ -97,8 +101,12 @@ function extractPersonaPrompts(patchText) {
   return prompts
 }
 
-const pluginDirectories = readdirSync(new URL('../plugins', import.meta.url), { withFileTypes: true })
-  .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_'))
+const pluginDirectories = readdirSync(new URL('../plugins', import.meta.url), {
+  withFileTypes: true,
+})
+  .filter(
+    (entry) => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_'),
+  )
   .map((entry) => entry.name)
   .sort()
 
@@ -132,18 +140,37 @@ test('随插件发布的 preset persona 提示词都能被 DSH 渲染（issue #1
 
 test('提示词扫描规则与 DSH 一致：非法变量名会抛错', () => {
   assert.throws(
-    () => renderPromptText('checked when you validate: a {{nodes.<id>.data.<path>}} reference must be declared', 'deployment:persona-prefix'),
+    () =>
+      renderPromptText(
+        'checked when you validate: a {{nodes.<id>.data.<path>}} reference must be declared',
+        'deployment:persona-prefix',
+      ),
     /malformed prompt variable reference "\{\{nodes\.<id>\.data\.<path>\}\}" in section "deployment:persona-prefix"/u,
   )
 })
 
 test('提示词扫描规则与 DSH 一致：未知变量与缺配对的花括号都会抛错', () => {
-  assert.throws(() => renderPromptText('{{missing}}', 'deployment:persona-suffix'), /unknown prompt variable "\{\{missing\}\}"/u)
-  assert.throws(() => renderPromptText('a {{b c}} reference', 'deployment:persona-suffix'), /malformed prompt variable reference/u)
-  assert.throws(() => renderPromptText('a {{b}c}} reference', 'deployment:persona-suffix'), /malformed prompt variable reference/u)
+  assert.throws(
+    () => renderPromptText('{{missing}}', 'deployment:persona-suffix'),
+    /unknown prompt variable "\{\{missing\}\}"/u,
+  )
+  assert.throws(
+    () => renderPromptText('a {{b c}} reference', 'deployment:persona-suffix'),
+    /malformed prompt variable reference/u,
+  )
+  assert.throws(
+    () => renderPromptText('a {{b}c}} reference', 'deployment:persona-suffix'),
+    /malformed prompt variable reference/u,
+  )
 })
 
 test('提示词扫描规则与 DSH 一致：已注册变量会替换，孤立 {{ 保留为普通文字', () => {
-  assert.equal(renderPromptText('model={{model}} provider={{provider}}', 'deployment:persona-prefix'), 'model=flash provider=deepseek')
-  assert.equal(renderPromptText('a lone {{ stays literal', 'deployment:persona-prefix'), 'a lone {{ stays literal')
+  assert.equal(
+    renderPromptText('model={{model}} provider={{provider}}', 'deployment:persona-prefix'),
+    'model=flash provider=deepseek',
+  )
+  assert.equal(
+    renderPromptText('a lone {{ stays literal', 'deployment:persona-prefix'),
+    'a lone {{ stays literal',
+  )
 })

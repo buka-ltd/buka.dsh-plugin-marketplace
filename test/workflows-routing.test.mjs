@@ -13,7 +13,7 @@ import {
   resolveAbort,
   resolveRoute,
   resolveRoutes,
-} from '../plugins/workflows/lib/routing.js'
+} from '../plugins/workflows/src/routing.ts'
 
 const NODE = { id: 'check', type: 'robot', next: [{ to: 'done', name: '完成' }] }
 
@@ -38,7 +38,13 @@ test('routing: no abort key is left to the next route', () => {
 })
 
 test('routing: invalid abort shapes are reported with a retry reason', () => {
-  for (const data of [{ abort: '' }, { abort: '   ' }, { abort: null }, { abort: true }, { abort: 3 }]) {
+  for (const data of [
+    { abort: '' },
+    { abort: '   ' },
+    { abort: null },
+    { abort: true },
+    { abort: 3 },
+  ]) {
     const resolved = resolveAbort(data)
     assert.equal(resolved.error.kind, 'invalid-abort')
     assert.match(resolved.error.message, /abort/u)
@@ -71,7 +77,9 @@ test('routing: resolveRoutes supports concurrent fan-out via a next array', () =
   // 单值字符串仍然是一条边（向后兼容）。
   assert.deepEqual(resolveRoutes(node, { next: '后端' }), { rules: [node.next[0]] })
   // 数组 fan-out：按定义顺序返回全部命中的边。
-  assert.deepEqual(resolveRoutes(node, { next: ['后端', '前端'] }), { rules: [node.next[0], node.next[1]] })
+  assert.deepEqual(resolveRoutes(node, { next: ['后端', '前端'] }), {
+    rules: [node.next[0], node.next[1]],
+  })
   // 空数组、未知、重复、非字符串项都是错误。
   assert.match(resolveRoutes(node, { next: [] }).error, /empty "next" route list/u)
   assert.match(resolveRoutes(node, { next: ['后端', '不存在'] }).error, /unknown route "不存在"/u)

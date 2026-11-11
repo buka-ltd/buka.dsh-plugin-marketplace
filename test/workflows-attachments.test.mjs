@@ -10,12 +10,14 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  attachmentPreviewInfo,
+  DEFAULT_PREVIEW_TEXT_BYTES,
   normalizeAttachmentRequests,
   readAttachmentRange,
   readInlineText,
   sanitizeAttachmentName,
   writeAttachments,
-} from '../plugins/workflows/lib/attachments.js'
+} from '../plugins/workflows/src/attachments.ts'
 
 /**
  * @returns {Promise<{ root: string, workspace: string, run: string, destination: string }>}
@@ -35,20 +37,17 @@ test('attachments: normalize accepts strings and objects and rejects malformed i
       'notes/a.md',
       { path: 'notes/b.pdf', name: ' report.pdf ', description: '  details  ' },
     ]),
-    [
-      { path: 'notes/a.md' },
-      { path: 'notes/b.pdf', name: 'report.pdf', description: 'details' },
-    ],
+    [{ path: 'notes/a.md' }, { path: 'notes/b.pdf', name: 'report.pdf', description: 'details' }],
   )
   assert.deepEqual(normalizeAttachmentRequests(undefined), [])
   assert.throws(() => normalizeAttachmentRequests({ path: 'a' }), /must be an array/)
   assert.throws(() => normalizeAttachmentRequests([null]), /attachments\[0\]/)
   assert.throws(() => normalizeAttachmentRequests(['']), /non-empty file path/)
-  assert.throws(() => normalizeAttachmentRequests([{ path: 'a', name: 3 }]), /name must be a string/)
   assert.throws(
-    () => normalizeAttachmentRequests(['a', 'b', 'c'], { maxCount: 2 }),
-    /at most 2/,
+    () => normalizeAttachmentRequests([{ path: 'a', name: 3 }]),
+    /name must be a string/,
   )
+  assert.throws(() => normalizeAttachmentRequests(['a', 'b', 'c'], { maxCount: 2 }), /at most 2/)
 })
 
 test('attachments: names are sanitized to a single safe segment', () => {
@@ -67,10 +66,7 @@ test('attachments: copies files, dedupes names and records sizes', async () => {
     await fs.writeFile(path.join(paths.workspace, 'notes', 'a.md'), 'A', 'utf8')
     await fs.writeFile(path.join(paths.workspace, 'notes', 'b.bin'), Buffer.from([0, 1, 2]))
     const manifest = await writeAttachments({
-      raw: [
-        'notes/a.md',
-        { path: 'notes/b.bin', name: 'a.md', description: 'collision' },
-      ],
+      raw: ['notes/a.md', { path: 'notes/b.bin', name: 'a.md', description: 'collision' }],
       workspace: paths.workspace,
       runDirectory: paths.run,
       destination: paths.destination,
@@ -103,10 +99,7 @@ test('attachments: rejects missing, directory, outside and symlink-escape source
       () => writeAttachments({ ...options, raw: ['missing.txt'] }),
       /not readable/,
     )
-    await assert.rejects(
-      () => writeAttachments({ ...options, raw: ['dir'] }),
-      /not a regular file/,
-    )
+    await assert.rejects(() => writeAttachments({ ...options, raw: ['dir'] }), /not a regular file/)
     await assert.rejects(
       () => writeAttachments({ ...options, raw: [path.join(outside, 'secret.txt')] }),
       /outside the robot workspace/,
@@ -135,11 +128,14 @@ test('attachments: enforces per-file, total and count limits and cleans partial 
       destination: paths.destination,
       maxBytes: 4,
     }
-    await assert.rejects(
-      () => writeAttachments({ ...options, raw: ['big.bin'] }),
-      /too large/,
+    await assert.rejects(() => writeAttachments({ ...options, raw: ['big.bin'] }), /too large/)
+    assert.equal(
+      await fs.stat(paths.destination).then(
+        () => true,
+        () => false,
+      ),
+      false,
     )
-    assert.equal(await fs.stat(paths.destination).then(() => true, () => false), false)
     await assert.rejects(
       () =>
         writeAttachments({
@@ -189,4 +185,19 @@ test('attachments: text reads detect UTF-8, binary, truncation and offsets', asy
   } finally {
     await fs.rm(paths.root, { recursive: true, force: true })
   }
+})
+
+test('attachments: preview info maps only whitelisted image/pdf extensions inline', () => {
+  assert.equal(DEFAULT_PREVIEW_TEXT_BYTES, 64 * 1024)
+  assert.deepEqual(attachmentPreviewInfo('photo.PNG'), { kind: 'image', mime: 'image/png' })
+  assert.deepEqual(attachmentPreviewInfo('scan.jpeg'), { kind: 'image', mime: 'image/jpeg' })
+  assert.deepEqual(attachmentPreviewInfo('anim.gif'), { kind: 'image', mime: 'image/gif' })
+  assert.deepEqual(attachmentPreviewInfo('pixel.webp'), { kind: 'image', mime: 'image/webp' })
+  assert.deepEqual(attachmentPreviewInfo('icon.svg'), { kind: 'image', mime: 'image/svg+xml' })
+  assert.deepEqual(attachmentPreviewInfo('doc.pdf'), { kind: 'pdf', mime: 'application/pdf' })
+  // 大小写、无扩展名与其它扩展名都退回文本嗅探。
+  assert.deepEqual(attachmentPreviewInfo('README.MD'), { kind: 'text', mime: 'text/plain' })
+  assert.deepEqual(attachmentPreviewInfo('no-extension'), { kind: 'text', mime: 'text/plain' })
+  assert.deepEqual(attachmentPreviewInfo('archive.zip'), { kind: 'text', mime: 'text/plain' })
+  assert.deepEqual(attachmentPreviewInfo(undefined), { kind: 'text', mime: 'text/plain' })
 })

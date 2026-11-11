@@ -10,14 +10,21 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { WORKFLOW_FORMAT_VERSION, WorkflowRunStore, truncateUtf8 } from '../plugins/workflows/lib/run-store.js'
-import { renderTemplate, TemplateError } from '../plugins/workflows/lib/template.js'
+import {
+  truncateUtf8,
+  WORKFLOW_FORMAT_VERSION,
+  WorkflowRunStore,
+} from '../plugins/workflows/src/run-store.ts'
+import { renderTemplate, TemplateError } from '../plugins/workflows/src/template.ts'
 
 test('template: interpolates goal, node text and structured data', () => {
-  const text = renderTemplate('目标 {{goal}}；上一步：{{nodes.collect.text}}；摘要：{{nodes.collect.data.summary}}', {
-    goal: '发布',
-    nodes: { collect: { text: 'abc', data: { summary: 'ok' } } },
-  })
+  const text = renderTemplate(
+    '目标 {{goal}}；上一步：{{nodes.collect.text}}；摘要：{{nodes.collect.data.summary}}',
+    {
+      goal: '发布',
+      nodes: { collect: { text: 'abc', data: { summary: 'ok' } } },
+    },
+  )
   assert.equal(text, '目标 发布；上一步：abc；摘要：ok')
 })
 
@@ -28,7 +35,9 @@ test('template: rejects unknown and malformed paths', () => {
   assert.throws(
     () =>
       renderTemplate('{{nodes.collect.attachments.0.text}}', {
-        nodes: { collect: { attachments: [{ text: { __bukaTemplateError: 'attachment is binary' } }] } },
+        nodes: {
+          collect: { attachments: [{ text: { __bukaTemplateError: 'attachment is binary' } }] },
+        },
       }),
     /attachment is binary/,
   )
@@ -144,7 +153,8 @@ test('store: sequence numbers keep growing across restarts and deletions', async
   assert.equal(await second.allocateSeq(), 4)
 
   // 删掉所有运行目录（例如超期自动删除）后编号也不回退。
-  for (const runId of await second.listRunIds()) await fs.rm(second.runDirectory(runId), { recursive: true, force: true })
+  for (const runId of await second.listRunIds())
+    await fs.rm(second.runDirectory(runId), { recursive: true, force: true })
   const third = new WorkflowRunStore({ dir })
   await third.init()
   assert.equal(await third.allocateSeq(), 5)

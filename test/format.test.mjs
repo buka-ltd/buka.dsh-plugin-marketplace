@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { MAX_INLINE_ICON_BYTES, MarketIndexError, marketInstallTarget, parseMarketIndex } from '../scripts/lib/format.mjs'
+import { MarketIndexError, marketInstallTarget, parseMarketIndex } from '../scripts/lib/format.ts'
 
 const INDEX_URL = 'https://buka-ltd.github.io/buka.dsh-plugin-marketplace/index.json'
 
@@ -20,7 +20,10 @@ function baseIndex() {
         icon: './icons/hello.svg',
         author: 'Buka Ltd',
         homepage: 'https://github.com/buka-ltd/buka.dsh-plugin-marketplace#readme',
-        repository: { url: 'https://github.com/buka-ltd/buka.dsh-plugin-marketplace', directory: 'plugins/hello' },
+        repository: {
+          url: 'https://github.com/buka-ltd/buka.dsh-plugin-marketplace',
+          directory: 'plugins/hello',
+        },
         metadata: { category: 'tools', labels: ['stable'], keywords: ['hello'], sortKeys: {} },
         versions: [
           {
@@ -57,7 +60,10 @@ test('接受一份完整索引，并补空缺失组', () => {
   const parsed = parseMarketIndex(baseIndex(), INDEX_URL)
   assert.equal(parsed.format, 1)
   assert.equal(parsed.plugins.length, 1)
-  assert.equal(parsed.plugins[0].icon, 'https://buka-ltd.github.io/buka.dsh-plugin-marketplace/icons/hello.svg')
+  assert.equal(
+    parsed.plugins[0].icon,
+    'https://buka-ltd.github.io/buka.dsh-plugin-marketplace/icons/hello.svg',
+  )
   assert.equal(parsed.plugins[0].metadata.keywords[0], 'hello')
 
   const sparse = parseMarketIndex({ format: 1, title: 'T', plugins: [] }, INDEX_URL)

@@ -16,18 +16,21 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { addSavedRepo, repoStoreFile } from '../plugins/skills/lib/repo-store.js'
+import { addSavedRepo, repoStoreFile } from '../plugins/skills/src/repo-store.ts'
 import {
   installGlobalSkill,
   installSavedSkill,
   isInstallableSkillName,
   skillDirName,
-} from '../plugins/skills/lib/skill-install.js'
+} from '../plugins/skills/src/skill-install.ts'
 
 /** 在 `<dir>/SKILL.md` 写一个最小可发现的 skill。 */
 async function writeSkill(dir, name, description = name) {
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`)
+  await fs.writeFile(
+    path.join(dir, 'SKILL.md'),
+    `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`,
+  )
 }
 
 /** 造一份独立的全局 home，别碰真实 `~/.agents` / `~/.dsh`。 */
@@ -44,7 +47,11 @@ function fakeInstaller(homes, calls) {
   return async (args) => {
     calls.push(args)
     const name = args[args.indexOf('--skill') + 1]
-    await writeSkill(path.join(homes.agentsHome, 'skills', skillDirName(name)), name, 'installed by npx')
+    await writeSkill(
+      path.join(homes.agentsHome, 'skills', skillDirName(name)),
+      name,
+      'installed by npx',
+    )
     return { ok: true, output: 'installed' }
   }
 }
@@ -69,7 +76,17 @@ test('只接受能安全交给 --skill 的名字', () => {
   for (const good of ['web-design', 'Convex Best Practices', 'a', 'x'.repeat(255)]) {
     assert.equal(isInstallableSkillName(good), true, good)
   }
-  for (const bad of ['', '-g', ' --global', ' leading-space', 'a\nb', '...', 'x'.repeat(256), undefined, 42]) {
+  for (const bad of [
+    '',
+    '-g',
+    ' --global',
+    ' leading-space',
+    'a\nb',
+    '...',
+    'x'.repeat(256),
+    undefined,
+    42,
+  ]) {
     assert.equal(isInstallableSkillName(bad), false, String(bad))
   }
 })
@@ -93,7 +110,16 @@ test('安装：参数顺序正确，装完确认 SKILL.md 落到规范目录', a
     assert.equal(result.path, path.join(homes.agentsHome, 'skills', 'web-design-guidelines'))
     // 指定 universal agent：只写 ~/.agents/skills，不给其它 agent 目录建链接。
     assert.deepEqual(calls, [
-      ['add', 'vercel-labs/agent-skills', '--skill', 'Web Design Guidelines', '--global', '--yes', '-a', 'universal'],
+      [
+        'add',
+        'vercel-labs/agent-skills',
+        '--skill',
+        'Web Design Guidelines',
+        '--global',
+        '--yes',
+        '-a',
+        'universal',
+      ],
     ])
   } finally {
     await fs.rm(root, { recursive: true, force: true })
@@ -121,7 +147,14 @@ test('安装：CLI 不认识 universal agent 时退回默认选择', async () =>
 
     assert.equal(result.ok, true)
     assert.equal(calls.length, 2, '应先带 universal 试一次，失败后再退回默认命令')
-    assert.deepEqual(calls[1], ['add', 'vercel-labs/agent-skills', '--skill', 'demo', '--global', '--yes'])
+    assert.deepEqual(calls[1], [
+      'add',
+      'vercel-labs/agent-skills',
+      '--skill',
+      'demo',
+      '--global',
+      '--yes',
+    ])
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -136,7 +169,13 @@ test('安装：非法请求与已安装都在调用 npx 之前拒绝', async () 
       return { ok: true }
     }
 
-    const noSource = await installGlobalSkill({ homes, canonicalAgentsHome: homes.agentsHome, source: '', name: 'x', runNpx: notCalled })
+    const noSource = await installGlobalSkill({
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      source: '',
+      name: 'x',
+      runNpx: notCalled,
+    })
     assert.equal(noSource.code, 'invalid-source')
     const dashSource = await installGlobalSkill({
       homes,
@@ -154,7 +193,12 @@ test('安装：非法请求与已安装都在调用 npx 之前拒绝', async () 
       runNpx: notCalled,
     })
     assert.equal(badName.code, 'invalid-skill-name')
-    const noRunner = await installGlobalSkill({ homes, canonicalAgentsHome: homes.agentsHome, source: 'a/b', name: 'x' })
+    const noRunner = await installGlobalSkill({
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      source: 'a/b',
+      name: 'x',
+    })
     assert.equal(noRunner.code, 'no-runner')
 
     // 两个全局根里的同名 skill 都算已安装，不再重复安装。
@@ -215,7 +259,10 @@ test('安装：npx 失败与「退出码 0 但文件不在」都按失败上报'
       name: 'x',
       runNpx: async () => ({ ok: false, message: 'exit 1', output: 'network down' }),
     })
-    assert.deepEqual({ ok: failed.ok, code: failed.code, output: failed.output }, { ok: false, code: 'npx-failed', output: 'network down' })
+    assert.deepEqual(
+      { ok: failed.ok, code: failed.code, output: failed.output },
+      { ok: false, code: 'npx-failed', output: 'network down' },
+    )
 
     const incomplete = await installGlobalSkill({
       homes,
@@ -236,7 +283,11 @@ test('安装：npx 失败与「退出码 0 但文件不在」都按失败上报'
 test('页面入口：只安装收藏过的来源，并要求 skill 在该仓库的列表里', async () => {
   const { root, homes } = await makeHomes()
   try {
-    await addSavedRepo({ homes, source: 'https://github.com/Vercel-Labs/agent-skills.git', note: '' })
+    await addSavedRepo({
+      homes,
+      source: 'https://github.com/Vercel-Labs/agent-skills.git',
+      note: '',
+    })
     const calls = []
     const listed = []
     const catalog = {
@@ -246,8 +297,18 @@ test('页面入口：只安装收藏过的来源，并要求 skill 在该仓库�
           ok: true,
           kind: 'npx-skills',
           skills: [
-            { name: 'Frontend Design', description: 'design', path: 'skills/frontend-design/SKILL.md', plugin: null },
-            { name: 'Next Best Practices', description: 'next', path: 'skills/next/SKILL.md', plugin: 'web' },
+            {
+              name: 'Frontend Design',
+              description: 'design',
+              path: 'skills/frontend-design/SKILL.md',
+              plugin: null,
+            },
+            {
+              name: 'Next Best Practices',
+              description: 'next',
+              path: 'skills/next/SKILL.md',
+              plugin: 'web',
+            },
           ],
         }
       },
@@ -268,7 +329,16 @@ test('页面入口：只安装收藏过的来源，并要求 skill 在该仓库�
     )
     assert.deepEqual(listed, ['Vercel-Labs/agent-skills'], '宿主用收藏里的规范化来源读列表')
     assert.deepEqual(calls, [
-      ['add', 'Vercel-Labs/agent-skills', '--skill', 'Next Best Practices', '--global', '--yes', '-a', 'universal'],
+      [
+        'add',
+        'Vercel-Labs/agent-skills',
+        '--skill',
+        'Next Best Practices',
+        '--global',
+        '--yes',
+        '-a',
+        'universal',
+      ],
     ])
 
     const notSaved = await installSavedSkill({
@@ -323,12 +393,19 @@ test('页面入口：仓库读取失败原样带回，收藏文件损坏时拒�
     const rateLimited = await installSavedSkill({
       homes,
       canonicalAgentsHome: homes.agentsHome,
-      catalog: { async listSkills() { return { ok: false, code: 'rate-limited', message: 'slow down' } } },
+      catalog: {
+        async listSkills() {
+          return { ok: false, code: 'rate-limited', message: 'slow down' }
+        },
+      },
       source: 'owner/repo',
       skillPath: 'skills/x/SKILL.md',
       runNpx: async () => ({ ok: true }),
     })
-    assert.deepEqual({ code: rateLimited.code, message: rateLimited.message }, { code: 'rate-limited', message: 'slow down' })
+    assert.deepEqual(
+      { code: rateLimited.code, message: rateLimited.message },
+      { code: 'rate-limited', message: 'slow down' },
+    )
 
     const noCatalog = await installSavedSkill({
       homes,
@@ -344,7 +421,11 @@ test('页面入口：仓库读取失败原样带回，收藏文件损坏时拒�
     const corrupt = await installSavedSkill({
       homes,
       canonicalAgentsHome: homes.agentsHome,
-      catalog: { async listSkills() { return { ok: true, skills: [] } } },
+      catalog: {
+        async listSkills() {
+          return { ok: true, skills: [] }
+        },
+      },
       source: 'owner/repo',
       skillPath: 'skills/x/SKILL.md',
       runNpx: async () => ({ ok: true }),

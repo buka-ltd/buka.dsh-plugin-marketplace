@@ -1,7 +1,7 @@
 /**
  * `POST /buka-robots/rename` 的路由级单测。
  *
- * `lib/index.js` 顶层 import 了 DSH 运行时包（`@deepseek-ai/dsh-tools` 与
+ * `src/index.ts` 顶层 import 了 DSH 运行时包（`@deepseek-ai/dsh-tools` 与
  * `@deepseek-ai/schemastery`），仓库里没有这些依赖。这里用 `module.registerHooks`
  * 把两个包替换成最小桩，再用假的 `webServer` / `connection` 注册路由，直接调用
  * 改名 handler 检查 HTTP 状态、响应字段与错误码映射——不启动 DSH、不联网。
@@ -116,7 +116,8 @@ async function makeHarness() {
     },
     get(name) {
       if (name === 'sessions') return { get: (id) => sessions.get(id) }
-      if (name === 'agentPresets') return { presetForSession: (session) => presets.get(session.id) ?? null }
+      if (name === 'agentPresets')
+        return { presetForSession: (session) => presets.get(session.id) ?? null }
       return undefined
     },
     inject(deps, callback) {
@@ -127,7 +128,9 @@ async function makeHarness() {
     logger,
   }
 
-  const { apply } = await import(`${pathToFileURL(path.resolve('plugins/robots/lib/index.js')).href}`)
+  const { apply } = await import(
+    `${pathToFileURL(path.resolve('plugins/robots/src/index.ts')).href}`
+  )
   apply(ctx, { robotsDir, builderPresets: ['robot-builder'], seedPresets: false })
 
   const entry = registeredTools.find((item) => item.tool.name === 'buka_robot_build')

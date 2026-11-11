@@ -12,9 +12,14 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { buildRunGraph, buildTemplateGraph, layoutRunGraph } from '../plugins/workflows/lib/graph.js'
+import {
+  buildRunGraph,
+  buildTemplateGraph,
+  layoutRunGraph,
+} from '../plugins/workflows/src/graph.ts'
+import { WORKFLOW_TEMPLATES } from '../plugins/workflows/src/templates.ts'
 
-const CLIENT_PATH = path.resolve('plugins/workflows/client.js')
+const CLIENT_PATH = path.resolve('plugins/workflows/lib/client.js')
 
 /**
  * 手工构造落盘的定义快照（不经过 definition.js 校验）。
@@ -32,7 +37,10 @@ function definitionSnapshot(raw) {
   return {
     plan: {
       goal: typeof raw?.goal === 'string' ? raw.goal : '',
-      start: typeof raw?.start === 'string' && raw.start !== '' ? raw.start : (startNode?.id ?? ids[0] ?? ''),
+      start:
+        typeof raw?.start === 'string' && raw.start !== ''
+          ? raw.start
+          : (startNode?.id ?? ids[0] ?? ''),
       maxSteps: Number.isInteger(raw?.maxSteps) ? raw.maxSteps : 64,
       nodes: Object.fromEntries(nodes.map((node) => [node.id, node])),
       order: ids,
@@ -196,7 +204,8 @@ async function loadClient() {
     head: { appendChild() {} },
   }
   try {
-    const url = `${pathToFileURL(CLIENT_PATH).href}?smoke=${(loadSequence += 1)}`
+    loadSequence += 1
+    const url = `${pathToFileURL(CLIENT_PATH).href}?smoke=${loadSequence}`
     await import(url)
     assert.ok(clientModule, 'client module should register through window.__ModuleLoader__')
     clientModule.apply({
@@ -257,11 +266,24 @@ function fixture() {
         title: '发布确认',
         detail: '是否同意发布？',
         next: [
-          { to: 'publish', name: 'approve', label: '批准并发布', prompt: '执行发布' },
+          {
+            to: 'publish',
+            name: 'approve',
+            label: '批准并发布',
+            prompt: '执行发布',
+            description: '把改动发布到生产环境',
+            tone: 'success',
+          },
           { to: 'revise', name: 'revise', label: '返回修改' },
         ],
         questions: [
-          { id: 'notes', header: '修改意见', question: '哪里需要改？', multiSelect: false, options: [] },
+          {
+            id: 'notes',
+            header: '修改意见',
+            question: '哪里需要改？',
+            multiSelect: false,
+            options: [],
+          },
         ],
       },
       {
@@ -329,6 +351,7 @@ function fixture() {
         sessionId: 'session-1',
         text: 'published the release',
         data: { ok: true },
+        attachments: [{ index: 0, name: 'report.md', bytes: 12, description: 'report' }],
       },
     ],
     result: { status: 'completed', lastNode: 'done' },
@@ -349,6 +372,7 @@ function fixture() {
         prompt: '执行发布（渲染后）',
         text: 'published the release',
         structured: { ok: true },
+        attachments: [{ index: 0, name: 'report.md', bytes: 12, description: 'report' }],
       },
     ],
   }
@@ -366,8 +390,16 @@ function findCapsule(tree, label) {
   walk(tree, (node) => {
     if (found !== null) return
     const className = node.props?.className
-    if (typeof className !== 'string' || !className.split(/\s+/).includes('buka-workflows-capsule')) return
-    if ((node.children ?? []).some((child) => child === label)) found = node
+    if (typeof className !== 'string' || !className.split(/\s+/).includes('buka-workflows-capsule'))
+      return
+    /** @type {string[]} */
+    const texts = []
+    walk(node, (child) => {
+      for (const value of child.children ?? []) {
+        if (typeof value === 'string' || typeof value === 'number') texts.push(String(value))
+      }
+    })
+    if (texts.includes(label)) found = node
   })
   return found
 }
@@ -515,7 +547,11 @@ function startFixture() {
     goal: '开发—测试循环',
     maxSteps: 12,
     nodes: [
-      { id: 'start', type: 'start', next: [{ to: 'dev', name: '开始开发', prompt: '按需求实现导出功能。' }] },
+      {
+        id: 'start',
+        type: 'start',
+        next: [{ to: 'dev', name: '开始开发', prompt: '按需求实现导出功能。' }],
+      },
       {
         id: 'dev',
         type: 'robot',
@@ -600,14 +636,37 @@ function legacyFixture() {
     goal: '回看旧记录',
     start: 'check',
     nodes: [
-      { id: 'check', type: 'robot', robot: 'reviewer', summary: '检查旧稿', prompt: '定义里的检查提示', next: 'done' },
+      {
+        id: 'check',
+        type: 'robot',
+        robot: 'reviewer',
+        summary: '检查旧稿',
+        prompt: '定义里的检查提示',
+        next: 'done',
+      },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   }
   const definition = definitionSnapshot(raw)
   const steps = [
-    { seq: 1, nodeId: 'check', visit: 1, sessionId: 'session-old-1', startedAt: 1, finishedAt: 5, text: '旧输出 1' },
-    { seq: 2, nodeId: 'check', visit: 2, sessionId: 'session-old-2', startedAt: 10, finishedAt: 15, text: '旧输出 2' },
+    {
+      seq: 1,
+      nodeId: 'check',
+      visit: 1,
+      sessionId: 'session-old-1',
+      startedAt: 1,
+      finishedAt: 5,
+      text: '旧输出 1',
+    },
+    {
+      seq: 2,
+      nodeId: 'check',
+      visit: 2,
+      sessionId: 'session-old-2',
+      startedAt: 10,
+      finishedAt: 15,
+      text: '旧输出 2',
+    },
   ].map((step) => ({
     ...step,
     type: 'robot',
@@ -641,7 +700,17 @@ function legacyFixture() {
         firstNodeId: 'check',
         lastNodeId: 'check',
         visits: 1,
-        entries: [{ nodeId: 'check', visit: 2, seq: 2, sessionId: 'session-old-2', at: 10, resumed: true, compacted: true }],
+        entries: [
+          {
+            nodeId: 'check',
+            visit: 2,
+            seq: 2,
+            sessionId: 'session-old-2',
+            at: 10,
+            resumed: true,
+            compacted: true,
+          },
+        ],
       },
     ],
     steps,
@@ -675,7 +744,12 @@ function detailStates(data, selectedNodeId, executionIndex = null) {
     data.run.runId,
     {
       status: 'ready',
-      data: { run: data.run, definition: data.definition, nodeResults: data.nodeResults, graph: data.graph },
+      data: {
+        run: data.run,
+        definition: data.definition,
+        nodeResults: data.nodeResults,
+        graph: data.graph,
+      },
       error: null,
     },
     0,
@@ -685,16 +759,81 @@ function detailStates(data, selectedNodeId, executionIndex = null) {
   ]
 }
 
-test('client: the vertical graph renders capsules, rails, dots and the legend', async () => {
+/**
+ * 详情页 + 页面后半段的默认 state（第 8–18 个 hook）；末尾接附件抽屉的两个
+ * state（第 19、20 个：attachmentView / attachmentPreview）与连线抽屉的
+ * selectedEdgeKey（第 21 个）。
+ *
+ * @param {{ run: Record<string, any>, definition: Record<string, any>, graph: Record<string, any>, nodeResults: Array<Record<string, any>> }} data
+ * @param {string | null} selectedNodeId
+ * @param {Array<any>} [attachments] 抽屉的两个 state
+ * @param {number | null} [executionIndex]
+ * @param {string | null} [edgeKey] 连线配置抽屉里选中的边
+ * @returns {Array<any>}
+ */
+function pageStates(data, selectedNodeId, attachments = [], executionIndex = null, edgeKey = null) {
+  return [
+    ...detailStates(data, selectedNodeId, executionIndex),
+    null, // edgeTip
+    false, // showArchived
+    false, // settingsOpen
+    null, // settingsDraft
+    false, // settingsLoading
+    false, // settingsSaving
+    null, // settingsError
+    'runs', // view
+    { status: 'ready', items: [], error: null }, // templates
+    null, // selectedTemplateId
+    null, // selectedTemplateNodeId
+    attachments[0] ?? null, // attachmentView
+    attachments[1] ?? null, // attachmentPreview
+    edgeKey, // selectedEdgeKey
+  ]
+}
+
+/**
+ * 抽屉里打开的那个附件；与 fixture 里 publish 节点的附件一致。
+ *
+ * @param {{ run: Record<string, any> }} data
+ * @returns {Record<string, any>}
+ */
+function attachmentViewer(data) {
+  return {
+    runId: data.run.runId,
+    seq: 2,
+    nodeId: 'publish',
+    name: 'report.md',
+    bytes: 12,
+    description: 'report',
+  }
+}
+
+test('client: the layered graph renders capsules, port dots, clickable edges and the legend', async () => {
   const client = await loadClient()
   const data = fixture()
   const tree = client.render(detailStates(data, 'publish'))
   const { classes, classLists, texts, tags, paths } = collect(tree)
 
-  assert.ok(classes.includes('buka-workflows-split'))
-  assert.equal(classes.filter((name) => name === 'buka-workflows-capsule').length, data.graph.nodes.length)
-  assert.equal(classes.filter((name) => name === 'buka-workflows-vgraphDot').length, data.graph.nodes.length)
-  assert.equal(classes.filter((name) => name === 'buka-workflows-edge').length, data.graph.edges.length)
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-capsule').length,
+    data.graph.nodes.length,
+  )
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-vgraphNode').length,
+    data.graph.nodes.length,
+  )
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-edgeHit').length,
+    data.graph.edges.length,
+  )
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-vgraphDot').length,
+    data.graph.nodes.length,
+  )
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-edge').length,
+    data.graph.edges.length,
+  )
   const traversedEdges = classLists.filter(
     (list) => list.includes('buka-workflows-edge') && list.includes('is-traversed'),
   )
@@ -702,13 +841,12 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   const footer = findByClass(tree, 'buka-workflows-footer')
   assert.ok(footer, 'the legend lives in the footer')
   assert.ok(collect(footer).classes.includes('buka-workflows-legend'))
-  assert.equal(
-    collect(footer).classes.includes('buka-workflows-hint'),
-    false,
-    'the footer has no explanatory copy below the legend',
+  assert.ok(
+    collect(footer).texts.includes('graphInteractHint'),
+    'the footer explains that nodes and edges can be clicked',
   )
   const graphPane = findByClass(tree, 'buka-workflows-graphPane')
-  assert.ok(graphPane, 'the graph lives in its own content-sized column')
+  assert.ok(graphPane, 'the graph occupies the page body')
   assert.ok(!collect(graphPane).classes.includes('buka-workflows-legend'))
   assert.ok(tags.has('circle'))
   assert.ok(paths.length >= data.graph.edges.length)
@@ -721,15 +859,22 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   // 用户介入节点有自己的胶囊样式，图例同时列出它；批准 / 拒绝的连线样式已经消失。
   const userCapsule = findCapsule(tree, '发布确认')
   assert.ok(userCapsule, 'the user node capsule shows its title')
-  assert.ok(userCapsule.props.className.split(/\s+/).includes('is-user'), 'the user capsule uses its own type style')
+  assert.ok(
+    userCapsule.props.className.split(/\s+/).includes('is-user'),
+    'the user capsule uses its own type style',
+  )
   const footerLists = collect(footer).classLists
   assert.ok(
-    footerLists.some((list) => list.includes('buka-workflows-legendCapsule') && list.includes('is-user')),
+    footerLists.some(
+      (list) => list.includes('buka-workflows-legendCapsule') && list.includes('is-user'),
+    ),
     'the legend lists the user node type',
   )
   assert.equal(
     footerLists.some(
-      (list) => list.includes('buka-workflows-legendLine') && (list.includes('is-approve') || list.includes('is-reject')),
+      (list) =>
+        list.includes('buka-workflows-legendLine') &&
+        (list.includes('is-approve') || list.includes('is-reject')),
     ),
     false,
     'the edge legend only has traversed / pending',
@@ -748,12 +893,16 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   assert.match(css, /\.buka-workflows-capsule\.is-user\{[^}]*state-warn-primary/u)
   assert.doesNotMatch(css, /is-gate/u, 'the gate styles are gone')
   assert.doesNotMatch(css, /is-approve|is-reject/u, 'approved / rejected edge styles are gone')
-  // 右侧默认展示最近执行过的节点，即 publish 的交付物。
+  // 选中的节点在右侧抽屉里展示，内容和原来的右侧面板一致。
+  assert.ok(classes.includes('buka-workflows-drawer'))
   assert.ok(classes.includes('buka-workflows-inspector'))
   assert.ok(texts.includes('published the release'))
   assert.ok(texts.includes('executionOutput'), 'the deliverable lives in the execution tab')
   assert.ok(texts.includes('executionInput'))
-  assert.ok(texts.includes('执行发布（渲染后）'), 'the tab shows the rendered prompt of that execution')
+  assert.ok(
+    texts.includes('执行发布（渲染后）'),
+    'the tab shows the rendered prompt of that execution',
+  )
   // 步骤概要就是节点标题，节点 id 只是标题旁边的代码小标签。
   const title = findByClass(tree, 'buka-workflows-inspectorTitle')
   assert.ok(title, 'the inspector has a title')
@@ -763,14 +912,33 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
     false,
     'the node id is not used as the title',
   )
-  assert.ok(findCapsule(tree, '发布 v1.2 的说明'), 'the capsule shows the creator-written step summary')
+  assert.ok(
+    findCapsule(tree, '发布 v1.2 的说明'),
+    'the capsule shows the creator-written step summary',
+  )
   assert.ok(texts.includes('publish'), 'the node id stays visible as a small code label')
   assert.ok(texts.includes('nodeExecutor'), 'the executor is labelled')
+  assert.equal(
+    classes.includes('buka-workflows-split'),
+    false,
+    'the detail page no longer uses the old two-column split',
+  )
+  assert.match(css, /\.buka-workflows-graphPane\{[^}]*width:max-content/u)
+  assert.match(css, /\.buka-workflows-vgraphNode\{position:absolute/u)
+  assert.match(css, /\.buka-workflows-edgeHit\{[^}]*cursor:pointer/u)
+  assert.match(css, /\.buka-workflows-edge\.is-selected\{[^}]*brand-primary/u)
+  assert.match(css, /\.buka-workflows-nodeDrawer \.buka-workflows-inspector\{[^}]*border:0/u)
+  assert.doesNotMatch(css, /\.buka-workflows-split\{/u)
+  assert.doesNotMatch(css, /\.buka-workflows-detailPane\{/u)
   // 节点详情不再解释「结构化结果」这类实现细节。
   assert.equal(texts.includes('nodeReport'), false, 'no structured-result meta row')
   assert.equal(texts.includes('nodeReportHint'), false, 'no structured-result explanation')
   // 出口已经画在图上，详情里不再重复一份出口说明。
-  assert.equal(texts.includes('nodeTransitions'), false, 'the graph is the only place that shows exits')
+  assert.equal(
+    texts.includes('nodeTransitions'),
+    false,
+    'the graph is the only place that shows exits',
+  )
   // 详情页只展示图，没有列表卡片与旧的时间线页签。
   assert.ok(!classes.includes('buka-workflows-card'))
   assert.ok(!classes.includes('buka-workflows-timeline'))
@@ -807,21 +975,32 @@ test('client: edge tone paints success / failure lines and survives hover', asyn
   const hoveredLists = collect(hovered).classLists
   assert.ok(
     hoveredLists.some(
-      (list) => list.includes('buka-workflows-edge') && list.includes('is-hovered') && list.includes('is-failure'),
+      (list) =>
+        list.includes('buka-workflows-edge') &&
+        list.includes('is-hovered') &&
+        list.includes('is-failure'),
     ),
     'the hovered failure edge keeps its tone class',
   )
   assert.ok(
     hoveredLists.some(
       (list) =>
-        list.includes('buka-workflows-edgeArrow') && list.includes('is-hovered') && list.includes('is-failure'),
+        list.includes('buka-workflows-edgeArrow') &&
+        list.includes('is-hovered') &&
+        list.includes('is-failure'),
     ),
     'the hovered arrow keeps its tone class',
   )
 
   const css = client.css()
-  assert.match(css, /\.buka-workflows-edge\.is-success\{stroke:var\(--dsw-alias-state-success-primary\)\}/u)
-  assert.match(css, /\.buka-workflows-edge\.is-failure\{stroke:var\(--dsw-alias-state-error-primary\)\}/u)
+  assert.match(
+    css,
+    /\.buka-workflows-edge\.is-success\{stroke:var\(--dsw-alias-state-success-primary\)\}/u,
+  )
+  assert.match(
+    css,
+    /\.buka-workflows-edge\.is-failure\{stroke:var\(--dsw-alias-state-error-primary\)\}/u,
+  )
   assert.match(
     css,
     /\.buka-workflows-edge\.is-success\.is-hovered\{stroke:var\(--dsw-alias-state-success-primary\)\}/u,
@@ -833,12 +1012,31 @@ test('client: edge tone paints success / failure lines and survives hover', asyn
   )
 })
 
-test('client: clicking a capsule switches the right-hand panel', async () => {
+test('client: an older host graph without positions still renders its nodes', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const { positions, ...rest } = data.graph
+  const rows = data.graph.nodes.map((node, index) => ({ id: node.id, index, y: 28 + index * 68 }))
+  const legacyGraph = { ...rest, rows, dotX: 14, width: 80, height: rows.length * 68 }
+  const tree = client.render(detailStates({ ...data, graph: legacyGraph }, null))
+  const { classes } = collect(tree)
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-capsule').length,
+    data.graph.nodes.length,
+    'every capsule still renders against the old rows layout',
+  )
+  const node = findByClass(tree, 'buka-workflows-vgraphNode')
+  assert.ok(node)
+  assert.equal(node.props.style.left, '80px', 'the capsule sits to the right of the old rail')
+})
+
+test('client: clicking a capsule opens the node drawer and closing it clears the selection', async () => {
   const client = await loadClient()
   const data = fixture()
   const tree = client.render(detailStates(data, 'revise'))
   const { classes, texts } = collect(tree)
 
+  assert.ok(classes.includes('buka-workflows-drawer'), 'the node drawer is open')
   assert.ok(classes.includes('buka-workflows-inspector'))
   assert.ok(texts.includes('revise'))
   assert.ok(texts.includes('writer'), 'the robot executor is labelled')
@@ -847,6 +1045,24 @@ test('client: clicking a capsule switches the right-hand panel', async () => {
   const selectedCapsules = collect(tree).classLists.filter((list) => list.includes('is-selected'))
   assert.equal(selectedCapsules.length, 1)
   assert.ok(!texts.includes('published the release'))
+
+  // 没有选中时点胶囊写入节点 id 并清掉连线选择；关闭按钮清空节点选择。
+  const closedTree = client.render(detailStates(data, null))
+  const capsule = findCapsule(closedTree, 'writer')
+  assert.ok(capsule)
+  capsule.props.onClick()
+  const opened = client.updates()
+  assert.ok(opened.includes('revise'), 'clicking a capsule selects that node')
+  assert.ok(opened.includes(null), 'clicking a capsule clears the edge selection')
+
+  const close = findByClass(tree, 'buka-workflows-drawerClose')
+  assert.ok(close, 'the node drawer has a close button')
+  assert.equal(close.props['aria-label'], 'close')
+  close.props.onClick()
+  assert.ok(
+    client.updates().slice(-2).includes(null),
+    'closing the drawer clears the node and execution selection',
+  )
 })
 
 test('client: the selected node shows its session and executions', async () => {
@@ -859,7 +1075,11 @@ test('client: the selected node shows its session and executions', async () => {
   assert.ok(texts.includes('openSession'), 'the node session can be opened')
   assert.ok(texts.includes('published the release'))
   assert.ok(texts.includes('session-1'))
-  assert.equal(texts.filter((text) => text === 'session-1').length, 1, 'the node session is shown once')
+  assert.equal(
+    texts.filter((text) => text === 'session-1').length,
+    1,
+    'the node session is shown once',
+  )
   // 已结束的节点用 durationMs（publish 执行 10ms）。
   assert.ok(texts.includes('10ms'), 'a finished node keeps its recorded duration')
 })
@@ -878,7 +1098,11 @@ test('client: a repeated robot execution shows the shared session and compaction
   const tree = client.render(detailStates(data, 'dev', 1))
   const { texts } = collect(tree)
   assert.ok(texts.includes('nodeSession'), 'the robot session is labelled on the node')
-  assert.equal(texts.includes('nodeSessionHint'), false, 'the page does not explain the session mechanism')
+  assert.equal(
+    texts.includes('nodeSessionHint'),
+    false,
+    'the page does not explain the session mechanism',
+  )
   assert.equal(
     texts.filter((text) => text === devSession).length,
     1,
@@ -896,7 +1120,9 @@ test('client: a looped node shows its one robot session once, not per execution'
   const data = loopFixture()
   const tree = client.render(detailStates(data, 'check', 2))
   const { classLists, texts } = collect(tree)
-  const reviewerSession = data.run.sessions.find((session) => session.robot === 'reviewer').sessionId
+  const reviewerSession = data.run.sessions.find(
+    (session) => session.robot === 'reviewer',
+  ).sessionId
 
   // check 进入了三次，但一个机器人一次运行只有一个会话：节点级只出现一次。
   const tabs = classLists.filter((list) => list.includes('buka-workflows-tab'))
@@ -907,8 +1133,16 @@ test('client: a looped node shows its one robot session once, not per execution'
     1,
     'the shared session id is rendered once for the whole node',
   )
-  assert.equal(texts.filter((text) => text === 'openSession').length, 1, 'one open-session action for the node')
-  assert.equal(texts.includes('nodeSessionsLegacy'), false, 'a normal run is not labelled as a legacy record')
+  assert.equal(
+    texts.filter((text) => text === 'openSession').length,
+    1,
+    'one open-session action for the node',
+  )
+  assert.equal(
+    texts.includes('nodeSessionsLegacy'),
+    false,
+    'a normal run is not labelled as a legacy record',
+  )
   // 每次执行自己的输入仍然各在各自的 Tab 里。
   assert.ok(texts.includes('rendered prompt for check #3'))
 })
@@ -920,13 +1154,24 @@ test('client: an old record with several sessions lists each one and keeps the d
   const { texts } = collect(tree)
 
   // 节点级列出旧记录里的两个会话，每个都能打开，并说明这是旧记录。
-  assert.ok(texts.includes('nodeSessionsLegacy'), 'several sessions are explained as a legacy record')
+  assert.ok(
+    texts.includes('nodeSessionsLegacy'),
+    'several sessions are explained as a legacy record',
+  )
   assert.ok(texts.includes('session-old-1'))
   assert.ok(texts.includes('session-old-2'))
-  assert.equal(texts.filter((text) => text === 'openSession').length, 2, 'each legacy session has an open action')
+  assert.equal(
+    texts.filter((text) => text === 'openSession').length,
+    2,
+    'each legacy session has an open action',
+  )
   // 第二次进入没有记录输入，不能拿定义里的 prompt 冒充这一次。
   assert.ok(texts.includes('executionInputMissing'), 'the missing per-execution input is explained')
-  assert.equal(texts.includes('定义里的检查提示'), false, 'the definition prompt is not reused for visit 2')
+  assert.equal(
+    texts.includes('定义里的检查提示'),
+    false,
+    'the definition prompt is not reused for visit 2',
+  )
   assert.ok(texts.includes('旧输出 2'))
 
   // 第一次进入没有 per-execution prompt 时，仍可以回退到定义里的 prompt（旧格式兼容）。
@@ -956,27 +1201,44 @@ test('client: a running node shows recovering and live-duration state, and step 
     },
     steps: data.run.steps.map((step) =>
       step.seq === 2
-        ? { ...step, status: 'running', finishedAt: null, recovered: true, recoveryAttempts: 2, timedOut: true }
+        ? {
+            ...step,
+            status: 'running',
+            finishedAt: null,
+            recovered: true,
+            recoveryAttempts: 2,
+            timedOut: true,
+          }
         : step,
     ),
   }
   const model = buildRunGraph({ run: runningRun, definition: data.definition })
   assert.ok(model)
   const graph = { ...model, ...layoutRunGraph(model) }
-  const tree = client.render(
-    detailStates({ ...data, run: runningRun, graph }, 'publish'),
-    (key) => (key === 'sessionRecovering' ? '恢复中（第 {n} 次）' : key),
+  const tree = client.render(detailStates({ ...data, run: runningRun, graph }, 'publish'), (key) =>
+    key === 'sessionRecovering' ? '恢复中（第 {n} 次）' : key,
   )
   const { texts } = collect(tree)
 
   assert.ok(texts.includes('恢复中（第 2 次）'), 'the recovering tag carries the attempt number')
-  assert.ok(texts.some((text) => /^5\.\ds$/u.test(text)), 'a running node shows a live duration')
-  assert.equal(texts.includes('10ms'), false, 'the live node does not fall back to the finished duration')
+  assert.ok(
+    texts.some((text) => /^5\.\ds$/u.test(text)),
+    'a running node shows a live duration',
+  )
+  assert.equal(
+    texts.includes('10ms'),
+    false,
+    'the live node does not fall back to the finished duration',
+  )
   assert.ok(texts.includes('sessionRecovered'), 'a recovered execution is tagged')
   assert.ok(texts.includes('executionTimedOut'), 'a timed-out execution is tagged')
   // 运行中的当前会话仍然是节点级唯一的那一次。
   assert.ok(texts.includes('sessionLive'), 'the live session is marked')
-  assert.equal(texts.filter((text) => text === 'session-1').length, 1, 'the live session is shown once')
+  assert.equal(
+    texts.filter((text) => text === 'session-1').length,
+    1,
+    'the live session is shown once',
+  )
 })
 
 test('client: an aborted execution shows the abort tag and its reason', async () => {
@@ -1016,17 +1278,38 @@ test('client: an aborted execution shows the abort tag and its reason', async ()
   assert.equal(texts.includes('routeLabel: done'), false, 'an aborted execution has no route')
 })
 
-test('client: entering a run focuses the running node, or done when completed', async () => {
+test('client: entering a run opens no drawer until a node is clicked', async () => {
   const client = await loadClient()
 
-  // 已完成：默认打开终止节点，直接看到最终交付物。
+  // 已完成：进入详情只看图，不自动打开终止节点。
   const doneData = fixture()
   const doneTree = client.render(detailStates(doneData, null))
-  const doneTexts = collect(doneTree).texts
-  assert.ok(doneTexts.includes('finalDeliverable'), 'a completed run opens on its final deliverable')
-  assert.ok(doneTexts.includes('done'), 'the focused node is the end node')
+  const doneCollected = collect(doneTree)
+  assert.equal(doneCollected.classes.includes('buka-workflows-drawer'), false, 'no drawer on entry')
+  assert.equal(
+    doneCollected.classes.includes('buka-workflows-inspector'),
+    false,
+    'no node panel on entry',
+  )
+  assert.equal(
+    doneCollected.texts.includes('finalDeliverable'),
+    false,
+    'the final output is not auto-opened',
+  )
+  const endCapsule = findCapsule(doneTree, 'done')
+  assert.ok(endCapsule, 'the end node is still visible on the graph')
+  assert.equal(
+    endCapsule.props.className.includes('is-selected'),
+    false,
+    'nothing is selected by default',
+  )
 
-  // 运行中：默认打开正在执行的那个节点，而不是结束节点。
+  // 点击终止节点后，抽屉里才展示最终交付物。
+  const selected = collect(client.render(detailStates(doneData, 'done')))
+  assert.ok(selected.classes.includes('buka-workflows-drawer'), 'clicking a node opens the drawer')
+  assert.ok(selected.texts.includes('finalDeliverable'), 'the end node shows its final deliverable')
+
+  // 运行中：同样不自动打开，但正在执行的胶囊仍带 is-running。
   const runningData = fixture()
   const runningRun = {
     ...runningData.run,
@@ -1053,9 +1336,19 @@ test('client: entering a run focuses the running node, or done when completed', 
       null,
     ),
   )
-  const runningTexts = collect(runningTree).texts
-  assert.ok(runningTexts.includes('published the release'), 'the running node is focused')
-  assert.equal(runningTexts.includes('finalDeliverable'), false, 'the end node is not focused while running')
+  const runningCollected = collect(runningTree)
+  assert.equal(
+    runningCollected.classes.includes('buka-workflows-drawer'),
+    false,
+    'the running node is not auto-opened',
+  )
+  assert.equal(runningCollected.texts.includes('published the release'), false)
+  const runningCapsule = findCapsule(runningTree, '发布 v1.2 的说明')
+  assert.ok(runningCapsule, 'the running node keeps its capsule')
+  assert.ok(
+    runningCapsule.props.className.includes('is-running'),
+    'the running state stays visible without a drawer',
+  )
 })
 
 test('client: a pending question shows a warning notice with an open-session action', async () => {
@@ -1074,7 +1367,12 @@ test('client: a pending question shows a warning notice with an open-session act
       sessionId: 'session-1',
       askedAt: 1_700_000_000_000,
       questions: [
-        { id: 'q1', header: '发布范围', question: '要发布到生产环境吗？', options: [{ label: '是' }, { label: '否' }] },
+        {
+          id: 'q1',
+          header: '发布范围',
+          question: '要发布到生产环境吗？',
+          options: [{ label: '是' }, { label: '否' }],
+        },
         { id: 'q2', header: '其它', question: '还有别的吗？', options: [] },
       ],
     },
@@ -1082,7 +1380,10 @@ test('client: a pending question shows a warning notice with an open-session act
   const tree = client.render(detailStates(data, 'publish'))
   const { classes, texts } = collect(tree)
 
-  assert.ok(classes.includes('buka-workflows-interactionNotice'), 'the notice is rendered above the graph')
+  assert.ok(
+    classes.includes('buka-workflows-interactionNotice'),
+    'the notice is rendered above the graph',
+  )
   assert.ok(texts.includes('waitingForAnswer'))
   assert.ok(texts.includes('要发布到生产环境吗？'), 'the first question is shown')
   assert.equal(texts.includes('还有别的吗？'), false, 'only the first question is previewed')
@@ -1107,7 +1408,10 @@ test('client: a pending question shows a warning notice with an open-session act
 
   const css = client.css()
   assert.match(css, /\.buka-workflows-interactionNotice\{[^}]*border[^}]*state-warn-primary/u)
-  assert.match(css, /\.buka-workflows-interactionNotice\{[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-warn-primary\)/u)
+  assert.match(
+    css,
+    /\.buka-workflows-interactionNotice\{[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-warn-primary\)/u,
+  )
   assert.match(css, /\.buka-workflows-interactionBody\{[^}]*white-space:pre-wrap/u)
 })
 
@@ -1136,7 +1440,11 @@ test('client: a pending approval names the tool and prefers the display reason',
 
   assert.ok(texts.includes('waitingForApproval shell'), 'the tool name joins the approval title')
   assert.ok(texts.includes('需要清掉旧的构建产物'), 'the display reason is preferred')
-  assert.equal(texts.includes('rm -rf dist'), false, 'the raw reason is hidden when a display reason exists')
+  assert.equal(
+    texts.includes('rm -rf dist'),
+    false,
+    'the raw reason is hidden when a display reason exists',
+  )
   assert.ok(texts.includes('openApprovalSession'))
   const openButton = findBy(tree, (node) => (node.children ?? []).includes('openApprovalSession'))
   assert.ok(openButton)
@@ -1182,7 +1490,13 @@ test('client: a run waiting at a user node shows the user notice above the graph
         { name: 'revise', label: '返回修改' },
       ],
       questions: [
-        { id: 'notes', header: '修改意见', question: '哪里需要改？', multiSelect: false, options: [] },
+        {
+          id: 'notes',
+          header: '修改意见',
+          question: '哪里需要改？',
+          multiSelect: false,
+          options: [],
+        },
       ],
       requestedAt: 1_700_000_000_000,
       sessionId: 'session-creator',
@@ -1200,11 +1514,17 @@ test('client: a run waiting at a user node shows the user notice above the graph
   const { classes, texts } = collect(tree)
 
   assert.ok(classes.includes('buka-workflows-userNotice'), 'the user notice has its own class')
-  assert.ok(classes.includes('buka-workflows-interactionNotice'), 'it reuses the warning notice styling')
+  assert.ok(
+    classes.includes('buka-workflows-interactionNotice'),
+    'it reuses the warning notice styling',
+  )
   assert.ok(classes.includes('buka-workflows-userChoiceList'))
   assert.ok(classes.includes('buka-workflows-userQuestionList'))
   assert.ok(texts.includes('userWaitingTitle'))
-  assert.ok(texts.includes('渲染后的等待说明'), 'the rendered detail is shown')
+  assert.ok(
+    texts.some((text) => text.includes('渲染后的等待说明')),
+    'the rendered detail is shown in the waiting notice',
+  )
   assert.ok(texts.includes('userChoice'))
   assert.ok(texts.includes('批准并发布'), 'every option label is listed')
   assert.ok(texts.includes('直接发布到生产环境'), 'option descriptions are shown')
@@ -1214,19 +1534,22 @@ test('client: a run waiting at a user node shows the user notice above the graph
   assert.ok(texts.includes('哪里需要改？'))
   assert.ok(texts.includes('userWaitingBody'), 'the notice explains where to answer')
   assert.ok(texts.includes('openSession'), 'the creator session can be opened')
-  // 默认聚焦等待中的用户节点。
-  const inspectorTitle = findByClass(tree, 'buka-workflows-inspectorTitle')
-  assert.ok(inspectorTitle)
-  assert.deepEqual(collect(inspectorTitle).texts, ['发布确认'], 'a waiting run focuses its user node')
-  // 节点详情行：等待中的渲染结果优先于定义快照里的模板。
-  assert.ok(texts.includes('userDetail'))
-  assert.ok(texts.includes('typeUser'))
+  // 进入详情不自动打开节点抽屉；点击等待中的用户节点后才展示节点详情。
+  assert.equal(findByClass(tree, 'buka-workflows-inspectorTitle'), null, 'no node panel auto-opens')
+  const selectedTree = client.render(detailStates(data, 'confirm'))
+  const selectedTexts = collect(selectedTree).texts
+  assert.ok(selectedTexts.includes('userDetail'))
+  assert.ok(selectedTexts.includes('typeUser'))
   assert.equal(
-    texts.filter((text) => text === '渲染后的等待说明').length,
+    selectedTexts.filter((text) => text === '渲染后的等待说明').length,
     1,
     'the node detail row shows the rendered detail once',
   )
-  assert.equal(texts.includes('是否同意发布？'), false, 'the unrendered template is not shown while waiting')
+  assert.equal(
+    selectedTexts.includes('是否同意发布？'),
+    false,
+    'the unrendered template is not shown while waiting',
+  )
 
   // 用户提示排在最前：机器人提问 / 审批提示排在它后面。
   data.run.pendingInteraction = {
@@ -1241,9 +1564,13 @@ test('client: a run waiting at a user node shows the user notice above the graph
   assert.ok(body)
   const first = String(body.children[1]?.props?.className ?? '')
   const second = String(body.children[2]?.props?.className ?? '')
-  assert.ok(first.includes('buka-workflows-userNotice'), 'the user notice sits above the robot interaction notice')
   assert.ok(
-    second.includes('buka-workflows-interactionNotice') && !second.includes('buka-workflows-userNotice'),
+    first.includes('buka-workflows-userNotice'),
+    'the user notice sits above the robot interaction notice',
+  )
+  assert.ok(
+    second.includes('buka-workflows-interactionNotice') &&
+      !second.includes('buka-workflows-userNotice'),
     'the robot interaction notice comes second',
   )
 
@@ -1255,21 +1582,32 @@ test('client: a run waiting at a user node shows the user notice above the graph
   const css = client.css()
   assert.match(css, /\.buka-workflows-userNotice\{[^}]*display:flex/u)
   assert.match(css, /\.buka-workflows-userChoiceList,\.buka-workflows-userQuestionList\{/u)
-  assert.match(css, /\.buka-workflows-userChoice,\.buka-workflows-userQuestion\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/u)
+  assert.match(
+    css,
+    /\.buka-workflows-userChoice,\.buka-workflows-userQuestion\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/u,
+  )
 })
 
 test('client: an execution shows the selected route as a small label', async () => {
   const client = await loadClient()
   const data = fixture()
-  data.run.steps = data.run.steps.map((step) => (step.seq === 2 ? { ...step, route: 'done', routeTo: 'done' } : step))
+  data.run.steps = data.run.steps.map((step) =>
+    step.seq === 2 ? { ...step, route: 'done', routeTo: 'done' } : step,
+  )
   const tree = client.render(detailStates(data, 'publish'))
   const { texts } = collect(tree)
 
   assert.ok(texts.includes('routeLabel: done'), 'the route name is shown next to the status')
   // 路由是标签，不是一份铺开的 JSON / key-value。
   assert.equal(texts.includes('routeTo'), false)
-  assert.equal(texts.some((text) => text.includes('"next"')), false)
-  assert.equal(texts.some((text) => text.includes('"to"')), false)
+  assert.equal(
+    texts.some((text) => text.includes('"next"')),
+    false,
+  )
+  assert.equal(
+    texts.some((text) => text.includes('"to"')),
+    false,
+  )
 })
 
 test('client: a user edge is labelled by the option text the user chose', async () => {
@@ -1288,7 +1626,8 @@ test('client: a user edge is labelled by the option text the user chose', async 
   const hits = []
   walk(client.render(detailStates(data, null)), (node) => {
     const className = node.props?.className
-    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit')) hits.push(node)
+    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit'))
+      hits.push(node)
   })
   const hoverable = data.graph.edges.filter((edge) => {
     const labels = Array.isArray(edge.labels) ? edge.labels.filter(Boolean) : []
@@ -1305,14 +1644,24 @@ test('client: a user edge is labelled by the option text the user chose', async 
   const userHit = hits[hoverable.indexOf(approve)]
   assert.ok(userHit, 'the user edge has a hit area')
   hover(userHit)
-  const userTip = client.updates().filter((update) => update !== null && typeof update === 'object').pop()
-  assert.equal(userTip.text, '批准并发布', 'the hover tip shows the option label, not the route key')
+  const userTip = client
+    .updates()
+    .filter((update) => update !== null && typeof update === 'object')
+    .pop()
+  assert.equal(
+    userTip.text,
+    '批准并发布',
+    'the hover tip shows the option label, not the route key',
+  )
 
   // 机器人边没有 labels，仍然退回路由名。
   const robotHit = hits[hoverable.indexOf(robotEdge)]
   assert.ok(robotHit)
   hover(robotHit)
-  const robotTip = client.updates().filter((update) => update !== null && typeof update === 'object').pop()
+  const robotTip = client
+    .updates()
+    .filter((update) => update !== null && typeof update === 'object')
+    .pop()
   assert.equal(robotTip.text, '已发布')
 })
 
@@ -1322,8 +1671,20 @@ test('client: the run list tags a run that is waiting for the user', async () =>
     {
       status: 'ready',
       runs: [
-        { runId: 'wf-wait', goal: 'waiting run', status: 'waiting', createdAt: 1, waitingForUser: true },
-        { runId: 'wf-live', goal: 'running run', status: 'running', createdAt: 2, waitingForUser: false },
+        {
+          runId: 'wf-wait',
+          goal: 'waiting run',
+          status: 'waiting',
+          createdAt: 1,
+          waitingForUser: true,
+        },
+        {
+          runId: 'wf-live',
+          goal: 'running run',
+          status: 'running',
+          createdAt: 2,
+          waitingForUser: false,
+        },
       ],
       archivedCount: 0,
       error: null,
@@ -1339,10 +1700,14 @@ test('client: the run list tags a run that is waiting for the user', async () =>
   const cards = []
   walk(tree, (node) => {
     const className = node.props?.className
-    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-card')) cards.push(node)
+    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-card'))
+      cards.push(node)
   })
   assert.equal(cards.length, 2)
-  assert.ok(collect(cards[0]).texts.includes('waitingForUser'), 'a run waiting for the user carries the tag')
+  assert.ok(
+    collect(cards[0]).texts.includes('waitingForUser'),
+    'a run waiting for the user carries the tag',
+  )
   assert.equal(collect(cards[1]).texts.includes('waitingForUser'), false, 'other runs do not')
 })
 
@@ -1386,16 +1751,14 @@ test('client: robot capsules and the inspector show the robot avatar', async () 
   assert.equal(capsuleAvatars.length, 3, 'every robot capsule carries an avatar')
   const inspectorAvatars = classes.filter((name) => name === 'buka-workflows-inspectorAvatar')
   assert.equal(inspectorAvatars.length, 1, 'the selected robot shows its avatar next to the title')
-  for (const emoji of ['🦉', '🦊', '🐼']) assert.ok(texts.includes(emoji), `avatar ${emoji} is rendered`)
+  for (const emoji of ['🦉', '🦊', '🐼'])
+    assert.ok(texts.includes(emoji), `avatar ${emoji} is rendered`)
   // 机器人头像在预设色的浅底圆片里：底色由预设色与主题背景混合，不写死成亮色。
   assert.match(client.css(), /\.buka-workflows-avatar\{[^}]*border-radius:999px/u)
 
   // 没有头像表（robots 插件没装）时图照常画，只是不带头像。
   const bare = client.render(detailStates(fixture(), null))
-  assert.equal(
-    collect(bare).classes.filter((name) => name === 'buka-workflows-avatar').length,
-    0,
-  )
+  assert.equal(collect(bare).classes.filter((name) => name === 'buka-workflows-avatar').length, 0)
 })
 
 test('client: an unknown avatar id renders no avatar instead of crashing', async () => {
@@ -1428,7 +1791,11 @@ test('client: a node the run did not reach is a gray dashed capsule', async () =
     /\.buka-workflows-capsule\.is-idle\{[^}]*color:var\(--dsw-alias-label-tertiary\)/u,
     'idle capsules use the tertiary (gray) label color',
   )
-  assert.match(css, /\.buka-workflows-capsule\.is-idle\{[^}]*border-style:dashed/u, 'idle capsules are dashed')
+  assert.match(
+    css,
+    /\.buka-workflows-capsule\.is-idle\{[^}]*border-style:dashed/u,
+    'idle capsules are dashed',
+  )
   assert.doesNotMatch(
     css,
     /\.buka-workflows-capsule\.is-idle\{[^}]*opacity:/u,
@@ -1466,7 +1833,16 @@ test('client: the start node is marked and an unreachable node explains why it n
     current: null,
     pendingUser: null,
     steps: [
-      { seq: 1, nodeId: 'a', type: 'robot', robot: 'worker', status: 'completed', stopReason: 'completed', startedAt: 1, finishedAt: 2 },
+      {
+        seq: 1,
+        nodeId: 'a',
+        type: 'robot',
+        robot: 'worker',
+        status: 'completed',
+        stopReason: 'completed',
+        startedAt: 1,
+        finishedAt: 2,
+      },
     ],
     result: { status: 'completed', lastNode: 'b' },
   }
@@ -1475,10 +1851,17 @@ test('client: the start node is marked and an unreachable node explains why it n
   const data = { run, definition, graph: { ...model, ...layoutRunGraph(model) }, nodeResults: [] }
 
   const startTree = client.render(detailStates(data, 'a'))
-  assert.ok(collect(startTree).texts.includes('nodeStart'), 'the declared start carries a Start tag')
+  assert.ok(
+    collect(startTree).texts.includes('nodeStart'),
+    'the declared start carries a Start tag',
+  )
 
   const otherTree = client.render(detailStates(data, 'b'))
-  assert.equal(collect(otherTree).texts.includes('nodeStart'), false, 'other nodes do not claim to be the start')
+  assert.equal(
+    collect(otherTree).texts.includes('nodeStart'),
+    false,
+    'other nodes do not claim to be the start',
+  )
 
   const orphanTree = client.render(detailStates(data, 'orphan'))
   const orphanTexts = collect(orphanTree).texts
@@ -1496,7 +1879,11 @@ test('client: an execution links to the execution it led to', async () => {
   assert.ok(texts.includes('executionNext'), 'the tab shows where the run went next')
   const nextTitle = findByClass(tree, 'buka-workflows-nextTitle')
   assert.ok(nextTitle, 'the next execution is rendered as a target')
-  assert.deepEqual(collect(nextTitle).texts, ['发布 v1.2 的说明'], 'the target is labelled by its step summary')
+  assert.deepEqual(
+    collect(nextTitle).texts,
+    ['发布 v1.2 的说明'],
+    'the target is labelled by its step summary',
+  )
   const nextVisit = findByClass(tree, 'buka-workflows-nextVisit')
   assert.ok(nextVisit)
   assert.deepEqual(collect(nextVisit).texts, ['#1'], 'the target execution number is shown')
@@ -1510,15 +1897,24 @@ test('client: an execution links to the execution it led to', async () => {
   const lastTitle = findByClass(lastTree, 'buka-workflows-nextTitle')
   assert.ok(lastTitle, 'the last execution links to the end node it reached')
   assert.deepEqual(collect(lastTitle).texts, ['done'])
-  assert.deepEqual(collect(findByClass(lastTree, 'buka-workflows-nextVisit')).texts, ['executionEnded'])
+  assert.deepEqual(collect(findByClass(lastTree, 'buka-workflows-nextVisit')).texts, [
+    'executionEnded',
+  ])
 
   // 运行在节点本身结束（例如被拒绝、失败）时，没有可指向的节点，只说明运行结束。
   const cut = fixture()
   cut.run.result = { status: 'rejected', lastNode: 'publish' }
   const cutTree = client.render(detailStates(cut, 'publish'))
   const cutTexts = collect(cutTree).texts
-  assert.ok(cutTexts.includes('executionNextEnded'), 'a run that stops on the node itself says it ended')
-  assert.equal(findByClass(cutTree, 'buka-workflows-nextLink'), null, 'there is no link in that case')
+  assert.ok(
+    cutTexts.includes('executionNextEnded'),
+    'a run that stops on the node itself says it ended',
+  )
+  assert.equal(
+    findByClass(cutTree, 'buka-workflows-nextLink'),
+    null,
+    'there is no link in that case',
+  )
 })
 
 test('client: an execution footer walks both backward and forward', async () => {
@@ -1582,7 +1978,10 @@ test('client: every execution gets its own tab with input and output', async () 
   // 默认打开最近一次执行，只渲染那一次的输入 / 输出。
   const active = tabs.filter((list) => list.includes('is-active'))
   assert.equal(active.length, 1)
-  assert.ok(texts.includes('rendered prompt for check #3'), 'the active tab shows that execution input')
+  assert.ok(
+    texts.includes('rendered prompt for check #3'),
+    'the active tab shows that execution input',
+  )
   assert.ok(!texts.includes('rendered prompt for check #1'), 'other executions stay collapsed')
   assert.ok(texts.includes('executionInput'))
   assert.ok(texts.includes('executionOutput'))
@@ -1601,7 +2000,11 @@ test('client: the output tab shows the deliverable content, not routing fields',
   assert.equal(texts.includes('nodeReport'), false, 'no structured-result label')
   assert.equal(texts.includes('ok'), false, 'routing fields are not rendered as key/value rows')
   assert.equal(texts.includes('true'), false)
-  assert.equal(texts.some((text) => text.includes('"ok":')), false, 'no raw JSON block')
+  assert.equal(
+    texts.some((text) => text.includes('"ok":')),
+    false,
+    'no raw JSON block',
+  )
   const panel = findByClass(tree, 'buka-workflows-tabPanel')
   assert.ok(panel)
   assert.equal(
@@ -1615,9 +2018,15 @@ test('client: the output tab shows the deliverable content, not routing fields',
   assert.ok(page)
   const body = findByClass(tree, 'buka-workflows-body')
   assert.ok(body)
-  assert.equal(collect(body).classes.includes('buka-workflows-footer'), false, 'the footer is not scrolling content')
+  assert.equal(
+    collect(body).classes.includes('buka-workflows-footer'),
+    false,
+    'the footer is not scrolling content',
+  )
   const directFooters = (page.children ?? []).filter(
-    (child) => typeof child?.props?.className === 'string' && child.props.className.includes('buka-workflows-footer'),
+    (child) =>
+      typeof child?.props?.className === 'string' &&
+      child.props.className.includes('buka-workflows-footer'),
   )
   assert.equal(directFooters.length, 1, 'the footer is pinned as the last row of the page layout')
 
@@ -1636,9 +2045,15 @@ test('client: a user execution shows the rendered instruction, the answers and t
   // 节点详情行：类型 + 定义快照里的说明。
   assert.ok(texts.includes('typeUser'))
   assert.ok(texts.includes('userDetail'))
-  assert.ok(texts.includes('是否同意发布？'), 'the definition detail explains the node before it runs')
+  assert.ok(
+    texts.includes('是否同意发布？'),
+    'the definition detail explains the node before it runs',
+  )
   // 输入取 step.input（host 渲染后的说明），输出是答案文本。
-  assert.ok(texts.includes('是否同意发布？（已渲染）'), 'the execution input is the rendered instruction')
+  assert.ok(
+    texts.includes('是否同意发布？（已渲染）'),
+    'the execution input is the rendered instruction',
+  )
   assert.ok(texts.includes('选择：批准并发布'), 'the execution output is the readable answer text')
   assert.equal(texts.includes('executionNoOutput'), false)
   // route 标签显示用户看到的选项文字，不显示路由键。
@@ -1657,7 +2072,10 @@ test('client: the end node shows the final deliverable, not a definition message
   const { texts } = collect(tree)
 
   assert.ok(texts.includes('finalDeliverable'), 'the end node has a final-deliverable section')
-  assert.ok(texts.includes('published the release'), 'it is the content of the last robot execution')
+  assert.ok(
+    texts.includes('published the release'),
+    'it is the content of the last robot execution',
+  )
   const source = texts.find((text) => text.includes('finalDeliverableFrom'))
   assert.ok(source, 'the source is labelled')
   assert.ok(source.includes('发布 v1.2 的说明'), 'the source label identifies the node')
@@ -1671,17 +2089,14 @@ test('client: the end node shows the final deliverable, not a definition message
   link.props.onClick()
 })
 
-test('client: an execution with attachments shows a download link', async () => {
+test('client: an execution with attachments previews the name and keeps the download entry', async () => {
   const client = await loadClient()
   const data = fixture()
-  const attachments = [
-    { index: 0, name: 'report.md', bytes: 16, description: '检查报告' },
-  ]
+  const attachments = [{ index: 0, name: 'report.md', bytes: 16, description: '检查报告' }]
   data.run.steps[1].attachments = attachments
   data.nodeResults[0].attachments = attachments
-  const tree = client.render(
-    detailStates(data, 'publish'),
-    (key) => (key === 'attachmentCount' ? '{n} attachments' : key),
+  const tree = client.render(detailStates(data, 'publish'), (key) =>
+    key === 'attachmentCount' ? '{n} attachments' : key,
   )
   const { texts } = collect(tree)
 
@@ -1689,22 +2104,399 @@ test('client: an execution with attachments shows a download link', async () => 
   assert.ok(texts.includes('report.md'))
   assert.ok(texts.includes('16 B'))
   assert.ok(texts.includes('1 attachments'))
+  // 文件名不再是带 download 的链接，而是打开右侧预览的按钮。
   const link = findByClass(tree, 'buka-workflows-attachmentLink')
-  assert.ok(link, 'the attachment has a download link')
-  assert.equal(link.props.download, 'report.md')
-  assert.match(link.props.href, /^\/buka-workflows\/attachment\?/)
-  assert.match(link.props.href, /runId=wf-render-smoke/)
-  assert.match(link.props.href, /seq=2/)
-  assert.match(link.props.href, /nodeId=publish/)
-  assert.match(link.props.href, /name=report\.md/)
+  assert.ok(link, 'the attachment name is a button')
+  assert.equal(link.type, 'button')
+  assert.equal(link.props.type, 'button')
+  assert.equal(link.props.title, 'attachmentPreviewOpenHint')
+  assert.equal(typeof link.props.onClick, 'function')
+  assert.deepEqual(link.children, ['report.md'])
+  // 下载入口保留为原来的 href + download。
+  const download = findByClass(tree, 'buka-workflows-attachmentDownload')
+  assert.ok(download, 'the attachment keeps its download link')
+  assert.equal(download.props.download, 'report.md')
+  assert.match(download.props.href, /^\/buka-workflows\/attachment\?/)
+  assert.match(download.props.href, /runId=wf-render-smoke/)
+  assert.match(download.props.href, /seq=2/)
+  assert.match(download.props.href, /nodeId=publish/)
+  assert.match(download.props.href, /name=report\.md/)
+  assert.equal(
+    download.props.href.includes('mode='),
+    false,
+    'the download link does not ask for a preview mode',
+  )
+})
+
+test('client: clicking an attachment name opens the drawer with a loading preview', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const tree = client.render(pageStates(data, 'publish'))
+  const button = findByClass(tree, 'buka-workflows-attachmentLink')
+  assert.ok(button, 'the fixture publishes one attachment row')
+  button.props.onClick()
+
+  const updates = client.updates()
+  const viewer = updates.find(
+    (update) => update !== null && typeof update === 'object' && 'runId' in update,
+  )
+  assert.ok(viewer, 'clicking the name stores the attachment to preview')
+  assert.equal(viewer.runId, data.run.runId)
+  assert.equal(viewer.seq, 2)
+  assert.equal(viewer.nodeId, 'publish')
+  assert.equal(viewer.name, 'report.md')
+  assert.equal(viewer.bytes, 12)
+  assert.equal(viewer.description, 'report')
+  const loading = updates.find((update) => update?.status === 'loading')
+  assert.ok(loading, 'the preview starts in the loading state')
+  assert.equal(loading.data, null)
+  assert.equal(loading.error, null)
+})
+
+test('client: the attachment drawer is closed until an attachment is opened', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const closed = collect(client.render(pageStates(data, null)))
+  assert.equal(
+    closed.classes.includes('buka-workflows-drawer'),
+    false,
+    'no drawer without a selected attachment',
+  )
+
+  const tree = client.render(
+    pageStates(data, null, [
+      attachmentViewer(data),
+      { status: 'loading', data: null, error: null },
+    ]),
+  )
+  const { classes, texts } = collect(tree)
+  assert.ok(classes.includes('buka-workflows-drawer'), 'the drawer is a right-hand panel')
+  assert.ok(texts.includes('attachmentPreviewLoading'), 'the loading state is announced')
+})
+
+test('client: the attachment drawer renders a markdown preview with link interception', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const preview = {
+    status: 'ready',
+    data: {
+      name: 'report.md',
+      bytes: 12,
+      kind: 'text',
+      mime: 'text/markdown',
+      text: '# Report\n\n[site](https://example.com/report)',
+    },
+    error: null,
+  }
+  const tree = client.render(pageStates(data, null, [attachmentViewer(data), preview]))
+  const { texts } = collect(tree)
+
+  // 抽屉是 headless Modal：标题、关闭文案与关闭回调都挂在 props 上。
+  const drawer = findByClass(tree, 'buka-workflows-drawer')
+  assert.ok(drawer, 'the drawer renders through the headless Modal')
+  assert.equal(drawer.props.open, true)
+  assert.equal(drawer.props.headless, true)
+  assert.equal(drawer.props.title, 'report.md')
+  assert.equal(drawer.props.closeLabel, 'attachmentPreviewClose')
+  assert.equal(drawer.props.backdropBlur, false)
+  assert.equal(typeof drawer.props.onClose, 'function')
+
+  // 头部：文件名、大小、描述、下载与关闭。
+  assert.ok(texts.includes('report.md'))
+  assert.ok(texts.includes('12 B · report'), 'the drawer meta joins size and description')
+  const download = findByClass(tree, 'buka-workflows-drawerDownload')
+  assert.ok(download)
+  assert.match(download.props.href, /name=report\.md/)
+  assert.equal(download.props.href.includes('mode='), false)
+  assert.equal(download.props.download, 'report.md')
+  const close = findByClass(tree, 'buka-workflows-drawerClose')
+  assert.ok(close)
+  assert.equal(close.props['aria-label'], 'attachmentPreviewClose')
+  close.props.onClick()
+  const updates = client.updates()
+  assert.ok(updates.includes(null), 'closing clears the attachment view')
+  assert.ok(
+    updates.some((update) => update?.status === 'idle'),
+    'closing resets the preview state',
+  )
+
+  // Markdown 用 MarkdownText（omitHtml + 自建 labels）。
+  const markdown = findBy(tree, (node) => node.props?.omitHtml === true)
+  assert.ok(markdown, 'markdown files render through MarkdownText')
+  assert.equal(markdown.props.text, '# Report\n\n[site](https://example.com/report)')
+  assert.deepEqual(markdown.props.labels, {
+    code: {
+      copyLabel: 'copy',
+      copiedLabel: 'copied',
+      toolbarLabels: { codeLabel: 'code', wrapLabel: 'wrap', unwrapLabel: 'unwrap' },
+    },
+  })
+
+  // 链接拦截：http(s) 交给新窗口，其它协议只阻止跳转，两种都不让页面离开运行页。
+  const container = findByClass(tree, 'buka-workflows-drawerMarkdown')
+  assert.ok(container)
+  assert.equal(typeof container.props.onClickCapture, 'function')
+  const opened = []
+  globalThis.window = { open: (...args) => opened.push(args) }
+  try {
+    let prevented = false
+    const preventDefault = () => {
+      prevented = true
+    }
+    container.props.onClickCapture({
+      preventDefault,
+      target: { closest: () => ({ getAttribute: () => 'https://example.com/report' }) },
+    })
+    assert.equal(prevented, true, 'even http(s) links do not navigate the page')
+    assert.deepEqual(opened, [['https://example.com/report', '_blank', 'noopener,noreferrer']])
+
+    let secondPrevented = false
+    container.props.onClickCapture({
+      preventDefault: () => {
+        secondPrevented = true
+      },
+      target: { closest: () => ({ getAttribute: () => '#section' }) },
+    })
+    assert.equal(secondPrevented, true, 'relative anchors are blocked')
+    assert.equal(opened.length, 1, 'only http(s) links open a new window')
+  } finally {
+    delete globalThis.window
+  }
+})
+
+test('client: the attachment drawer renders plain text through CodeBlock', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const viewer = { ...attachmentViewer(data), name: 'notes.txt' }
+  const preview = {
+    status: 'ready',
+    data: {
+      name: 'notes.txt',
+      bytes: 8,
+      kind: 'text',
+      mime: 'text/plain',
+      text: 'hello world',
+      truncated: true,
+    },
+    error: null,
+  }
+  const tree = client.render(pageStates(data, null, [viewer, preview]))
+  const { texts } = collect(tree)
+
+  const code = findByClass(tree, 'buka-workflows-drawerCode')
+  assert.ok(code, 'non-markdown text uses the code block')
+  assert.equal(code.props.code, 'hello world')
+  assert.equal(code.props.lineNumbers, true)
+  assert.equal(code.props.showHeader, true)
+  assert.equal(code.props.copyLabel, 'copy')
+  assert.equal(code.props.copiedLabel, 'copied')
+  assert.ok(texts.includes('attachmentPreviewTruncated'), 'a truncated preview says so')
+})
+
+test('client: the attachment drawer explains empty text and binary files', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const empty = client.render(
+    pageStates(data, null, [
+      attachmentViewer(data),
+      {
+        status: 'ready',
+        data: { name: 'report.md', bytes: 0, kind: 'text', mime: 'text/markdown', text: '' },
+        error: null,
+      },
+    ]),
+  )
+  assert.ok(
+    collect(empty).texts.includes('attachmentPreviewEmpty'),
+    'an empty text file gets a hint',
+  )
+
+  const binary = client.render(
+    pageStates(data, null, [
+      { ...attachmentViewer(data), name: 'bundle.zip' },
+      {
+        status: 'ready',
+        data: { name: 'bundle.zip', bytes: 64, kind: 'binary', mime: null },
+        error: null,
+      },
+    ]),
+  )
+  const binaryTexts = collect(binary).texts
+  assert.ok(
+    binaryTexts.includes('attachmentPreviewBinary'),
+    'binary files explain that they cannot be previewed',
+  )
+  assert.ok(binaryTexts.includes('attachmentDownload'), 'binary files keep the download entry')
+})
+
+test('client: the attachment drawer shows images and PDFs from the inline route', async () => {
+  const client = await loadClient()
+  const data = fixture()
+
+  const imageTree = client.render(
+    pageStates(data, null, [
+      { ...attachmentViewer(data), name: 'chart.png' },
+      {
+        status: 'ready',
+        data: { name: 'chart.png', bytes: 32, kind: 'image', mime: 'image/png' },
+        error: null,
+      },
+    ]),
+  )
+  const image = findByClass(imageTree, 'buka-workflows-drawerImage')
+  assert.ok(image, 'images render as an img')
+  assert.match(image.props.src, /name=chart\.png/)
+  assert.match(image.props.src, /mode=inline/)
+  assert.equal(image.props.src.includes('mode=preview'), false)
+  assert.equal(image.props.alt, 'chart.png')
+  assert.equal(typeof image.props.onError, 'function')
+  image.props.onError()
+  const imageFailure = client.updates().find((update) => update?.status === 'failed')
+  assert.ok(imageFailure, 'a broken image switches the preview to failed')
+  assert.equal(imageFailure.error, 'attachmentPreviewImageFailed')
+
+  const pdfTree = client.render(
+    pageStates(data, null, [
+      { ...attachmentViewer(data), name: 'guide.pdf' },
+      {
+        status: 'ready',
+        data: { name: 'guide.pdf', bytes: 128, kind: 'pdf', mime: 'application/pdf' },
+        error: null,
+      },
+    ]),
+  )
+  const frame = findByClass(pdfTree, 'buka-workflows-drawerFrame')
+  assert.ok(frame, 'PDFs render in an iframe')
+  assert.match(frame.props.src, /name=guide\.pdf/)
+  assert.match(frame.props.src, /mode=inline/)
+  assert.equal(frame.props.title, 'guide.pdf')
+  assert.ok(
+    collect(pdfTree).texts.includes('attachmentPreviewPdfHint'),
+    'the PDF preview explains itself',
+  )
+})
+
+test('client: the attachment drawer retries a failed preview', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const tree = client.render(
+    pageStates(data, null, [
+      attachmentViewer(data),
+      { status: 'failed', data: null, error: 'attachmentPreviewFailed: boom' },
+    ]),
+  )
+  const { texts } = collect(tree)
+  assert.ok(texts.includes('attachmentPreviewFailed: boom'), 'the failure reason is shown')
+  assert.ok(texts.includes('attachmentPreviewRetry'), 'the failed state offers a retry')
+  const retry = findBy(tree, (node) => (node.children ?? []).includes('attachmentPreviewRetry'))
+  assert.ok(retry)
+  assert.equal(typeof retry.props.onClick, 'function')
+  assert.ok(texts.includes('attachmentDownload'), 'the failed state keeps the download entry')
+
+  // 重试走 mode=preview 路由，并把成功的 attachment 交给预览状态。
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init })
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        attachment: {
+          name: 'report.md',
+          bytes: 12,
+          kind: 'text',
+          mime: 'text/markdown',
+          text: '# ok',
+        },
+      }),
+    }
+  }
+  try {
+    retry.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(calls.length, 1, 'retrying fetches the preview once')
+    assert.match(calls[0].url, /^\/buka-workflows\/attachment\?/)
+    assert.match(calls[0].url, /runId=wf-render-smoke/)
+    assert.match(calls[0].url, /seq=2/)
+    assert.match(calls[0].url, /nodeId=publish/)
+    assert.match(calls[0].url, /name=report\.md/)
+    assert.match(calls[0].url, /mode=preview/)
+    assert.ok(calls[0].init.signal !== undefined, 'the preview request is abortable')
+    assert.equal(calls[0].init.headers.accept, 'application/json')
+    const ready = client.updates().find((update) => update?.status === 'ready')
+    assert.ok(ready, 'a successful retry renders the preview')
+    assert.equal(ready.data.text, '# ok')
+
+    // 再次失败时把 Host 的 message 拼在失败文案后面。
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ ok: false, code: 'preview-failed', message: 'boom' }),
+    })
+    retry.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const failed = client
+      .updates()
+      .find((update) => update?.status === 'failed' && update.error !== null)
+    assert.ok(failed, 'a failed retry returns to the failed state')
+    assert.equal(failed.error, 'attachmentPreviewFailed boom')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('client: the attachment drawer CSS pins a full-height right panel with a narrow-screen rule', async () => {
+  const client = await loadClient()
+  const css = client.css()
+
+  assert.match(css, /\.buka-workflows-drawer\.buka-workflows-drawer\{[^}]*position:fixed/u)
+  assert.match(css, /\.buka-workflows-drawer\.buka-workflows-drawer\{[^}]*inset-block:0/u)
+  assert.match(css, /\.buka-workflows-drawer\.buka-workflows-drawer\{[^}]*right:0/u)
+  assert.match(
+    css,
+    /\.buka-workflows-drawer\.buka-workflows-drawer\{[^}]*width:min\(560px,100vw\)/u,
+  )
+  assert.match(css, /\.buka-workflows-drawer\.buka-workflows-drawer\{[^}]*max-height:none/u)
+  assert.match(
+    css,
+    /@media \(width<=767px\)\{\.buka-workflows-drawer\.buka-workflows-drawer\{width:100vw\}\}/u,
+  )
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion:reduce\)\{\.buka-workflows-drawer\.buka-workflows-drawer\{animation:none\}\}/u,
+  )
+  assert.match(css, /\.buka-workflows-drawerFrame\{[^}]*min-height:420px/u)
+  assert.match(css, /\.buka-workflows-attachmentLink\{[^}]*background:0 0/u)
+  assert.match(css, /\.buka-workflows-attachmentLink\{[^}]*border:0/u)
+  assert.match(css, /\.buka-workflows-attachmentLink\{[^}]*color:var\(--dsw-alias-brand-primary\)/u)
+  assert.match(css, /\.buka-workflows-attachmentLink:focus-visible\{[^}]*outline/u)
+})
+
+test('client: an attachment preview stacks above an open node drawer', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const preview = {
+    status: 'ready',
+    data: { name: 'report.md', bytes: 12, kind: 'text', mime: 'text/markdown', text: '# Report' },
+    error: null,
+  }
+  const tree = client.render(pageStates(data, 'publish', [attachmentViewer(data), preview]))
+  const { classes } = collect(tree)
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-drawer').length,
+    2,
+    'the attachment preview and the node drawer are both mounted',
+  )
+  assert.ok(classes.includes('buka-workflows-nodeDrawer'), 'the node drawer stays open underneath')
+  assert.ok(classes.includes('buka-workflows-drawerDownload'), 'the attachment preview is on top')
 })
 
 test('client: an attachment-only final deliverable is not reported as empty', async () => {
   const client = await loadClient()
   const data = fixture()
-  const attachments = [
-    { index: 0, name: 'report.md', bytes: 16, description: '检查报告' },
-  ]
+  const attachments = [{ index: 0, name: 'report.md', bytes: 16, description: '检查报告' }]
   data.run.steps[1].text = ''
   data.nodeResults[0].text = ''
   data.run.steps[1].attachments = attachments
@@ -1717,24 +2509,35 @@ test('client: an attachment-only final deliverable is not reported as empty', as
   assert.ok(texts.includes('executionOutputAttachmentsOnly'))
   const link = findByClass(tree, 'buka-workflows-attachmentLink')
   assert.ok(link, 'the final deliverable links to the attachment')
-  assert.equal(link.props.download, 'report.md')
+  assert.equal(link.type, 'button')
+  const download = findByClass(tree, 'buka-workflows-attachmentDownload')
+  assert.ok(download)
+  assert.equal(download.props.download, 'report.md')
 })
 
-test('client: a loop run shows visit badges and a back edge next to the rail', async () => {
+test('client: a loop run shows visit badges, a parallel row and a side back edge', async () => {
   const client = await loadClient()
   const data = loopFixture()
   const tree = client.render(detailStates(data, null))
-  const { classes, classLists, texts, tags, paths } = collect(tree)
+  const { classLists, texts, paths } = collect(tree)
 
   // check 被循环访问 3 次、fix 2 次，胶囊右侧显示 ×N。
   assert.ok(texts.includes('×3'), 'the revisited node shows its visit count')
   assert.ok(texts.includes('×2'))
   const back = data.graph.edges.find((edge) => edge.from === 'fix' && edge.to === 'check')
-  assert.ok(back.lane >= 1, 'the back edge is drawn on a side lane, not the main rail')
+  assert.ok(back.lane >= 1, 'the back edge is drawn on a side lane')
+  assert.notEqual(back.side, 'center', 'the back edge does not take a direct adjacent-layer route')
   assert.equal(back.traversals, 2, 'the loop was walked twice')
+  const fixPos = data.graph.positions.find((position) => position.id === 'fix')
+  const skipPos = data.graph.positions.find((position) => position.id === 'skip')
+  assert.equal(fixPos.y, skipPos.y, 'the loop body and the untaken branch share a row')
   // 循环不额外画图标：回边与正向边的两个箭头围成环即可。
   assert.equal('glyph' in back, false)
-  assert.equal(classLists.some((list) => list.includes('is-loop')), false, 'no loop badge on the graph')
+  assert.equal(
+    classLists.some((list) => list.includes('is-loop')),
+    false,
+    'no loop badge on the graph',
+  )
   assert.equal(texts.includes('↺'), false, 'no ↺ icon on the graph or in the legend')
   const arrows = classLists.filter((list) => list.includes('buka-workflows-edgeArrow'))
   assert.equal(arrows.length, data.graph.edges.length, 'every edge carries a mid-path arrow')
@@ -1746,7 +2549,7 @@ test('client: a loop run shows visit badges and a back edge next to the rail', a
   assert.ok(idleCapsule.props.className.split(/\s+/).includes('is-idle'))
 })
 
-test('client: a named edge exposes a hover hit area and shows only its name', async () => {
+test('client: every drawable edge is clickable and hover still shows only its name', async () => {
   const client = await loadClient()
   const data = loopFixture()
   const tree = client.render(detailStates(data, null))
@@ -1755,10 +2558,22 @@ test('client: a named edge exposes a hover hit area and shows only its name', as
   const hits = []
   walk(tree, (node) => {
     const className = node.props?.className
-    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit')) hits.push(node)
+    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit'))
+      hits.push(node)
   })
-  assert.ok(hits.length > 0, 'named edges get a transparent hit area')
-  assert.equal(typeof hits[0].props.onMouseEnter, 'function')
+  const drawable = data.graph.edges.filter((edge) => typeof edge.d === 'string' && edge.d !== '')
+  assert.equal(hits.length, drawable.length, 'every drawable edge gets a hit area, named or not')
+  for (const hit of hits) {
+    assert.equal(hit.props.role, 'button')
+    assert.equal(hit.props.tabIndex, 0)
+    assert.equal(typeof hit.props['data-edge-key'], 'string')
+    assert.equal(typeof hit.props.onClick, 'function')
+    assert.equal(typeof hit.props.onKeyDown, 'function')
+    assert.ok(
+      hit.props['aria-label'].startsWith('edgeAriaLabel'),
+      'the hit area has an accessible name',
+    )
+  }
 
   // 悬浮状态只带名字和鼠标坐标；把第 8 个 state（edgeTip）预置上即可检查
   // 它渲染的文本里没有任何条件 / 提示词配置。
@@ -1770,7 +2585,11 @@ test('client: a named edge exposes a hover hit area and shows only its name', as
   assert.ok(tip, 'the hover tip is rendered')
   const tipContent = collect(tip)
   assert.ok(tipContent.texts.includes('发现问题'), 'the tip shows only the edge name')
-  assert.deepEqual(tip.children, ['发现问题'], 'the tip carries the name alone: no dot, bar or icon')
+  assert.deepEqual(
+    tip.children,
+    ['发现问题'],
+    'the tip carries the name alone: no dot, bar or icon',
+  )
   assert.equal(
     tipContent.classes.some((name) => name.includes('edgeTipSwatch')),
     false,
@@ -1778,50 +2597,60 @@ test('client: a named edge exposes a hover hit area and shows only its name', as
   )
   assert.deepEqual(tip.props.style, { left: '112px', top: '64px' })
   assert.equal(tip.props.role, 'tooltip')
-  assert.equal(tip.props.className.includes('is-anchored'), false, 'without an anchor the tip follows the cursor')
+  assert.equal(
+    tip.props.className.includes('is-anchored'),
+    false,
+    'without an anchor the tip follows the cursor',
+  )
 
   // 悬浮的线变成实线并略粗，其余线压暗；不再铺光晕。
   const hovered = collect(tipTree)
   assert.equal(hovered.classes.includes('buka-workflows-edgeHalo'), false, 'no halo layer anymore')
   assert.ok(
-    hovered.classLists.some((list) => list.includes('buka-workflows-edge') && list.includes('is-hovered')),
+    hovered.classLists.some(
+      (list) => list.includes('buka-workflows-edge') && list.includes('is-hovered'),
+    ),
     'the hovered edge itself is highlighted',
   )
   assert.ok(
-    hovered.classLists.some((list) => list.includes('buka-workflows-edge') && list.includes('is-dimmed')),
+    hovered.classLists.some(
+      (list) => list.includes('buka-workflows-edge') && list.includes('is-dimmed'),
+    ),
     'the other edges step back',
   )
   assert.ok(
-    hovered.classLists.some((list) => list.includes('buka-workflows-edgeArrow') && list.includes('is-hovered')),
+    hovered.classLists.some(
+      (list) => list.includes('buka-workflows-edgeArrow') && list.includes('is-hovered'),
+    ),
     'the arrow is highlighted too',
   )
   const edgeLists = hovered.classLists.filter((list) => list.includes('buka-workflows-edge'))
-  assert.equal(edgeLists.filter((list) => list.includes('is-hovered')).length, 1, 'only one edge is hovered')
+  assert.equal(
+    edgeLists.filter((list) => list.includes('is-hovered')).length,
+    1,
+    'only one edge is hovered',
+  )
   assert.equal(
     edgeLists.filter((list) => list.includes('is-dimmed')).length,
     data.graph.edges.length - 1,
     'every other edge steps back',
   )
 
-  // 真实 DOM 里名字钉在轨道右侧、线中段的高度上，纵向由 is-anchored 居中。
+  // 名字钉在这条边的箭头旁；纵向由 is-anchored 居中。
+  const namedHit = hits.find((hit) => hit.props['data-edge-key'] === named.key)
+  assert.ok(namedHit, 'the named edge has its own hit area')
   const anchored = client.render([
     ...detailStates(data, null),
     { ...tipState, anchor: { left: 132, top: 241 } },
   ])
   const anchoredTip = findByClass(anchored, 'buka-workflows-edgeTip')
   assert.ok(anchoredTip, 'the anchored tip is rendered')
-  assert.ok(anchoredTip.props.className.includes('is-anchored'), 'an anchored tip is vertically centred')
+  assert.ok(
+    anchoredTip.props.className.includes('is-anchored'),
+    'an anchored tip is vertically centred',
+  )
   assert.deepEqual(anchoredTip.props.style, { left: '132px', top: '241px' })
 
-  // 交互回调按 SVG 几何算落点：名字钉在轨道右侧、这条线中段的高度上。
-  const namedEdges = data.graph.edges.filter((edge) => {
-    const names = Array.isArray(edge.names)
-      ? edge.names.filter((name) => typeof name === 'string' && name !== '')
-      : []
-    return typeof edge.d === 'string' && edge.d !== '' && names.length > 0
-  })
-  const namedHit = hits[namedEdges.indexOf(named)]
-  assert.ok(namedHit, 'the named edge has its own hit area')
   namedHit.props.onMouseEnter({
     currentTarget: {
       ownerSVGElement: { getBoundingClientRect: () => ({ left: 80, top: 111 }) },
@@ -1831,7 +2660,30 @@ test('client: a named edge exposes a hover hit area and shows only its name', as
   })
   const entry = client.updates().find((update) => update !== null && typeof update === 'object')
   assert.ok(entry, 'hovering the hit area updates the tip')
-  assert.deepEqual(entry.anchor, { left: 80 + data.graph.width, top: 111 + named.arrow.y })
+  assert.deepEqual(entry.anchor, { left: 80 + named.arrow.x + 8, top: 111 + named.arrow.y })
+
+  // 点击命中区进入连线抽屉；键盘 Enter / Space 走同一条路径。
+  namedHit.props.onClick()
+  assert.ok(client.updates().includes(named.key), 'clicking the edge selects its key')
+  let prevented = 0
+  namedHit.props.onKeyDown({
+    key: 'Enter',
+    preventDefault: () => {
+      prevented += 1
+    },
+  })
+  namedHit.props.onKeyDown({
+    key: ' ',
+    preventDefault: () => {
+      prevented += 1
+    },
+  })
+  assert.equal(prevented, 2, 'Enter and Space are handled as activation keys')
+  assert.equal(
+    client.updates().filter((update) => update === named.key).length,
+    3,
+    'both pointer and keyboard activations select the same edge',
+  )
 
   // 靠近视口边缘时名字会收进可视区；测试环境平时没有 window，这里临时给一个。
   globalThis.window = { innerWidth: 1000, innerHeight: 800 }
@@ -1847,36 +2699,33 @@ test('client: a named edge exposes a hover hit area and shows only its name', as
   }
 })
 
-test('client: an edge label never lands on a node row', async () => {
+test('client: clicking an edge opens its configuration drawer', async () => {
   const client = await loadClient()
-  const data = loopFixture()
-  const rows = data.graph.rows.map((row) => row.y).sort((left, right) => left - right)
-  assert.ok(rows.length >= 3, 'the loop fixture has enough rows')
-  // 把有名字的边的箭头挪到中间那一行上，模拟自环 / 跨偶数行的回边。
-  const rowY = rows[1]
-  data.graph.edges = data.graph.edges.map((edge) =>
-    edge.names.length > 0 ? { ...edge, arrow: { ...edge.arrow, y: rowY } } : edge,
-  )
-  const tree = client.render(detailStates(data, null))
-  /** @type {Array<Record<string, any>>} */
-  const hits = []
-  walk(tree, (node) => {
-    const className = node.props?.className
-    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit')) hits.push(node)
-  })
-  assert.ok(hits.length > 0, 'the named edges still have hit areas')
-  hits[0].props.onMouseEnter({
-    currentTarget: { ownerSVGElement: { getBoundingClientRect: () => ({ left: 80, top: 0 }) } },
-    clientX: 10,
-    clientY: 10,
-  })
-  const entry = client.updates().find((update) => update !== null && typeof update === 'object')
-  assert.ok(entry, 'hovering updates the tip')
-  // 标签被挪到下一行之前的空隙里，而不是压在 rows[1] 的胶囊上。
-  assert.deepEqual(entry.anchor, {
-    left: 80 + data.graph.width,
-    top: (rows[1] + rows[2]) / 2,
-  })
+  const data = fixture()
+  const edge = data.graph.edges.find((item) => item.from === 'confirm' && item.to === 'publish')
+  assert.ok(edge, 'the user choice has its own edge')
+  const tree = client.render(pageStates(data, null, [], null, edge.key))
+  const { classes, texts } = collect(tree)
+  assert.ok(classes.includes('buka-workflows-drawer'), 'the edge drawer opens')
+  assert.ok(texts.includes('edgeDrawerTitle'))
+  assert.ok(texts.includes('发布确认 → 发布 v1.2 的说明'), 'the meta names both ends')
+  assert.ok(texts.includes('edgeLoop') === false, 'a plain edge is not labelled as a loop')
+  assert.ok(texts.includes('edgeRoute: approve'), 'the route key is shown')
+  assert.ok(texts.includes('edgeOption: 批准并发布'), 'the user-facing label is shown')
+  assert.ok(texts.includes('把改动发布到生产环境'), 'the option description is shown')
+  assert.ok(texts.includes('执行发布'), 'the raw entry prompt is shown')
+  assert.ok(texts.includes('edgePromptHint'), 'the drawer explains when the prompt is rendered')
+  assert.ok(texts.includes('edgeToneSuccess'), 'the edge tone is shown')
+  assert.ok(texts.includes('edgeState'), 'run pages show the edge run state')
+  assert.ok(texts.includes('edgeTraversed'))
+  assert.ok(texts.includes('yes'))
+  assert.ok(texts.includes('edgeTraversals'))
+  assert.ok(texts.includes('1'))
+
+  const close = findByClass(tree, 'buka-workflows-drawerClose')
+  assert.ok(close, 'the edge drawer can be closed')
+  close.props.onClick()
+  assert.ok(client.updates().includes(null), 'closing clears the selected edge key')
 })
 
 test('client: the start node is a marker, not an execution', async () => {
@@ -1894,6 +2743,23 @@ test('client: the start node is a marker, not an execution', async () => {
   assert.ok(
     classLists.some((list) => list.includes('buka-workflows-capsule') && list.includes('is-start')),
     'the start capsule has its own type style',
+  )
+})
+
+test('client: the legend lists all five node types, including join', async () => {
+  const client = await loadClient()
+  const tree = client.render(detailStates(startFixture(), 'start'))
+  const { texts, classLists } = collect(tree)
+
+  // join 在代码与模板里早就在用，但界面曾漏了它：图例必须列出五种类型。
+  for (const key of ['typeStart', 'typeRobot', 'typeUser', 'typeJoin', 'typeEnd']) {
+    assert.ok(texts.includes(key), `图例缺少 ${key}`)
+  }
+  assert.ok(
+    classLists.some(
+      (list) => list.includes('buka-workflows-legendCapsule') && list.includes('is-join'),
+    ),
+    'join 的图例胶囊要有自己的样式',
   )
 })
 
@@ -1950,8 +2816,16 @@ test('client: the run list shows sequence numbers and the archived entry', async
   assert.ok(archivedButton, 'the archived entry lives in the toolbar')
   assert.deepEqual(collect(archivedButton).texts, ['archiveView (2)'])
   assert.equal(typeof archivedButton.props.onClick, 'function')
-  assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
-  assert.equal(findByClass(tree, 'buka-workflows-title'), null, 'the list view has no redundant page title; the tab is the heading')
+  assert.equal(
+    findByClass(tree, 'buka-workflows-archivedRow'),
+    null,
+    'no archived entry under the list',
+  )
+  assert.equal(
+    findByClass(tree, 'buka-workflows-title'),
+    null,
+    'the list view has no redundant page title; the tab is the heading',
+  )
 
   // 页签与工具栏同一行：页签列可收缩，工具栏不换行、不缩小；按钮用 32px 的
   // 工具栏尺寸（与 Robots 页一致），比执行面板里的 28px 小按钮更大。
@@ -1965,15 +2839,14 @@ test('client: the run list shows sequence numbers and the archived entry', async
   // 工具栏固定宽度，所以窗口再窄按钮也不会掉到下一行。
   const titleRow = findByClass(tree, 'buka-workflows-titleRow')
   assert.ok(titleRow, 'the header has one title row')
-  const titleRowChildren = titleRow.children.filter((child) => typeof child === 'object' && child !== null)
+  const titleRowChildren = titleRow.children.filter(
+    (child) => typeof child === 'object' && child !== null,
+  )
   assert.ok(
     titleRowChildren.some((child) => child.props?.className === 'buka-workflows-tabbar'),
     'the tabs are the first cell of the row',
   )
-  assert.ok(
-    titleRowChildren.includes(toolbar),
-    'the toolbar is the second cell of the same row',
-  )
+  assert.ok(titleRowChildren.includes(toolbar), 'the toolbar is the second cell of the same row')
   const css = client.css()
   assert.match(css, /\.buka-workflows-titleRow\{[^}]*flex-wrap:nowrap/u)
   assert.match(css, /\.buka-workflows-tabbar\{[^}]*flex:1 1 auto/u)
@@ -1986,7 +2859,9 @@ test('client: the archived view marks its filter and can go back', async () => {
   const tree = client.render([
     {
       status: 'ready',
-      runs: [{ runId: 'wf-2', seq: 6, goal: 'two', status: 'completed', createdAt: 2, archivedAt: 3 }],
+      runs: [
+        { runId: 'wf-2', seq: 6, goal: 'two', status: 'completed', createdAt: 2, archivedAt: 3 },
+      ],
       archivedCount: 1,
       error: null,
     },
@@ -2004,10 +2879,18 @@ test('client: the archived view marks its filter and can go back', async () => {
   // 归档视图里只有卡片带「已归档」标签，右上角工具栏不放这个 tag；归档入口切换成
   // 「返回列表」，加上归档设置与刷新。列表视图不再渲染页头标题（页签就是页头）。
   assert.ok(texts.includes('archived'), 'archived runs keep their tag')
-  assert.equal(findByClass(tree, 'buka-workflows-title'), null, 'the archived list has no page title')
+  assert.equal(
+    findByClass(tree, 'buka-workflows-title'),
+    null,
+    'the archived list has no page title',
+  )
   const toolbar = findByClass(tree, 'buka-workflows-toolbar')
   assert.ok(toolbar, 'the title row keeps a toolbar')
-  assert.equal(collect(toolbar).texts.includes('archived'), false, 'the toolbar has no archived tag')
+  assert.equal(
+    collect(toolbar).texts.includes('archived'),
+    false,
+    'the toolbar has no archived tag',
+  )
   assert.equal(
     collect(toolbar).classes.filter((name) => name === 'buka-workflows-toolbarButton').length,
     3,
@@ -2016,8 +2899,16 @@ test('client: the archived view marks its filter and can go back', async () => {
 
   // 返回入口在工具栏里（「返回列表」按钮），点击后回到普通运行列表；页头不再有
   // 独立的返回按钮与标题列。
-  assert.equal(findByClass(tree, 'buka-workflows-backButton'), null, 'the header has no separate back button')
-  assert.equal(findByClass(tree, 'buka-workflows-titleCluster'), null, 'the header has no title cluster')
+  assert.equal(
+    findByClass(tree, 'buka-workflows-backButton'),
+    null,
+    'the header has no separate back button',
+  )
+  assert.equal(
+    findByClass(tree, 'buka-workflows-titleCluster'),
+    null,
+    'the header has no title cluster',
+  )
   const backEntry = findBy(tree, (node) => {
     const name = node.props?.className
     return (
@@ -2031,7 +2922,11 @@ test('client: the archived view marks its filter and can go back', async () => {
   backEntry.props.onClick()
   assert.deepEqual(client.updates().slice(-1), [false], 'clicking back leaves the archived view')
 
-  assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
+  assert.equal(
+    findByClass(tree, 'buka-workflows-archivedRow'),
+    null,
+    'no archived entry under the list',
+  )
   assert.equal(texts.includes('welcome'), false, 'the archive empty state is not the welcome copy')
 })
 
@@ -2112,10 +3007,15 @@ test('client: the settings dialog validates hours and disables fields when archi
     false,
     null,
   ])
-  assert.ok(collect(invalid).texts.includes('archiveInvalid'), 'an out-of-range archive hour is rejected')
+  assert.ok(
+    collect(invalid).texts.includes('archiveInvalid'),
+    'an out-of-range archive hour is rejected',
+  )
   const invalidDialog = findBy(invalid, (node) => node.props?.title === 'archiveSettingsTitle')
   assert.ok(invalidDialog)
-  const invalidSave = findBy(invalidDialog.props.footer, (node) => (node.children ?? []).includes('save'))
+  const invalidSave = findBy(invalidDialog.props.footer, (node) =>
+    (node.children ?? []).includes('save'),
+  )
   assert.ok(invalidSave)
   assert.equal(invalidSave.props.disabled, true, 'an invalid draft cannot be saved')
 
@@ -2152,15 +3052,23 @@ test('client: opening a node session refreshes a client list that does not know 
       calls.push(`open:${sessionId}`)
     },
   }
-  const tree = client.render(detailStates(data, 'publish'), (key) => key, (name) => {
-    if (name === 'sessions') return sessions
-    if (name === 'uiWorkspace') return uiWorkspace
-    return null
-  })
+  const tree = client.render(
+    detailStates(data, 'publish'),
+    (key) => key,
+    (name) => {
+      if (name === 'sessions') return sessions
+      if (name === 'uiWorkspace') return uiWorkspace
+      return null
+    },
+  )
   const openButton = findBy(tree, (node) => (node.children ?? []).includes('openSession'))
   assert.ok(openButton, 'the node session offers an open action')
   await openButton.props.onClick()
-  assert.deepEqual(calls, ['refresh', 'open:session-1'], 'a stale client list is refreshed before opening')
+  assert.deepEqual(
+    calls,
+    ['refresh', 'open:session-1'],
+    'a stale client list is refreshed before opening',
+  )
 })
 
 test('client: opening a known node session does not refresh the client list', async () => {
@@ -2179,11 +3087,15 @@ test('client: opening a known node session does not refresh the client list', as
       calls.push(`open:${sessionId}`)
     },
   }
-  const tree = client.render(detailStates(data, 'publish'), (key) => key, (name) => {
-    if (name === 'sessions') return sessions
-    if (name === 'uiWorkspace') return uiWorkspace
-    return null
-  })
+  const tree = client.render(
+    detailStates(data, 'publish'),
+    (key) => key,
+    (name) => {
+      if (name === 'sessions') return sessions
+      if (name === 'uiWorkspace') return uiWorkspace
+      return null
+    },
+  )
   const openButton = findBy(tree, (node) => (node.children ?? []).includes('openSession'))
   assert.ok(openButton)
   await openButton.props.onClick()
@@ -2199,7 +3111,12 @@ test('client: opening a known node session does not refresh the client list', as
  * @param {string | null} [selectedTemplateNodeId] 详情里选中的节点 id
  * @returns {Array<any>}
  */
-function templateStates(items, selectedTemplateId = null, selectedTemplateNodeId = null) {
+function templateStates(
+  items,
+  selectedTemplateId = null,
+  selectedTemplateNodeId = null,
+  edgeKey = null,
+) {
   return [
     { status: 'loading', runs: [], archivedCount: 0, error: null },
     null,
@@ -2219,6 +3136,9 @@ function templateStates(items, selectedTemplateId = null, selectedTemplateNodeId
     { status: 'ready', items, error: null },
     selectedTemplateId,
     selectedTemplateNodeId,
+    null, // attachmentView
+    null, // attachmentPreview
+    edgeKey, // selectedEdgeKey
   ]
 }
 
@@ -2292,34 +3212,66 @@ test('client: the templates tab lists templates with a runs/templates tab bar', 
   assert.ok(classes.includes('buka-workflows-templateCard'), 'templates render as cards')
   assert.ok(texts.includes('开发与测试'), 'the template name is shown')
   assert.ok(texts.includes('起草与审校'), 'the second template name is shown')
-  assert.ok(texts.includes(TEMPLATE_FIXTURES[0].description), 'the description is shown on the card')
+  assert.ok(
+    texts.includes(TEMPLATE_FIXTURES[0].description),
+    'the description is shown on the card',
+  )
 })
 
-test('client: a template detail renders a node graph and a node inspector', async () => {
+test('client: a template detail renders a layered graph and opens the node drawer on click', async () => {
   const client = await loadClient()
   const tree = client.render(templateStates(TEMPLATE_FIXTURES, 'develop-test'))
   const { classes, texts, classLists } = collect(tree)
 
-  // 图 + 右侧节点说明双栏，不再是平面步骤列表。
-  assert.ok(classes.includes('buka-workflows-split'), 'the template detail uses the graph split')
+  // 图占主体，不再与右侧面板分栏；进入详情不自动选中节点。
   assert.ok(classes.includes('buka-workflows-capsule'), 'the template flow renders node capsules')
   assert.ok(classes.includes('buka-workflows-edge'), 'the template flow draws its edges')
-  assert.ok(classes.includes('buka-workflows-inspector'), 'the right pane explains the node')
-  assert.ok(classes.includes('buka-workflows-templateBackButton'), 'the detail offers a visible back action')
+  assert.ok(classes.includes('buka-workflows-vgraphNode'), 'the template flow positions its nodes')
+  assert.equal(
+    classes.includes('buka-workflows-split'),
+    false,
+    'the template detail no longer uses the split',
+  )
+  assert.equal(
+    classes.includes('buka-workflows-inspector'),
+    false,
+    'no node drawer opens automatically',
+  )
+  assert.ok(
+    classes.includes('buka-workflows-templateBackButton'),
+    'the detail offers a visible back action',
+  )
   const templateBack = findByClass(tree, 'buka-workflows-templateBackButton')
   assert.ok(templateBack, 'the template detail has a back action')
-  assert.equal(templateBack.props['aria-label'], 'templatesBack', 'the icon-only back action keeps an accessible label')
+  assert.equal(
+    templateBack.props['aria-label'],
+    'templatesBack',
+    'the icon-only back action keeps an accessible label',
+  )
   assert.equal(texts.includes('templatesBack'), false, 'the back action has no visible text label')
   // 返回图标放在模板名称左侧（同一个 head 行里，先于标题）。
   const templateHead = findByClass(tree, 'buka-workflows-templateHead')
   assert.ok(templateHead, 'the template detail has a head row')
-  const headChildren = templateHead.children.filter((child) => typeof child === 'object' && child !== null)
+  const headChildren = templateHead.children.filter(
+    (child) => typeof child === 'object' && child !== null,
+  )
   const backIndex = headChildren.indexOf(templateBack)
-  const titleIndex = headChildren.findIndex((child) => child.props?.className === 'buka-workflows-templateTitle')
-  assert.ok(backIndex !== -1 && titleIndex !== -1 && backIndex < titleIndex, 'the back action sits left of the template name')
-  // 默认聚焦 start：它不执行，只通过出边把 prompt 交给第一个机器人节点。
-  assert.ok(texts.includes('startNodeHint'), 'the start node explains its role')
-  assert.ok(texts.some((text) => text.includes('begin')), 'the start edge route name appears in the transitions')
+  const titleIndex = headChildren.findIndex(
+    (child) => child.props?.className === 'buka-workflows-templateTitle',
+  )
+  assert.ok(
+    backIndex !== -1 && titleIndex !== -1 && backIndex < titleIndex,
+    'the back action sits left of the template name',
+  )
+  // 点开 start：它不执行，只通过出边把 prompt 交给第一个机器人节点。
+  const startTexts = collect(
+    client.render(templateStates(TEMPLATE_FIXTURES, 'develop-test', 'start')),
+  ).texts
+  assert.ok(startTexts.includes('startNodeHint'), 'the start node explains its role')
+  assert.ok(
+    startTexts.some((text) => text.includes('begin')),
+    'the start edge route name appears in the transitions',
+  )
 
   // 模板是参考流程，没有执行状态：胶囊按节点类型上色，不能一律套运行页那套
   // 「未运行」的灰虚线——否则整张模板图看起来全是浅灰色，读不出节点类型。
@@ -2327,7 +3279,11 @@ test('client: a template detail renders a node graph and a node inspector', asyn
   for (const type of ['start', 'robot', 'user', 'end']) {
     const capsule = templateCapsules.find((list) => list.includes(`is-${type}`))
     assert.ok(capsule, `the template graph renders a ${type} capsule`)
-    assert.equal(capsule.includes('is-idle'), false, `the ${type} capsule keeps its type colour, not the idle gray`)
+    assert.equal(
+      capsule.includes('is-idle'),
+      false,
+      `the ${type} capsule keeps its type colour, not the idle gray`,
+    )
   }
   const capsuleTitles = []
   walk(tree, (node) => {
@@ -2351,15 +3307,27 @@ test('client: a template detail renders a node graph and a node inspector', asyn
     'template edges are never marked as traversed',
   )
   assert.ok(texts.includes('legendFlow'), 'the template legend labels the edges as flow')
-  assert.equal(texts.includes('legendTraversed'), false, 'the template legend has no run-state edge labels')
-  assert.equal(texts.includes('legendPending'), false, 'the template legend has no run-state edge labels')
+  assert.equal(
+    texts.includes('legendTraversed'),
+    false,
+    'the template legend has no run-state edge labels',
+  )
+  assert.equal(
+    texts.includes('legendPending'),
+    false,
+    'the template legend has no run-state edge labels',
+  )
   assert.equal(
     classLists.filter((list) => list.includes('buka-workflows-legendLine')).length,
     1,
     'the template footer shows a single edge sample',
   )
   const css = client.css()
-  assert.match(css, /\.buka-workflows-edge\.is-static\{[^}]*stroke-dasharray:none/u, 'static edges are solid')
+  assert.match(
+    css,
+    /\.buka-workflows-edge\.is-static\{[^}]*stroke-dasharray:none/u,
+    'static edges are solid',
+  )
   assert.match(
     css,
     /\.buka-workflows-legendLine\.is-static\{[^}]*border-top-style:solid/u,
@@ -2375,6 +3343,23 @@ test('client: a template detail renders a node graph and a node inspector', asyn
   assert.ok(devTexts.includes('实现需求'), 'the node purpose is shown')
   assert.ok(devTexts.includes('templatesPurpose'), 'the purpose is labelled')
   assert.ok(devTexts.includes('templatesTransitions'), 'the node transitions are listed')
+  assert.ok(
+    collect(devTree).classes.includes('buka-workflows-drawer'),
+    'clicking a template node opens the drawer',
+  )
+
+  // 模板连线抽屉：配置照常展示，但不出现运行状态行。
+  const template = TEMPLATE_FIXTURES[0]
+  const loopEdge = template.graph.edges.find((edge) => edge.from === 'test' && edge.to === 'dev')
+  assert.ok(loopEdge, 'the template has a loop edge')
+  const edgeTexts = collect(
+    client.render(templateStates(TEMPLATE_FIXTURES, 'develop-test', null, loopEdge.key)),
+  ).texts
+  assert.ok(edgeTexts.includes('edgeDrawerTitle'))
+  assert.ok(edgeTexts.includes('edgeRoute: 不通过'), 'the template edge shows its route key')
+  assert.ok(edgeTexts.includes('测试不通过，回开发修复。'), 'the template edge shows its prompt')
+  assert.equal(edgeTexts.includes('edgeState'), false, 'templates do not show a run state section')
+  assert.equal(edgeTexts.includes('edgeTraversed'), false)
 })
 
 test('client: a pending plan review shows a plan-review notice with an open-session action', async () => {
@@ -2409,7 +3394,11 @@ test('client: a pending plan review shows a plan-review notice with an open-sess
   assert.ok(classes.includes('buka-workflows-interactionNotice'))
   assert.ok(texts.includes('waitingForPlanReview'))
   assert.ok(texts.includes('planReviewBody'))
-  assert.equal(texts.includes('Approve this plan and leave plan mode?'), false, 'the raw review question is not dumped')
+  assert.equal(
+    texts.includes('Approve this plan and leave plan mode?'),
+    false,
+    'the raw review question is not dumped',
+  )
   assert.ok(texts.includes('openPlanReviewSession'))
   const openButton = findBy(tree, (node) => (node.children ?? []).includes('openPlanReviewSession'))
   assert.ok(openButton)
@@ -2429,5 +3418,46 @@ test('client: a plan-mode robot node shows its mode tag in the detail panel', as
 
   // 普通机器人节点不显示这个标签。
   const plain = fixture()
-  assert.equal(collect(client.render(detailStates(plain, 'publish'))).texts.includes('modePlan'), false)
+  assert.equal(
+    collect(client.render(detailStates(plain, 'publish'))).texts.includes('modePlan'),
+    false,
+  )
+})
+
+test('client: every shipped template renders its node and edge drawers', async () => {
+  const client = await loadClient()
+  const items = WORKFLOW_TEMPLATES.map((template) => {
+    const model = buildTemplateGraph(template)
+    return { ...template, graph: model === null ? null : { ...model, ...layoutRunGraph(model) } }
+  })
+  for (const template of items) {
+    assert.ok(template.graph, `template ${template.id} has a graph`)
+    const tree = client.render(templateStates(items, template.id))
+    assert.equal(
+      collect(tree).classes.includes('buka-workflows-inspector'),
+      false,
+      'no node drawer on entry',
+    )
+    for (const node of template.graph.nodes) {
+      const nodeTree = collect(client.render(templateStates(items, template.id, node.id)))
+      assert.ok(
+        nodeTree.classes.includes('buka-workflows-drawer'),
+        `node ${template.id}/${node.id} opens a drawer`,
+      )
+    }
+    for (const edge of template.graph.edges) {
+      const edgeTexts = collect(
+        client.render(templateStates(items, template.id, null, edge.key)),
+      ).texts
+      assert.ok(
+        edgeTexts.includes('edgeDrawerTitle'),
+        `edge ${template.id}/${edge.from}->${edge.to} opens its drawer`,
+      )
+      assert.equal(
+        edgeTexts.includes('edgeState'),
+        false,
+        'template edge drawers never show run state',
+      )
+    }
+  }
 })

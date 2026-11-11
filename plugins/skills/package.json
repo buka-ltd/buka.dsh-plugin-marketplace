@@ -1,39 +1,30 @@
 {
   "name": "@buka/dsh-plugin-skills",
-  "version": "0.5.1",
-  "description": "In a sidebar page, lists the skills installed globally for every DSH session, flags the ones the npx skills CLI manages, uninstalls each through the right path, keeps a personal list of skill sources to install later (GitHub repos, any git remote such as https/ssh/git, local absolute paths, or package names), exposes them to other plugins through the ctx.bukaSkills service, and labels each saved repository as an npx skills repository or a Claude Code marketplace, expanding GitHub, git-remote and local sources into a cached skills tree and installing any single skill from that tree into the global skills directory with one click through npx skills add -g",
+  "version": "0.6.0",
+  "description": "在侧边栏管理全局 skills 与常用来源，一键安装、卸载并浏览带缓存的 skills 树。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./service": "./lib/service.js",
-    "./client": "./client.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "icon": "./icon.svg",
   "files": [
-    "lib/index.js",
-    "lib/skill-store.js",
-    "lib/skill-install.js",
-    "lib/npx.js",
-    "lib/repo-store.js",
-    "lib/repo-skills.js",
-    "lib/local-source.js",
-    "lib/git-source.js",
-    "lib/service.js",
-    "client.js",
+    "lib",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "docs"
   ],
   "engines": {
     "node": ">=22.20",
-    "dsh": ">=0.2.1-rc.5 <0.3.0"
+    "dsh": ">=0.2.1-rc.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
   },
   "dsh": {

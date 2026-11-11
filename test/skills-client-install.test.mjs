@@ -16,11 +16,54 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const PACKAGE_ROOT = new URL('../plugins/skills/', import.meta.url)
-const source = readFileSync(new URL('client.js', PACKAGE_ROOT), 'utf8')
+const CLIENT_BUILD = fileURLToPath(new URL('../.build/skills/client/', import.meta.url))
+/**
+ * 把源码压成与格式无关的形状：去掉每行缩进、合并连续空行。
+ *
+ * 这些测试按源码片段定位，而源码会随格式化工具改变缩进与空行，所以定位前
+ * 两边都先归一。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function normalize(text) {
+  return text.replace(/^[ \t]+/gm, '').replace(/\n{2,}/g, '\n')
+}
+
+/**
+ * 列出编译产物目录下的全部文件（含子目录）。
+ *
+ * @param {string} dir 目录
+ * @returns {string[]}
+ */
+function clientFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name)
+    return entry.isDirectory() ? clientFiles(full) : [full]
+  })
+}
+
+/**
+ * 浏览器一半现在分成多个模块，tsc 每个源文件产出一个 `.js`：按路径排序拼接，
+ * 测试仍然按源码片段定位（缩进与空行由 `normalize()` 抹平）。
+ *
+ * @param {string} dir 编译产物目录
+ * @returns {string}
+ */
+function readClientSource(dir) {
+  return clientFiles(dir)
+    .filter((file) => file.endsWith('.js'))
+    .sort()
+    .map((file) => readFileSync(file, 'utf8'))
+    .join('\n')
+}
+
+const source = normalize(readClientSource(CLIENT_BUILD))
 
 /**
  * 截取一段源码：从 `start` 标记开始，到它之后第一个 `end` 标记之前。
@@ -30,9 +73,9 @@ const source = readFileSync(new URL('client.js', PACKAGE_ROOT), 'utf8')
  * @returns {string}
  */
 function section(start, end) {
-  const from = source.indexOf(start)
+  const from = source.indexOf(normalize(start))
   assert.notEqual(from, -1, `源码里找不到：${start}`)
-  const to = source.indexOf(end, from + start.length)
+  const to = source.indexOf(normalize(end), from + start.length)
   assert.notEqual(to, -1, `源码里找不到结束标记：${end}`)
   return source.slice(from, to)
 }
@@ -74,15 +117,33 @@ test('安装走独立的 Host 路由，与卸载分开', () => {
 })
 
 test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装的禁用按钮', () => {
-  const tree = section('function renderTreeNode(repo, node)', '\n      /**')
-  assert.ok(tree.includes('const installed = installedSkillKeys.has(skillKeyOf(node.name))'), '没有按目录键判断已安装')
-  assert.ok(tree.includes('const busy = installing === installKeyOf(repo, node)'), '没有按组合键判断安装中')
-  assert.ok(tree.includes("icon: h(IconDownloadOutlineRegular, { size: 13 })"), '安装按钮没有下载图标')
-  assert.ok(tree.includes("onClick: () => installSkill(repo, node)"), '安装按钮没有触发安装')
+  const tree = section(
+    'function renderTreeNode(repo, node)',
+    'return { renderTree, renderTreeNode }',
+  )
+  assert.ok(
+    tree.includes('const installed = installedSkillKeys.has(skillKeyOf(node.name))'),
+    '没有按目录键判断已安装',
+  )
+  assert.ok(
+    tree.includes('const busy = installing === installKeyOf(repo, node)'),
+    '没有按组合键判断安装中',
+  )
+  assert.ok(
+    tree.includes('icon: h(IconDownloadOutlineRegular, { size: 13 })'),
+    '安装按钮没有下载图标',
+  )
+  assert.ok(tree.includes('onClick: () => installSkill(repo, node)'), '安装按钮没有触发安装')
   assert.ok(tree.includes('disabled: installing !== null'), '安装请求进行中应禁用其它安装按钮')
   // 已安装的分支在「安装中」之前：它应该是一个禁用的按钮，不是 Tag。
-  const installedBranch = tree.slice(tree.indexOf("className: 'buka-skills-treeSkillAction'"), tree.indexOf(': busy'))
-  assert.ok(installedBranch.includes("h(IconCheckOutlineRegular, { size: 13 })"), '已安装按钮没有对勾图标')
+  const installedBranch = tree.slice(
+    tree.indexOf("className: 'buka-skills-treeSkillAction'"),
+    tree.indexOf(': busy'),
+  )
+  assert.ok(
+    installedBranch.includes('h(IconCheckOutlineRegular, { size: 13 })'),
+    '已安装按钮没有对勾图标',
+  )
   assert.ok(installedBranch.includes("t('installedBadge')"), '已安装按钮应显示「已安装」文案')
   assert.ok(installedBranch.includes('disabled: true'), '已安装应显示禁用的按钮')
   assert.ok(installedBranch.includes("variant: 'outline'"), '已安装按钮应与安装按钮同款（outline）')
@@ -112,16 +173,26 @@ test('skillKeyOf 与 npx skills 的目录名规则一致（页面据此认已安
 test('已安装键集合来自全局列表的 id 与 name，按 npx 规则归一', () => {
   const memo = section('const installedSkillKeys = React.useMemo(', '}, [installedData])')
   assert.ok(memo.includes('for (const skill of skills)'), '没有遍历全局已安装列表')
-  assert.ok(memo.includes('for (const value of [skill.id, skill.name])'), '应同时用目录名与展示名匹配')
+  assert.ok(
+    memo.includes('for (const value of [skill.id, skill.name])'),
+    '应同时用目录名与展示名匹配',
+  )
   assert.ok(memo.includes('const key = skillKeyOf(value)'), '没有按目录名规则归一')
-  assert.ok(memo.includes('if (key !== \'\') keys.add(key)'), '空键不该进集合')
+  // 守卫语句会被 tsc 拆成两行（`if (...) {` 块也可能换行），只按「条件 + 动作」
+  // 的单行正则定位，不依赖大括号与换行位置。
+  assert.match(memo, /if \(key !== ''\)\s*\{?\s*keys\.add\(key\)/u, '空键不该进集合')
 })
 
 test('安装成功只刷新已安装列表并弹 Toast；失败用页面底部 Toast', () => {
   const install = section('async function installSkill(repo, node)', '\n\n      /**')
-  assert.ok(install.includes("flash('success', `${t('installedToast')} ${body.name ?? node.name}`)"), '成功提示文案不对')
+  assert.ok(
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: 断言的正是源码里的模板字符串字面量
+    install.includes("flash('success', `${t('installedToast')} ${body.name ?? node.name}`)"),
+    '成功提示文案不对',
+  )
   assert.ok(install.includes('await refreshInstalled()'), '安装成功后没有刷新已安装列表')
-  assert.ok(install.includes("failure?.code === 'skill-not-found'"), 'skill 列表变化应有专门提示')
+  // `skill-not-found` 现在由 `errorCode(failure)` 解出（与其它路由失败的处理统一）。
+  assert.match(install, /errorCode\(failure\) === 'skill-not-found'/u, 'skill 列表变化应有专门提示')
   assert.ok(install.includes("flash('error', text)"), '失败应弹 Toast')
   assert.ok(install.includes('setInstalling(installKeyOf(repo, node))'), '没有记录安装中的行')
   assert.ok(install.includes('setInstalling(null)'), '安装结束后没有清理状态')
@@ -129,7 +200,10 @@ test('安装成功只刷新已安装列表并弹 Toast；失败用页面底部 T
 
   const refresh = section('async function refreshInstalled()', '\n\n      /**')
   assert.ok(refresh.includes('requestJson(LIST_ROUTE)'), '没有重读已安装列表')
-  assert.ok(refresh.includes('setInstalled({ data: body, error: null, loading: false })'), '没有更新已安装状态')
+  assert.ok(
+    refresh.includes('setInstalled({ data: body, error: null, loading: false })'),
+    '没有更新已安装状态',
+  )
 })
 
 test('安装中/已完成的状态不写进 localStorage 的 view cache', () => {
@@ -142,15 +216,18 @@ test('安装中/已完成的状态不写进 localStorage 的 view cache', () => 
     !source.includes('writeViewCache({ expandedRepos, collapsedDirs, trees, installing })'),
     '安装状态是纯页面状态，不该写进 view cache',
   )
-  assert.ok(
-    !source.includes('useState(restored?.installing'),
-    '重启后不该恢复安装中的状态',
-  )
+  assert.ok(!source.includes('useState(restored?.installing'), '重启后不该恢复安装中的状态')
 })
 
 test('中英文都补齐了安装相关文案', () => {
-  for (const key of ['install', 'installing', 'installedToast', 'installFailed', 'installMissing']) {
-    const occurrences = source.split(`\n      ${key}:`).length - 1
+  for (const key of [
+    'install',
+    'installing',
+    'installedToast',
+    'installFailed',
+    'installMissing',
+  ]) {
+    const occurrences = source.split(`\n${key}:`).length - 1
     assert.equal(occurrences, 2, `${key} 应该在 en 与 zh 各有一份`)
   }
   assert.ok(source.includes("install: 'Install'"), '英文 install 文案不对')
@@ -165,7 +242,9 @@ test('中英文都补齐了安装相关文案', () => {
 
 test('树 skill 行改成左右布局，操作区在右侧', () => {
   assert.ok(
-    source.includes('.buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;'),
+    source.includes(
+      '.buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;',
+    ),
     '树 skill 行应改回横向布局',
   )
   assert.ok(source.includes('.buka-skills-treeSkillMain{'), '缺少左侧主区样式')
