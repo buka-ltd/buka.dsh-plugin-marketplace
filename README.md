@@ -8,12 +8,12 @@
 
 ## 插件
 
-| 插件 | 核心能力 |
-| --- | --- |
-| [Skills · 技能](plugins/skills/README.md)（`@buka/dsh-plugin-skills`） | 所有技能的收藏夹和清单：收藏技能来源、记录已安装的技能，需要时一键装进机器人 |
-| [Robots · 机器人](plugins/robots/README.md)（`@buka/dsh-plugin-robots`） | 有明确职责的个体：每个机器人有自己的 AGENTS.md、项目技能和一句职责，只拿岗位需要的技能，不是万能的超级 Agent |
+| 插件                                                                              | 核心能力                                                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Skills · 技能](plugins/skills/README.md)（`@buka/dsh-plugin-skills`）            | 所有技能的收藏夹和清单：收藏技能来源、记录已安装的技能，需要时一键装进机器人                                                                                                                                                |
+| [Robots · 机器人](plugins/robots/README.md)（`@buka/dsh-plugin-robots`）          | 有明确职责的个体：每个机器人有自己的 AGENTS.md、项目技能和一句职责，只拿岗位需要的技能，不是万能的超级 Agent                                                                                                                |
 | [Workflows · 工作流](plugins/workflows/README.md)（`@buka/dsh-plugin-workflows`） | 预先定好的流程图，由引擎按图调度机器人——不是 Agent 自己组队派活：节点、顺序、出边在跑之前写死，多个机器人被组织起来完成一件复杂工程；`user` 节点在关键处停下来等你介入，`mode: "plan"` 的机器人节点先交计划、你批准后再实施 |
-| [Bell · 提示音](plugins/bell/README.md)（`@buka/dsh-plugin-bell`） | Agent 任务结束、等你输入、计划被退回、手动终止四个时机各响一声提示，每个时机的音单独选、点一下即试听 |
+| [Bell · 提示音](plugins/bell/README.md)（`@buka/dsh-plugin-bell`）                | Agent 任务结束、等你输入、计划被退回、手动终止四个时机各响一声提示，每个时机的音单独选、点一下即试听                                                                                                                        |
 
 ## 为什么这样做
 
@@ -33,6 +33,28 @@ Agent 和人一样会犯错。单个 Agent 越能干，一次误判能造成的�
 
 ## 快速开始
 
+本仓库的开发需要 Node.js `>=22.20` 与 pnpm 11。首次工作先安装依赖：
+
+```bash
+pnpm install
+```
+
+插件源码在 `plugins/*/src/`（TypeScript），`plugins/*/lib/` 是编译产物、提交进 git、安装时不编译。改完源码要重建产物：
+
+```bash
+pnpm run build:code      # 先编 packages/*，再编 plugins/*，产出 .build/
+pnpm run build:clients   # 从 .build/ 打出 plugins/*/lib/{index.js,client.js}
+```
+
+本地看市场索引：
+
+```bash
+pnpm run build           # 只生成 dist/index.json 与 dist/icons/，不编译插件
+pnpm run serve           # 在 http://127.0.0.1:4180 预览 dist/
+```
+
+### 在 DSH 里安装
+
 1. 打开 Web 侧边栏的 **Plugins**
 2. **More（Experimental plugins）→ Custom plugin markets → Discover**
 3. 添加索引来源，填：
@@ -41,4 +63,43 @@ Agent 和人一样会犯错。单个 Agent 越能干，一次误判能造成的�
    https://buka-ltd.github.io/buka.dsh-plugin-marketplace/index.json
    ```
 
-4. 在列表里安装你需要的插件，装完侧边栏会出现对应页面。
+4. 在列表里安装你需要的插件，装完在侧边栏或设置页出现对应入口。
+
+### 本地开发命令
+
+| 命令                     | 作用                                                     |
+| ------------------------ | -------------------------------------------------------- |
+| `pnpm run build:code`    | TypeScript 类型检查 + 编译 `packages/*` 与 `plugins/*`   |
+| `pnpm run build:clients` | 用 tsdown 从 `.build/` 打出插件运行文件 `plugins/*/lib/` |
+| `pnpm run build`         | 生成市场索引 `dist/`（不编译插件）                       |
+| `pnpm run check`         | 发布前自检：清单、locale、format 1、钉住的提交           |
+| `pnpm run serve`         | 本地 http 预览 `dist/`                                   |
+| `pnpm test`              | `node --test`；`pretest` 会先跑 `build:code`             |
+| `pnpm run lint`          | Biome 格式 + 静态检查                                    |
+
+更细的说明见 [常用命令](docs/agent-rules/commands.md)。
+
+## 目录结构
+
+```text
+plugins/<dir>/src/          # TypeScript 源码：宿主一半与界面一半
+plugins/<dir>/lib/          # 编译产物，提交进 git，不手改
+plugins/<dir>/locale/       # 展示文案唯一来源（meta.title/description/detail）
+plugins/<dir>/docs/         # DETAIL.md / DETAIL.zh.md：市场详情长文
+plugins/<dir>/market.json   # 挂牌字段：分类、标签、关键词、图标等
+packages/plugin-kit/        # 宿主侧公共包，构建时内联进插件
+packages/plugin-ui/         # 界面侧公共包，构建时内联进插件
+scripts/                    # 索引与构建脚本（Node 直接运行 .ts）
+types/dsh.d.ts              # 官方缺失的服务与 Context 增强
+docs/adr/                   # 架构决策记录
+dist/、.build/              # 构建产物，gitignored
+```
+
+完整目录树与文件归属见 [项目结构](docs/agent-rules/project-structure.md)。
+
+## 文档
+
+- [AGENTS.md](AGENTS.md)：仓库协作规则的索引与硬约束。
+- [docs/agent-rules/](docs/agent-rules/)：项目结构、索引格式、插件编写、常用命令、Git 操作约束。
+- [GLOSSARY.md](GLOSSARY.md)：本仓库的术语表；写文档、提交信息时用这里的词。
+- [docs/adr/](docs/adr/)：已经采纳的架构决策（TypeScript 化、locale 单一来源、兼容范围等）。
