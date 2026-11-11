@@ -12,6 +12,7 @@ import {
   MAX_ABORT_REASON_LENGTH,
   resolveAbort,
   resolveRoute,
+  resolveRoutes,
 } from '../plugins/workflows/lib/routing.js'
 
 const NODE = { id: 'check', type: 'robot', next: [{ to: 'done', name: '完成' }] }
@@ -57,4 +58,25 @@ test('routing: resolveRoute still follows a valid next route', () => {
   assert.deepEqual(missing.routes, ['完成'])
   const unknown = resolveRoute(NODE, { next: 'nope' })
   assert.match(unknown.error, /unknown route/u)
+})
+
+test('routing: resolveRoutes supports concurrent fan-out via a next array', () => {
+  const node = {
+    next: [
+      { to: 'a', name: '后端' },
+      { to: 'b', name: '前端' },
+      { to: 'c', name: '测试' },
+    ],
+  }
+  // 单值字符串仍然是一条边（向后兼容）。
+  assert.deepEqual(resolveRoutes(node, { next: '后端' }), { rules: [node.next[0]] })
+  // 数组 fan-out：按定义顺序返回全部命中的边。
+  assert.deepEqual(resolveRoutes(node, { next: ['后端', '前端'] }), { rules: [node.next[0], node.next[1]] })
+  // 空数组、未知、重复、非字符串项都是错误。
+  assert.match(resolveRoutes(node, { next: [] }).error, /empty "next" route list/u)
+  assert.match(resolveRoutes(node, { next: ['后端', '不存在'] }).error, /unknown route "不存在"/u)
+  assert.match(resolveRoutes(node, { next: ['后端', '后端'] }).error, /repeats "后端"/u)
+  assert.match(resolveRoutes(node, { next: ['后端', 3] }).error, /only route names/u)
+  // 没有出边的节点是终止节点。
+  assert.deepEqual(resolveRoutes({ id: 'terminal', next: [] }, {}), { rules: [] })
 })

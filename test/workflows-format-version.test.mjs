@@ -1,5 +1,5 @@
 /**
- * 工作流运行存储的格式版本（v2）单测。
+ * 工作流运行存储的格式版本（v3）单测。
  *
  * 覆盖启动时按版本清退旧运行、序号计数器重置、settings.json 不受影响，以及
  * `pendingInteraction` 在列表与中断标记上的表现。全部使用临时目录，不启动
@@ -90,7 +90,7 @@ async function writeRunDirectory(runsDir, runId, options = {}) {
   return directory
 }
 
-test('store format v2: purges runs whose run.json or definition.json is not the current version', async (t) => {
+test('store format v3: purges runs whose run.json or definition.json is not the current version', async (t) => {
   const { runsDir } = await tempRoot(t)
   await fs.mkdir(runsDir, { recursive: true })
 
@@ -126,7 +126,7 @@ test('store format v2: purges runs whose run.json or definition.json is not the 
   assert.ok(logs.some((message) => message.includes('2')), logs.join('\n'))
 })
 
-test('store format v2: deletes runs with a missing or corrupt run/definition snapshot', async (t) => {
+test('store format v3: deletes runs with a missing or corrupt run/definition snapshot', async (t) => {
   const { runsDir } = await tempRoot(t)
   await fs.mkdir(runsDir, { recursive: true })
 
@@ -160,7 +160,7 @@ test('store format v2: deletes runs with a missing or corrupt run/definition sna
   assert.ok(await store.readRun('wf-healthy'))
 })
 
-test('store format v2: every directory purged also resets the sequence counter', async (t) => {
+test('store format v3: every directory purged also resets the sequence counter', async (t) => {
   const { runsDir } = await tempRoot(t)
   await fs.mkdir(runsDir, { recursive: true })
   await writeRunDirectory(runsDir, 'wf-old-a', {
@@ -184,7 +184,7 @@ test('store format v2: every directory purged also resets the sequence counter',
   assert.equal(await store.allocateSeq(), 2)
 })
 
-test('store format v2: keeps the sequence counter when current-version runs remain', async (t) => {
+test('store format v3: keeps the sequence counter when current-version runs remain', async (t) => {
   const { runsDir } = await tempRoot(t)
   await fs.mkdir(runsDir, { recursive: true })
   await writeRunDirectory(runsDir, 'wf-old', {
@@ -195,7 +195,7 @@ test('store format v2: keeps the sequence counter when current-version runs rema
     run: sampleRun('wf-current', { seq: 4 }),
     definition: { version: WORKFLOW_FORMAT_VERSION, runId: 'wf-current' },
   })
-  await fs.writeFile(path.join(runsDir, 'sequence.json'), `${JSON.stringify({ version: 2, next: 12 })}\n`)
+  await fs.writeFile(path.join(runsDir, 'sequence.json'), `${JSON.stringify({ version: 3, next: 12 })}\n`)
 
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -204,7 +204,7 @@ test('store format v2: keeps the sequence counter when current-version runs rema
   assert.equal(await store.allocateSeq(), 12)
 })
 
-test('store format v2: never touches settings.json next to runs/', async (t) => {
+test('store format v3: never touches settings.json next to runs/', async (t) => {
   const { runsDir, settingsFile } = await tempRoot(t)
   await fs.mkdir(runsDir, { recursive: true })
   const settingsBody = `${JSON.stringify({ archive: { enabled: false, archiveAfterHours: 24, deleteAfterHours: 168 } }, null, 2)}\n`
@@ -221,7 +221,7 @@ test('store format v2: never touches settings.json next to runs/', async (t) => 
   assert.equal(await fs.readFile(settingsFile, 'utf8'), settingsBody)
 })
 
-test('store format v2: create() stamps the current version on run and definition snapshots', async (t) => {
+test('store format v3: create() stamps the current version on run and definition snapshots', async (t) => {
   const { runsDir } = await tempRoot(t)
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -241,7 +241,7 @@ test('store format v2: create() stamps the current version on run and definition
   assert.equal(results[0].version, WORKFLOW_FORMAT_VERSION)
 })
 
-test('store format v2: listRuns reports waitingForUser from pendingInteraction', async (t) => {
+test('store format v3: listRuns reports waitingForUser from pendingInteraction', async (t) => {
   const { runsDir } = await tempRoot(t)
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -270,14 +270,25 @@ test('store format v2: listRuns reports waitingForUser from pendingInteraction',
     definition: { start: 'a' },
   })
   await store.save({ ...(await store.readRun('wf-idle')), status: 'running', pendingInteraction: null })
+  // 用户介入节点等待作答也计入 waitingForUser。
+  await store.create({
+    run: sampleRun('wf-user-waiting', { status: 'waiting', createdAt: now - 3000 }),
+    definition: { start: 'a' },
+  })
+  await store.save({
+    ...(await store.readRun('wf-user-waiting')),
+    status: 'waiting',
+    pendingUser: { nodeId: 'review', title: '发布确认', options: [], questions: [] },
+  })
 
   const runs = await store.listRuns(10)
   const byId = Object.fromEntries(runs.map((item) => [item.runId, item]))
   assert.equal(byId['wf-waiting'].waitingForUser, true)
+  assert.equal(byId['wf-user-waiting'].waitingForUser, true)
   assert.equal(byId['wf-idle'].waitingForUser, false)
 })
 
-test('store format v2: markInterrupted clears pendingInteraction', async (t) => {
+test('store format v3: markInterrupted clears pendingInteraction', async (t) => {
   const { runsDir } = await tempRoot(t)
   const store = new WorkflowRunStore({ dir: runsDir })
   await store.init()
@@ -315,7 +326,7 @@ test('store format v2: markInterrupted clears pendingInteraction', async (t) => 
   const run = await store.readRun('wf-interrupt')
   assert.equal(run.status, 'interrupted')
   assert.equal(run.pendingInteraction, null)
-  assert.equal(run.pendingGate, null)
+  assert.equal(run.pendingUser, null)
   assert.equal(run.current, null)
   assert.equal(run.error, 'host restarted')
   assert.equal((await store.listRuns(10))[0].waitingForUser, false)

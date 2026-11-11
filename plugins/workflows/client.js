@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const {
       Button,
-      Tooltip,
+      SegmentedTabs,
       Tag,
       Toast,
       StateDot,
@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
     const RUNS_ROUTE = '/buka-workflows/runs'
     const RUN_ROUTE = '/buka-workflows/run'
     const SETTINGS_ROUTE = '/buka-workflows/settings'
+    const TEMPLATES_ROUTE = '/buka-workflows/templates'
 
     /** 自动归档默认值：运行结束 24 小时后归档、168 小时后删除。 */
     const DEFAULT_ARCHIVE_HOURS = 24
@@ -84,19 +85,13 @@ window.__ModuleLoader__.load({
       mushroom: { emoji: '🍄', color: '#EB5757' },
     }
 
-    /**
-     * 通用型机器人的固定头像：它不在普通预设表里，但 robots 服务的
-     * `avatarMap()` 会返回 `robot`，节点图需要照常画 🤖。
-     */
-    const GENERAL_AVATAR = { emoji: '🤖', color: '#3B82F6' }
-
     /** 英文文案。 */
     const en = {
       panel: 'Workflows',
       title: 'Workflows',
       welcome: 'No workflow runs yet.',
       welcomeHint:
-        'Start a session with the workflow-orchestrator preset and ask it to run a workflow. Gate-free runs continue in the background after the tool call returns; their node sessions appear here as the graph advances.',
+        'Start a session with the workflow-orchestrator preset and ask it to run a workflow. The robot sessions it opens and the user nodes it waits at appear here as the graph advances.',
       refresh: 'Refresh',
       loading: 'Loading…',
       loadFailed: 'Request failed:',
@@ -114,7 +109,16 @@ window.__ModuleLoader__.load({
       waitingForApproval: 'A robot is waiting for your approval',
       openAnswerSession: 'Open session to answer',
       openApprovalSession: 'Open session to approve',
+      modePlan: 'Plan mode',
+      waitingForPlanReview: 'A robot is waiting for you to review its plan',
+      planReviewBody: 'Open the robot session to approve the plan or keep planning.',
+      openPlanReviewSession: 'Open session to review',
       waitingForUser: 'Waiting for you',
+      userWaitingTitle: 'The workflow is waiting for you',
+      userWaitingBody: 'Answer in the session that started this workflow; the run continues once you submit.',
+      userChoice: 'Choices',
+      userAnswers: 'Additional questions',
+      userAnswerSkipped: 'Not answered',
       sessionLive: 'Current session',
       sessionCompacted: 'History compacted',
       sessionRecovering: 'Recovering (attempt {n})',
@@ -129,26 +133,24 @@ window.__ModuleLoader__.load({
       statusRejected: 'Rejected',
       statusCancelled: 'Cancelled',
       statusInterrupted: 'Interrupted',
-      statusApproved: 'Approved',
       legendTypes: 'Node types',
       legendStates: 'Node states',
       legendEdges: 'Edges',
       legendTraversed: 'Traversed',
       legendPending: 'Not taken',
-      legendApprove: 'Approve',
-      legendReject: 'Reject',
+      legendFlow: 'Flow',
       legendDone: 'Done',
       legendRunning: 'Running',
-      legendWaiting: 'Waiting',
+      legendWaiting: 'Waiting for you',
       legendFailed: 'Failed',
       legendIdle: 'Not run',
       visitsLabel: 'Visits',
       typeStart: 'Start',
       typeRobot: 'Robot',
-      typeGate: 'Gate',
+      typeUser: 'User',
       typeEnd: 'End',
       stateIdle: 'Not run',
-      stateUnavailable: 'Approval unavailable',
+      stateUnavailable: 'Questions unavailable',
       inspector: 'Node detail',
       nodeNotRun: 'This node has not run in this workflow.',
       nodeStart: 'Start',
@@ -182,7 +184,7 @@ window.__ModuleLoader__.load({
       nodeTimeout: 'Timeout',
       nodeMaxVisits: 'Max visits',
       nodeEndStatus: 'End status',
-      gateDetail: 'Gate detail',
+      userDetail: 'User detail',
       finalDeliverable: 'Final output',
       finalDeliverableEmpty: 'This run produced no robot output.',
       finalDeliverableFrom: 'From',
@@ -218,6 +220,21 @@ window.__ModuleLoader__.load({
       archiveBack: 'Back to list',
       archiveEmpty: 'No archived runs yet.',
       archived: 'Archived',
+      runsTab: 'Runs',
+      templatesTab: 'Templates',
+      tabsLabel: 'Workflow pages',
+      templatesTitle: 'Workflow templates',
+      templatesBack: 'Back to templates',
+      templatesEmpty: 'No workflow templates available.',
+      templatesHint:
+        'Abstract workflow patterns for reference. Each template names roles (not real robots) and lists its process stages; use your real robots to design a workflow that fits the request.',
+      templatesStep: 'Step',
+      templatesRole: 'Role',
+      templatesAbstractRole: 'Abstract role',
+      templatesTransitions: 'Transitions',
+      templatesNoFlow: 'This template has no flow.',
+      templatesPurpose: 'Purpose',
+      templatesNoTransitions: 'This node has no outgoing transitions.',
     }
 
     /** 简体中文文案。 */
@@ -226,7 +243,7 @@ window.__ModuleLoader__.load({
       title: '工作流',
       welcome: '还没有运行过工作流。',
       welcomeHint:
-        '用 workflow-orchestrator preset 新建一个会话，让它跑一个工作流；不含门禁的运行在工具返回后仍在后台调度节点会话，图会随执行推进。',
+        '用 workflow-orchestrator preset 新建一个会话，让它跑一个工作流；它启动的机器人会话与正在等待你介入的节点都会随执行推进显示在这里。',
       refresh: '刷新',
       loading: '正在读取…',
       loadFailed: '请求失败：',
@@ -243,7 +260,16 @@ window.__ModuleLoader__.load({
       waitingForApproval: '机器人正在等待你批准',
       openAnswerSession: '打开会话回答',
       openApprovalSession: '打开会话审批',
+      modePlan: '计划模式',
+      waitingForPlanReview: '机器人正在等待你审阅计划',
+      planReviewBody: '打开机器人会话，批准计划或继续计划。',
+      openPlanReviewSession: '打开会话审阅',
       waitingForUser: '等待用户',
+      userWaitingTitle: '工作流正在等待你介入',
+      userWaitingBody: '请在工作流创建者的会话里作答；提交后流程会继续。',
+      userChoice: '选项',
+      userAnswers: '补充问题',
+      userAnswerSkipped: '未作答',
       sessionLive: '当前会话',
       sessionCompacted: '已压缩历史',
       sessionRecovering: '恢复中（第 {n} 次）',
@@ -258,26 +284,24 @@ window.__ModuleLoader__.load({
       statusRejected: '已拒绝',
       statusCancelled: '已取消',
       statusInterrupted: '已中断',
-      statusApproved: '已批准',
       legendTypes: '节点类型',
       legendStates: '节点状态',
       legendEdges: '连线',
       legendTraversed: '已走过',
       legendPending: '未走过',
-      legendApprove: '批准',
-      legendReject: '拒绝',
+      legendFlow: '流程走向',
       legendDone: '已完成',
       legendRunning: '运行中',
-      legendWaiting: '等待授权',
+      legendWaiting: '等待用户',
       legendFailed: '失败',
       legendIdle: '未运行',
       visitsLabel: '执行次数',
       typeStart: '开始',
       typeRobot: '机器人',
-      typeGate: '门禁',
+      typeUser: '用户',
       typeEnd: '终止',
       stateIdle: '未运行',
-      stateUnavailable: '审批不可用',
+      stateUnavailable: '提问不可用',
       inspector: '节点详情',
       nodeNotRun: '这个节点在本次运行中还没有执行。',
       nodeStart: '起点',
@@ -310,7 +334,7 @@ window.__ModuleLoader__.load({
       nodeTimeout: '超时',
       nodeMaxVisits: '最多访问',
       nodeEndStatus: '终止状态',
-      gateDetail: '门禁说明',
+      userDetail: '用户说明',
       finalDeliverable: '最终输出',
       finalDeliverableEmpty: '这次运行没有机器人输出。',
       finalDeliverableFrom: '来自',
@@ -343,6 +367,21 @@ window.__ModuleLoader__.load({
       archiveBack: '返回列表',
       archiveEmpty: '还没有已归档的运行。',
       archived: '已归档',
+      runsTab: '运行',
+      templatesTab: '模板',
+      tabsLabel: '工作流页面',
+      templatesTitle: '工作流模板',
+      templatesBack: '返回模板列表',
+      templatesEmpty: '还没有工作流模板。',
+      templatesHint:
+        '抽象的工作流范式，供设计真实工作流时参考。每个模板用角色名（而不是真实机器人）描述流程阶段；设计时请用你真正拥有的机器人替换角色。',
+      templatesStep: '步骤',
+      templatesRole: '角色',
+      templatesAbstractRole: '抽象角色',
+      templatesTransitions: '流转',
+      templatesNoFlow: '这个模板没有流程。',
+      templatesPurpose: '目的',
+      templatesNoTransitions: '这个节点没有流转去向。',
     }
 
     /** 页面样式：沿用 Robots / Skills 页的标题行 + 960px 内容区 + 卡片结构。 */
@@ -352,8 +391,6 @@ window.__ModuleLoader__.load({
 .buka-workflows-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-workflows-inset));max-width:none;margin-inline:calc(-1 * var(--buka-workflows-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-workflows-inset) 0;background:var(--dsw-alias-bg-base);z-index:1;position:sticky;top:0}
 .buka-workflows-headInner{width:100%;max-width:960px;margin-inline:auto}
 .buka-workflows-titleRow{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:center;gap:16px;min-width:0}
-.buka-workflows-titleCluster{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px}
-.buka-workflows-title{margin:0;font-size:20px;font-weight:500;line-height:28px;overflow-wrap:anywhere;min-width:0}
 .buka-workflows-toolbar{flex:none;display:flex;align-items:center;gap:8px}
 .buka-workflows-body{box-sizing:border-box;width:100%;max-width:960px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;display:flex;flex-direction:column;padding:32px 0 24px}
 .buka-workflows-pageBody{display:flex;flex-direction:column;gap:20px}
@@ -387,11 +424,6 @@ window.__ModuleLoader__.load({
 .buka-workflows-pre{margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-family:var(--ds-font-family-code);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;width:100%;box-sizing:border-box}
 .buka-workflows-smallButton{border-radius:var(--dsw-radius-md);height:28px;padding:0 10px;font-size:12px;line-height:18px}
 .buka-workflows-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
-.buka-workflows-iconButton{border-radius:var(--dsw-radius-sm);width:28px;height:28px;color:var(--dsw-alias-label-caption);cursor:pointer;background:0 0;border:0;justify-content:center;align-items:center;display:inline-flex;padding:0}
-@media (hover:hover){.buka-workflows-iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
-.buka-workflows-iconButton:active{background:var(--dsw-alias-interactive-bg-active)}
-.buka-workflows-iconButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-.buka-workflows-backButton{flex:none;margin-left:-4px}
 .buka-workflows-back svg{transform:rotate(180deg)}
 .buka-workflows-split{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:32px;align-items:start}
 @media (width<=860px){.buka-workflows-split{grid-template-columns:minmax(0,1fr)}}
@@ -410,7 +442,7 @@ window.__ModuleLoader__.load({
 .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
 .buka-workflows-capsuleAvatar{margin-right:6px}
 .buka-workflows-inspectorAvatar{margin-right:2px}
-.buka-workflows-capsule.is-gate{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-state-warn-primary)}
+.buka-workflows-capsule.is-user{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-capsule.is-end{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}
 .buka-workflows-capsule.is-start{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}
 .buka-workflows-capsule.is-idle{border-color:var(--dsw-alias-border-l2);border-style:dashed;color:var(--dsw-alias-label-tertiary)}
@@ -421,28 +453,27 @@ window.__ModuleLoader__.load({
 @keyframes buka-workflows-pulse{0%{box-shadow:0 0 0 0 var(--dsw-alias-brand-primary)}70%{box-shadow:0 0 0 5px transparent}100%{box-shadow:0 0 0 0 transparent}}
 @media (prefers-reduced-motion:reduce){.buka-workflows-capsule.is-running{animation:none}}
 .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.25;stroke-dasharray:4 4;stroke-linecap:round;opacity:.6;transition:stroke-width .16s ease,opacity .16s ease,stroke .16s ease}
+.buka-workflows-edge.is-static{stroke:var(--dsw-alias-label-tertiary);stroke-width:1.5;stroke-dasharray:none;opacity:.85}
 .buka-workflows-edge.is-traversed{stroke:var(--dsw-alias-brand-primary);stroke-width:1.75;stroke-dasharray:none;opacity:1}
-.buka-workflows-edge.is-approve{stroke:var(--dsw-alias-state-success-primary)}
-.buka-workflows-edge.is-reject{stroke:var(--dsw-alias-state-error-primary)}
-.buka-workflows-edge.is-approve:not(.is-traversed),.buka-workflows-edge.is-reject:not(.is-traversed){opacity:.45}
 .buka-workflows-edge.is-hovered{stroke-width:2.5;opacity:1;stroke-dasharray:none}
 .buka-workflows-edge.is-next.is-hovered{stroke:var(--dsw-alias-brand-primary)}
-.buka-workflows-edge.is-approve.is-hovered{stroke:var(--dsw-alias-state-success-primary)}
-.buka-workflows-edge.is-reject.is-hovered{stroke:var(--dsw-alias-state-error-primary)}
+.buka-workflows-edge.is-success{stroke:var(--dsw-alias-state-success-primary)}
+.buka-workflows-edge.is-failure{stroke:var(--dsw-alias-state-error-primary)}
+.buka-workflows-edge.is-success.is-hovered{stroke:var(--dsw-alias-state-success-primary)}
+.buka-workflows-edge.is-failure.is-hovered{stroke:var(--dsw-alias-state-error-primary)}
 .buka-workflows-edge.is-dimmed:not(.is-hovered){opacity:.5}
 .buka-workflows-edgeHit{fill:none;stroke:transparent;stroke-width:14;stroke-linecap:round;pointer-events:stroke}
 .buka-workflows-edgeTip{position:fixed;z-index:1000;max-width:240px;box-sizing:border-box;padding:4px 9px;border-radius:var(--dsw-radius-md);border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:11.5px;line-height:16px;font-weight:500;box-shadow:0 4px 12px rgba(17,20,28,.12);pointer-events:none;overflow-wrap:anywhere}
 .buka-workflows-edgeTip.is-anchored{transform:translateY(-50%)}
 .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.7;transition:opacity .16s ease,fill .16s ease}
+.buka-workflows-edgeArrow.is-static{fill:var(--dsw-alias-label-tertiary);opacity:.85}
 .buka-workflows-edgeArrow.is-traversed{fill:var(--dsw-alias-brand-primary);opacity:1}
-.buka-workflows-edgeArrow.is-approve{fill:var(--dsw-alias-state-success-primary)}
-.buka-workflows-edgeArrow.is-reject{fill:var(--dsw-alias-state-error-primary)}
-.buka-workflows-edgeArrow.is-approve,.buka-workflows-edgeArrow.is-reject{opacity:.9}
-.buka-workflows-edgeArrow.is-approve:not(.is-traversed),.buka-workflows-edgeArrow.is-reject:not(.is-traversed){opacity:.5}
 .buka-workflows-edgeArrow.is-hovered{opacity:1}
 .buka-workflows-edgeArrow.is-next.is-hovered{fill:var(--dsw-alias-brand-primary)}
-.buka-workflows-edgeArrow.is-approve.is-hovered{fill:var(--dsw-alias-state-success-primary)}
-.buka-workflows-edgeArrow.is-reject.is-hovered{fill:var(--dsw-alias-state-error-primary)}
+.buka-workflows-edgeArrow.is-success{fill:var(--dsw-alias-state-success-primary)}
+.buka-workflows-edgeArrow.is-failure{fill:var(--dsw-alias-state-error-primary)}
+.buka-workflows-edgeArrow.is-success.is-hovered{fill:var(--dsw-alias-state-success-primary)}
+.buka-workflows-edgeArrow.is-failure.is-hovered{fill:var(--dsw-alias-state-error-primary)}
 .buka-workflows-edgeArrow.is-dimmed:not(.is-hovered){opacity:.5}
 .buka-workflows-vgraphDot{stroke:var(--dsw-alias-bg-layer-1);stroke-width:1.5;fill:var(--dsw-alias-state-idle-primary)}
 .buka-workflows-vgraphDot.is-running{fill:var(--dsw-alias-brand-primary)}
@@ -457,7 +488,7 @@ window.__ModuleLoader__.load({
 .buka-workflows-legendItem{display:inline-flex;align-items:center;gap:5px}
 .buka-workflows-legendCapsule{box-sizing:border-box;width:26px;height:11px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2)}
 .buka-workflows-legendCapsule.is-robot{border-color:var(--dsw-alias-brand-primary)}
-.buka-workflows-legendCapsule.is-gate{border-color:var(--dsw-alias-state-warn-primary)}
+.buka-workflows-legendCapsule.is-user{border-color:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-legendCapsule.is-end{border-color:var(--dsw-alias-state-success-primary)}
 .buka-workflows-legendCapsule.is-start{border-color:var(--dsw-alias-border-l2)}
 .buka-workflows-legendDot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-idle-primary)}
@@ -466,9 +497,8 @@ window.__ModuleLoader__.load({
 .buka-workflows-legendDot.is-waiting{background:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-legendDot.is-failed{background:var(--dsw-alias-state-error-primary)}
 .buka-workflows-legendLine{box-sizing:border-box;width:18px;height:0;border-top:1.5px solid var(--dsw-alias-label-caption);border-top-style:dashed}
+.buka-workflows-legendLine.is-static{border-top-color:var(--dsw-alias-label-tertiary);border-top-style:solid}
 .buka-workflows-legendLine.is-traversed{border-top-color:var(--dsw-alias-brand-primary);border-top-style:solid}
-.buka-workflows-legendLine.is-approve{border-top-color:var(--dsw-alias-state-success-primary);border-top-style:solid}
-.buka-workflows-legendLine.is-reject{border-top-color:var(--dsw-alias-state-error-primary)}
 .buka-workflows-inspector{display:flex;flex-direction:column;gap:14px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);padding:14px 16px}
 .buka-workflows-inspectorHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
 .buka-workflows-inspectorTitle{flex:1 1 auto;min-width:0;font-size:15px;font-weight:500;line-height:22px;overflow-wrap:anywhere}
@@ -507,6 +537,13 @@ window.__ModuleLoader__.load({
 .buka-workflows-interactionTitle{flex:1 1 auto;min-width:0;color:var(--dsw-alias-state-warn-primary);font-size:13px;font-weight:500;line-height:20px;overflow-wrap:anywhere}
 .buka-workflows-interactionBody{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}
 .buka-workflows-interactionActions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.buka-workflows-userNotice{display:flex;flex-direction:column;gap:8px}
+.buka-workflows-userNoticeGroup{display:flex;flex-direction:column;gap:6px}
+.buka-workflows-userChoiceList,.buka-workflows-userQuestionList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.buka-workflows-userChoice,.buka-workflows-userQuestion{display:flex;flex-direction:column;gap:2px;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workflows-userChoiceLabel,.buka-workflows-userQuestionHeader{color:var(--dsw-alias-label-primary);font-weight:500}
+.buka-workflows-userChoiceDesc{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+.buka-workflows-userQuestionText{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-workflows-kvKey{color:var(--dsw-alias-label-tertiary);min-width:72px}
 .buka-workflows-kvValue{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;min-width:0}
 .buka-workflows-executionNav{margin-top:14px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-secondary);display:flex;justify-content:space-between;gap:16px}
@@ -539,6 +576,33 @@ window.__ModuleLoader__.load({
 .buka-workflows-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:500;line-height:20px}
 .buka-workflows-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-workflows-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.buka-workflows-tabbar{flex:1 1 auto;min-width:0}
+.buka-workflows-tabList{width:fit-content;min-width:240px}
+@media (width<=372px){.buka-workflows-tabList{min-width:0}}
+.buka-workflows-templateList{display:flex;flex-direction:column;gap:16px}
+.buka-workflows-templateCard{display:flex;flex-direction:column;gap:8px;width:100%;box-sizing:border-box;text-align:left;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:var(--dsw-radius-md);padding:14px 16px;font:inherit;color:inherit;cursor:pointer}
+@media (hover:hover){.buka-workflows-templateCard:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.buka-workflows-templateCard:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
+.buka-workflows-templateHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+.buka-workflows-templateTitle{font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere;min-width:0}
+.buka-workflows-templateChevron{flex:none;margin-left:auto;color:var(--dsw-alias-label-tertiary)}
+.buka-workflows-templateDesc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workflows-templateDetail{display:flex;flex-direction:column;gap:20px}
+.buka-workflows-flow{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
+.buka-workflows-flowStep{display:flex;flex-direction:column;gap:6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);padding:10px 12px}
+.buka-workflows-flowHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+.buka-workflows-flowIndex{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.buka-workflows-flowSummary{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workflows-flowTransitions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.buka-workflows-templateBackButton{flex:none;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:0;background:0 0;color:var(--dsw-alias-label-caption);cursor:pointer;border-radius:var(--dsw-radius-sm);padding:0;margin-left:-4px}
+@media (hover:hover){.buka-workflows-templateBackButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
+.buka-workflows-templateBackButton:active{background:var(--dsw-alias-interactive-bg-active)}
+.buka-workflows-templateBackButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+.buka-workflows-detailBackButton{align-self:flex-start}
+.buka-workflows-templateTransitions{display:flex;flex-direction:column;gap:8px}
+.buka-workflows-templateTransition{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
+.buka-workflows-templateTransitionHead{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}
+.buka-workflows-templateTransitionBody{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
 `
 
     /**
@@ -623,7 +687,6 @@ window.__ModuleLoader__.load({
     function statusTone(status) {
       switch (status) {
         case 'completed':
-        case 'approved':
           return 'success'
         case 'running':
         case 'waiting':
@@ -662,8 +725,6 @@ window.__ModuleLoader__.load({
           return t('statusCancelled')
         case 'interrupted':
           return t('statusInterrupted')
-        case 'approved':
-          return t('statusApproved')
         case 'unavailable':
           return t('stateUnavailable')
         case 'idle':
@@ -833,7 +894,6 @@ window.__ModuleLoader__.load({
      * @returns {{ emoji: string, color: string } | null}
      */
     function avatarPreset(id) {
-      if (id === 'robot') return GENERAL_AVATAR
       return typeof id === 'string' && Object.hasOwn(AVATARS, id) ? AVATARS[id] : null
     }
 
@@ -868,7 +928,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 节点标题：步骤概要就是标题。机器人节点用创建者写的 summary（旧定义退回
-     * 提示词第一行，再退回机器人名），门禁用标题，终止节点用 id。
+     * 提示词第一行，再退回机器人名），用户介入节点用标题，终止节点用 id。
      *
      * @param {Record<string, any>} node 图模型里的节点
      * @param {Record<string, any> | null} config 定义快照里的节点
@@ -876,7 +936,7 @@ window.__ModuleLoader__.load({
      */
     function nodeTitle(node, config) {
       if (node.type === 'robot') return summaryText(config) || node.robot || node.id
-      if (node.type === 'gate') return node.title || node.id
+      if (node.type === 'user') return node.title || node.id
       return node.id
     }
 
@@ -905,7 +965,7 @@ window.__ModuleLoader__.load({
     function typeLabel(t, type) {
       if (type === 'start') return t('typeStart')
       if (type === 'robot') return t('typeRobot')
-      if (type === 'gate') return t('typeGate')
+      if (type === 'user') return t('typeUser')
       if (type === 'end') return t('typeEnd')
       return String(type)
     }
@@ -919,7 +979,6 @@ window.__ModuleLoader__.load({
     function stateClass(state) {
       switch (state) {
         case 'completed':
-        case 'approved':
           return 'done'
         case 'running':
           return 'running'
@@ -937,7 +996,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 从定义快照里取一个节点的原始配置（用于提示词、门禁说明）。
+     * 从定义快照里取一个节点的原始配置（用于提示词、用户说明）。
      *
      * @param {unknown} definition
      * @param {string} id
@@ -1121,6 +1180,18 @@ window.__ModuleLoader__.load({
       /** 设置相关的错误文案。 */
       const [settingsError, setSettingsError] = React.useState(null)
 
+      /** 页面顶部的页签：运行 / 模板。 */
+      const [view, setView] = React.useState('runs')
+
+      /** 模板目录状态。 */
+      const [templates, setTemplates] = React.useState({ status: 'loading', items: [], error: null })
+
+      /** 模板页里选中的模板 id；null 表示模板列表。 */
+      const [selectedTemplateId, setSelectedTemplateId] = React.useState(null)
+
+      /** 模板详情里选中的节点 id；null 表示还没选，由详情页默认到 start。 */
+      const [selectedTemplateNodeId, setSelectedTemplateNodeId] = React.useState(null)
+
       // 列表：首次加载与每次刷新；归档视图只取已归档的运行。
       React.useEffect(() => {
         let cancelled = false
@@ -1174,6 +1245,29 @@ window.__ModuleLoader__.load({
           cancelled = true
         }
       }, [selectedId, tick])
+
+      // 模板目录：静态数据，挂载时读一次；之后不再重复请求。空依赖避免「状态变更
+      // → 清理上一次请求 → 结果被丢弃」的死循环。
+      React.useEffect(() => {
+        let cancelled = false
+        requestJson(TEMPLATES_ROUTE).then(
+          (body) => {
+            if (cancelled) return
+            setTemplates({
+              status: 'ready',
+              items: Array.isArray(body.templates) ? body.templates : [],
+              error: null,
+            })
+          },
+          (failure) => {
+            if (cancelled) return
+            setTemplates({ status: 'ready', items: [], error: messageOf(failure) })
+          },
+        )
+        return () => {
+          cancelled = true
+        }
+      }, [])
 
       // 页面打开期间定时刷新：有运行在跑时快一点，否则保持低频。
       const live =
@@ -1392,21 +1486,21 @@ window.__ModuleLoader__.load({
 
       /**
        * 胶囊文案：机器人节点优先用创建者写的步骤概要（旧定义没有时退回机器人
-       * 名），门禁用标题，终止节点用 id。
+       * 名），用户介入节点用标题，终止节点用 id。
        *
        * @param {Record<string, any>} node
        * @returns {string}
        */
       function capsuleText(node) {
         if (node.type === 'robot') return node.summary || node.robot || node.id
-        if (node.type === 'gate') return node.title || node.id
+        if (node.type === 'user') return node.title || node.id
         if (node.type === 'start') return t('typeStart')
         return node.id
       }
 
       /**
        * 默认选中的节点：
-       * - 有正在执行 / 等待授权的节点 → 那个节点；
+       * - 有正在执行 / 等待用户介入的节点 → 那个节点；
        * - 运行已完成 → 它最后走到的终止节点（没有就找任意已到达的终止节点），
        *   让页面一进来就展示最终输出；
        * - 其他状态 → 最近执行过的节点；
@@ -1441,21 +1535,58 @@ window.__ModuleLoader__.load({
       /**
        * 一条边在悬停时展示的名字。
        *
-       * - 机器人节点的边：创建者写的 `name`；多条规则合并成一条边时按顺序并列；
-       * - 门禁边：直接用「批准 / 拒绝」，这已经是这条边的全部含义；
-       * - 没写名字的机器人边：不展示，不拿目标 id 凑数。
+       * - 用户介入节点的边：先显示给用户看的选项文字（`labels`），这才是这条边
+       *   对用户的意义；
+       * - 机器人节点的边：创建者写的路由名 `names`；多条规则合并成一条边时按顺序
+       *   并列；
+       * - 没写名字的边：不展示，不拿目标 id 凑数。
        *
        * @param {Record<string, any>} edge
        * @returns {string}
        */
       function edgeLabel(edge) {
+        const labels = Array.isArray(edge?.labels)
+          ? edge.labels.filter((label) => typeof label === 'string' && label !== '')
+          : []
+        if (labels.length > 0) return labels.join(' / ')
         const names = Array.isArray(edge?.names)
           ? edge.names.filter((name) => typeof name === 'string' && name !== '')
           : []
         if (names.length > 0) return names.join(' / ')
-        if (edge?.kind === 'approve') return t('legendApprove')
-        if (edge?.kind === 'reject') return t('legendReject')
         return ''
+      }
+
+      /**
+       * 边的外观色 class：只认图模型归一后的 `success` / `failure`。
+       *
+       * 颜色是纯展示属性（定义里的可选 `tone`），不参与路由；状态 class
+       * （`is-traversed` / `is-static` / `is-hovered`）仍然各自控制线宽、实线与
+       * 压暗，CSS 里让 tone 的颜色优先于它们。
+       *
+       * @param {Record<string, any>} edge
+       * @returns {string}
+       */
+      function edgeToneClass(edge) {
+        if (edge?.tone === 'success') return ' is-success'
+        if (edge?.tone === 'failure') return ' is-failure'
+        return ''
+      }
+
+      /**
+       * 一次用户执行的 route 展示文字：优先用所选边的 `label`（定义里用户看到的
+       * 选项），找不到时退回路由键。机器人执行仍然显示路由名。
+       *
+       * @param {Record<string, any>} node 图模型里的节点
+       * @param {Record<string, any> | null} config 定义快照里的节点
+       * @param {string} route 路由键
+       * @returns {string}
+       */
+      function routeText(node, config, route) {
+        if (node.type !== 'user' || route === '') return route
+        const next = Array.isArray(config?.next) ? config.next : []
+        const edge = next.find((item) => item?.name === route)
+        const label = typeof edge?.label === 'string' ? edge.label.trim() : ''
+        return label === '' ? route : label
       }
 
       /**
@@ -1467,17 +1598,20 @@ window.__ModuleLoader__.load({
       function typeTone(type) {
         if (type === 'start') return 'neutral'
         if (type === 'robot') return 'info'
-        if (type === 'gate') return 'warning'
+        if (type === 'user') return 'warning'
         if (type === 'end') return 'success'
         return 'neutral'
       }
 
       /**
-       * 图例：节点类型（胶囊颜色）、节点状态（轨道圆点）与连线。
+       * 图例：节点类型（胶囊颜色）、节点状态（轨道圆点）与连线。模板页没有执行状态，
+       * 传入 `{ states: false }` 时省略「节点状态」一组；连线也不再区分「已走过 / 未走过」，
+       * 只留一条「流程走向」的实线样例。
        *
+       * @param {{ states?: boolean }} [options]
        * @returns {object} React 元素
        */
-      function renderLegend() {
+      function renderLegend(options = {}) {
         const states = [
           ['done', t('legendDone')],
           ['running', t('legendRunning')],
@@ -1492,7 +1626,7 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'buka-workflows-legendGroup' },
             h('span', { className: 'buka-workflows-legendTitle' }, t('legendTypes')),
-            ...['start', 'robot', 'gate', 'end'].map((type) =>
+            ...['start', 'robot', 'user', 'end'].map((type) =>
               h(
                 'span',
                 { key: type, className: 'buka-workflows-legendItem' },
@@ -1504,35 +1638,47 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
-          h(
-            'span',
-            { className: 'buka-workflows-legendGroup' },
-            h('span', { className: 'buka-workflows-legendTitle' }, t('legendStates')),
-            ...states.map(([kind, label]) =>
-              h(
+          options.states === false
+            ? null
+            : h(
                 'span',
-                { key: kind, className: 'buka-workflows-legendItem' },
-                h('span', { className: `buka-workflows-legendDot is-${kind}`, 'aria-hidden': true }),
-                label,
+                { className: 'buka-workflows-legendGroup' },
+                h('span', { className: 'buka-workflows-legendTitle' }, t('legendStates')),
+                ...states.map(([kind, label]) =>
+                  h(
+                    'span',
+                    { key: kind, className: 'buka-workflows-legendItem' },
+                    h('span', { className: `buka-workflows-legendDot is-${kind}`, 'aria-hidden': true }),
+                    label,
+                  ),
+                ),
               ),
-            ),
-          ),
           h(
             'span',
             { className: 'buka-workflows-legendGroup' },
             h('span', { className: 'buka-workflows-legendTitle' }, t('legendEdges')),
-            ...['traversed', '', 'approve', 'reject'].map((kind, index) => {
-              const labels = [t('legendTraversed'), t('legendPending'), t('legendApprove'), t('legendReject')]
-              return h(
-                'span',
-                { key: `${kind || 'pending'}-${index}`, className: 'buka-workflows-legendItem' },
-                h('span', {
-                  className: `buka-workflows-legendLine${kind === '' ? '' : ` is-${kind}`}`,
-                  'aria-hidden': true,
-                }),
-                labels[index],
-              )
-            }),
+            ...(options.states === false
+              ? [
+                  // 模板没有「已走过 / 未走过」：连线只表达参考流程的走向。
+                  h(
+                    'span',
+                    { key: 'flow', className: 'buka-workflows-legendItem' },
+                    h('span', { className: 'buka-workflows-legendLine is-static', 'aria-hidden': true }),
+                    t('legendFlow'),
+                  ),
+                ]
+              : ['traversed', ''].map((kind, index) => {
+                  const labels = [t('legendTraversed'), t('legendPending')]
+                  return h(
+                    'span',
+                    { key: `${kind || 'pending'}-${index}`, className: 'buka-workflows-legendItem' },
+                    h('span', {
+                      className: `buka-workflows-legendLine${kind === '' ? '' : ` is-${kind}`}`,
+                      'aria-hidden': true,
+                    }),
+                    labels[index],
+                  )
+                })),
           ),
         )
       }
@@ -1542,9 +1688,12 @@ window.__ModuleLoader__.load({
        *
        * @param {Record<string, any>} graph 路由返回的图模型（含行坐标与连线）
        * @param {string | null} activeNodeId 当前选中的节点
+       * @param {(id: string) => void} [onNodeSelect] 点胶囊时的回调；不传则回退到运行详情的选中逻辑
+       * @param {{ states?: boolean }} [options] 传 `{ states: false }` 时按「没有执行状态」画：模板是参考流程，胶囊保持类型配色，不套「未运行」的灰虚线
        * @returns {object} React 元素
        */
-      function renderGraph(graph, activeNodeId) {
+      function renderGraph(graph, activeNodeId, onNodeSelect = null, options = {}) {
+        const showStates = options.states !== false
         const nodes = Array.isArray(graph.nodes) ? graph.nodes : []
         if (nodes.length === 0) return h('p', { className: 'buka-workflows-empty' }, t('graphEmpty'))
         const edges = Array.isArray(graph.edges) ? graph.edges : []
@@ -1597,9 +1746,9 @@ window.__ModuleLoader__.load({
                 .map((edge) =>
                   h('path', {
                     key: edge.key,
-                    className: `buka-workflows-edge is-${edge.kind}${
+                    className: `buka-workflows-edge is-${edge.kind}${showStates ? '' : ' is-static'}${
                       edge.traversed === true ? ' is-traversed' : ''
-                    }${hoveredEdge === null ? '' : ' is-dimmed'}`,
+                    }${edgeToneClass(edge)}${hoveredEdge === null ? '' : ' is-dimmed'}`,
                     d: edge.d,
                   }),
                 ),
@@ -1607,9 +1756,9 @@ window.__ModuleLoader__.load({
                 ? null
                 : h('path', {
                     key: hoveredEdge.key,
-                    className: `buka-workflows-edge is-${hoveredEdge.kind}${
+                    className: `buka-workflows-edge is-${hoveredEdge.kind}${showStates ? '' : ' is-static'}${
                       hoveredEdge.traversed === true ? ' is-traversed' : ''
-                    } is-hovered`,
+                    }${edgeToneClass(hoveredEdge)} is-hovered`,
                     d: hoveredEdge.d,
                   }),
               // 方向箭头放在每条线自己的中段，避免多支箭头都挤在圆点旁边。
@@ -1622,9 +1771,9 @@ window.__ModuleLoader__.load({
                   'g',
                   {
                     key: `arrow-${edge.key}`,
-                    className: `buka-workflows-edgeArrow is-${edge.kind}${
+                    className: `buka-workflows-edgeArrow is-${edge.kind}${showStates ? '' : ' is-static'}${
                       edge.traversed === true ? ' is-traversed' : ''
-                    }${hovered ? ' is-hovered' : ''}${
+                    }${edgeToneClass(edge)}${hovered ? ' is-hovered' : ''}${
                       hoveredEdge !== null && !hovered ? ' is-dimmed' : ''
                     }`,
                     transform: `translate(${arrow.x} ${arrow.y}) rotate(${arrow.angle ?? 90})`,
@@ -1702,18 +1851,23 @@ window.__ModuleLoader__.load({
                       'button',
                       {
                         type: 'button',
-                        className: `buka-workflows-capsule is-${node.type}${kind === 'idle' ? ' is-idle' : ''}${
-                          kind === 'running' ? ' is-running' : ''
-                        }${selected ? ' is-selected' : ''}${
-                          typeof node.avatar === 'string' && node.avatar !== '' ? ' has-avatar' : ''
-                        }`,
-                        title: `${node.id} · ${typeLabel(t, node.type)} · ${statusLabel(t, state)}`,
+                        className: `buka-workflows-capsule is-${node.type}${
+                          showStates && kind === 'idle' ? ' is-idle' : ''
+                        }${showStates && kind === 'running' ? ' is-running' : ''}${
+                          selected ? ' is-selected' : ''
+                        }${typeof node.avatar === 'string' && node.avatar !== '' ? ' has-avatar' : ''}`,
+                        title: showStates
+                          ? `${node.id} · ${typeLabel(t, node.type)} · ${statusLabel(t, state)}`
+                          : `${node.id} · ${typeLabel(t, node.type)}`,
                         'aria-pressed': selected,
                         // 点胶囊换节点时回到「最近一次执行」；点执行记录里的「下一步」
                         // 则用 focusExecution 指定具体的那一次。
                         onClick: () => {
-                          setSelectedNodeId(node.id)
-                          setExecutionIndex(null)
+                          if (onNodeSelect !== null) onNodeSelect(node.id)
+                          else {
+                            setSelectedNodeId(node.id)
+                            setExecutionIndex(null)
+                          }
                         },
                       },
                       renderAvatar(node.avatar, 20, 'buka-workflows-capsuleAvatar'),
@@ -1753,27 +1907,44 @@ window.__ModuleLoader__.load({
        * @returns {object} React 元素
        */
       function renderExecution(step, full, config, node, steps, definition, graph, run, nodeSessionIds = []) {
-        const decision = typeof step.decision === 'string' && step.decision !== '' ? step.decision : null
         const visit = typeof step.visit === 'number' ? step.visit : 1
-        // 这次执行选中的边名字（v2 由机器人 JSON 的 next 决定）；只作为标签展示，
-        // 不把整份 JSON 铺成 key/value。
+        // 这次执行选中的边名字（机器人由结果里的 next 决定，用户由选中的选项决定）；
+        // 只作为标签展示，不把整份 JSON 铺成 key/value。
         const route = typeof step.route === 'string' ? step.route.trim() : ''
         // 每次进入的输入优先用那次落盘的渲染后 prompt。定义里的 prompt 只属于第一次
         // 进入节点时那条边，所以 visit > 1 又没有落盘 prompt 时不能再拿它冒充这次输入。
         let promptText = typeof full?.prompt === 'string' && full.prompt !== '' ? full.prompt : ''
         let inputMissing = false
-        if (node.type === 'gate') {
+        if (node.type === 'user') {
+          // 用户节点没有 prompt：输入就是渲染后的说明（step.input），等待中的那次
+          // 取 run.pendingUser.detail / title；旧记录退回定义快照里的 detail / title。
+          const stepInput = typeof step.input === 'string' ? step.input.trim() : ''
+          const pending =
+            run !== null &&
+            typeof run === 'object' &&
+            run.pendingUser !== null &&
+            typeof run.pendingUser === 'object' &&
+            run.pendingUser.nodeId === node.id &&
+            run.pendingUser.visit === visit
+              ? run.pendingUser
+              : null
+          const pendingText =
+            typeof pending?.detail === 'string' && pending.detail !== ''
+              ? pending.detail
+              : typeof pending?.title === 'string'
+                ? pending.title
+                : ''
           const detail = typeof config?.detail === 'string' ? config.detail : ''
           const title = typeof config?.title === 'string' ? config.title : ''
-          promptText = detail !== '' ? detail : title
+          promptText = stepInput !== '' ? stepInput : pendingText !== '' ? pendingText : detail !== '' ? detail : title
         } else if (promptText === '') {
           if (visit === 1) promptText = typeof config?.prompt === 'string' ? config.prompt : ''
           else inputMissing = true
         }
         const stepText = typeof step.text === 'string' ? step.text : ''
         const fullText = typeof full?.text === 'string' ? full.text : ''
-        let outputText = fullText !== '' ? fullText : stepText
-        if (node.type === 'gate' && decision !== null) outputText = statusLabel(t, decision)
+        // 用户节点的输出就是答案文本（step.text）；不再有批准 / 拒绝的 decision。
+        const outputText = fullText !== '' ? fullText : stepText
         const attachments = Array.isArray(full?.attachments)
           ? full.attachments
           : Array.isArray(step.attachments)
@@ -1852,7 +2023,7 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'buka-workflows-tabMeta' },
             h(Tag, { tone: statusTone(step.status) }, statusLabel(t, step.status)),
-            route === '' ? null : h(Tag, { tone: 'neutral' }, `${t('routeLabel')}: ${route}`),
+            route === '' ? null : h(Tag, { tone: 'neutral' }, `${t('routeLabel')}: ${routeText(node, config, route)}`),
             attachments.length === 0
               ? null
               : h(
@@ -2005,21 +2176,41 @@ window.__ModuleLoader__.load({
           rows.push(kvRow(t('nodeExecutor'), node.robot || '—'))
           if (typeof node.timeoutMs === 'number') rows.push(kvRow(t('nodeTimeout'), formatMs(node.timeoutMs) || '—'))
           if (typeof node.maxVisits === 'number') rows.push(kvRow(t('nodeMaxVisits'), String(node.maxVisits)))
-        } else if (node.type === 'gate') {
-          rows.push(kvRow(t('typeGate'), node.title || '—'))
-          if (typeof node.detail === 'string' && node.detail !== '') rows.push(kvRow(t('gateDetail'), node.detail))
+        } else if (node.type === 'user') {
+          rows.push(kvRow(t('typeUser'), node.title || '—'))
+          // 说明优先展示等待中的那一次（模板已经渲染过），其次是定义快照里的模板，
+          // 最后退回执行记录里落盘的输入。
+          const pendingUser =
+            run !== null && typeof run === 'object' && run.pendingUser !== null && typeof run.pendingUser === 'object'
+              ? run.pendingUser
+              : null
+          let detail = ''
+          if (pendingUser !== null && pendingUser.nodeId === node.id && typeof pendingUser.detail === 'string') {
+            detail = pendingUser.detail
+          }
+          if (detail === '' && typeof config?.detail === 'string') detail = config.detail
+          if (detail === '' && typeof node.detail === 'string') detail = node.detail
+          if (detail === '') {
+            const lastUserStep = nodeSteps.filter((step) => step?.type === 'user').pop()
+            if (typeof lastUserStep?.input === 'string') detail = lastUserStep.input
+          }
+          const detailText = detail.trim()
+          if (detailText !== '') rows.push(kvRow(t('userDetail'), detailText))
         } else if (node.type === 'end') {
           rows.push(kvRow(t('nodeEndStatus'), statusLabel(t, node.endStatus ?? 'completed')))
         }
         const template = truncateText(config?.prompt, 4000)
         const isStart = node.type === 'start'
         const title = isStart ? t('typeStart') : nodeTitle(node, config)
-        const current =
-          run !== null && typeof run === 'object' && run.current !== null && typeof run.current === 'object'
-            ? run.current
-            : null
-        // 机器人会话在进入节点后、执行结束前就会落到 run.current 上，所以运行中的
-        // 节点也能看到并打开当前会话；它也是这个节点优先展示的会话。
+        const actives =
+          run !== null && Array.isArray(run.active)
+            ? run.active.filter((entry) => entry !== null && typeof entry === 'object')
+            : run !== null && typeof run === 'object' && run.current !== null && typeof run.current === 'object'
+              ? [run.current]
+              : []
+        const current = actives.find((entry) => entry.nodeId === node.id) ?? null
+        // 机器人会话在进入节点后、执行结束前就会落到 run.active（旧记录 run.current）上，
+        // 所以运行中的节点也能看到并打开当前会话；它也是这个节点优先展示的会话。
         const isLiveNode = current !== null && current.nodeId === node.id
         const liveSession = isLiveNode && typeof current.sessionId === 'string' ? current.sessionId : ''
         // 节点级只展示一次会话：正常情况一个节点只有一个会话；旧记录里一个节点可能
@@ -2194,6 +2385,9 @@ window.__ModuleLoader__.load({
             title === node.id ? null : h('code', { className: 'buka-workflows-inspectorId' }, node.id),
             node.id === graph?.start ? h(Tag, { tone: 'neutral' }, t('nodeStart')) : null,
             isStart ? null : h(Tag, { tone: typeTone(node.type) }, typeLabel(t, node.type)),
+            node.type === 'robot' && node.mode === 'plan'
+              ? h(Tag, { tone: 'info' }, t('modePlan'))
+              : null,
             isStart ? null : h(Tag, { tone: statusTone(state) }, statusLabel(t, state)),
             recoveringText === '' ? null : h(Tag, { tone: 'warning' }, recoveringText),
             node.visits > 1 ? h('span', { className: 'buka-workflows-meta' }, `×${node.visits}`) : null,
@@ -2348,6 +2542,118 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 运行停在用户介入节点时的提示条：说明在等什么（标题 + 渲染后的说明），列出
+       * 用户可选的出口与追加问题，并提供直达工作流创建者会话的入口。数据由
+       * supervisor 写在 `run.pendingUser` 上。
+       *
+       * @param {Record<string, any> | null} run 运行记录
+       * @returns {object | null} React 元素；没有等待中的用户介入时返回 null
+       */
+      function renderUserNotice(run) {
+        const pending =
+          run !== null && typeof run === 'object' && run.pendingUser !== null && typeof run.pendingUser === 'object'
+            ? run.pendingUser
+            : null
+        if (pending === null) return null
+        const nodeId = typeof pending.nodeId === 'string' ? pending.nodeId : ''
+        const title = typeof pending.title === 'string' ? pending.title.trim() : ''
+        const detail = typeof pending.detail === 'string' ? pending.detail.trim() : ''
+        const sessionId = typeof pending.sessionId === 'string' ? pending.sessionId : ''
+        const requestedAt =
+          typeof pending.requestedAt === 'number' && Number.isFinite(pending.requestedAt)
+            ? formatTime(pending.requestedAt)
+            : ''
+        // 正文就是等待卡的内容：用户节点的标题 + 模板渲染后的说明。
+        const body = [title, detail].filter((text) => text !== '').join('\n')
+        const options = Array.isArray(pending.options)
+          ? pending.options.filter((option) => option !== null && typeof option === 'object')
+          : []
+        const questions = Array.isArray(pending.questions)
+          ? pending.questions.filter((question) => question !== null && typeof question === 'object')
+          : []
+        return h(
+          'div',
+          { className: 'buka-workflows-interactionNotice buka-workflows-userNotice', role: 'status' },
+          h(
+            'div',
+            { className: 'buka-workflows-interactionHead' },
+            h('span', { className: 'buka-workflows-interactionTitle' }, t('userWaitingTitle')),
+            nodeId === '' ? null : h('code', { className: 'buka-workflows-inlineCode' }, nodeId),
+            requestedAt === '' ? null : h('span', { className: 'buka-workflows-meta' }, requestedAt),
+          ),
+          body === '' ? null : h('p', { className: 'buka-workflows-interactionBody' }, body),
+          // 用户的选择就是出边：列出每条边给用户看的 label（可带 description）。
+          options.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-userNoticeGroup' },
+                h('span', { className: 'buka-workflows-label' }, t('userChoice')),
+                h(
+                  'ul',
+                  { className: 'buka-workflows-userChoiceList' },
+                  ...options.map((option, index) => {
+                    const label = typeof option.label === 'string' ? option.label.trim() : ''
+                    const description = typeof option.description === 'string' ? option.description.trim() : ''
+                    return h(
+                      'li',
+                      { key: `${String(option.name ?? index)}-${label}`, className: 'buka-workflows-userChoice' },
+                      h(
+                        'span',
+                        { className: 'buka-workflows-userChoiceLabel' },
+                        label === '' ? t('userAnswerSkipped') : label,
+                      ),
+                      description === '' ? null : h('span', { className: 'buka-workflows-userChoiceDesc' }, description),
+                    )
+                  }),
+                ),
+              ),
+          // 追加问题：header 是可选的大标题，question 才是正文。
+          questions.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-userNoticeGroup' },
+                h('span', { className: 'buka-workflows-label' }, t('userAnswers')),
+                h(
+                  'ul',
+                  { className: 'buka-workflows-userQuestionList' },
+                  ...questions.map((question, index) => {
+                    const id = typeof question.id === 'string' ? question.id : String(index)
+                    const header = typeof question.header === 'string' ? question.header.trim() : ''
+                    const text = typeof question.question === 'string' ? question.question.trim() : ''
+                    return h(
+                      'li',
+                      { key: id, className: 'buka-workflows-userQuestion' },
+                      header === '' ? null : h('span', { className: 'buka-workflows-userQuestionHeader' }, header),
+                      text === '' ? null : h('span', { className: 'buka-workflows-userQuestionText' }, text),
+                    )
+                  }),
+                ),
+              ),
+          // 提问卡出现在创建者会话里：给出直达入口，并说明要去哪里作答。
+          sessionId === ''
+            ? null
+            : h(
+                'div',
+                { className: 'buka-workflows-interactionActions' },
+                h('span', { className: 'buka-workflows-hint' }, t('userWaitingBody')),
+                h(
+                  Button,
+                  {
+                    variant: 'outline',
+                    size: 'sm',
+                    className: 'buka-workflows-smallButton',
+                    icon: h(IconNewChatOutlineRegular, { size: 13 }),
+                    onClick: () => openSession({ sessionId }),
+                  },
+                  t('openSession'),
+                ),
+              ),
+        )
+      }
+
+      /**
        * 运行在等待用户时（机器人提问 / 请求批准）的提示条：说明在等什么，并提供
        * 直达当前机器人会话的入口。数据由 supervisor 写在 `run.pendingInteraction`。
        *
@@ -2361,6 +2667,7 @@ window.__ModuleLoader__.load({
             : null
         if (interaction === null) return null
         const approval = interaction.kind === 'approval'
+        const planReview = interaction.planReview === true && !approval
         const toolName = typeof interaction.toolName === 'string' ? interaction.toolName.trim() : ''
         const nodeId = typeof interaction.nodeId === 'string' ? interaction.nodeId : ''
         const sessionId = typeof interaction.sessionId === 'string' ? interaction.sessionId : ''
@@ -2374,6 +2681,9 @@ window.__ModuleLoader__.load({
           const displayReason = typeof interaction.displayReason === 'string' ? interaction.displayReason.trim() : ''
           const reason = typeof interaction.reason === 'string' ? interaction.reason.trim() : ''
           body = displayReason !== '' ? displayReason : reason
+        } else if (planReview) {
+          // 计划正文留在机器人会话的原生审阅卡里，运行页只说明去哪里审阅。
+          body = t('planReviewBody')
         } else {
           const questions = Array.isArray(interaction.questions) ? interaction.questions : []
           const first = questions[0] !== null && typeof questions[0] === 'object' ? questions[0] : null
@@ -2381,9 +2691,11 @@ window.__ModuleLoader__.load({
           const header = typeof first?.header === 'string' ? first.header.trim() : ''
           body = question !== '' ? question : header
         }
-        const title = approval
-          ? `${t('waitingForApproval')}${toolName === '' ? '' : ` ${toolName}`}`
-          : t('waitingForAnswer')
+        const title = planReview
+          ? t('waitingForPlanReview')
+          : approval
+            ? `${t('waitingForApproval')}${toolName === '' ? '' : ` ${toolName}`}`
+            : t('waitingForAnswer')
         return h(
           'div',
           { className: 'buka-workflows-interactionNotice', role: 'status' },
@@ -2409,7 +2721,7 @@ window.__ModuleLoader__.load({
                     icon: h(IconNewChatOutlineRegular, { size: 13 }),
                     onClick: () => openSession({ sessionId }),
                   },
-                  t(approval ? 'openApprovalSession' : 'openAnswerSession'),
+                  t(planReview ? 'openPlanReviewSession' : approval ? 'openApprovalSession' : 'openAnswerSession'),
                 ),
               ),
         )
@@ -2455,10 +2767,23 @@ window.__ModuleLoader__.load({
           graph === null
             ? h('p', { className: 'buka-workflows-empty' }, t('noGraph'))
             : renderGraph(graph, activeNodeId)
+        // 用户介入提示排在机器人提问 / 审批提示之前；没有等待中的提示时不留空槽。
+        const notices = [renderUserNotice(run), renderInteractionNotice(run)].filter((notice) => notice !== null)
         return h(
           'div',
           { className: 'buka-workflows-pageBody buka-workflows-detail' },
-          renderInteractionNotice(run),
+          h(
+            Button,
+            {
+              variant: 'ghost',
+              size: 'sm',
+              className: 'buka-workflows-detailBackButton buka-workflows-back',
+              icon: h(IconChevronRightOutlineRegular, { size: 14 }),
+              onClick: () => setSelectedId(null),
+            },
+            t('back'),
+          ),
+          ...notices,
           h(
             'div',
             { className: 'buka-workflows-split' },
@@ -2473,16 +2798,232 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 详情页底部的图例与说明。它固定占据页面底部，不跟内容一起滚动，内容再长
-       * 也不会把它顶下去。
+       * 模板页签里的模板列表。
        *
        * @returns {object} React 元素
        */
-      function renderFooter() {
+      function renderTemplatesList() {
+        if (templates.error !== null && templates.items.length === 0) {
+          return h(
+            'div',
+            { className: 'buka-workflows-templateList' },
+            h('p', { className: 'buka-workflows-failure', role: 'alert' }, `${t('loadFailed')} ${templates.error}`),
+          )
+        }
+        if (templates.status === 'loading' && templates.items.length === 0) {
+          return h(
+            'div',
+            { className: 'buka-workflows-templateList' },
+            h(
+              'p',
+              { className: 'buka-workflows-statusWithDot', role: 'status' },
+              h(StateDot, { state: 'ongoing' }),
+              t('loading'),
+            ),
+          )
+        }
+        if (templates.items.length === 0) {
+          return h(
+            'div',
+            { className: 'buka-workflows-templateList' },
+            h(
+              'div',
+              { className: 'buka-workflows-emptyBox' },
+              h('p', { className: 'buka-workflows-empty' }, t('templatesEmpty')),
+              h('p', { className: 'buka-workflows-hint' }, t('templatesHint')),
+            ),
+          )
+        }
+        return h(
+          'div',
+          { className: 'buka-workflows-templateList' },
+          h('p', { className: 'buka-workflows-hint' }, t('templatesHint')),
+          ...templates.items.map((template) =>
+            h(
+              'button',
+              {
+                key: template.id,
+                type: 'button',
+                className: 'buka-workflows-templateCard',
+                onClick: () => setSelectedTemplateId(template.id),
+              },
+              h(
+                'span',
+                { className: 'buka-workflows-templateHead' },
+                h('span', { className: 'buka-workflows-templateTitle' }, template.name),
+                h(Tag, { tone: 'neutral' }, template.id),
+                h(IconChevronRightOutlineRegular, { size: 14, className: 'buka-workflows-templateChevron' }),
+              ),
+              h('p', { className: 'buka-workflows-templateDesc' }, template.description),
+            ),
+          ),
+        )
+      }
+
+      /**
+       * 模板节点的可读标题：机器人用抽象角色名，用户用标题，起止用固定文案。
+       *
+       * @param {Record<string, any>} node
+       * @returns {string}
+       */
+      function templateNodeLabel(node) {
+        if (node.type === 'robot') return node.robot || node.summary || node.id
+        if (node.type === 'user') return node.title || node.id
+        if (node.type === 'start') return t('typeStart')
+        return t('typeEnd')
+      }
+
+      /**
+       * 模板详情右侧的节点面板：说明这个节点「做什么 / 什么时候需要它」，并把它的
+       * 出边连同条件列成流转去向。
+       *
+       * @param {Record<string, any> | null} node 图模型里的节点
+       * @param {Record<string, any>} template 模板对象（含原始 nodes）
+       * @returns {object} React 元素
+       */
+      function renderTemplateNodePanel(node, template) {
+        if (node === null) return h('p', { className: 'buka-workflows-hint' }, t('templatesNoFlow'))
+        const rawNodes = Array.isArray(template?.nodes) ? template.nodes : []
+        const config = rawNodes.find((item) => item?.id === node.id) ?? null
+        const byId = new Map(rawNodes.map((item) => [item.id, item]))
+        const rows = []
+        if (node.type === 'robot') {
+          rows.push(kvRow(t('templatesRole'), node.robot || '—'))
+          if (typeof node.summary === 'string' && node.summary !== '') {
+            rows.push(kvRow(t('templatesPurpose'), node.summary))
+          }
+        } else if (node.type === 'user') {
+          if (typeof node.title === 'string' && node.title !== '') rows.push(kvRow(t('typeUser'), node.title))
+          if (typeof node.detail === 'string' && node.detail !== '') {
+            rows.push(kvRow(t('templatesPurpose'), node.detail))
+          }
+        } else if (node.type === 'end') {
+          rows.push(kvRow(t('nodeEndStatus'), statusLabel(t, node.endStatus ?? 'completed')))
+        }
+
+        const next = Array.isArray(config?.next) ? config.next : []
+        const transitions = next.map((rule) => {
+          const target = byId.get(rule.to)
+          const label =
+            typeof rule.label === 'string' && rule.label !== ''
+              ? rule.label
+              : typeof rule.name === 'string' && rule.name !== ''
+                ? rule.name
+                : ''
+          const condition =
+            typeof rule.description === 'string' && rule.description !== ''
+              ? rule.description
+              : typeof rule.prompt === 'string' && rule.prompt !== ''
+                ? rule.prompt
+                : ''
+          const head = label === '' ? rule.to : `${label} → ${target === undefined ? rule.to : templateNodeLabel(target)}`
+          return h(
+            'div',
+            { key: `${String(rule.name ?? '')}-${String(rule.to)}`, className: 'buka-workflows-templateTransition' },
+            h(
+              'span',
+              { className: 'buka-workflows-templateTransitionHead' },
+              h(Tag, { tone: 'neutral' }, head),
+            ),
+            condition === ''
+              ? null
+              : h('span', { className: 'buka-workflows-templateTransitionBody' }, condition),
+          )
+        })
+
+        const title = templateNodeLabel(node)
+        return h(
+          'div',
+          { className: 'buka-workflows-inspector', role: 'region', 'aria-label': t('inspector') },
+          h(
+            'div',
+            { className: 'buka-workflows-inspectorHead' },
+            h('span', { className: 'buka-workflows-inspectorTitle' }, title),
+            title === node.id ? null : h('code', { className: 'buka-workflows-inspectorId' }, node.id),
+            node.type === 'start' ? h(Tag, { tone: 'neutral' }, t('nodeStart')) : null,
+            node.type === 'robot' ? h(Tag, { tone: 'info' }, t('templatesAbstractRole')) : null,
+            h(Tag, { tone: typeTone(node.type) }, typeLabel(t, node.type)),
+          ),
+          node.type === 'start' ? h('p', { className: 'buka-workflows-hint' }, t('startNodeHint')) : null,
+          rows.length === 0 ? null : h('div', { className: 'buka-workflows-kv' }, ...rows),
+          h(
+            'div',
+            { className: 'buka-workflows-inspectorSection' },
+            h('span', { className: 'buka-workflows-label' }, t('templatesTransitions')),
+            transitions.length === 0
+              ? h('p', { className: 'buka-workflows-hint' }, t('templatesNoTransitions'))
+              : h('div', { className: 'buka-workflows-templateTransitions' }, ...transitions),
+          ),
+        )
+      }
+
+      /**
+       * 模板详情：名字 + 描述 + 参考提示 + 「图 + 节点说明」双栏。图复用运行详情那套
+       * 纵向节点图；右侧点节点看它的目的与流转去向。
+       *
+       * @returns {object} React 元素
+       */
+      function renderTemplateDetail() {
+        const template = templates.items.find((item) => item.id === selectedTemplateId)
+        if (template === undefined) {
+          return h('p', { className: 'buka-workflows-empty' }, t('templatesEmpty'))
+        }
+        const graph = template.graph !== null && typeof template.graph === 'object' ? template.graph : null
+        const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+        const activeNodeId =
+          selectedTemplateNodeId !== null && nodes.some((node) => node.id === selectedTemplateNodeId)
+            ? selectedTemplateNodeId
+            : (graph?.start ?? nodes[0]?.id ?? null)
+        const activeNode = activeNodeId === null ? null : nodes.find((node) => node.id === activeNodeId) ?? null
+        const graphBody =
+          graph === null || nodes.length === 0
+            ? h('p', { className: 'buka-workflows-empty' }, t('templatesNoFlow'))
+            : renderGraph(graph, activeNodeId, (id) => setSelectedTemplateNodeId(id), { states: false })
+        return h(
+          'div',
+          { className: 'buka-workflows-pageBody buka-workflows-detail buka-workflows-templateDetail' },
+          h(
+            'div',
+            { className: 'buka-workflows-templateHead' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'buka-workflows-templateBackButton buka-workflows-back',
+                'aria-label': t('templatesBack'),
+                onClick: () => {
+                  setSelectedTemplateId(null)
+                  setSelectedTemplateNodeId(null)
+                },
+              },
+              h(IconChevronRightOutlineRegular, { size: 16 }),
+            ),
+            h('span', { className: 'buka-workflows-templateTitle' }, template.name),
+            h(Tag, { tone: 'neutral' }, template.id),
+          ),
+          h('p', { className: 'buka-workflows-templateDesc' }, template.description),
+          h(
+            'div',
+            { className: 'buka-workflows-split' },
+            graphBody,
+            h('div', { className: 'buka-workflows-detailPane' }, renderTemplateNodePanel(activeNode, template)),
+          ),
+        )
+      }
+
+      /**
+       * 详情页底部的图例与说明。它固定占据页面底部，不跟内容一起滚动，内容再长
+       * 也不会把它顶下去。模板页没有执行状态，传入 false 省掉「节点状态」图例，
+       * 连线图例也换成单一「流程走向」。
+       *
+       * @param {boolean} [withStates]
+       * @returns {object} React 元素
+       */
+      function renderFooter(withStates = true) {
         return h(
           'footer',
           { className: 'buka-workflows-footer' },
-          renderLegend(),
+          renderLegend({ states: withStates }),
         )
       }
 
@@ -2618,21 +3159,20 @@ window.__ModuleLoader__.load({
       }
 
       const selectedRun = selectedId !== null ? detail.data?.run ?? null : null
+      const inTemplates = view === 'templates'
+      const inTemplateDetail = inTemplates && selectedTemplateId !== null
+      const selectedTemplate =
+        inTemplateDetail ? (templates.items.find((item) => item.id === selectedTemplateId) ?? null) : null
 
-      /**
-       * 标题：普通列表用「工作流」，归档列表用「已归档的工作流」；详情标题在
-       * 有运行序号时是「#N · 目标」，否则退回目标或 runId。
-       */
-      const headingText =
-        selectedId === null
-          ? showArchived
-            ? t('archiveTitle')
-            : t('title')
-          : selectedRun === null
-            ? String(selectedId)
-            : typeof selectedRun.seq === 'number'
-              ? `#${selectedRun.seq} · ${selectedRun.goal || selectedRun.runId}`
-              : String(selectedRun.goal || selectedRun.runId)
+      /** 切换运行 / 模板页签；从详情页切回列表时也清掉选中项。 */
+      const switchView = (next) => {
+        if (next === view) return
+        setNotice(null)
+        setSelectedTemplateNodeId(null)
+        if (next === 'templates') setSelectedTemplateId(null)
+        else setSelectedId(null)
+        setView(next)
+      }
 
       return h(
         'div',
@@ -2648,97 +3188,111 @@ window.__ModuleLoader__.load({
               { className: 'buka-workflows-titleRow' },
               h(
                 'div',
-                { className: 'buka-workflows-titleCluster' },
-                selectedId === null && !showArchived
-                  ? null
-                  : h(
-                      Tooltip,
-                      {
-                        label: selectedId === null ? t('archiveBack') : t('back'),
-                        side: 'top',
-                        delayMs: 400,
-                      },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className:
-                            'buka-workflows-iconButton buka-workflows-back buka-workflows-backButton',
-                          'aria-label': selectedId === null ? t('archiveBack') : t('back'),
-                          onClick: () => {
-                            if (selectedId === null) setShowArchived(false)
-                            else setSelectedId(null)
-                          },
-                        },
-                        h(IconChevronRightOutlineRegular, { size: 16 }),
-                      ),
-                    ),
-                h(
-                  'h1',
-                  { className: 'buka-workflows-title' },
-                  headingText,
-                ),
+                { className: 'buka-workflows-tabbar' },
+                h(SegmentedTabs, {
+                  size: 'sm',
+                  className: 'buka-workflows-tabList',
+                  label: t('tabsLabel'),
+                  value: view,
+                  onChange: switchView,
+                  items: [
+                    { value: 'runs', label: t('runsTab'), id: 'buka-workflows-tab-runs', panelId: 'buka-workflows-panel-runs' },
+                    { value: 'templates', label: t('templatesTab'), id: 'buka-workflows-tab-templates', panelId: 'buka-workflows-panel-templates' },
+                  ],
+                }),
               ),
               h(
                 'div',
                 { className: 'buka-workflows-toolbar' },
-                ...(selectedId === null
-                  ? [
-                      showArchived
-                        ? null
-                        : h(
-                            Button,
-                            {
-                              variant: 'outline',
-                              size: 'sm',
-                              className: 'buka-workflows-toolbarButton',
-                              icon: h(IconFolderOpenOutlineRegular, { size: 13 }),
-                              onClick: () => setShowArchived(true),
-                            },
-                            list.archivedCount > 0
-                              ? `${t('archiveView')} (${list.archivedCount})`
-                              : t('archiveView'),
-                          ),
+                ...(inTemplates
+                  ? selectedTemplate === null
+                    ? []
+                    : [h('code', { className: 'buka-workflows-inlineCode' }, selectedTemplate.id)]
+                  : selectedId === null
+                    ? [
+                        showArchived
+                          ? h(
+                              Button,
+                              {
+                                variant: 'outline',
+                                size: 'sm',
+                                className: 'buka-workflows-toolbarButton buka-workflows-back',
+                                icon: h(IconChevronRightOutlineRegular, { size: 13 }),
+                                onClick: () => setShowArchived(false),
+                              },
+                              t('archiveBack'),
+                            )
+                          : h(
+                              Button,
+                              {
+                                variant: 'outline',
+                                size: 'sm',
+                                className: 'buka-workflows-toolbarButton',
+                                icon: h(IconFolderOpenOutlineRegular, { size: 13 }),
+                                onClick: () => setShowArchived(true),
+                              },
+                              list.archivedCount > 0
+                                ? `${t('archiveView')} (${list.archivedCount})`
+                                : t('archiveView'),
+                            ),
+                        h(
+                          Button,
+                          {
+                            variant: 'outline',
+                            size: 'sm',
+                            className: 'buka-workflows-toolbarButton',
+                            icon: h(IconSettingsOutlineRegular, { size: 13 }),
+                            onClick: openSettingsDialog,
+                          },
+                          t('settings'),
+                        ),
+                      ]
+                    : [
+                        typeof selectedRun?.archivedAt === 'number'
+                          ? h(Tag, { tone: 'neutral' }, t('archived'))
+                          : null,
+                        h('code', { className: 'buka-workflows-inlineCode' }, selectedRun?.runId ?? selectedId),
+                        h(
+                          Tag,
+                          { tone: statusTone(selectedRun?.status ?? '') },
+                          statusLabel(t, selectedRun?.status ?? ''),
+                        ),
+                      ]),
+                ...(inTemplates
+                  ? []
+                  : [
                       h(
                         Button,
                         {
                           variant: 'outline',
                           size: 'sm',
                           className: 'buka-workflows-toolbarButton',
-                          icon: h(IconSettingsOutlineRegular, { size: 13 }),
-                          onClick: openSettingsDialog,
+                          icon: h(IconRefreshOutlineRegular, { size: 13 }),
+                          onClick: reload,
                         },
-                        t('settings'),
-                      ),
-                    ]
-                  : [
-                      typeof selectedRun?.archivedAt === 'number'
-                        ? h(Tag, { tone: 'neutral' }, t('archived'))
-                        : null,
-                      h('code', { className: 'buka-workflows-inlineCode' }, selectedRun?.runId ?? selectedId),
-                      h(
-                        Tag,
-                        { tone: statusTone(selectedRun?.status ?? '') },
-                        statusLabel(t, selectedRun?.status ?? ''),
+                        t('refresh'),
                       ),
                     ]),
-                h(
-                  Button,
-                  {
-                    variant: 'outline',
-                    size: 'sm',
-                    className: 'buka-workflows-toolbarButton',
-                    icon: h(IconRefreshOutlineRegular, { size: 13 }),
-                    onClick: reload,
-                  },
-                  t('refresh'),
-                ),
               ),
             ),
           ),
         ),
-        h('div', { className: 'buka-workflows-body' }, selectedId === null ? renderList() : renderDetail()),
-        selectedId === null ? null : renderFooter(),
+        h(
+          'div',
+          { className: 'buka-workflows-body' },
+          inTemplates
+            ? selectedTemplateId === null
+              ? renderTemplatesList()
+              : renderTemplateDetail()
+            : selectedId === null
+              ? renderList()
+              : renderDetail(),
+        ),
+        inTemplateDetail
+          ? renderFooter(false)
+          : !inTemplates && selectedId !== null
+            ? renderFooter()
+            : null,
         renderSettingsDialog(),
         notice === null
           ? null

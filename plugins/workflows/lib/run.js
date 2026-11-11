@@ -1,17 +1,19 @@
 /**
- * 工作流运行期的纯函数与错误类型（workflow format 2）。
+ * 工作流运行期的纯函数与错误类型（workflow format 3）。
  *
  * 这些工具从旧的阻塞执行器 `engine.js` 里搬出来，供 Host 侧观察者
- * `supervisor.js` 复用：渲染机器人节点的提示词、给机器人会话起标题、门禁审批
- * 结果映射、把运行记录转成工具返回值等。本模块不 import 任何 DSH 包，也不读写
- * 磁盘，便于单测。
+ * `supervisor.js` 复用：渲染机器人节点的提示词、给机器人会话起标题、构造用户
+ * 介入节点的提问批次与解析回答、把运行记录转成工具返回值等。本模块不 import
+ * 任何 DSH 包，也不读写磁盘，便于单测。
  *
- * format 2 里机器人节点没有自己的 prompt：每次进入都渲染「进入它的那条边」上的
- * prompt，所以 `renderNodePrompt` 只接受 edgePrompt 一个来源。
+ * format 3 里机器人节点没有自己的 prompt：每次进入都渲染「进入它的那条边」上的
+ * prompt，所以 `renderNodePrompt` 只接受 edgePrompt 一个来源；用户节点则把
+ * `detail` 渲染后交给原生提问卡，用户的选项就是出边。
  *
  * @module @buka/dsh-plugin-workflows/run
  */
 
+import { ROUTE_QUESTION_ID } from './definition.js'
 import { renderOutputContract } from './output.js'
 import { renderTemplate } from './template.js'
 
@@ -73,6 +75,28 @@ export function renderNodePrompt(node, edgePrompt, values, plan, step, runId) {
 }
 
 /**
+ * 渲染用户节点的说明（`detail`）。说明可以引用前面节点的文本 / 结构化结果 /
+ * 用户回答；为空时返回空串，调用方在提问卡里退回 `title`。
+ *
+ * @param {Record<string, any>} node
+ * @param {Record<string, any>} values 已完成节点的结果，供 `{{nodes.<id>...}}` 引用
+ * @param {{ goal?: string }} plan
+ * @param {number} step
+ * @param {string} runId
+ * @returns {string}
+ */
+export function renderUserDetail(node, values, plan, step, runId) {
+  const template = typeof node.detail === 'string' ? node.detail : ''
+  if (template.trim() === '') return ''
+  return renderTemplate(template, {
+    goal: plan.goal,
+    nodes: values,
+    step,
+    runId,
+  })
+}
+
+/**
  * DSH 会话标题的 UTF-8 字节上限（与 `session-title` 服务的 `maxTitleBytes` 一致）。
  */
 export const SESSION_TITLE_MAX_BYTES = 80
@@ -125,33 +149,130 @@ export function clipUtf8(text, maxBytes) {
 }
 
 /**
- * 审批结果映射。
+ * 用户节点问题批次里的 route 问题 id：用户的选项就是节点的出边。
  *
- * @param {unknown} outcome
- * @returns {'approved' | 'rejected' | 'cancelled' | 'unavailable'}
+ * @param {Record<string, any>} node
+ * @param {string} detail 已渲染的说明（为空时用 title 作为问题正文）
+ * @returns {Array<Record<string, any>>} 传给 ctx.userQuestions.ask() 的问题数组
  */
-export function mapApproval(outcome) {
-  switch (outcome) {
-    case 'allowed-once':
-      return 'approved'
-    case 'rejected':
-      return 'rejected'
-    case 'cancelled':
-      return 'cancelled'
-    default:
-      return 'unavailable'
+export function buildUserQuestions(node, detail) {
+  /** @type {Array<Record<string, any>>} */
+  const questions = []
+  const edges = Array.isArray(node.next) ? node.next : []
+  if (edges.length > 0) {
+    questions.push({
+      id: ROUTE_QUESTION_ID,
+      header: node.title,
+      question: typeof detail === 'string' && detail.trim() !== '' ? detail.trim() : node.title,
+      options: edges.map((edge) =>
+        typeof edge.description === 'string' && edge.description !== ''
+          ? { label: edge.label, description: edge.description }
+          : { label: edge.label },
+      ),
+    })
+  }
+  for (const question of Array.isArray(node.questions) ? node.questions : []) {
+    /** @type {Record<string, any>} */
+    const item = { id: question.id, question: question.question }
+    if (typeof question.header === 'string' && question.header !== '') item.header = question.header
+    if (Array.isArray(question.options) && question.options.length > 0) {
+      item.options = question.options.map((option) =>
+        typeof option.description === 'string' && option.description !== ''
+          ? { label: option.label, description: option.description }
+          : { label: option.label },
+      )
+    }
+    if (question.multiSelect === true) item.multiSelect = true
+    questions.push(item)
+  }
+  return questions
+}
+
+/**
+ * 解析用户节点的回答。
+ *
+ * 返回 `{ ok: true, route, answers, text }`；`route` 是选中的出边（没有出边时为
+ * null）。用户没有做出选择（跳过 / 只写了自定义文本）时返回
+ * `{ cancelled: true, answers, text }`，让运行以 cancelled 结束。答案是
+ * `{ id, selected, custom }` 数组，`custom` 缺省补空串，方便模板直接取值。
+ *
+ * @param {Record<string, any>} node
+ * @param {{ answers?: Array<{ id?: unknown, selected?: unknown, custom?: unknown }> }} answer
+ * @returns {{ ok: boolean, cancelled?: boolean, error?: string, route?: Record<string, any> | null, answers: Array<{ id: string, selected: string[], custom: string }>, text: string }}
+ */
+export function resolveUserAnswer(node, answer) {
+  const received = new Map()
+  for (const item of Array.isArray(answer?.answers) ? answer.answers : []) {
+    if (typeof item?.id !== 'string') continue
+    const selected = Array.isArray(item.selected)
+      ? item.selected.filter((label) => typeof label === 'string' && label !== '')
+      : []
+    const custom = typeof item.custom === 'string' ? item.custom.trim() : ''
+    received.set(item.id, { selected, custom })
+  }
+
+  /** @type {Array<{ id: string, selected: string[], custom: string }>} */
+  const answers = []
+  const edges = Array.isArray(node.next) ? node.next : []
+  let route = null
+  let cancelled = false
+  const lines = []
+
+  if (edges.length > 0) {
+    const raw = received.get(ROUTE_QUESTION_ID) ?? { selected: [], custom: '' }
+    answers.push({ id: ROUTE_QUESTION_ID, selected: [...raw.selected], custom: '' })
+    if (raw.selected.length === 0) {
+      cancelled = true
+    } else if (raw.selected.length > 1) {
+      return {
+        ok: false,
+        error: `the route choice must be a single option, received ${raw.selected.length}`,
+        answers,
+        text: '',
+      }
+    } else {
+      const label = raw.selected[0]
+      const edge = edges.find((item) => item.label === label)
+      if (edge === undefined) {
+        return { ok: false, error: `received an unknown choice "${label}"`, answers, text: '' }
+      }
+      route = edge
+      lines.push(`选择：${label}`)
+    }
+  }
+
+  for (const question of Array.isArray(node.questions) ? node.questions : []) {
+    const raw = received.get(question.id) ?? { selected: [], custom: '' }
+    answers.push({ id: question.id, selected: [...raw.selected], custom: raw.custom })
+    const heading = question.header !== '' ? question.header : question.question
+    const parts = []
+    if (raw.selected.length > 0) parts.push(raw.selected.join('、'))
+    if (raw.custom !== '') parts.push(`（${raw.custom}）`)
+    if (parts.length > 0) lines.push(`${heading}：${parts.join('')}`)
+  }
+
+  return {
+    ok: true,
+    cancelled,
+    route,
+    answers,
+    text: cancelled && edges.length > 0 ? '' : lines.join('\n'),
   }
 }
 
 /**
- * 审批框里展示的原因。
+ * 把规范化后的答案数组转成按问题 id 索引的对象（模板 / 运行记录用）。
  *
- * @param {Record<string, any>} node
- * @returns {string}
+ * @param {Array<{ id: string, selected: string[], custom: string }>} answers
+ * @returns {Record<string, { selected: string[], custom: string }>}
  */
-export function gateReason(node) {
-  const detail = typeof node.detail === 'string' && node.detail.trim() !== '' ? `：${node.detail.trim()}` : ''
-  return `工作流门禁「${node.title}」正在等待授权${detail}`
+export function answersValue(answers) {
+  /** @type {Record<string, { selected: string[], custom: string }>} */
+  const value = {}
+  for (const answer of answers) {
+    value[answer.id] = { selected: [...answer.selected], custom: answer.custom }
+  }
+  return value
 }
 
 /**
@@ -169,7 +290,8 @@ export function toToolRun(run) {
     createdAt: run.createdAt,
     finishedAt: run.finishedAt ?? null,
     current: run.current ?? null,
-    pendingGate: run.pendingGate ?? null,
+    active: Array.isArray(run.active) ? run.active.map((entry) => ({ ...entry })) : [],
+    pendingUser: run.pendingUser ?? null,
     pendingInteraction: run.pendingInteraction ?? null,
     sessions: Array.isArray(run.sessions) ? run.sessions.map((session) => ({ ...session })) : [],
     steps: Array.isArray(run.steps) ? run.steps.map((step) => ({ ...step })) : [],

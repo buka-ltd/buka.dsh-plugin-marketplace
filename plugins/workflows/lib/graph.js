@@ -2,26 +2,28 @@
  * 把一次落盘的工作流运行整理成可绘制的节点图。
  *
  * 浏览器一半需要「节点 + 连线 + 每个节点的运行状态」；这些信息分散在定义快照
- * （节点、出口、门禁分支）与状态快照（steps、current、pendingGate、result）里。
- * 本模块把它们合成一份与展示无关的图模型，并给出确定性的分层坐标与 SVG 路径，
- * 让页面只负责渲染、单测可以直接断言几何结果。
+ * （节点、出口）与状态快照（steps、current、pendingUser、result）里。本模块把
+ * 它们合成一份与展示无关的图模型，并给出确定性的分层坐标与 SVG 路径，让页面
+ * 只负责渲染、单测可以直接断言几何结果。
  *
  * 图模型：
  *
  * ```text
  * { start, order, nodes: [{ id, type, state, visits, … }],
- *   edges: [{ from, to, kind, names, prompt, traversed, traversals, loop }] }
+ *   edges: [{ from, to, kind, names, labels, prompt, tone, traversed, traversals, loop }] }
  * ```
  *
- * - `kind`：`next`（机器人节点的出口）、`approve` / `reject`（门禁的两条出边）；
- * - 同一个「来源 → 目标」只留一条边：多条边指向同一目标时合并，`names` 是边上
- *   写的名字（给页面悬停展示，去重后按定义顺序），`prompt` 是进入目标节点时要
- *   发的提示词（取第一条非空值，只作诊断，不在图上渲染）；
+ * - `kind`：目前只有 `next`（机器人 / 用户 / start 节点的出口）；
+ * - `names` 是边上的路由键，`labels` 是用户节点选项显示给用户的文字（机器人
+ *   节点没有 label）。同一个「来源 → 目标」只留一条边：多条边指向同一目标时
+ *   合并，名字 / 选项按定义顺序去重后并列；`prompt` 是进入目标节点时要发的
+ *   提示词（取第一条非空值，只作诊断，不在图上渲染）；`tone` 是边可选的
+ *   外观色（`success` / `failure`，取第一条有值的边，只用于渲染，不影响路由）；
  * - `traversed`：这次运行实际走过这条边（按 steps 的先后顺序推出）；
  * - `traversals`：走过这条边的次数（循环时同一对节点会被走多次）；
  * - `loop`：这条边属于环（从目标还能走回来源），是按拓扑算的，和行序无关；
- * - `state`：`idle` / `running` / `waiting` / `completed` / `failed` / `approved` /
- *   `rejected` / `cancelled` / `unavailable`；`idle` 表示这次运行没有走到该节点；
+ * - `state`：`idle` / `running` / `waiting` / `completed` / `failed` /
+ *   `cancelled` / `interrupted`；`idle` 表示这次运行没有走到该节点；
  * - `unreachable`：从 `start` 出发根本没有路径到达该节点。新定义在校验阶段就会
  *   拒绝这种节点（否则它会像第二个起点），这个标记只用于回看旧记录，页面据此
  *   说明它为什么永远不会执行。
@@ -75,7 +77,7 @@ function previewLine(value, limit) {
 }
 
 /** 节点类型。 */
-const NODE_TYPES = new Set(['start', 'robot', 'gate', 'end'])
+const NODE_TYPES = new Set(['start', 'robot', 'user', 'join', 'end'])
 
 /**
  * 读取定义快照里的节点表。
@@ -141,17 +143,23 @@ function normalizeNode(id, raw) {
   if (type === 'robot') {
     node.robot = typeof raw.robot === 'string' ? raw.robot : ''
     node.summary = typeof raw.summary === 'string' ? raw.summary : ''
+    if (raw.mode === 'plan') node.mode = 'plan'
     node.task = previewLine(raw.prompt, 160)
     node.next = normalizeNext(raw.next)
     if (Number.isFinite(raw.timeoutMs)) node.timeoutMs = raw.timeoutMs
     if (Number.isFinite(raw.maxVisits)) node.maxVisits = raw.maxVisits
     return node
   }
-  if (type === 'gate') {
+  if (type === 'user') {
     node.title = typeof raw.title === 'string' ? raw.title : ''
     node.detail = typeof raw.detail === 'string' ? raw.detail : ''
-    node.onApprove = normalizeGateEdge(raw.onApprove)
-    node.onReject = normalizeGateEdge(raw.onReject)
+    node.next = normalizeNext(raw.next)
+    node.questions = Array.isArray(raw.questions) ? raw.questions : []
+    return node
+  }
+  if (type === 'join') {
+    node.inputs = Array.isArray(raw.inputs) ? raw.inputs : []
+    node.next = normalizeNext(raw.next)
     return node
   }
   node.endStatus = END_STATUSES.has(raw.status) ? raw.status : 'completed'
@@ -159,50 +167,37 @@ function normalizeNode(id, raw) {
 }
 
 /**
- * 规范化门禁的一条出边：旧记录里的字符串目标，或新的 `{ to, name, prompt }` 对象。
- * 图模型保留目标、悬停名字与边上的 prompt（prompt 只作诊断，不在图上渲染）。
- *
- * @param {unknown} raw
- * @returns {{ to: string, name: string, prompt: string } | null}
- */
-function normalizeGateEdge(raw) {
-  if (typeof raw === 'string' && raw.trim() !== '') return { to: raw.trim(), name: '', prompt: '' }
-  if (!isPlainObject(raw)) return null
-  const to = typeof raw.to === 'string' ? raw.to.trim() : ''
-  if (to === '') return null
-  return {
-    to,
-    name: typeof raw.name === 'string' ? raw.name.trim() : '',
-    prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
-  }
-}
-
-/**
  * 规范化节点的 `next`：边对象数组（新格式）或字符串 / 字符串数组（旧记录）。
  *
- * 图模型只保留给观测者看的 `name` 与边的 `prompt`；format 2 不再有路由条件，
- * 这里也不解析。
+ * 图模型保留给观测者看的 `name`、用户选项的 `label`、边的 `prompt` 与外观色
+ * `tone`；路由条件不在这里解析。`tone` 只有 `success` / `failure` 会被保留，
+ * 旧记录 / 手工改动里的其它值归一成空串（不画颜色）。
  *
  * @param {unknown} raw
- * @returns {Array<{ to: string, name: string, prompt: string }>}
+ * @returns {Array<{ to: string, name: string, label: string, prompt: string, tone: string }>}
  */
 function normalizeNext(raw) {
-  if (typeof raw === 'string' && raw.trim() !== '') return [{ to: raw.trim(), name: '', prompt: '' }]
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    return [{ to: raw.trim(), name: '', label: '', prompt: '', tone: '' }]
+  }
   if (!Array.isArray(raw)) return []
-  /** @type {Array<{ to: string, name: string, prompt: string }>} */
+  /** @type {Array<{ to: string, name: string, label: string, prompt: string, tone: string }>} */
   const rules = []
   for (const rule of raw) {
     if (typeof rule === 'string' && rule.trim() !== '') {
-      rules.push({ to: rule.trim(), name: '', prompt: '' })
+      rules.push({ to: rule.trim(), name: '', label: '', prompt: '', tone: '' })
       continue
     }
     if (!isPlainObject(rule)) continue
     const to = typeof rule.to === 'string' ? rule.to.trim() : ''
     if (to === '') continue
+    const tone = typeof rule.tone === 'string' ? rule.tone.trim() : ''
     rules.push({
       to,
       name: typeof rule.name === 'string' ? rule.name.trim() : '',
+      label: typeof rule.label === 'string' ? rule.label.trim() : '',
       prompt: typeof rule.prompt === 'string' ? rule.prompt : '',
+      tone: tone === 'success' || tone === 'failure' ? tone : '',
     })
   }
   return rules
@@ -251,7 +246,7 @@ export function buildRunGraph(input) {
       if (id === '' || configs.has(id)) continue
       configs.set(id, {
         id,
-        type: step.type === 'gate' ? 'gate' : 'robot',
+        type: step.type === 'user' ? 'user' : 'robot',
         robot: typeof step.robot === 'string' ? step.robot : '',
         next: [],
       })
@@ -274,23 +269,40 @@ export function buildRunGraph(input) {
 
   const result = isPlainObject(run.result) ? run.result : null
   const lastNode = typeof result?.lastNode === 'string' ? result.lastNode : null
-  const current = isPlainObject(run.current) ? run.current : null
-  const pendingGate = isPlainObject(run.pendingGate) ? run.pendingGate : null
+  // 并发后活跃节点是数组（run.active）；旧记录退回单值 run.current。
+  const actives = Array.isArray(run.active)
+    ? run.active.filter(isPlainObject)
+    : isPlainObject(run.current)
+      ? [run.current]
+      : []
+  const current = actives[0] ?? null
+  const pendingUser = isPlainObject(run.pendingUser) ? run.pendingUser : null
+
+  // 「任务 → 引用它的 join」反向索引（join.inputs 表达的是入边）。
+  /** @type {Map<string, string[]>} */
+  const inputJoins = new Map()
+  for (const id of order) {
+    const config = configs.get(id)
+    if (config?.type !== 'join') continue
+    for (const input of Array.isArray(config.inputs) ? config.inputs : []) {
+      if (typeof input !== 'string' || !configs.has(input)) continue
+      const list = inputJoins.get(input)
+      if (list === undefined) inputJoins.set(input, [id])
+      else list.push(id)
+    }
+  }
 
   /**
-   * 节点的出边目标。
+   * 节点的出边目标（含 join 的隐式入边：任务 → 引用它的 join）。
    *
    * @param {Record<string, any>} config
    * @returns {string[]}
    */
   function targetsOf(config) {
-    if (config.type === 'robot' || config.type === 'start') {
-      return (config.next ?? []).map((rule) => rule.to)
-    }
-    if (config.type === 'gate') {
-      return [config.onApprove, config.onReject]
-        .filter((edge) => edge !== null && edge !== undefined)
-        .map((edge) => edge.to)
+    if (config.type === 'start' || config.type === 'robot' || config.type === 'user' || config.type === 'join') {
+      const targets = (config.next ?? []).map((rule) => rule.to)
+      if (config.type === 'robot') targets.push(...(inputJoins.get(config.id) ?? []))
+      return targets
     }
     return []
   }
@@ -390,8 +402,9 @@ export function buildRunGraph(input) {
   function stateOf(config) {
     // start 节点本身不执行；从它出发就说明这次运行已经开始了。
     if (config.type === 'start') return 'completed'
-    if (pendingGate !== null && pendingGate.nodeId === config.id) return 'waiting'
-    if (current !== null && current.nodeId === config.id) return 'running'
+    if (config.type === 'join' && config.next?.length === 0) return 'idle'
+    if (pendingUser !== null && pendingUser.nodeId === config.id) return 'waiting'
+    if (actives.some((active) => active.nodeId === config.id)) return 'running'
     const nodeSteps = stepsByNode.get(config.id) ?? []
     if (nodeSteps.length > 0) {
       const status = nodeSteps[nodeSteps.length - 1].status
@@ -429,7 +442,6 @@ export function buildRunGraph(input) {
       finishedAt: typeof lastStep?.finishedAt === 'number' ? lastStep.finishedAt : null,
       durationMs,
       stopReason: typeof lastStep?.stopReason === 'string' ? lastStep.stopReason : null,
-      decision: typeof lastStep?.decision === 'string' ? lastStep.decision : null,
       sessionId: typeof lastStep?.sessionId === 'string' && lastStep.sessionId !== '' ? lastStep.sessionId : null,
       error: typeof lastStep?.error === 'string' && lastStep.error !== '' ? lastStep.error : null,
       task: config.type === 'robot' ? config.task ?? '' : '',
@@ -444,14 +456,17 @@ export function buildRunGraph(input) {
         typeof avatars[config.robot] === 'string'
           ? avatars[config.robot]
           : null,
-      title: config.type === 'gate' ? config.title : null,
-      detail: config.type === 'gate' ? config.detail : null,
+      title: config.type === 'user' ? config.title : null,
+      detail: config.type === 'user' ? config.detail : null,
+      questions: config.type === 'user' ? config.questions ?? [] : null,
       endStatus: config.type === 'end' ? config.endStatus : null,
       timeoutMs: config.type === 'robot' && Number.isFinite(config.timeoutMs) ? config.timeoutMs : null,
       maxVisits: config.type === 'robot' && Number.isFinite(config.maxVisits) ? config.maxVisits : null,
-      next: config.type === 'robot' || config.type === 'start' ? config.next : [],
-      onApprove: config.type === 'gate' ? config.onApprove : null,
-      onReject: config.type === 'gate' ? config.onReject : null,
+      mode: config.type === 'robot' && config.mode === 'plan' ? 'plan' : null,
+      inputs: config.type === 'join' ? config.inputs ?? [] : null,
+      next: config.type === 'robot' || config.type === 'start' || config.type === 'user' || config.type === 'join'
+        ? config.next
+        : [],
     }
   })
 
@@ -464,8 +479,8 @@ export function buildRunGraph(input) {
     sequence.push(id)
   }
   for (const step of steps) pushSequence(step.nodeId)
-  if (current !== null) pushSequence(current.nodeId)
-  if (pendingGate !== null) pushSequence(pendingGate.nodeId)
+  for (const active of actives) pushSequence(active.nodeId)
+  if (pendingUser !== null) pushSequence(pendingUser.nodeId)
   /** 每对相邻节点在这次运行里走了几次；循环会让同一对出现多次。 */
   /** @type {Map<string, number>} */
   const pairCounts = new Map()
@@ -505,19 +520,26 @@ export function buildRunGraph(input) {
   /**
    * @param {string} from
    * @param {string} to
-   * @param {'next' | 'approve' | 'reject'} kind
-   * @param {string} [name] 边上写的名字（v2 里是路由键，同时给页面悬停展示）
+   * @param {'next'} kind
+   * @param {string} [name] 边上写的路由键
    * @param {string} [prompt] 进入目标节点时要发的提示词（只作诊断，不渲染）
+   * @param {string} [label] 用户节点选项显示给用户的文字
+   * @param {string} [tone] 边上可选的外观色：`success` / `failure`（只用于渲染）
    */
-  function pushEdge(from, to, kind, name, prompt) {
+  function pushEdge(from, to, kind, name, prompt, label, tone) {
     if (!configs.has(from) || !configs.has(to)) return
     const key = `${from}->${to}#${kind}`
     const edgeName = typeof name === 'string' ? name.trim() : ''
     const edgePrompt = typeof prompt === 'string' ? prompt : ''
+    const edgeLabel = typeof label === 'string' ? label.trim() : ''
+    const edgeTone = tone === 'success' || tone === 'failure' ? tone : ''
     const existing = edgesByKey.get(key)
     if (existing !== undefined) {
       if (edgeName !== '' && !existing.names.includes(edgeName)) existing.names.push(edgeName)
+      if (edgeLabel !== '' && !existing.labels.includes(edgeLabel)) existing.labels.push(edgeLabel)
       if (existing.prompt === '' && edgePrompt !== '') existing.prompt = edgePrompt
+      // 合并线只能有一种颜色：取定义顺序里第一条带 tone 的边。
+      if (existing.tone === '' && edgeTone !== '') existing.tone = edgeTone
       return
     }
     const traversals = pairCounts.get(`${from}->${to}`) ?? 0
@@ -527,7 +549,9 @@ export function buildRunGraph(input) {
       to,
       kind,
       names: edgeName === '' ? [] : [edgeName],
+      labels: edgeLabel === '' ? [] : [edgeLabel],
       prompt: edgePrompt,
+      tone: edgeTone,
       traversed: traversals > 0,
       traversals,
       // 循环边：从目标还能走回来源（自环恒成立）。
@@ -541,14 +565,15 @@ export function buildRunGraph(input) {
   } else {
     for (const id of order) {
       const config = configs.get(id)
-      if (config.type === 'robot' || config.type === 'start') {
-        for (const rule of config.next) pushEdge(id, rule.to, 'next', rule.name, rule.prompt)
-      } else if (config.type === 'gate') {
-        if (config.onApprove !== null) {
-          pushEdge(id, config.onApprove.to, 'approve', config.onApprove.name, config.onApprove.prompt)
+      if (config.type === 'robot' || config.type === 'start' || config.type === 'user' || config.type === 'join') {
+        for (const rule of config.next) {
+          pushEdge(id, rule.to, 'next', rule.name, rule.prompt, rule.label, rule.tone)
         }
-        if (config.onReject !== null) {
-          pushEdge(id, config.onReject.to, 'reject', config.onReject.name, config.onReject.prompt)
+      }
+      // join 的隐式入边：任务 → join。
+      if (config.type === 'join') {
+        for (const input of Array.isArray(config.inputs) ? config.inputs : []) {
+          if (typeof input === 'string') pushEdge(input, id, 'next', '', '', '')
         }
       }
     }
@@ -694,4 +719,28 @@ function edgeGeometry(from, to, lane) {
       `L${x},${to.y + 12} C${x},${to.y + 6} ${x0},${to.y + 6} ${x0},${to.y}`,
     arrow: { x, y: midY, angle: -90 },
   }
+}
+
+/**
+ * 把一份抽象工作流模板画成图模型（不含坐标）。
+ *
+ * 模板不是运行：没有 steps / current / pendingUser，所以复用 `buildRunGraph` 的
+ * 拓扑排序、成环合并与边合并，用一个「空运行」喂进去。得到节点后统一改成
+ * `idle` 状态（start 也不再标成 completed），让图读作「静态参考结构」而不是
+ * 「执行进度」。调用方再把结果交给 `layoutRunGraph` 计算行坐标与 SVG 路径。
+ *
+ * @param {Record<string, any>} template 模板对象（含 `id` 与 `nodes`）
+ * @returns {ReturnType<typeof buildRunGraph>}
+ */
+export function buildTemplateGraph(template) {
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : []
+  if (nodes.length === 0) return null
+  const model = buildRunGraph({
+    run: { runId: `template:${typeof template?.id === 'string' ? template.id : ''}` },
+    definition: { definition: { nodes } },
+    avatars: null,
+  })
+  if (model === null) return null
+  model.nodes = model.nodes.map((node) => ({ ...node, state: 'idle', visits: 0, unreachable: false }))
+  return model
 }

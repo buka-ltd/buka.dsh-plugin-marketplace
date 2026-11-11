@@ -1,7 +1,7 @@
 /**
  * @buka/dsh-plugin-workflows 图模型的单测。
  *
- * 覆盖：节点状态、连线分类与「是否走过」、门禁分支、缺定义快照时的兜底链、
+ * 覆盖：节点状态、连线分类与「是否走过」、用户介入选项、缺定义快照时的兜底链、
  * 分层坐标与回边 / 自环路径。全部是纯函数，不读盘、不启动 DSH。
  */
 
@@ -70,7 +70,7 @@ test('graph: linear run marks the reached end node and the traversed edge', () =
     runId: 'wf-test-linear',
     status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       {
         seq: 1,
@@ -150,7 +150,7 @@ test('graph: robot nodes carry the avatar from the robots avatar map', () => {
     runId: 'wf-test-avatars',
     status: 'running',
     current: { nodeId: 'review' },
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       {
         seq: 1,
@@ -166,7 +166,7 @@ test('graph: robot nodes carry the avatar from the robots avatar map', () => {
     result: null,
   }
 
-  // 有头像表：robot 节点带 id；门禁 / 终止节点没有；表里没有的机器人也是 null。
+  // 有头像表：robot 节点带 id；user / 终止节点没有；表里没有的机器人也是 null。
   const graph = buildRunGraph({ run, definition, avatars: { writer: 'panda', reviewer: 42 } })
   assert.ok(graph)
   const byId = new Map(graph.nodes.map((node) => [node.id, node]))
@@ -203,7 +203,7 @@ test('graph: routing highlights only the taken branch', () => {
     runId: 'wf-test-branch',
     status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       { seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, route: 'ok', routeTo: 'ok_end' },
     ],
@@ -233,56 +233,90 @@ test('graph: routing highlights only the taken branch', () => {
   assert.equal(layout.width, RAIL_BASE + LANE_GAP + RAIL_PAD)
 })
 
-test('graph: a rejected gate without targets ends the run at the gate', () => {
+test('graph: a terminal user node keeps its title and ends the run', () => {
   const definition = snapshot({
-    start: 'gate',
-    nodes: [{ id: 'gate', type: 'gate', title: '确认', detail: '是否继续？' }],
+    start: 'ask',
+    nodes: [
+      {
+        id: 'ask',
+        type: 'user',
+        title: '确认',
+        detail: '是否继续？',
+        questions: [{ id: 'notes', header: '备注', question: '还有什么要说明？' }],
+      },
+    ],
   })
   const run = {
-    runId: 'wf-test-gate-reject',
-    status: 'rejected',
+    runId: 'wf-test-user-terminal',
+    status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       {
         seq: 1,
-        nodeId: 'gate',
-        type: 'gate',
-        status: 'rejected',
-        decision: 'rejected',
+        nodeId: 'ask',
+        type: 'user',
+        status: 'completed',
+        route: null,
+        answers: [{ id: 'notes', selected: [], custom: '没问题' }],
+        text: '备注：（没问题）',
         startedAt: 1,
         finishedAt: 2,
       },
     ],
-    result: { status: 'rejected', lastNode: 'gate' },
+    result: { status: 'completed', lastNode: 'ask' },
   }
 
   const graph = buildRunGraph({ run, definition })
   assert.ok(graph)
   assert.equal(graph.edges.length, 0)
-  const gate = graph.nodes.find((node) => node.id === 'gate')
-  assert.equal(gate.state, 'rejected')
-  assert.equal(gate.decision, 'rejected')
+  const ask = graph.nodes.find((node) => node.id === 'ask')
+  assert.equal(ask.type, 'user')
+  assert.equal(ask.state, 'completed')
+  assert.equal(ask.title, '确认')
+  assert.equal(ask.detail, '是否继续？')
+  assert.equal(ask.next.length, 0)
+  assert.equal(Object.hasOwn(ask, 'onApprove'), false)
+  // 用户节点没有会话 / 决策字段。
+  assert.equal(ask.sessionId, null)
+  assert.equal(Object.hasOwn(ask, 'decision'), false)
   assert.equal(layoutRunGraph(graph).height, ROW_HEIGHT)
 })
 
-test('graph: gate branches are classified and the approved path is traversed', () => {
+test('graph: user edges are choices with labels and the chosen path is traversed', () => {
   const definition = snapshot({
-    start: 'gate',
+    start: 'ask',
     nodes: [
-      { id: 'gate', type: 'gate', title: '确认', onApprove: 'approve_path', onReject: 'reject_path' },
-      { id: 'approve_path', type: 'robot', robot: 'publisher', prompt: 'publish', next: 'done' },
-      { id: 'reject_path', type: 'robot', robot: 'writer', prompt: 'revise', next: 'done' },
+      {
+        id: 'ask',
+        type: 'user',
+        title: '确认',
+        next: [
+          { to: 'approve_path', name: 'approve', label: '批准' },
+          { to: 'reject_path', name: 'revise', label: '打回' },
+        ],
+      },
+      { id: 'approve_path', type: 'robot', robot: 'publisher', prompt: 'publish', next: [{ to: 'done', name: '完成' }] },
+      { id: 'reject_path', type: 'robot', robot: 'writer', prompt: 'revise', next: [{ to: 'done', name: '完成' }] },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   })
   const run = {
-    runId: 'wf-test-gate-approve',
+    runId: 'wf-test-user-approve',
     status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
-      { seq: 1, nodeId: 'gate', type: 'gate', status: 'approved', decision: 'approved', startedAt: 1, finishedAt: 2 },
+      {
+        seq: 1,
+        nodeId: 'ask',
+        type: 'user',
+        status: 'completed',
+        route: 'approve',
+        routeTo: 'approve_path',
+        startedAt: 1,
+        finishedAt: 2,
+      },
       {
         seq: 2,
         nodeId: 'approve_path',
@@ -298,38 +332,41 @@ test('graph: gate branches are classified and the approved path is traversed', (
 
   const graph = buildRunGraph({ run, definition })
   assert.ok(graph)
-  assert.equal(edgeOf(graph.edges, 'gate', 'approve_path').kind, 'approve')
-  assert.equal(edgeOf(graph.edges, 'gate', 'approve_path').traversed, true)
-  assert.equal(edgeOf(graph.edges, 'gate', 'reject_path').kind, 'reject')
-  assert.equal(edgeOf(graph.edges, 'gate', 'reject_path').traversed, false)
+  assert.equal(edgeOf(graph.edges, 'ask', 'approve_path').kind, 'next')
+  assert.deepEqual(edgeOf(graph.edges, 'ask', 'approve_path').names, ['approve'])
+  assert.deepEqual(edgeOf(graph.edges, 'ask', 'approve_path').labels, ['批准'])
+  assert.equal(edgeOf(graph.edges, 'ask', 'approve_path').traversed, true)
+  assert.deepEqual(edgeOf(graph.edges, 'ask', 'reject_path').labels, ['打回'])
+  assert.equal(edgeOf(graph.edges, 'ask', 'reject_path').traversed, false)
   assert.equal(edgeOf(graph.edges, 'approve_path', 'done').traversed, true)
   assert.equal(edgeOf(graph.edges, 'reject_path', 'done').traversed, false)
 
-  assert.equal(graph.nodes.find((node) => node.id === 'gate').state, 'approved')
+  assert.equal(graph.nodes.find((node) => node.id === 'ask').state, 'completed')
   assert.equal(graph.nodes.find((node) => node.id === 'reject_path').state, 'idle')
   assert.equal(graph.nodes.find((node) => node.id === 'done').state, 'completed')
 
-  // 拓扑行序保持定义顺序：gate、approve_path、reject_path、done。
+  // 拓扑行序保持定义顺序：ask、approve_path、reject_path、done。
   const layout = layoutRunGraph(graph)
   const rowOf = new Map(layout.rows.map((row) => [row.id, row]))
   assert.equal(rowOf.get('reject_path').index, 2)
   assert.equal(rowOf.get('done').index, 3)
   assert.equal(rowOf.get('done').y, 3 * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT / 2)
   // 相邻边留在主干；两条跨两行的边各自占一条 lane。
-  assert.equal(edgeOf(layout.edges, 'gate', 'approve_path').lane, 0)
+  assert.equal(edgeOf(layout.edges, 'ask', 'approve_path').lane, 0)
   assert.equal(edgeOf(layout.edges, 'reject_path', 'done').lane, 0)
-  assert.equal(edgeOf(layout.edges, 'gate', 'reject_path').lane, 1)
+  assert.equal(edgeOf(layout.edges, 'ask', 'reject_path').lane, 1)
   assert.equal(edgeOf(layout.edges, 'approve_path', 'done').lane, 2)
   assert.equal(layout.width, RAIL_BASE + 2 * LANE_GAP + RAIL_PAD)
 })
 
-test('graph: the running node and the waiting gate carry live state', () => {
+test('graph: the running node and the waiting user node carry live state', () => {
   const definition = snapshot({
     start: 'a',
     nodes: [
       { id: 'a', type: 'robot', robot: 'r1', prompt: 'a', next: 'b' },
-      { id: 'b', type: 'robot', robot: 'r2', prompt: 'b', next: 'gate' },
-      { id: 'gate', type: 'gate', title: '确认' },
+      { id: 'b', type: 'robot', robot: 'r2', prompt: 'b', next: 'ask' },
+      { id: 'ask', type: 'user', title: '确认', next: [{ to: 'done', name: 'continue', label: '继续' }] },
+      { id: 'done', type: 'end', status: 'completed' },
     ],
   })
 
@@ -338,7 +375,7 @@ test('graph: the running node and the waiting gate carry live state', () => {
       runId: 'wf-test-running',
       status: 'running',
       current: { nodeId: 'b', visit: 1, type: 'robot' },
-      pendingGate: null,
+      pendingUser: null,
       steps: [{ seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 }],
       result: null,
     },
@@ -353,8 +390,8 @@ test('graph: the running node and the waiting gate carry live state', () => {
     run: {
       runId: 'wf-test-waiting',
       status: 'waiting',
-      current: { nodeId: 'gate', visit: 1, type: 'gate' },
-      pendingGate: { nodeId: 'gate', title: '确认' },
+      current: { nodeId: 'ask', visit: 1, type: 'user' },
+      pendingUser: { nodeId: 'ask', title: '确认' },
       steps: [
         { seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
         { seq: 2, nodeId: 'b', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
@@ -364,8 +401,8 @@ test('graph: the running node and the waiting gate carry live state', () => {
     definition,
   })
   assert.ok(waiting)
-  assert.equal(waiting.nodes.find((node) => node.id === 'gate').state, 'waiting')
-  assert.equal(edgeOf(waiting.edges, 'b', 'gate').traversed, true)
+  assert.equal(waiting.nodes.find((node) => node.id === 'ask').state, 'waiting')
+  assert.equal(edgeOf(waiting.edges, 'b', 'ask').traversed, true)
 })
 
 test('graph: without a definition snapshot the steps become a linear chain', () => {
@@ -374,7 +411,7 @@ test('graph: without a definition snapshot the steps become a linear chain', () 
       runId: 'wf-test-synthetic',
       status: 'completed',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [
         { seq: 1, nodeId: 'first', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
         { seq: 2, nodeId: 'second', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
@@ -417,7 +454,7 @@ test('graph: an old record with an unreachable node keeps it on its own row and 
       runId: 'wf-test-orphan',
       status: 'completed',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       result: null,
     },
@@ -448,7 +485,7 @@ test('graph: backward edges and self loops are routed to the side', () => {
       runId: 'wf-test-back',
       status: 'cancelled',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [
         { seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
         { seq: 2, nodeId: 'b', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
@@ -522,7 +559,7 @@ test('graph: a loop run counts revisits and marks the back edge', () => {
     runId: 'wf-test-loop',
     status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       step(1, 'check', 1, { ok: false }),
       step(2, 'fix', 1),
@@ -612,7 +649,7 @@ test('graph: several named edges pointing at the same target merge into one draw
       runId: 'wf-test-merge',
       status: 'completed',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [
         { seq: 1, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, data: { ok: true } },
       ],
@@ -629,6 +666,57 @@ test('graph: several named edges pointing at the same target merge into one draw
   const toFix = edgeOf(graph.edges, 'check', 'fix')
   assert.deepEqual(toFix.names, ['修复'])
   assert.equal(graph.edges.filter((edge) => edge.from === 'check').length, 2, 'one line per target')
+})
+
+test('graph: an optional edge tone is carried for rendering only', () => {
+  const raw = {
+    start: 'check',
+    nodes: [
+      {
+        id: 'check',
+        type: 'robot',
+        robot: 'reviewer',
+        prompt: '检查',
+        next: [
+          { to: 'done', name: '通过', tone: 'success' },
+          { to: 'done', name: '已是最新', tone: 'failure' },
+          { to: 'fix', name: '修复', tone: 'failure' },
+        ],
+      },
+      {
+        id: 'fix',
+        type: 'robot',
+        robot: 'fixer',
+        prompt: '修复',
+        next: [{ to: 'check', name: '回检', tone: 'green' }],
+      },
+      { id: 'done', type: 'end', status: 'completed' },
+    ],
+  }
+  const run = {
+    runId: 'wf-test-tone',
+    status: 'completed',
+    current: null,
+    pendingUser: null,
+    steps: [
+      { seq: 1, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 },
+    ],
+    result: { status: 'completed', lastNode: 'done' },
+  }
+  const graph = buildRunGraph({ run, definition: snapshot(raw) })
+  assert.ok(graph)
+  const merged = edgeOf(graph.edges, 'check', 'done')
+  assert.equal(merged.tone, 'success', 'the first edge with a tone decides the merged line')
+  assert.deepEqual(merged.names, ['通过', '已是最新'], 'tone does not change the edge name merge')
+  assert.equal(edgeOf(graph.edges, 'check', 'fix').tone, 'failure')
+  assert.equal(edgeOf(graph.edges, 'fix', 'check').tone, '', 'an unknown tone is normalized to no color')
+  assert.equal(merged.traversed, true, 'tone never affects the traversed state')
+
+  // 没有 plan 的原始定义快照走同一条归一化路径：tone 同样保留。
+  const rawGraph = buildRunGraph({ run, definition: { definition: { nodes: raw.nodes } } })
+  assert.ok(rawGraph)
+  assert.equal(edgeOf(rawGraph.edges, 'check', 'done').tone, 'success')
+  assert.equal(edgeOf(rawGraph.edges, 'check', 'fix').tone, 'failure')
 })
 
 
@@ -749,7 +837,7 @@ test('graph: nested arcs never cross on a loop run', () => {
       runId: 'wf-test-crossing',
       status: 'completed',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [
         { seq: 1, nodeId: 'check', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, data: { ok: false } },
         { seq: 2, nodeId: 'fix', type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4 },
@@ -775,7 +863,7 @@ test('graph: long output and long prompts are truncated for the card', () => {
       runId: 'wf-test-truncate',
       status: 'completed',
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       steps: [{ seq: 1, nodeId: 'work', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, text: longText }],
       result: { status: 'completed', lastNode: 'end' },
     },
@@ -807,11 +895,19 @@ test('graph: edges carry their names, merging rules to one target', () => {
         next: [
           { to: 'b', name: '快路径' },
           { to: 'b', name: '慢路径' },
-          { to: 'gate', name: '去确认' },
+          { to: 'ask', name: '去确认' },
         ],
       },
-      { id: 'b', type: 'robot', robot: 'worker', prompt: 'b', next: 'gate' },
-      { id: 'gate', type: 'gate', title: '确认', onApprove: 'done', onReject: 'b' },
+      { id: 'b', type: 'robot', robot: 'worker', prompt: 'b', next: 'ask' },
+      {
+        id: 'ask',
+        type: 'user',
+        title: '确认',
+        next: [
+          { to: 'done', name: 'approve', label: '批准' },
+          { to: 'b', name: 'revise', label: '打回' },
+        ],
+      },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   })
@@ -819,7 +915,7 @@ test('graph: edges carry their names, merging rules to one target', () => {
     runId: 'wf-edge-names',
     status: 'running',
     current: { nodeId: 'b' },
-    pendingGate: null,
+    pendingUser: null,
     steps: [{ seq: 1, nodeId: 'a', type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2 }],
     result: null,
   }
@@ -831,9 +927,13 @@ test('graph: edges carry their names, merging rules to one target', () => {
   // 图模型只保留名字与边 prompt；v1 的 when 不再存在。
   assert.equal('when' in merged, false)
   assert.equal('whens' in merged, false)
-  for (const edge of graph.edges.filter((item) => item.kind !== 'next')) {
-    assert.deepEqual(edge.names, [], 'gate edges have no custom name')
-  }
+  // 用户节点的边同时带路由名和显示给用户的 label；机器人边没有 label。
+  const choice = edgeOf(graph.edges, 'ask', 'done')
+  assert.deepEqual(choice.names, ['approve'])
+  assert.deepEqual(choice.labels, ['批准'])
+  assert.deepEqual(merged.labels, [])
+  assert.deepEqual(edgeOf(graph.edges, 'b', 'ask').labels, [])
+  for (const edge of graph.edges) assert.equal(edge.kind, 'next')
 })
 
 test('graph: a start node is a completed marker, not a step', () => {
@@ -865,7 +965,7 @@ test('graph: a start node is a completed marker, not a step', () => {
     runId: 'wf-start-node',
     status: 'completed',
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       { seq: 1, nodeId: 'dev', visit: 1, type: 'robot', status: 'completed', startedAt: 1, finishedAt: 2, text: '初版' },
       { seq: 2, nodeId: 'test', visit: 1, type: 'robot', status: 'completed', startedAt: 3, finishedAt: 4, text: '打回', data: { passed: false } },
@@ -888,4 +988,37 @@ test('graph: a start node is a completed marker, not a step', () => {
   const layout = layoutRunGraph(graph)
   assert.equal(layout.rows[0].id, 'start')
   assert.equal(layout.rows.length, 4)
+})
+
+test('graph: a plan robot node keeps its mode flag', () => {
+  const definition = snapshot({
+    goal: 'plan',
+    start: 'work',
+    nodes: [
+      {
+        id: 'work',
+        type: 'robot',
+        robot: 'writer',
+        summary: '计划后实施',
+        mode: 'plan',
+        prompt: 'do it',
+        next: 'end',
+      },
+      { id: 'end', type: 'end', status: 'completed' },
+    ],
+  })
+  const run = {
+    runId: 'wf-test-plan',
+    status: 'running',
+    current: null,
+    pendingUser: null,
+    steps: [],
+    result: null,
+  }
+  const graph = buildRunGraph({ run, definition })
+  assert.ok(graph)
+  const work = graph.nodes.find((node) => node.id === 'work')
+  assert.equal(work.mode, 'plan')
+  const end = graph.nodes.find((node) => node.id === 'end')
+  assert.equal(end.mode, null)
 })

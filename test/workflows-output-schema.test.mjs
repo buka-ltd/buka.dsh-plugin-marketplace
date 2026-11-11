@@ -180,7 +180,9 @@ test('output: buildResultSchema merges next and the built-in attachments capabil
   }
   const before = JSON.parse(JSON.stringify(node.output))
   const schema = buildResultSchema(node)
-  assert.deepEqual(schema.properties.next.enum, ['交稿', '完成'])
+  assert.deepEqual(schema.properties.next.oneOf.map((branch) => branch.type), ['string', 'array'])
+  assert.deepEqual(schema.properties.next.oneOf[0].enum, ['交稿', '完成'])
+  assert.deepEqual(schema.properties.next.oneOf[1].items.enum, ['交稿', '完成'])
   assert.deepEqual(schema.required, ['summary'], 'next is optional because abort can replace it')
   assert.equal(schema.properties.abort.type, 'string')
   assert.match(schema.properties.abort.description, /cannot complete this task/u)
@@ -394,7 +396,7 @@ test('definition: prompt references are checked against the declared output', ()
   )
 
   const nonRobot = validateDefinition(withPrompt('read {{nodes.done.text}}'))
-  assert.match(nonRobot.errors.map((error) => error.message).join('\n'), /only robot nodes provide/u)
+  assert.match(nonRobot.errors.map((error) => error.message).join('\n'), /only robot and user nodes provide/u)
 
   const reserved = validateDefinition(withPrompt('read {{nodes.dev.data.next}}'))
   assert.match(reserved.errors.map((error) => error.message).join('\n'), /reserved field "next"/u)
@@ -404,7 +406,7 @@ test('definition: prompt references are checked against the declared output', ()
   assert.match(syntax.errors.map((error) => error.message).join('\n'), /invalid template path/u)
 })
 
-test('definition: gate decisions and attachments are checked by node type', () => {
+test('definition: user answer fields and attachments are checked by node type', () => {
   const base = () => ({
     nodes: [
       { id: 'start', type: 'start', next: [{ to: 'dev', name: '开始', prompt: 'go' }] },
@@ -413,14 +415,22 @@ test('definition: gate decisions and attachments are checked by node type', () =
         type: 'robot',
         robot: 'coder',
         output: { type: 'object', properties: {} },
-        next: [{ to: 'gate', name: '提交' }],
+        next: [{ to: 'review', name: '提交' }],
       },
       {
-        id: 'gate',
-        type: 'gate',
+        id: 'review',
+        type: 'user',
         title: '确认',
-        onApprove: { to: 'publish', name: '批准', prompt: 'decided {{nodes.gate.decision}}' },
-        onReject: 'done',
+        next: [
+          {
+            to: 'publish',
+            name: 'approve',
+            label: '批准',
+            prompt: 'decided {{nodes.review.route}}；备注 {{nodes.review.answers.notes.custom}}；选择 {{nodes.review.answers.route.selected}}',
+          },
+          { to: 'done', name: 'reject', label: '取消' },
+        ],
+        questions: [{ id: 'notes', question: '还有什么要说明？' }],
       },
       {
         id: 'publish',
@@ -436,20 +446,41 @@ test('definition: gate decisions and attachments are checked by node type', () =
   assert.equal(ok.ok, true, ok.errors.map((error) => error.message).join('; '))
 
   const wrong = base()
-  wrong.nodes[2].onApprove.prompt = 'decision {{nodes.dev.decision}}'
+  wrong.nodes[2].next[0].prompt = 'decision {{nodes.dev.answers.notes.custom}}'
   assert.match(
     validateDefinition(wrong).errors.map((error) => error.message).join('\n'),
-    /only gate nodes provide/u,
+    /only user nodes provide/u,
   )
 
-  const dataOnGate = base()
-  dataOnGate.nodes[2].onApprove.prompt = 'data {{nodes.gate.data.ok}}'
+  const unknownQuestion = base()
+  unknownQuestion.nodes[2].next[0].prompt = 'x {{nodes.review.answers.missing.custom}}'
   assert.match(
-    validateDefinition(dataOnGate).errors.map((error) => error.message).join('\n'),
+    validateDefinition(unknownQuestion).errors.map((error) => error.message).join('\n'),
+    /unknown question id "missing"/u,
+  )
+
+  const badAnswerField = base()
+  badAnswerField.nodes[2].next[0].prompt = 'x {{nodes.review.answers.notes.value}}'
+  assert.match(
+    validateDefinition(badAnswerField).errors.map((error) => error.message).join('\n'),
+    /use \.selected or \.custom/u,
+  )
+
+  const dataOnUser = base()
+  dataOnUser.nodes[2].next[0].prompt = 'data {{nodes.review.data.ok}}'
+  assert.match(
+    validateDefinition(dataOnUser).errors.map((error) => error.message).join('\n'),
     /only robot nodes provide/u,
   )
 
+  const decisionRemoved = base()
+  decisionRemoved.nodes[2].next[0].prompt = 'old {{nodes.review.decision}}'
+  assert.match(
+    validateDefinition(decisionRemoved).errors.map((error) => error.message).join('\n'),
+    /removed gate node/u,
+  )
+
   const attachmentsOnRobot = base()
-  attachmentsOnRobot.nodes[2].onApprove.prompt = 'files {{nodes.dev.attachments.0.path}}'
+  attachmentsOnRobot.nodes[2].next[0].prompt = 'files {{nodes.dev.attachments.0.path}}'
   assert.equal(validateDefinition(attachmentsOnRobot).ok, true)
 })

@@ -63,14 +63,99 @@ export function resolveAbort(data) {
 }
 
 /**
- * 按机器人结果里的 `next` 选择出边。
+ * 按机器人结果里的 `next` 选择出边（format 2 起，format 3 支持并发 fan-out）。
  *
- * 调用方必须先处理 `resolveAbort`：合法 abort 不进入路由。
+ * 结果里的 `next` 可以是一个路由键（单线，向后兼容），也可以是一个路由键数组
+ * （fan-out：同时沿所有列出的出边并发执行）。调用方必须先处理 `resolveAbort`：
+ * 合法 abort 不进入路由。
  *
  * 返回：
- * - `{ rule }`：命中唯一一条出边；
- * - `{ rule: null }`：节点没有出边，流程到此结束；
- * - `{ error, routes }`：缺少 / 未知 `next`，`routes` 是允许的名字列表。
+ * - `{ rules }`：命中一条或多条出边（数组，按定义顺序）；
+ * - `{ rules: [] }`：节点没有出边，流程到此结束；
+ * - `{ error, routes }`：缺少 / 未知 / 重复 `next`，`routes` 是允许的名字列表。
+ *
+ * @param {Record<string, any>} node 已规范化的节点
+ * @param {unknown} data 机器人交回的 JSON 对象
+ * @returns {{ rules: Array<Record<string, any>> } | { error: string, routes: string[] }}
+ */
+export function resolveRoutes(node, data) {
+  const rules = Array.isArray(node?.next) ? node.next : []
+  if (rules.length === 0) return { rules: [] }
+
+  const routes = []
+  for (const rule of rules) {
+    if (typeof rule?.name === 'string' && rule.name !== '') routes.push(rule.name)
+  }
+
+  const rawNext = typeof data === 'object' && data !== null ? data.next : undefined
+  if (typeof rawNext === 'string') {
+    const name = rawNext.trim()
+    if (name === '') {
+      return { error: `the result has no "next" route; set "next" to one of: ${formatRoutes(routes)}`, routes }
+    }
+    const matches = rules.filter((rule) => rule?.name === name)
+    if (matches.length !== 1) {
+      return {
+        error:
+          matches.length === 0
+            ? `unknown route "${name}"; "next" must be one of: ${formatRoutes(routes)}`
+            : `route "${name}" is ambiguous; "next" must be one of: ${formatRoutes(routes)}`,
+        routes,
+      }
+    }
+    return { rules: matches }
+  }
+
+  if (Array.isArray(rawNext)) {
+    if (rawNext.length === 0) {
+      return {
+        error: `the result has an empty "next" route list; set "next" to one or more of: ${formatRoutes(routes)}`,
+        routes,
+      }
+    }
+    const selected = []
+    const seen = new Set()
+    for (const raw of rawNext) {
+      if (typeof raw !== 'string') {
+        return {
+          error: `the "next" route list must contain only route names; set it to one or more of: ${formatRoutes(routes)}`,
+          routes,
+        }
+      }
+      const name = raw.trim()
+      if (name === '') {
+        return { error: `the "next" route list contains an empty name; use one or more of: ${formatRoutes(routes)}`, routes }
+      }
+      if (seen.has(name)) {
+        return { error: `the "next" route list repeats "${name}"; each route can only be selected once`, routes }
+      }
+      seen.add(name)
+      const matches = rules.filter((rule) => rule?.name === name)
+      if (matches.length !== 1) {
+        return {
+          error:
+            matches.length === 0
+              ? `unknown route "${name}"; "next" must be one of: ${formatRoutes(routes)}`
+              : `route "${name}" is ambiguous; "next" must be one of: ${formatRoutes(routes)}`,
+          routes,
+        }
+      }
+      selected.push(matches[0])
+    }
+    return { rules: selected }
+  }
+
+  return {
+    error: `the result has no "next" route; set "next" to one of: ${formatRoutes(routes)}`,
+    routes,
+  }
+}
+
+/**
+ * 按机器人结果里的 `next` 选择唯一一条出边（单线；遗留 API）。
+ *
+ * fan-out（`next` 数组）请用 `resolveRoutes`。这里保留旧的返回值形状，供调用方
+ * 处理「终止节点 / 单一路由」路径。
  *
  * @param {Record<string, any>} node 已规范化的节点
  * @param {unknown} data 机器人交回的 JSON 对象

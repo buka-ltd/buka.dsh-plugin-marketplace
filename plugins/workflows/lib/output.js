@@ -387,10 +387,21 @@ export function buildResultSchema(node) {
   const routes = routeNamesOf(node)
   if (routes.length > 0) {
     schema.properties.next = {
-      type: 'string',
-      enum: routes,
+      oneOf: [
+        {
+          type: 'string',
+          enum: routes,
+          description: 'A single route key; the workflow follows exactly one edge.',
+        },
+        {
+          type: 'array',
+          items: { type: 'string', enum: routes },
+          description:
+            'One or more route keys (non-empty); the workflow starts every listed edge as a concurrent branch. Use this to fan out parallel work that a join node collects later.',
+        },
+      ],
       description:
-        'Route key from the workflow definition; selects the next edge. Use "abort" instead when you cannot complete this node\'s task.',
+        'Route key(s) from the workflow definition; selects the edge(s) to follow next. Use "abort" instead when you cannot complete this node\'s task.',
     }
   }
 
@@ -608,7 +619,7 @@ export function renderOutputContract(node) {
     '```json',
     JSON.stringify(schema, null, 2),
     '```',
-    'When this node has outgoing edges, the object must contain exactly one of "next" (one of the declared route names) and "abort".',
+    'When this node has outgoing edges, the object must contain exactly one of "next" and "abort": "next" is a declared route name, or a non-empty list of route names to start several edges as concurrent branches; "abort" is a short non-empty reason.',
     'If you cannot complete this task, do not choose a route you do not believe in: submit "abort" with a short non-empty reason instead. The workflow ends immediately, the run is recorded as failed, and the declared output fields and attachments are not required.',
     "The final assistant text is this step's output shown on the run page; put the actual answer in the final text and the declared fields.",
     'The "attachments" list is a built-in capability for independent data or files this node produced (archives, traces, images, large datasets); it is not a place for the answer itself.',

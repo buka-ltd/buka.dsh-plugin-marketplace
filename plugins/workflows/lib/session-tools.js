@@ -162,10 +162,24 @@ function requireSeq(value) {
  * @returns {string}
  */
 function currentStatus(run, current) {
-  if (current?.type === 'gate') {
-    return run.pendingGate?.nodeId === current.nodeId ? 'waiting' : 'running'
+  if (current?.type === 'user') {
+    return run.pendingUser?.nodeId === current.nodeId ? 'waiting' : 'running'
   }
   return 'running'
+}
+
+/**
+ * 运行中的活跃节点列表：并发用 run.active，旧记录退回单值 run.current。
+ *
+ * @param {Record<string, any>} run
+ * @returns {Array<Record<string, any>>}
+ */
+function activesOf(run) {
+  if (Array.isArray(run.active)) {
+    return run.active.filter((entry) => entry !== null && typeof entry === 'object')
+  }
+  if (run.current !== null && typeof run.current === 'object') return [run.current]
+  return []
 }
 
 /**
@@ -194,8 +208,8 @@ function executionList(run) {
       finishedAt: isoTime(step.finishedAt),
     })
   }
-  const current = run.current
-  if (current !== null && typeof current === 'object' && !list.some((item) => item.seq === current.seq)) {
+  for (const current of activesOf(run)) {
+    if (list.some((item) => item.seq === current.seq)) continue
     list.push({
       seq: Number.isInteger(current.seq) ? current.seq : null,
       nodeId: typeof current.nodeId === 'string' ? current.nodeId : '',
@@ -225,8 +239,8 @@ function findExecution(run, seq) {
   const steps = Array.isArray(run.steps) ? run.steps : []
   const step = steps.find((item) => item !== null && typeof item === 'object' && item.seq === seq)
   if (step !== undefined) return { step, running: false }
-  const current = run.current
-  if (current !== null && typeof current === 'object' && current.seq === seq) {
+  const current = activesOf(run).find((item) => item.seq === seq)
+  if (current !== undefined) {
     return {
       step: {
         ...current,
@@ -248,8 +262,9 @@ function findExecution(run, seq) {
  */
 function overviewValue(run, definition) {
   const model = buildRunGraph({ run, definition })
-  const current = run.current
-  const pendingGate = run.pendingGate
+  const actives = activesOf(run)
+  const current = actives[0] ?? null
+  const pendingUser = run.pendingUser
   const pendingInteraction = run.pendingInteraction
   const nodes = (Array.isArray(model?.nodes) ? model.nodes : []).map((node) => ({
     id: typeof node.id === 'string' ? node.id : '',
@@ -260,7 +275,7 @@ function overviewValue(run, definition) {
     summary:
       node.type === 'robot'
         ? clipText(node.summary, SUMMARY_LIMIT)
-        : node.type === 'gate'
+        : node.type === 'user'
           ? clipText(node.title, SUMMARY_LIMIT)
           : null,
     robot: node.type === 'robot' && typeof node.robot === 'string' && node.robot !== '' ? node.robot : null,
@@ -295,11 +310,18 @@ function overviewValue(run, definition) {
               robot: typeof current.robot === 'string' && current.robot !== '' ? current.robot : null,
             }
           : null,
-      pendingGate:
-        pendingGate !== null && typeof pendingGate === 'object'
+      active: actives.map((active) => ({
+        nodeId: typeof active.nodeId === 'string' ? active.nodeId : '',
+        seq: Number.isInteger(active.seq) ? active.seq : null,
+        type: typeof active.type === 'string' ? active.type : null,
+        visit: Number.isInteger(active.visit) ? active.visit : null,
+        robot: typeof active.robot === 'string' && active.robot !== '' ? active.robot : null,
+      })),
+      pendingUser:
+        pendingUser !== null && typeof pendingUser === 'object'
           ? {
-              nodeId: typeof pendingGate.nodeId === 'string' ? pendingGate.nodeId : '',
-              title: clipText(pendingGate.title, SUMMARY_LIMIT),
+              nodeId: typeof pendingUser.nodeId === 'string' ? pendingUser.nodeId : '',
+              title: clipText(pendingUser.title, SUMMARY_LIMIT),
             }
           : null,
       pendingInteraction:
@@ -331,12 +353,13 @@ function renderOverview(value) {
   if (typeof run.goal === 'string' && run.goal !== '') lines.push(`goal: ${run.goal}`)
   if (typeof run.createdAt === 'string' && run.createdAt !== '') lines.push(`created: ${run.createdAt}`)
   if (typeof run.finishedAt === 'string' && run.finishedAt !== '') lines.push(`finished: ${run.finishedAt}`)
-  if (run.current !== null && run.current !== undefined) {
-    const seq = Number.isInteger(run.current.seq) ? ` (execution #${run.current.seq})` : ''
-    lines.push(`current: ${run.current.nodeId}${seq}`)
+  const actives = Array.isArray(run.active) ? run.active : []
+  for (const current of actives.length > 0 ? actives : (run.current ? [run.current] : [])) {
+    const seq = Number.isInteger(current.seq) ? ` (execution #${current.seq})` : ''
+    lines.push(`current: ${current.nodeId}${seq}`)
   }
-  if (run.pendingGate !== null && run.pendingGate !== undefined) {
-    lines.push(`waiting at gate: ${run.pendingGate.title || run.pendingGate.nodeId}`)
+  if (run.pendingUser !== null && run.pendingUser !== undefined) {
+    lines.push(`waiting at user node: ${run.pendingUser.title || run.pendingUser.nodeId}`)
   }
   if (run.pendingInteraction !== null && run.pendingInteraction !== undefined) {
     lines.push(`waiting for user: ${run.pendingInteraction.kind ?? 'interaction'} at ${run.pendingInteraction.nodeId}`)
@@ -590,7 +613,7 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
     defineTool({
       name: 'buka_workflow_execution_input',
       description:
-        'Read the exact input recorded for one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns the rendered prompt that was sent to that robot session; a gate execution returns the gate title and detail that were shown for approval. Read-only.',
+        'Read the exact input recorded for one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns the rendered prompt that was sent to that robot session; a user execution returns the title, rendered instruction and choices that were shown to the user. Read-only.',
       parameters: {
         seq: {
           type: 'number',
@@ -626,28 +649,48 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
           )
         }
         const step = found.step
-        if (step.type === 'gate') {
+        if (step.type === 'user') {
           const definition = await store.readDefinition(runId)
           const node = definitionNode(definition, step.nodeId)
-          const pending = run.pendingGate?.nodeId === step.nodeId ? run.pendingGate : null
-          const title = typeof node?.title === 'string' && node.title !== '' ? node.title : (pending?.title ?? '')
+          const pending = found.running && run.pendingUser?.nodeId === step.nodeId ? run.pendingUser : null
+          const title = pending?.title ?? (typeof node?.title === 'string' ? node.title : '')
           const detail =
-            typeof node?.detail === 'string' && node.detail !== '' ? node.detail : (pending?.detail ?? '')
+            typeof pending?.detail === 'string' && pending.detail !== ''
+              ? pending.detail
+              : typeof step.input === 'string' && step.input !== ''
+                ? step.input
+                : typeof node?.detail === 'string'
+                  ? node.detail
+                  : ''
+          const options = Array.isArray(pending?.options)
+            ? pending.options
+            : Array.isArray(node?.next)
+              ? node.next
+              : []
+          const optionLines = options
+            .filter((option) => option !== null && typeof option === 'object' && typeof option.label === 'string')
+            .map(
+              (option) =>
+                `- ${option.label}${typeof option.description === 'string' && option.description !== '' ? `: ${option.description}` : ''}`,
+            )
+          const parts = [title, detail]
+          if (optionLines.length > 0) parts.push(`choices:\n${optionLines.join('\n')}`)
           return {
             seq,
             nodeId: typeof step.nodeId === 'string' ? step.nodeId : '',
             visit: Number.isInteger(step.visit) ? step.visit : null,
-            type: 'gate',
+            type: 'user',
             robot: null,
-            status: typeof step.status === 'string' ? step.status : 'unknown',
-            input: [title, detail].filter((part) => part !== '').join('\n'),
+            status: found.running ? 'waiting' : typeof step.status === 'string' ? step.status : 'unknown',
+            input: parts.filter((part) => typeof part === 'string' && part !== '').join('\n'),
             truncated: false,
           }
         }
         const result = await store.readNodeResult(runId, seq, step.nodeId)
         let input = typeof result?.prompt === 'string' ? result.prompt : ''
-        if (input === '' && found.running && typeof run.current?.prompt === 'string') {
-          input = run.current.prompt
+        const runningActive = found.running ? activesOf(run).find((item) => item.seq === seq) : undefined
+        if (input === '' && runningActive !== undefined && typeof runningActive.prompt === 'string') {
+          input = runningActive.prompt
         }
         if (input === '') {
           throw new Error(`execution #${seq} (node "${step.nodeId}") has no recorded input in workflow run "${runId}"`)
@@ -668,7 +711,7 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
     defineTool({
       name: 'buka_workflow_execution_output',
       description:
-        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a node that aborted the workflow reports stopReason "aborted" with its reason in error. A gate execution returns its decision. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
+        'Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a node that aborted the workflow reports stopReason "aborted" with its reason in error. A user execution returns the readable answer transcript plus the chosen route and recorded answers. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.',
       parameters: {
         seq: {
           type: 'number',
@@ -725,24 +768,30 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
           )
         }
         const step = found.step
-        if (step.type === 'gate') {
+        if (step.type === 'user') {
           if (found.running) {
-            throw new Error(`execution #${seq} (gate "${step.nodeId}") is still waiting for approval and has no output yet`)
+            throw new Error(
+              `execution #${seq} (user "${step.nodeId}") is still waiting for the user and has no output yet`,
+            )
           }
-          const decision = typeof step.decision === 'string' ? step.decision : step.status
+          const answers = Array.isArray(step.answers) ? step.answers : []
           return {
             seq,
             nodeId: typeof step.nodeId === 'string' ? step.nodeId : '',
             visit: Number.isInteger(step.visit) ? step.visit : null,
-            type: 'gate',
+            type: 'user',
             robot: null,
             status: typeof step.status === 'string' ? step.status : 'unknown',
             stopReason: null,
-            output: typeof decision === 'string' ? decision : '',
-            structured: null,
+            output: typeof step.text === 'string' ? step.text : '',
+            structured: {
+              route: typeof step.route === 'string' && step.route !== '' ? step.route : null,
+              routeTo: typeof step.routeTo === 'string' && step.routeTo !== '' ? step.routeTo : null,
+              answers,
+            },
             attachments: [],
-            route: null,
-            routeTo: null,
+            route: typeof step.route === 'string' && step.route !== '' ? step.route : null,
+            routeTo: typeof step.routeTo === 'string' && step.routeTo !== '' ? step.routeTo : null,
             error: typeof step.error === 'string' && step.error !== '' ? step.error : null,
             truncated: false,
             finishedAt: isoTime(step.finishedAt),
@@ -872,16 +921,16 @@ export function createWorkflowSessionTools({ defineTool, store, resolveSession }
         if (found.running) {
           throw new Error(`execution #${seq} (node "${step.nodeId}") is still running and has no attachments yet`)
         }
-        if (step.type === 'gate') {
+        if (step.type === 'user') {
           if (typeof args?.name === 'string' && args.name.trim() !== '') {
-            throw new Error(`execution #${seq} (gate "${step.nodeId}") has no attachments`)
+            throw new Error(`execution #${seq} (user "${step.nodeId}") has no attachments`)
           }
           return {
             seq,
             nodeId: typeof step.nodeId === 'string' ? step.nodeId : '',
-            type: 'gate',
+            type: 'user',
             robot: null,
-            status: typeof step.status === 'string' ? step.status : 'unknown',
+            status: found.running ? 'waiting' : typeof step.status === 'string' ? step.status : 'unknown',
             attachments: [],
             attachment: null,
           }

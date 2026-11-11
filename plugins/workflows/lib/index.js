@@ -8,17 +8,19 @@
  * `buka_workflow_start`，插件现场校验并顺序执行：同一个 robot 在一次运行里只开
  * 一个会话（落到普通工作 preset），再次进入时先 compact 压缩历史、再把新的边
  * prompt 发进同一会话；每个 robot 节点交回一个 JSON，`next` 选中的出边就是下一跳；
- * gate 节点弹一次原生审批。
+ * user 节点在原生提问卡里等用户做决策 / 完成操作 / 给出反馈，用户的选项就是出边。
+ * robot 节点可选 `mode: "plan"`：进入前把会话切到 DSH plan 模式，机器人先探索并
+ * 交计划，用户在原生计划审阅卡里批准后在同一会话继续实施，再交回结构化结果。
  *
- * 不含 gate 的定义在后台跑：工具立刻返回 runId，节点会话由 Host 侧观察者继续
- * 调度，浏览器里只读的运行页负责观察。含 gate 的定义必须在调用者的 turn 内
- * 跑完，因为原生审批要求会话有活跃的 turn。
+ * 不含 user 节点的定义在后台跑：工具立刻返回 runId，节点会话由 Host 侧观察者
+ * 继续调度，浏览器里只读的运行页负责观察。含 user 节点的定义必须在调用者的
+ * turn 内跑完，因为原生提问卡要求会话有活跃的 turn。
  *
  * 运行数据落盘到插件目录下的 `runs/`（定义快照、状态快照、事件流、节点结果、节点附件），
  * 既是回看依据，也是恢复的权威状态：Host 侧观察者（lib/supervisor.js）订阅全局
  * 会话事件推进运行，会话中断只续接同一会话，续接失败即终止运行；宿主重启后
- * 未完成的运行会尝试恢复，无法续接时标成 `interrupted`。等待
- * 原生审批的门禁运行无法重建审批，也会标成 `interrupted`。
+ * 未完成的运行会尝试恢复，无法续接时标成 `interrupted`。等待用户作答的
+ * user 运行无法重建原生提问，也会标成 `interrupted`。
  * 每次运行有一个持久递增的序号（`runs/sequence.json` 计数器），页面与工具输出
  * 都显示 `#N`；结束的运行按自动归档设置（`runs/` 同级的 `settings.json`，默认
  * 24 小时归档、168 小时删除）自动隐藏或删除，运行中的记录不会被处理。
@@ -45,10 +47,11 @@ import {
   DEFAULT_MAX_NODE_ATTACHMENTS_BYTES,
 } from './attachments.js'
 import { describePlan, validateDefinition } from './definition.js'
-import { buildRunGraph, layoutRunGraph } from './graph.js'
+import { buildRunGraph, buildTemplateGraph, layoutRunGraph } from './graph.js'
 import { WorkflowRunStore } from './run-store.js'
 import { createSessionToolVisibility, createWorkflowSessionTools } from './session-tools.js'
 import { WorkflowSupervisor } from './supervisor.js'
+import { describeTemplate, findTemplate, listTemplates, summarizeTemplates } from './templates.js'
 import {
   defaultSettings,
   readSettings,
@@ -60,7 +63,7 @@ import {
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 不是一回事。 */
 export const name = 'tool-buka-workflows'
 
-/** 依赖的服务：只需要工具注册表；robots / approval 在调用时按需获取。 */
+/** 依赖的服务：只需要工具注册表；robots / userQuestions 在调用时按需获取。 */
 export const inject = ['tools']
 
 /** 插件全局目录名。 */
@@ -77,6 +80,9 @@ const ATTACHMENT_ROUTE = '/buka-workflows/attachment'
 
 /** 浏览器一半读 / 写自动归档设置的路由。 */
 const SETTINGS_ROUTE = '/buka-workflows/settings'
+
+/** 浏览器一半读取工作流模板目录的路由。 */
+const TEMPLATES_ROUTE = '/buka-workflows/templates'
 
 /** 自动归档的巡检间隔：设置按小时计，每小时扫一次足够。 */
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000
@@ -177,30 +183,37 @@ const DEFINITION_HELP = `A one-off workflow definition is a JSON object:
 Node types:
 - start: { "id", "type": "start", "next": [{ "to": "<robot id>", "name": "short edge name", "prompt": "..." }] }
   Exactly one start node. It never executes and does not count as a step; its single outgoing edge carries the prompt for the first real node, which must be a robot node.
-- robot: { "id", "type": "robot", "robot": "<robot name>", "output": { ... }, "summary": "one-line step summary shown in the run page", "agentOptions"?: {...}, "timeoutMs"?, "maxVisits"?, "next"?: [edge, ...] }
+- robot: { "id", "type": "robot", "robot": "<robot name>", "output": { ... }, "summary": "one-line step summary shown in the run page", "mode"?: "plan", "agentOptions"?: {...}, "timeoutMs"?, "maxVisits"?, "next"?: [edge, ...] }
   Each robot keeps ONE session for the whole run: the first time any node uses that robot, its session is created; every later entry (another node, or a loop back to the same node) first compacts that session's history and then sends the new edge prompt into the same session. The robot keeps continuity across entries while its context stays bounded.
   A robot node has NO prompt of its own: every edge entering it carries the prompt for that entry. This is how the same robot node gets a different instruction when a loop sends work back to it.
+  Set "mode": "plan" when the robot should plan before acting. Its session is switched to DSH plan mode before the first prompt: the robot explores, presents the plan through the native plan review card, and only after the user approves does it carry out the plan and submit the node's structured result. This is ONE node, not a separate approval node: do not add a user node just to approve the plan when the native review is what you want. Plan mode is guidance, not a hard sandbox, and it needs the plan-mode + user-questions services and a compatible Buka Robots plugin. The output contract and "next" routes are unchanged; include the plan in an "output" field if later nodes need it.
   "output" is REQUIRED: a JSON Schema object with "type": "object" that declares the result JSON fields. Allowed keywords: type, description, properties, required, additionalProperties (boolean), items, enum, const, oneOf; property names use [A-Za-z0-9_-]. Do NOT declare "next", "abort" or "attachments" inside output: the engine adds "next" from the outgoing edge names (used only when the node chooses to continue), always adds the built-in "abort" escape, and always adds the built-in "attachments" capability.
   Give every robot node a short "summary": the run page shows it as the step's title.
   "timeoutMs" is optional and there is NO default timeout: a slow model, a large task or a slow network must not be killed by a guessed deadline. Only set it when the node genuinely has a hard time bound.
-  Every robot node must finish by calling structured_output with one JSON object matching that schema (a plain-text JSON object is also accepted and validated the same way). When the node has outgoing edges, that JSON MUST contain exactly one of "next" (one of the outgoing edge names) and "abort". The engine reads "next" and follows that edge automatically; no other agent decides the route. A terminal robot node (no outgoing edges) still submits JSON but does not need "next". Any node may instead return {"abort": "<short non-empty reason>"} when it cannot complete the task: the run ends as failed immediately, no edge is followed, and the declared output fields are not required. A missing/invalid JSON result, an invalid "abort", or both "next" and "abort" together is asked again in the same session, then the node fails.
+  Every robot node must finish by calling structured_output with one JSON object matching that schema (a plain-text JSON object is also accepted and validated the same way). When the node has outgoing edges, that JSON MUST contain exactly one of "next" and "abort": "next" is one of the outgoing edge names, or a non-empty list of them to start several edges as concurrent branches (fan-out). The engine reads "next" and follows each edge automatically; no other agent decides the route. A terminal robot node (no outgoing edges) still submits JSON but does not need "next". Any node may instead return {"abort": "<short non-empty reason>"} when it cannot complete the task: the run ends as failed immediately, no edge is followed, and the declared output fields are not required. A missing/invalid JSON result, an invalid "abort", or both "next" and "abort" together is asked again in the same session, then the node fails.
   The engine appends this declared result contract to every node prompt, so the edge prompt should only state the task and explain what each outgoing edge name means; do not repeat the field list. The abort escape is part of that contract, so do not invent a route or an end node just to model "cannot".
   A node may also return optional "attachments": an array of file paths (relative to its workspace) or { "path", "name"?, "description"? } objects. Attachments are a built-in capability for independent data or files (binaries, archives, traces, large datasets); they are NOT a channel for the answer itself. The node's final text is this step's output shown on the run page: tell the robot to put the actual answer there and in the declared fields, never only in an attachment. The workflow copies those files into that execution's node directory so later nodes can read them; attachments are copied only when the node completes normally, not when it aborts.
   The outgoing edge names are the only valid values for "next"; "abort" is not a route.
-- gate: { "id", "type": "gate", "title": "...", "detail"?: "...", "onApprove"?: edge, "onReject"?: edge }
-  edge is either a node id string, or { "to": "<node id>", "name"?: "...", "prompt"?: "..." }. Waits for one native approval dialog. Approve goes to onApprove; reject goes to onReject; either may be omitted to end the run (approved => completed, rejected => rejected). An edge entering a robot node must carry a prompt.
+- user: { "id", "type": "user", "title": "...", "detail"?: "...", "next"?: [{ "to": "<node id>", "name": "route key", "label": "option text", "description"?: "...", "prompt"?: "..." }], "questions"?: [{ "id", "header"?, "question", "multiSelect"?, "options"?: [{ "label", "description"? }] }] }
+  A user-intervention checkpoint: the run pauses, shows "title" plus "detail" (templates allowed) to the user through the native question card, and waits. Use it for a decision (the user's options are the outgoing edges), for a manual operation only a human can do (one edge, e.g. label "Done"), or for reviewing a result only a human can see and returning feedback (add "questions"). "title" is required; a user node needs at least one outgoing edge or one extra question.
+  User edges are the choices: "name" is a unique route key, "label" is the required, unique text the user sees, "description" is optional. The chosen edge's name is available to later prompts as the route of this node; an edge entering a robot node must carry its prompt.
+  "questions" (max 4) collect extra answers in the same batch: each needs a unique "id" (not "route"), a required "question", optional "header", "multiSelect", and "options" [ { "label", "description"? } ]. Answers are stored by question id, so later prompts can read the selected labels and custom text. User nodes need the creating session to have an active turn: a definition containing a user node runs in the foreground, and is marked interrupted if DSH restarts while it waits.
 - end: { "id", "type": "end", "status"?: "completed" | "failed" | "rejected" }
+- join: { "id", "type": "join", "inputs": ["<robot node id>", ...], "next": [{ "to": "<node id>", "prompt"?: "..." }] }
+  A barrier that collects concurrent fan-out branches. It has no robot, no output, no prompt and no result. It fires ONCE when every one of its "inputs" that was actually started in that fan-out has completed, then continues down its single outgoing edge (whose "prompt" is the instruction for the next robot node). Inputs that were never started are ignored, so it waits only for the branches that really ran. One task may appear in several joins (its completion feeds all of them), which gives overlapping groups: with tasks 1..8 available and a fan-out that starts 1..6, X = {1,2,3,7} fires when 1,2,3 finish and Y = {3,4,5,6,8} fires when 3,4,5,6 finish, even though 7 and 8 never started. "inputs" must be robot node ids, and its single outgoing edge enters a robot node (with a prompt) or an end node. Any branch aborting or failing fails the whole run and cancels its siblings (fail-fast).
 
-"next" is an array of edge rules: { "to": "<node id>", "name": "route key", "prompt"?: "prompt for the target robot node" }
-Every edge leaving a robot node needs a unique "name" within that node; that name is the route value the robot returns in JSON "next". Edges entering a robot node must carry "prompt"; edges entering a gate or end node must not. The prompt is rendered only when that edge is taken; its template variables are checked at plan time (the referenced node must exist and every data path must be declared in that node's "output").
-The start node's edge is the prompt for the first robot node; a loop edge back to a robot node is how a revisit gets different instructions. Gate edges without a name show as approve / reject.
+"next" is an array of edge rules: { "to": "<node id>", "name": "route key", "prompt"?: "prompt for the target robot node", "tone"?: "success" | "failure" }; user-choice edges add "label" (and optional "description").
+Every edge leaving a robot node needs a unique "name" within that node; that name is the route value the robot returns in JSON "next". Every edge leaving a user node needs a unique "name" and a unique "label"; the label is the option the user clicks. Edges entering a robot node must carry "prompt"; edges entering a user or end node must not. The prompt is rendered only when that edge is taken; its template variables are checked at plan time (the referenced node must exist and every data path must be declared in that node's "output").
+"tone" is optional and purely cosmetic: it draws that edge green ("success") or red ("failure") on the run page and changes nothing about routing, validation or execution. Set it where a branch clearly means success or failure - especially when a node has two outgoing edges whose names alone do not make the difference obvious.
+The start node's edge is the prompt for the first robot node; a loop edge back to a robot node is how a revisit gets different instructions.
 Every node must be reachable from the start node: a node nothing leads to would never run, so it is rejected instead of being drawn as a second entry. Edges may not point back at the start node.
 A loop node should set "maxVisits": the run warns when a robot node is on a cycle without it, because then only maxSteps bounds the loop.
 
-"report" and "when" were removed in workflow format 2; the validator rejects them. Routing is driven solely by the JSON "next" route; "abort" is a failure escape that ends the run, not a route.
+"report" and "when" were removed in workflow format 2, and the gate node was replaced by the user node in workflow format 3; the validator rejects all three. Robot routing is driven solely by the JSON "next" route; "abort" is a failure escape that ends the run, not a route.
 
 Prompt templates only interpolate these paths (no expressions):
-{{goal}}, {{step}}, {{nodes.<node id>.text}}, {{nodes.<node id>.data.<path>}}, {{nodes.<node id>.route}}, {{nodes.<gate id>.decision}},
+{{goal}}, {{step}}, {{nodes.<node id>.text}}, {{nodes.<node id>.data.<path>}}, {{nodes.<node id>.route}},
+for a user node: {{nodes.<user id>.answers.<question id>.selected}}, {{nodes.<user id>.answers.<question id>.custom}} (or the whole answer object via {{nodes.<user id>.answers}}); the reserved question id "route" holds the chosen option's label,
 and for an attachment of a completed node: {{nodes.<node id>.attachments.<index>.text}}, .path, .name, .bytes, .description.
 The engine validates templates at plan time: the referenced node must exist, and every {{nodes.<node id>.data.<path>}} must be declared in that node's "output" (objects by properties, arrays by numeric index plus "items", oneOf in every variant). Plain {{nodes.<id>.data}} passes the whole result object. Use .text only for small UTF-8 text files; binary or oversized attachments need .path or buka_workflow_execution_attachment. Use buka_robots first to see the available robot names. Use buka_workflow_plan to validate before starting.`
 
@@ -208,23 +221,26 @@ The engine validates templates at plan time: the referenced node must exist, and
 const PLAN_DESCRIPTION = `Validate a one-off workflow definition without running it, and return the normalized node graph or precise errors. Use it after buka_robots and before buka_workflow_start. This tool is only visible to the workflow-orchestrator preset; other sessions must not create workflows.\n\n${DEFINITION_HELP}`
 
 /** "启动"工具的描述。 */
-const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt. Every robot node declares its result schema in "output"; the engine installs that schema on structured_output (adding "next", the built-in "abort" escape and the built-in attachments array) and appends the result contract to the node prompt. When a node has outgoing edges the JSON carries exactly one of "next" (the outgoing edge name) and "abort", and the observer follows "next" automatically; "abort" ends the run as failed with the node's reason and follows no edge. Gate nodes wait for the normal approval dialog. There is no default node timeout: a session is allowed to finish at its own pace, and only an explicit robot timeoutMs creates a hard deadline. The definition is stored under the plugin run directory together with the run record, node results and node attachments, and the read-only sidebar page observes them live. Attachments are a built-in capability for independent data/files, not a way to move the answer out of the result, and are copied only when the node completes normally; a node's final text is the step output shown on the run page.
+const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt. Every robot node declares its result schema in "output"; the engine installs that schema on structured_output (adding "next", the built-in "abort" escape and the built-in attachments array) and appends the result contract to the node prompt. When a node has outgoing edges the JSON carries exactly one of "next" (the outgoing edge name) and "abort", and the observer follows "next" automatically; "abort" ends the run as failed with the node's reason and follows no edge. User nodes pause the run on the native question card: the user's choices are the outgoing edges, and optional extra questions collect feedback that later prompts can read; the answer is returned to the run automatically. There is no default node timeout: a session is allowed to finish at its own pace, and only an explicit robot timeoutMs creates a hard deadline. The definition is stored under the plugin run directory together with the run record, node results and node attachments, and the read-only sidebar page observes them live. Attachments are a built-in capability for independent data/files, not a way to move the answer out of the result, and are copied only when the node completes normally; a node's final text is the step output shown on the run page.
 
-Robot sessions are normal sessions: they run as runtime roots, use the deployment's normal approval policy (an explicit approval:'never' is headless only), and may request tool approvals or ask the user questions. The workflow does not inject behavior instructions; it only provides the task prompt, the declared result contract and the meaning of each route.
+Robot sessions are normal sessions: they run as runtime roots, use the deployment's normal approval policy (an explicit approval:'never' is headless only), and may request tool approvals or ask the user questions. The workflow does not inject behavior instructions; it only provides the task prompt, the declared result contract and the meaning of each route. A robot node with "mode": "plan" is the one mode-specific exception: its session enters DSH plan mode before the prompt, the robot presents its plan through the native plan review card, and after approval it carries out the plan and submits the node result. The review card lives in the robot's own session, so the run page shows a waiting notice with an open-session action; a run without user nodes may still be background. If the robot ends its turn while still in plan mode without presenting a plan, the observer sends one bounded nudge and then fails the node with an explicit reason. Plan mode is soft guidance, not a sandbox; it needs the plan-mode and user-questions services and a compatible Buka Robots plugin, checked before the run starts.
 
-A host-level observer (not the robot session itself) watches session events: when the active session finishes its turn, it reads the JSON result and follows "next". If the JSON is missing, does not match the declared output, has an invalid "next", carries an invalid "abort", or carries both "next" and "abort", the observer asks the same session to correct it a bounded number of times, then fails the node. A valid "abort" ends the run as failed at that node without resuming an interrupted session. If that session is interrupted or disposed, the observer resumes it with a continuation prompt and continues; if it cannot be resumed, the node and run fail with an explicit error and no substitute session is opened. A run that is still going when DSH restarts is resumed from its persisted state (gate runs waiting for approval are marked interrupted because their approval cannot be recreated). Old-format run data is deleted on startup by WORKFLOW_FORMAT_VERSION.
+A host-level observer (not the robot session itself) watches session events: when the active session finishes its turn, it reads the JSON result and follows "next". If the JSON is missing, does not match the declared output, has an invalid "next", carries an invalid "abort", or carries both "next" and "abort", the observer asks the same session to correct it a bounded number of times, then fails the node. A valid "abort" ends the run as failed at that node without resuming an interrupted session. If that session is interrupted or disposed, the observer resumes it with a continuation prompt and continues; if it cannot be resumed, the node and run fail with an explicit error and no substitute session is opened. A run that is still going when DSH restarts is resumed from its persisted state (runs that contain user nodes are marked interrupted because their question card needs an active caller turn). Old-format run data is deleted on startup by WORKFLOW_FORMAT_VERSION.
 
-Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT gate nodes starts in the background: the call returns after the first node is dispatched with a runId and that seq, and the observer keeps the run going, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH gate nodes must run inside this call, because the native approval dialog needs an active turn: the call returns only after the run reaches a terminal state.
+Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT user nodes starts in the background: the call returns after the first node is dispatched with a runId and that seq, and the observer keeps the run going, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH user nodes must run inside this call, because the native question card needs an active turn: the call returns only after the run reaches a terminal state.
 
 Only the workflow-orchestrator preset can see this tool; robot node sessions run in the worker preset and cannot start nested workflows. Requires the Buka Robots plugin for robot nodes.\n\n${DEFINITION_HELP}`
 
 /** "状态"工具的描述。 */
 const STATUS_DESCRIPTION =
-  'Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start; each robot step shows its JSON route (next), and a step that aborted the run is marked aborted with the node reason in error; a pending user question or tool approval is reported as pendingInteraction. Unfinished runs are resumed by the host observer after a restart (except gate runs waiting for approval). Background runs keep advancing while you poll.'
+  'Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start; each robot step shows its JSON route (next), and a step that aborted the run is marked aborted with the node reason in error; a user node waiting for the user is reported as pendingUser, and a robot session question or tool approval as pendingInteraction. Unfinished runs are resumed by the host observer after a restart (except runs that contain user nodes). Background runs keep advancing while you poll.'
 
 /** "取消"工具的描述。 */
 const CANCEL_DESCRIPTION =
   'Cancel one still-running workflow run started by buka_workflow_start. Cancelling a finished run is a no-op; the run record is updated on disk.'
+
+/** "模板"工具的描述。 */
+const TEMPLATES_DESCRIPTION = `Read the abstract workflow template catalog for reference while designing a real one-off workflow. Templates are NOT runnable definitions: each robot node carries an abstract role name (e.g. a role like "development" or "testing"), has no output schema, and no goal. Each template has a description telling you when to reference it. Use this tool first with no arguments to see the catalog (id, name, description), then pass an id to read one template's full abstract node flow. To build the real workflow, run buka_robots to see the robots you actually own, map each abstract role to a real robot, add the required output schema to every robot node, and write concrete edge prompts for the task; adapt the flow to the requirement instead of copying it verbatim. The sidebar "templates" tab shows the same catalog.`
 
 /**
  * 注册工具。
@@ -461,18 +477,43 @@ export function apply(ctx, config) {
             'robot nodes need a Buka Robots service with dispatchSession(); install or update @buka/dsh-plugin-robots first',
           )
         }
-        const approval = ctx.get('approval')
-        const needsApproval = parsed.plan.order.some((id) => parsed.plan.nodes[id].type === 'gate')
-        if (needsApproval && (approval === undefined || approval === null)) {
-          throw new Error('gate nodes need the approval service, which is unavailable in this composition')
+        const userQuestions = ctx.get('userQuestions')
+        const needsUser = parsed.plan.order.some((id) => parsed.plan.nodes[id].type === 'user')
+        if (needsUser && (userQuestions === undefined || userQuestions === null || typeof userQuestions.ask !== 'function')) {
+          throw new Error('user nodes need the user-questions service, which is unavailable in this composition')
+        }
+        // plan 节点要三样东西：plan 模式服务本身、原生审阅卡需要的提问通道、
+        // 以及在首轮 prompt 之前切换模式的新版 robots 服务。缺任何一样都在
+        // 创建运行前拒绝，不能静默按普通机器人节点跑。
+        const needsPlanMode = parsed.plan.order.some((id) => {
+          const node = parsed.plan.nodes[id]
+          return node.type === 'robot' && node.mode === 'plan'
+        })
+        if (needsPlanMode) {
+          const planMode = ctx.get('planMode')
+          if (planMode === undefined || planMode === null || typeof planMode.set !== 'function') {
+            throw new Error(
+              'plan mode robot nodes need the plan-mode service (@deepseek-ai/dsh-plan-mode), which is unavailable in this composition',
+            )
+          }
+          if (robots === undefined || robots === null || robots.supportsPlanMode !== true) {
+            throw new Error(
+              'plan mode robot nodes need @buka/dsh-plugin-robots 0.9.0 or newer (supportsPlanMode is missing); update the Buka Robots plugin',
+            )
+          }
+          if (userQuestions === undefined || userQuestions === null || typeof userQuestions.ask !== 'function') {
+            throw new Error(
+              'plan mode robot nodes need the user-questions service for the native plan review card, which is unavailable in this composition',
+            )
+          }
         }
 
         await ensureReady()
 
-        // 观察者接管执行：gate 节点要弹原生审批，而审批要求会话里有活跃的
-        // turn，所以含 gate 的定义只能前台跑完；其余定义在第一个节点 dispatch
-        // 后立刻返回 runId，后续由观察者按会话事件推进。
-        if (needsApproval) {
+        // 观察者接管执行：user 节点要弹原生提问卡，而提问要求会话里有活跃的
+        // turn，所以含 user 节点的定义只能前台跑完；其余定义在第一个节点
+        // dispatch 后立刻返回 runId，后续由观察者按会话事件推进。
+        if (needsUser) {
           const run = await supervisor.start({
             plan: parsed.plan,
             definition: args.definition,
@@ -570,6 +611,59 @@ export function apply(ctx, config) {
         await ensureReady()
         const cancelled = await supervisor.cancel(runId, 'cancelled by the workflow orchestrator')
         return { cancelled, run: await store.readRun(runId) }
+      },
+    }),
+    { when: visibleWhen },
+  )
+
+  // 模板目录：只读、只对编排 preset 可见。它不参与运行，只是给 agent 设计真实
+  // 工作流时参考的抽象流程。
+  ctx.tools.register(
+    defineTool({
+      name: 'buka_workflow_templates',
+      description: TEMPLATES_DESCRIPTION,
+      parameters: {
+        id: {
+          type: 'string',
+          description: 'Template id from the catalog; omit to list every template (id, name, description).',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            templates: {
+              type: 'array',
+              required: true,
+              description: 'The template catalog as { id, name, description } summaries.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  name: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                },
+              },
+            },
+            template: {
+              type: 'json',
+              required: true,
+              description: 'The full template (id, name, description, nodes) when an id was given and matched; otherwise null.',
+            },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: renderTemplates(value) }],
+      },
+      async execute(args) {
+        const id = typeof args.id === 'string' ? args.id.trim() : ''
+        const templates = listTemplates()
+        const template = id === '' ? null : findTemplate(id)
+        return {
+          templates: summarizeTemplates(templates),
+          template: template === null ? null : template,
+        }
       },
     }),
     { when: visibleWhen },
@@ -716,6 +810,39 @@ export function apply(ctx, config) {
           },
         }),
       `buka-workflows: GET/POST ${SETTINGS_ROUTE}`,
+    )
+
+    // 工作流模板目录：只读，供浏览器「模板」页签展示。内容与编排 agent 的
+    // `buka_workflow_templates` 工具读同一份静态目录。
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: TEMPLATES_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'GET') {
+              sendMethodNotAllowed(res, 'GET')
+              return
+            }
+            try {
+              // 每份模板都附带一份算好坐标的图模型：页面只渲染，模板页签复用运行
+              // 详情那套纵向节点图，不自己推布局。
+              const templates = listTemplates().map((template) => {
+                const model = buildTemplateGraph(template)
+                return {
+                  ...template,
+                  graph: model === null ? null : { ...model, ...layoutRunGraph(model) },
+                }
+              })
+              sendJson(res, 200, { ok: true, templates })
+            } catch (error) {
+              webCtx.logger?.warn?.('buka-workflows: 读取工作流模板失败：%s', describeError(error))
+              sendError(res, 500, 'templates-failed', `读取工作流模板失败：${describeError(error)}`)
+            }
+          },
+        }),
+      `buka-workflows: GET ${TEMPLATES_ROUTE}`,
     )
 
     webCtx.effect(
@@ -954,7 +1081,23 @@ export function renderPlanResult(value) {
   ]
   if (typeof summary.goal === 'string' && summary.goal !== '') lines.push(`goal: ${summary.goal}`)
   for (const node of nodes) {
-    lines.push(`- ${node.id} [${node.type}${node.robot === undefined ? '' : ` robot=${node.robot}`}]`)
+    const robot = node.robot === undefined ? '' : ` robot=${node.robot}`
+    const title = typeof node.title === 'string' && node.title !== '' ? ` "${node.title}"` : ''
+    const routes = Array.isArray(node.routes)
+      ? node.routes
+          .map((route) =>
+            typeof route === 'string' ? route : `${String(route?.name ?? '')}: ${String(route?.label ?? '')}`,
+          )
+          .filter((route) => route !== '')
+      : []
+    const questions = Array.isArray(node.questions)
+      ? node.questions.filter((id) => typeof id === 'string' && id !== '')
+      : []
+    const detail = [
+      routes.length === 0 ? '' : ` routes=${routes.join(' | ')}`,
+      questions.length === 0 ? '' : ` questions=${questions.join(' | ')}`,
+    ].join('')
+    lines.push(`- ${node.id} [${node.type}${robot}]${title}${detail}`)
   }
   for (const warning of warnings) lines.push(`! ${warning}`)
   return lines.join('\n')
@@ -997,8 +1140,8 @@ export function renderRun(run) {
     lines.push(`result: ${JSON.stringify(run.result)}`)
   }
   if (typeof run.error === 'string' && run.error !== '') lines.push(`error: ${run.error}`)
-  if (run.pendingGate !== null && run.pendingGate !== undefined) {
-    lines.push(`waiting at gate: ${run.pendingGate.title ?? run.pendingGate.nodeId}`)
+  if (run.pendingUser !== null && run.pendingUser !== undefined) {
+    lines.push(`waiting at user node: ${run.pendingUser.title ?? run.pendingUser.nodeId}`)
   }
   const pending = run.pendingInteraction
   if (pending !== null && pending !== undefined) {
@@ -1042,6 +1185,27 @@ export function renderCancel(value) {
   if (value?.cancelled === true) return `workflow ${value.run?.runId ?? ''} cancellation signalled`
   if (value?.run === null || value?.run === undefined) return 'No workflow run was found.'
   return `workflow ${value.run.runId} is not live (status: ${value.run.status}); nothing to cancel`
+}
+
+/**
+ * `buka_workflow_templates` 的展示文本：无 id 时列目录，有 id 时给一份模板的
+ * 可读流程。
+ *
+ * @param {{ templates: Array<Record<string, any>>, template: Record<string, any> | null } | null | undefined} value
+ * @returns {string}
+ */
+export function renderTemplates(value) {
+  if (value?.template !== null && value?.template !== undefined) {
+    return describeTemplate(value.template)
+  }
+  const templates = Array.isArray(value?.templates) ? value.templates : []
+  if (templates.length === 0) return 'No workflow templates are available.'
+  const lines = ['workflow template catalog (abstract reference, not runnable definitions):']
+  for (const template of templates) {
+    lines.push(`- ${template.id} — ${template.name}: ${template.description}`)
+  }
+  lines.push('pass an id to read one template in full; map its abstract roles to real robots before starting.')
+  return lines.join('\n')
 }
 
 /**

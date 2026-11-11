@@ -23,15 +23,17 @@
 import { randomUUID } from 'node:crypto'
 
 import { buildResultSchema, outputProblems, routeNamesOf } from './output.js'
-import { resolveAbort, resolveRoute } from './routing.js'
+import { resolveAbort, resolveRoutes } from './routing.js'
 import {
-  WorkflowCancelledError,
-  WorkflowRunError,
-  gateReason,
-  mapApproval,
+  answersValue,
+  buildUserQuestions,
   renderNodePrompt,
+  renderUserDetail,
+  resolveUserAnswer,
   robotSessionTitle,
   toToolRun,
+  WorkflowCancelledError,
+  WorkflowRunError,
 } from './run.js'
 import { truncateUtf8, WORKFLOW_FORMAT_VERSION } from './run-store.js'
 
@@ -46,6 +48,13 @@ const MAX_EARLY_EVENTS = 40
 
 /** 这些结束原因视为“会话中断”，可以尝试续跑；`max-tokens` / `blocked` 直接失败。 */
 const RECOVERABLE_STOP_REASONS = new Set(['aborted', 'interrupted', 'error'])
+
+/**
+ * plan 节点的一轮结束时仍停在计划阶段、又没有弹出审阅卡时，发出的唯一一次
+ * 协议提示。它不是行为提示词，只把节点拉回 plan 模式的正常收尾路径。
+ */
+const PLAN_REVIEW_NUDGE =
+  'You are still in plan mode. Present your finished plan through the exit_plan_mode tool so the user can approve it; do not submit this node\'s structured result before the plan is approved.'
 
 /**
  * @param {unknown} error
@@ -214,7 +223,7 @@ export class WorkflowSupervisor {
   /**
    * 启动一次运行。
    *
-   * 后台模式在第一个节点 dispatch 后返回；前台模式（含 gate）返回 `done`
+   * 后台模式在第一个节点 dispatch 后返回；前台模式（含 user 节点）返回 `done`
    * promise，调用方 await 到终止状态。
    *
    * @param {{
@@ -231,8 +240,8 @@ export class WorkflowSupervisor {
     if (typeof agent?.id !== 'string' || agent.id === '') {
       throw new WorkflowRunError('a workflow run needs the creating agent')
     }
-    if (mode === 'background' && plan.order.some((id) => plan.nodes[id].type === 'gate')) {
-      throw new WorkflowRunError('gate nodes require a foreground run with an active caller turn')
+    if (mode === 'background' && plan.order.some((id) => plan.nodes[id].type === 'user')) {
+      throw new WorkflowRunError('user nodes require a foreground run with an active caller turn')
     }
     const runId = createRunId()
     const seq = await this.store.allocateSeq()
@@ -248,8 +257,8 @@ export class WorkflowSupervisor {
       updatedAt: now,
       finishedAt: null,
       createdBy: { sessionId: agent.id },
-      current: null,
-      pendingGate: null,
+      active: [],
+      pendingUser: null,
       pendingInteraction: null,
       steps: [],
       sessions: [],
@@ -282,15 +291,17 @@ export class WorkflowSupervisor {
       await this.#enqueue(runId, () => this.#fail(ctx, new WorkflowRunError('workflow start node is not a start node')))
       return mode === 'foreground' ? await ctx.done.promise : { run, runId, seq }
     }
-    const rule = Array.isArray(startNode.next) ? startNode.next[0] : null
-    if (rule === null || rule === undefined) {
+    const startEdges = Array.isArray(startNode.next) ? startNode.next : []
+    if (startEdges.length === 0) {
       await this.#enqueue(runId, () => this.#fail(ctx, new WorkflowRunError('start node has no outgoing edge')))
       return mode === 'foreground' ? await ctx.done.promise : { run, runId, seq }
     }
-    ctx.next = {
+    ctx.frontier = startEdges.map((rule) => ({
       nodeId: rule.to,
       edgePrompt: typeof rule.prompt === 'string' && rule.prompt !== '' ? rule.prompt : null,
-    }
+    }))
+    // start 节点多出边是无条件 fan-out：据此激活 join（启动子集）。
+    if (startEdges.length > 1) this.#activateJoins(ctx, startEdges.map((rule) => rule.to))
     await this.#enqueue(runId, () => this.#advanceInner(ctx))
     if (mode === 'foreground') return await ctx.done.promise
     return { run, runId, seq }
@@ -326,8 +337,8 @@ export class WorkflowSupervisor {
   }
 
   /**
-   * 启动恢复：把上次进程留下的 running / waiting 运行接回来。等待审批的 gate
-   * 运行没有调用者 turn，无法重建审批，直接标 interrupted。
+   * 启动恢复：把上次进程留下的 running / waiting 运行接回来。等待用户作答的
+   * user 运行没有调用者 turn，无法重建原生提问，直接标 interrupted。
    *
    * @returns {Promise<{ recovered: number, interrupted: number }>}
    */
@@ -473,7 +484,15 @@ export class WorkflowSupervisor {
     if (ctx === undefined || ctx.closed || ctx.cancelled) return answer
     const interactionId = randomUUID()
     const kind = event === 'approval/request' ? 'approval' : 'question'
-    void this.#enqueue(entry.runId, () => this.#recordInteraction(ctx, entry, kind, request, interactionId))
+    // 计划审阅是 DSH plan 模式在机器人会话里弹出的原生问题卡。它和普通问题
+    // 一样记录等待提示，但 supervisor 还要靠这个标志区分「用户关闭了审阅、
+    // 正在自己回复」与「机器人自己停在计划阶段」。
+    const planReview =
+      event === 'user-questions/request' &&
+      Array.isArray(request?.questions) &&
+      request.questions.some((question) => question?.intent?.kind === 'plan-review')
+    if (planReview) entry.planReviewAsked = true
+    void this.#enqueue(entry.runId, () => this.#recordInteraction(ctx, entry, kind, request, interactionId, planReview))
     const settle = () => {
       void this.#enqueue(entry.runId, () => this.#clearInteraction(ctx, interactionId))
     }
@@ -489,12 +508,13 @@ export class WorkflowSupervisor {
    * @param {'question'|'approval'} kind
    * @param {any} request
    * @param {string} interactionId
+   * @param {boolean} [planReview]
    * @returns {Promise<void>}
    */
-  async #recordInteraction(ctx, entry, kind, request, interactionId) {
+  async #recordInteraction(ctx, entry, kind, request, interactionId, planReview = false) {
     if (ctx.closed || ctx.cancelled) return
-    const current = ctx.run.current
-    if (current === null || current.seq !== entry.seq) return
+    const current = this.#findActive(ctx, entry.seq)
+    if (current === null) return
     const questions = kind === 'question' ? normalizeQuestions(request?.questions) : undefined
     if (kind === 'question' && (questions === undefined || questions.length === 0)) return
     ctx.run.pendingInteraction = {
@@ -506,6 +526,7 @@ export class WorkflowSupervisor {
       robot: current.robot ?? null,
       sessionId: current.sessionId ?? null,
       askedAt: Date.now(),
+      ...(planReview ? { planReview: true } : {}),
       ...(questions === undefined ? {} : { questions }),
       ...(kind === 'approval'
         ? {
@@ -619,7 +640,9 @@ export class WorkflowSupervisor {
       mode,
       agent,
       controller: new AbortController(),
-      next: null,
+      frontier: [],
+      joins: new Map(),
+      lastEnd: null,
       values: {},
       visits: new Map(),
       seq: 0,
@@ -627,6 +650,12 @@ export class WorkflowSupervisor {
       done: deferred(),
       cancelled: false,
       closed: false,
+    }
+    // 旧记录用 run.current（单活跃节点）；并发后统一为 run.active 数组。就地迁移，
+    // 让升级前仍在跑的运行能继续恢复。
+    if (!Array.isArray(ctx.run.active)) {
+      ctx.run.active = ctx.run.current !== null && ctx.run.current !== undefined ? [ctx.run.current] : []
+      ctx.run.current = null
     }
     this.#rebuildFromSteps(ctx)
     if (signal !== undefined) {
@@ -664,6 +693,15 @@ export class WorkflowSupervisor {
       const nodeId = typeof step?.nodeId === 'string' ? step.nodeId : ''
       if (nodeId === '') continue
       ctx.visits.set(nodeId, (ctx.visits.get(nodeId) ?? 0) + 1)
+      if (step.type === 'user') {
+        ctx.values[nodeId] = {
+          route: typeof step.route === 'string' ? step.route : null,
+          routeTo: typeof step.routeTo === 'string' ? step.routeTo : null,
+          answers: answersValue(Array.isArray(step.answers) ? step.answers : []),
+          text: typeof step.text === 'string' ? step.text : '',
+        }
+        continue
+      }
       ctx.values[nodeId] = {
         text: typeof step.text === 'string' ? step.text : '',
         data: step.data ?? null,
@@ -707,39 +745,73 @@ export class WorkflowSupervisor {
   }
 
   /**
-   * 沿图推进到下一个需要等待的节点：robot 节点 dispatch 后返回，end 结束，
-   * gate 在前台模式等审批。
+   * 消费 frontier 里的待处理 next-hop：robot 节点 dispatch 后继续（非阻塞），
+   * user 节点在前台模式等用户作答，end 收尾一个分支；join 不进入 frontier（由
+   * 屏障激活）。frontier 与活跃任务都为空时结束运行。
    *
    * @param {Record<string, any>} ctx
    * @returns {Promise<void>}
    */
   async #advanceInner(ctx) {
-    while (!ctx.closed && !ctx.cancelled) {
-      const next = ctx.next
-      if (next === null) {
-        await this.#finish(ctx, 'completed')
-        return
-      }
+    while (!ctx.closed && !ctx.cancelled && ctx.frontier.length > 0) {
+      const next = ctx.frontier.shift()
       const node = ctx.plan.nodes[next.nodeId]
       if (node === undefined) {
         await this.#fail(ctx, new WorkflowRunError(`workflow node "${next.nodeId}" is missing`))
         return
       }
       if (node.type === 'end') {
-        await this.#finish(ctx, node.status ?? 'completed', { nodeId: node.id })
-        return
+        await this.#arriveEnd(ctx, node)
+        continue
       }
-      if (node.type === 'gate') {
-        await this.#runGate(ctx, node)
+      if (node.type === 'user') {
+        await this.#runUser(ctx, node)
         continue
       }
       if (node.type === 'robot') {
         await this.#startRobotNode(ctx, node, next.edgePrompt)
+        continue
+      }
+      if (node.type === 'join') {
+        await this.#fail(ctx, new WorkflowRunError(`join node "${node.id}" must not be reached directly`))
         return
       }
       await this.#fail(ctx, new WorkflowRunError(`unsupported node type "${String(node.type)}"`))
       return
     }
+    await this.#maybeFinish(ctx)
+  }
+
+  /**
+   * 一个分支到达 end：记录该分支终止。所有活跃任务与待处理 next-hop 都清空、
+   * 且没有 pending join 时才结束整个运行。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} node
+   * @returns {Promise<void>}
+   */
+  async #arriveEnd(ctx, node) {
+    if (ctx.closed || ctx.cancelled) return
+    ctx.lastEnd = node
+    await this.#maybeFinish(ctx)
+  }
+
+  /**
+   * 没有任何活跃任务 / 待处理 next-hop / pending join 时收尾。
+   *
+   * @param {Record<string, any>} ctx
+   * @returns {Promise<void>}
+   */
+  async #maybeFinish(ctx) {
+    if (ctx.closed || ctx.cancelled) return
+    if (ctx.frontier.length > 0) return
+    if (Array.isArray(ctx.run.active) && ctx.run.active.length > 0) return
+    if (ctx.run.pendingUser !== null && ctx.run.pendingUser !== undefined) return
+    if (ctx.joins.size > 0) return
+    const lastEnd = ctx.lastEnd ?? null
+    const nodeId = lastEnd !== null && typeof lastEnd.id === 'string' ? lastEnd.id : null
+    const status = lastEnd !== null && typeof lastEnd.status === 'string' ? lastEnd.status : 'completed'
+    await this.#finish(ctx, status, { nodeId })
   }
 
   // -------------------------------------------------------------------------
@@ -782,7 +854,8 @@ export class WorkflowSupervisor {
     ctx.visits.set(nodeId, visit)
     // 进入新节点时上一节点遗留的等待提示已经无效。
     run.pendingInteraction = null
-    run.current = {
+    /** @type {Record<string, any>} */
+    const current = {
       nodeId,
       visit,
       seq,
@@ -794,8 +867,11 @@ export class WorkflowSupervisor {
       startedAt,
       attempt: 1,
       recoveryAttempts: 0,
+      ...(node.mode === 'plan' ? { mode: 'plan' } : {}),
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
     }
+    if (!Array.isArray(run.active)) run.active = []
+    run.active.push(current)
     run.status = 'running'
     await this.#save(ctx)
     await this.store.appendEvent(run.runId, 'node/start', {
@@ -803,13 +879,15 @@ export class WorkflowSupervisor {
       visit,
       type: 'robot',
       ...(node.robot === undefined ? {} : { robot: node.robot }),
+      ...(node.mode === 'plan' ? { mode: 'plan' } : {}),
     })
-    await this.#saveRunningNodeResult(ctx, node, prompt, startedAt)
+    await this.#saveRunningNodeResult(ctx, current, node, prompt, startedAt)
 
     const robots = this.robots ?? this.ctx?.get?.('bukaRobots') ?? null
     if (robots === null || !this.#canDispatch(robots)) {
       await this.#completeNode(
         ctx,
+        current,
         node,
         {
           sessionId: null,
@@ -817,6 +895,24 @@ export class WorkflowSupervisor {
           stopReason: 'error',
           error:
             'robot node needs a Buka Robots service with dispatchSession(); install or update @buka/dsh-plugin-robots',
+        },
+        {},
+      )
+      return
+    }
+    // plan 节点需要新版 robots 在投递第一轮 prompt 之前切换模式；旧版会静默
+    // 忽略 planMode，节点就会在普通模式下跑，必须在启动前明确失败。
+    if (node.mode === 'plan' && robots.supportsPlanMode !== true) {
+      await this.#completeNode(
+        ctx,
+        current,
+        node,
+        {
+          sessionId: null,
+          text: '',
+          stopReason: 'error',
+          error:
+            'plan mode robot nodes need @buka/dsh-plugin-robots 0.9.0 or newer (supportsPlanMode is missing); update the Buka Robots plugin',
         },
         {},
       )
@@ -830,8 +926,8 @@ export class WorkflowSupervisor {
     const dispatchKey = previousSessionId !== '' ? previousSessionId : newSessionId
     // 先把会话 id 落盘再 dispatch：即使 create 期间宿主退出，恢复时也知道该
     // resume 哪个会话（新会话的 id 是调用方先分配好传给 robots 的）。
-    run.current.sessionId = dispatchKey
-    run.current.startSeq = null
+    current.sessionId = dispatchKey
+    current.startSeq = null
     this.rememberSession(run.runId, dispatchKey)
     await this.#save(ctx)
     /** @type {Record<string, any>} */
@@ -847,6 +943,9 @@ export class WorkflowSupervisor {
       resultExhausted: false,
       timer: null,
       timeoutMs,
+      planMode: node.mode === 'plan',
+      planReviewAsked: false,
+      planNudged: false,
     }
     this.dispatchBySession.set(dispatchKey, entry)
 
@@ -865,13 +964,15 @@ export class WorkflowSupervisor {
         ...(node.agentOptions === undefined ? {} : { agentOptions: node.agentOptions }),
         approval: 'ask',
         signal: ctx.controller.signal,
+        planMode: node.mode === 'plan',
         ...(previousSessionId !== '' ? { sessionId: previousSessionId } : { newSessionId }),
       })
     } catch (error) {
       this.dispatchBySession.delete(dispatchKey)
-      run.current.sessionId = null
+      current.sessionId = null
       await this.#completeNode(
         ctx,
+        current,
         node,
         { sessionId: null, text: '', stopReason: 'error', error: describeError(error) },
         {},
@@ -879,31 +980,31 @@ export class WorkflowSupervisor {
       return
     }
 
-    run.current.sessionId = typeof handle.sessionId === 'string' ? handle.sessionId : null
-    run.current.startSeq = Number.isInteger(handle.startSeq) ? handle.startSeq : null
-    if (run.current.sessionId !== null) this.rememberSession(run.runId, run.current.sessionId)
-    run.current.resumed = handle.resumed === true
-    run.current.compacted = handle.compacted === true
+    current.sessionId = typeof handle.sessionId === 'string' ? handle.sessionId : null
+    current.startSeq = Number.isInteger(handle.startSeq) ? handle.startSeq : null
+    if (current.sessionId !== null) this.rememberSession(run.runId, current.sessionId)
+    current.resumed = handle.resumed === true
+    current.compacted = handle.compacted === true
     // dispatch 里的 compact 不计入显式硬超时：计时从这一轮真正投递后开始。
-    run.current.timeoutStartedAt = Date.now()
+    current.timeoutStartedAt = Date.now()
     if (typeof handle.resumeError === 'string' && handle.resumeError !== '') {
-      run.current.sessionResetReason = handle.resumeError
+      current.sessionResetReason = handle.resumeError
     }
     if (typeof handle.compactionError === 'string' && handle.compactionError !== '') {
-      run.current.compactionError = handle.compactionError
+      current.compactionError = handle.compactionError
     }
     entry.handle = handle
     entry.startSeq = Number.isInteger(handle.startSeq) ? handle.startSeq : null
     // 防御旧版服务返回不同的 sessionId：把 provisional 键挪到真实 id。
-    if (run.current.sessionId !== null && run.current.sessionId !== dispatchKey) {
+    if (current.sessionId !== null && current.sessionId !== dispatchKey) {
       this.dispatchBySession.delete(dispatchKey)
-      this.dispatchBySession.set(run.current.sessionId, entry)
+      this.dispatchBySession.set(current.sessionId, entry)
     }
     rememberSessionEntry(run, node.robot, {
       nodeId,
       visit,
       seq,
-      sessionId: run.current.sessionId,
+      sessionId: current.sessionId,
       at: Date.now(),
       resumed: handle.resumed === true,
       compacted: handle.compacted === true,
@@ -912,14 +1013,14 @@ export class WorkflowSupervisor {
     await this.store.appendEvent(run.runId, 'node/session', {
       nodeId,
       visit,
-      sessionId: run.current.sessionId,
+      sessionId: current.sessionId,
       resumed: handle.resumed === true,
     })
     await this.store.appendEvent(run.runId, 'node/dispatch', {
       nodeId,
       visit,
       seq,
-      sessionId: run.current.sessionId,
+      sessionId: current.sessionId,
       resumed: handle.resumed === true,
       compacted: handle.compacted === true,
     })
@@ -958,8 +1059,8 @@ export class WorkflowSupervisor {
     }
     const ctx = this.runs.get(entry.runId)
     if (ctx === undefined || ctx.closed || ctx.cancelled) return
-    const current = ctx.run.current
-    if (current === null || current.seq !== entry.seq) return
+    const current = this.#findActive(ctx, entry.seq)
+    if (current === null) return
     if (entry.startSeq !== null && typeof event.seq === 'number' && event.seq < entry.startSeq) {
       entry.claimed = false
       return
@@ -989,7 +1090,7 @@ export class WorkflowSupervisor {
         ctx.run.pendingInteraction = null
         await this.#save(ctx)
       }
-      await this.#abortNode(ctx, node, result, abort.abort.reason, {
+      await this.#abortNode(ctx, current, node, result, abort.abort.reason, {
         workspace: typeof entry.handle?.cwd === 'string' ? entry.handle.cwd : undefined,
       })
       return
@@ -1006,6 +1107,9 @@ export class WorkflowSupervisor {
       ctx.run.pendingInteraction = null
       await this.#save(ctx)
     }
+    // plan 节点先过模式门禁：计划还没被批准时，这一轮的结果不能当作节点结果
+    // 路由；用户关闭审阅时保持等待，机器人自己停在计划阶段时给一次提示。
+    if (await this.#handlePlanGate(ctx, entry, current, node, result)) return
     const workspace = typeof entry.handle?.cwd === 'string' ? entry.handle.cwd : undefined
 
     // 所有 robot 节点都必须交回 JSON；缺失或 next 不合法时在同一会话里重试，
@@ -1027,7 +1131,7 @@ export class WorkflowSupervisor {
             ? result.error
             : 'the node did not submit a structured JSON result',
       }
-      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      await this.#completeNode(ctx, current, node, result, { routes: null, workspace })
       return
     }
 
@@ -1046,7 +1150,7 @@ export class WorkflowSupervisor {
         stopReason: 'error',
         error: `invalid workflow result for node "${node.id}": ${abort.error.message}`,
       }
-      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      await this.#completeNode(ctx, current, node, result, { routes: null, workspace })
       return
     }
 
@@ -1069,11 +1173,11 @@ export class WorkflowSupervisor {
         stopReason: 'error',
         error: `invalid workflow output for node "${node.id}": ${detail}`,
       }
-      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      await this.#completeNode(ctx, current, node, result, { routes: null, workspace })
       return
     }
 
-    const route = resolveRoute(node, result.structured)
+    const route = resolveRoutes(node, result.structured)
     if (route.error !== undefined) {
       if (
         await this.#retryResult(ctx, entry, node, {
@@ -1088,11 +1192,89 @@ export class WorkflowSupervisor {
         stopReason: 'error',
         error: `invalid workflow route: ${route.error}`,
       }
-      await this.#completeNode(ctx, node, result, { route: null, workspace })
+      await this.#completeNode(ctx, current, node, result, { routes: null, workspace })
       return
     }
 
-    await this.#completeNode(ctx, node, result, { route: route.rule, workspace })
+    await this.#completeNode(ctx, current, node, result, { routes: route.rules, workspace })
+  }
+
+  /**
+   * plan 节点的模式门禁：一轮结束时如果会话仍停在 plan 模式，这一轮不能按
+   * 普通结果路由。
+   *
+   * 三种情况：
+   * - 用户关闭了原生审阅卡（`planReviewAsked`）：不抢答，保持节点等待，用户在
+   *   机器人会话里的下一条消息继续这一节点；
+   * - 机器人自己停在计划阶段：发一次有界提示，要求先把计划交给
+   *   `exit_plan_mode` 审阅；第二次仍如此则节点失败；
+   * - 已经批准 / 用户手动退出 / 读不到模式：返回 false，走原有结果处理。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} entry
+   * @param {Record<string, any>} current
+   * @param {Record<string, any>} node
+   * @param {Record<string, any>} result
+   * @returns {Promise<boolean>} true 表示已处理，调用方不要再路由
+   */
+  async #handlePlanGate(ctx, entry, current, node, result) {
+    if (node.mode !== 'plan') return false
+    const planState =
+      typeof entry.handle?.getPlanMode === 'function' ? entry.handle.getPlanMode() : null
+    if (planState?.active !== true) return false
+
+    if (entry.planReviewAsked === true) {
+      // 用户关闭审阅去自己写回复：plan 模式仍开启，下一轮由用户的消息驱动。
+      entry.planReviewAsked = false
+      entry.claimed = false
+      await this.#save(ctx)
+      this.#armTimeout(ctx, entry)
+      await this.store.appendEvent(ctx.runId, 'node/plan-review-wait', {
+        nodeId: current.nodeId,
+        visit: current.visit,
+      })
+      return true
+    }
+
+    if (entry.planNudged !== true && typeof entry.handle?.send === 'function') {
+      // 先记标记再投递：新 turn 的 turn/end 即使抢在 await 返回前到达，也不会
+      // 再发第二次提示。
+      entry.planNudged = true
+      try {
+        const next = await entry.handle.send(PLAN_REVIEW_NUDGE, { compactFirst: false })
+        entry.startSeq = Number.isInteger(next) ? next : entry.startSeq
+        current.startSeq = entry.startSeq
+        entry.claimed = false
+        await this.#save(ctx)
+        this.#armTimeout(ctx, entry)
+        await this.store.appendEvent(ctx.runId, 'node/plan-review-nudge', {
+          nodeId: current.nodeId,
+          visit: current.visit,
+        })
+        return true
+      } catch (error) {
+        entry.planNudged = false
+        this.logger?.warn?.(
+          `buka-workflows: could not ask the robot to present its plan（${ctx.runId}/${node.id}）：${describeError(error)}`,
+        )
+      }
+    }
+
+    await this.#completeNode(
+      ctx,
+      current,
+      node,
+      {
+        ...result,
+        stopReason: 'error',
+        error: `workflow node "${node.id}" ended its turn in plan mode without presenting a plan for review`,
+      },
+      {
+        routes: null,
+        workspace: typeof entry.handle?.cwd === 'string' ? entry.handle.cwd : undefined,
+      },
+    )
+    return true
   }
 
   /**
@@ -1111,13 +1293,14 @@ export class WorkflowSupervisor {
       await entry.handle.send(prompt, { compactFirst: false })
       const nextSeq = entry.handle.startSeq
       entry.startSeq = Number.isInteger(nextSeq) ? nextSeq : entry.startSeq
-      if (ctx.run.current !== null) ctx.run.current.startSeq = entry.startSeq
+      const current = this.#findActive(ctx, entry.seq)
+      if (current !== null) current.startSeq = entry.startSeq
       entry.claimed = false
       await this.#save(ctx)
       this.#armTimeout(ctx, entry)
       await this.store.appendEvent(ctx.runId, 'node/result-retry', {
         nodeId: node.id,
-        visit: ctx.run.current?.visit ?? null,
+        visit: current?.visit ?? null,
         reason,
         routes,
       })
@@ -1131,42 +1314,40 @@ export class WorkflowSupervisor {
   }
 
   /**
-   * 把节点主动终止落成一条失败的 robot step，并结束整个运行。
+   * 把节点主动终止落成一条失败的 robot step，并结束整个运行（fail-fast 取消其余分支）。
    *
    * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} current 要终结的活跃节点
    * @param {Record<string, any>} node
    * @param {Record<string, any>} result
    * @param {string} reason 节点给出的无法完成原因
    * @param {{ recovered?: boolean, recoveryAttempts?: number, workspace?: string }} [extra]
    * @returns {Promise<void>}
    */
-  async #abortNode(ctx, node, result, reason, extra = {}) {
+  async #abortNode(ctx, current, node, result, reason, extra = {}) {
     await this.#completeNode(
       ctx,
+      current,
       node,
-      {
-        ...result,
-        stopReason: 'aborted',
-        error: reason,
-      },
-      { ...extra, route: null, aborted: true },
+      { ...result, stopReason: 'aborted', error: reason },
+      { ...extra, routes: null, aborted: true },
     )
   }
 
   /**
-   * 正常 / 失败地落一条 robot step，并决定下一节点。
+   * 正常 / 失败地落一条 robot step，并把它的出口（单线或 fan-out）推进 frontier，
+   * 同时更新 join 屏障：并发 fan-out 激活 join、任务完成喂给引用它的 join。
    *
    * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} current 要终结的活跃节点
    * @param {Record<string, any>} node
    * @param {Record<string, any>} result
-   * @param {{ recovered?: boolean, recoveryAttempts?: number, timedOut?: boolean, aborted?: boolean, route?: Record<string, any> | null }} extra
+   * @param {{ recovered?: boolean, recoveryAttempts?: number, timedOut?: boolean, aborted?: boolean, routes?: Array<Record<string, any>> | null, workspace?: string }} extra
    * @returns {Promise<void>}
    */
-  async #completeNode(ctx, node, result, extra) {
+  async #completeNode(ctx, current, node, result, extra) {
     if (ctx.closed || ctx.cancelled) return
     const run = ctx.run
-    const current = run.current
-    if (current === null || current.nodeId !== node.id) return
     const sessionId = typeof result.sessionId === 'string' ? result.sessionId : (current.sessionId ?? null)
     const finishedAt = Date.now()
     const startedAt = typeof current.startedAt === 'number' ? current.startedAt : finishedAt
@@ -1183,33 +1364,25 @@ export class WorkflowSupervisor {
       : Number.isInteger(current.recoveryAttempts)
         ? current.recoveryAttempts
         : 0
-    let route = aborted ? null : extra.route
-    if (route === undefined && stopReason === 'completed') {
-      // 防御性处理：调用方没先解析 abort 时，这里也不能把主动终止当成一条
-      // 缺失的 next 路由。
+    let routes = aborted ? null : extra.routes
+    if (routes === undefined && stopReason === 'completed') {
+      // 防御性处理：调用方没先解析 abort / next 时，这里兜底解析一次。
       const resolvedAbort = resolveAbort(result.structured)
       if (resolvedAbort?.abort !== undefined) {
         aborted = true
         stopReason = 'aborted'
-        route = null
-        result = {
-          ...result,
-          stopReason: 'aborted',
-          error: resolvedAbort.abort.reason,
-        }
+        routes = null
+        result = { ...result, stopReason: 'aborted', error: resolvedAbort.abort.reason }
       } else if (resolvedAbort?.error !== undefined) {
-        await this.#fail(
-          ctx,
-          new WorkflowRunError(`invalid workflow result: ${resolvedAbort.error.message}`),
-        )
+        await this.#fail(ctx, new WorkflowRunError(`invalid workflow result: ${resolvedAbort.error.message}`))
         return
       } else {
-        const resolved = resolveRoute(node, result.structured)
+        const resolved = resolveRoutes(node, result.structured)
         if (resolved.error !== undefined) {
           await this.#fail(ctx, new WorkflowRunError(`invalid workflow route: ${resolved.error}`))
           return
         }
-        route = resolved.rule
+        routes = resolved.rules
       }
     }
     // 附件只在节点正常完成时落盘。复制失败属于节点输出不完整：把节点改成
@@ -1233,19 +1406,14 @@ export class WorkflowSupervisor {
           result.structured.attachments,
           { workspace: extra.workspace },
         )
-        attachmentValues = await this.store.attachmentValues(
-          run.runId,
-          current.seq,
-          node.id,
-          nodeAttachments,
-        )
+        attachmentValues = await this.store.attachmentValues(run.runId, current.seq, node.id, nodeAttachments)
         result = {
           ...result,
           structured: { ...result.structured, attachments: nodeAttachments },
         }
       } catch (error) {
         stopReason = 'error'
-        route = null
+        routes = null
         result = {
           ...result,
           stopReason: 'error',
@@ -1253,8 +1421,9 @@ export class WorkflowSupervisor {
         }
       }
     }
-    const routeName = typeof route?.name === 'string' ? route.name : null
-    const routeTo = typeof route?.to === 'string' ? route.to : null
+    const routeList = Array.isArray(routes) ? routes : []
+    const routeName = routeList.length === 1 && typeof routeList[0]?.name === 'string' ? routeList[0].name : null
+    const routeTo = routeList.length === 1 && typeof routeList[0]?.to === 'string' ? routeList[0].to : null
     /** @type {Record<string, any>} */
     const step = {
       seq: current.seq,
@@ -1263,11 +1432,16 @@ export class WorkflowSupervisor {
       type: 'robot',
       robot: node.robot,
       sessionId,
+      ...(node.mode === 'plan' ? { mode: 'plan' } : {}),
       status: stopReason === 'completed' ? 'completed' : 'failed',
       stopReason,
       ...(aborted ? { aborted: true } : {}),
       route: routeName,
       routeTo,
+      routes: routeList.map((rule) => ({
+        name: typeof rule?.name === 'string' ? rule.name : null,
+        to: typeof rule?.to === 'string' ? rule.to : null,
+      })),
       startedAt,
       finishedAt,
       text: preview.text,
@@ -1290,7 +1464,7 @@ export class WorkflowSupervisor {
       ...(extra.timedOut === true ? { timedOut: true } : {}),
     }
     run.steps.push(step)
-    run.current = null
+    this.#removeActive(ctx, current)
     run.pendingInteraction = null
     run.updatedAt = finishedAt
     ctx.stepCount = run.steps.length
@@ -1316,6 +1490,7 @@ export class WorkflowSupervisor {
         visit: current.visit,
         robot: node.robot,
         sessionId,
+        ...(node.mode === 'plan' ? { mode: 'plan' } : {}),
         status: step.status,
         stopReason,
         ...(aborted ? { aborted: true } : {}),
@@ -1345,6 +1520,7 @@ export class WorkflowSupervisor {
       visit: current.visit,
       stopReason,
       ...(aborted ? { aborted: true } : {}),
+      ...(node.mode === 'plan' ? { mode: 'plan' } : {}),
       sessionId,
       resumed: step.resumed,
       compacted: step.compacted,
@@ -1359,24 +1535,29 @@ export class WorkflowSupervisor {
           : `robot node "${node.id}" ended with ${stopReason}`
       const message = aborted ? `workflow node "${node.id}" aborted the run: ${detail}` : detail
       run.error = message
+      // fail-fast：结束整个运行并取消其余活跃分支。
       await this.#finish(ctx, 'failed', { nodeId: node.id, message, aborted })
       return
     }
 
-    const rule = route
-    await this.store.appendEvent(run.runId, 'route', {
-      nodeId: node.id,
-      route: routeName,
-      to: routeTo,
-    })
-    if (rule === null || rule === undefined) {
-      await this.#finish(ctx, 'completed', { nodeId: node.id })
-      return
+    // 单线 / fan-out：把出口推进 frontier，并据此激活 join（并发 fan-out 的启动子集）。
+    if (routeList.length > 0) {
+      const targets = routeList.map((rule) => rule.to)
+      if (routeList.length > 1) this.#activateJoins(ctx, targets)
+      for (const rule of routeList) {
+        await this.store.appendEvent(run.runId, 'route', {
+          nodeId: node.id,
+          route: typeof rule?.name === 'string' ? rule.name : null,
+          to: typeof rule?.to === 'string' ? rule.to : null,
+        })
+        ctx.frontier.push({
+          nodeId: rule.to,
+          edgePrompt: typeof rule.prompt === 'string' && rule.prompt !== '' ? rule.prompt : null,
+        })
+      }
     }
-    ctx.next = {
-      nodeId: rule.to,
-      edgePrompt: typeof rule.prompt === 'string' && rule.prompt !== '' ? rule.prompt : null,
-    }
+    // 本节点作为任务的完成：喂给引用它的 join（可能触发汇合）。
+    await this.#contributeJoins(ctx, node.id)
     await this.#advanceInner(ctx)
   }
 
@@ -1390,8 +1571,8 @@ export class WorkflowSupervisor {
   async #recoverNode(entry, reason) {
     const ctx = this.runs.get(entry.runId)
     if (ctx === undefined || ctx.closed || ctx.cancelled) return
-    const current = ctx.run.current
-    if (current === null || current.seq !== entry.seq) return
+    const current = this.#findActive(ctx, entry.seq)
+    if (current === null) return
     const node = ctx.plan.nodes[current.nodeId]
     if (node === undefined) {
       await this.#fail(ctx, new WorkflowRunError(`workflow node "${current.nodeId}" is missing`))
@@ -1413,6 +1594,7 @@ export class WorkflowSupervisor {
     const stop = async (message, session = sessionId === '' ? null : sessionId) => {
       await this.#completeNode(
         ctx,
+        current,
         node,
         { sessionId: session, text: '', stopReason: 'error', error: message },
         {},
@@ -1454,13 +1636,27 @@ export class WorkflowSupervisor {
         !RECOVERABLE_STOP_REASONS.has(check.stopReason)
       ) {
         current.recovering = false
-        try {
-          await handle.dispose?.()
-        } catch {
-          // 已释放：忽略。
+        // 恢复时这一轮其实已经结束：先登记一个 entry，让 plan 门禁和正常结束
+        // 路径都能通过它观察 / 清理 plan 模式。
+        const recoveredEntry = {
+          runId: ctx.runId,
+          seq: current.seq,
+          startSeq: current.startSeq,
+          handle,
+          early: [],
+          claimed: true,
+          recoveryRequested: false,
+          disposedEarly: false,
+          resultExhausted: false,
+          timer: null,
+          timeoutMs: current.timeoutMs ?? 0,
+          planMode: node.mode === 'plan',
+          planReviewAsked: false,
+          planNudged: false,
         }
+        this.dispatchBySession.set(sessionId, recoveredEntry)
         let result = check
-        let route = null
+        let routes = null
         if (check.structured === undefined) {
           result = {
             ...check,
@@ -1470,7 +1666,7 @@ export class WorkflowSupervisor {
         } else {
           const abort = resolveAbort(check.structured)
           if (abort?.abort !== undefined) {
-            await this.#abortNode(ctx, node, check, abort.abort.reason, {
+            await this.#abortNode(ctx, current, node, check, abort.abort.reason, {
               recovered: true,
               recoveryAttempts: 1,
               workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
@@ -1492,7 +1688,7 @@ export class WorkflowSupervisor {
                 error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
               }
             } else {
-              const resolved = resolveRoute(node, check.structured)
+              const resolved = resolveRoutes(node, check.structured)
               if (resolved.error !== undefined) {
                 result = {
                   ...check,
@@ -1500,15 +1696,23 @@ export class WorkflowSupervisor {
                   error: `invalid workflow route: ${resolved.error}`,
                 }
               } else {
-                route = resolved.rule
+                routes = resolved.rules
               }
             }
           }
         }
-        await this.#completeNode(ctx, node, result, {
+        if (await this.#handlePlanGate(ctx, recoveredEntry, current, node, result)) return
+        this.#clearEntryPlanMode(recoveredEntry)
+        this.#removeEntry(recoveredEntry)
+        try {
+          await handle.dispose?.()
+        } catch {
+          // 已释放：忽略。
+        }
+        await this.#completeNode(ctx, current, node, result, {
           recovered: true,
           recoveryAttempts: 1,
-          route,
+          routes,
           workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
         })
         return
@@ -1534,6 +1738,9 @@ export class WorkflowSupervisor {
         resultExhausted: false,
         timer: null,
         timeoutMs: current.timeoutMs ?? 0,
+        planMode: node.mode === 'plan',
+        planReviewAsked: false,
+        planNudged: false,
       }
       rememberSessionEntry(ctx.run, node.robot, {
         nodeId: node.id,
@@ -1555,6 +1762,7 @@ export class WorkflowSupervisor {
       this.#armTimeout(ctx, recoveredEntry)
       return
     } catch (error) {
+      if (node.mode === 'plan') this.#clearEntryPlanMode({ planMode: true, handle })
       try {
         await handle?.dispose?.()
       } catch {
@@ -1568,24 +1776,27 @@ export class WorkflowSupervisor {
   }
 
   // -------------------------------------------------------------------------
-  // Gate
+  // 用户介入
   // -------------------------------------------------------------------------
 
   /**
-   * 执行一个 gate 节点（仅前台模式）。审批要求调用者会话有活跃 turn。
+   * 执行一个用户介入节点（仅前台模式）。原生提问卡要求调用者会话有活跃 turn。
+   *
+   * 用户的选项就是节点的出边（`label` 显示给用户）；`questions` 收集额外的
+   * 反馈 / 信息。回答会落成一条 user step，后续 prompt 可以用模板引用答案。
    *
    * @param {Record<string, any>} ctx
    * @param {Record<string, any>} node
    * @returns {Promise<void>}
    */
-  async #runGate(ctx, node) {
+  async #runUser(ctx, node) {
     if (ctx.mode !== 'foreground') {
-      await this.#fail(ctx, new WorkflowRunError(`gate "${node.id}" requires a foreground run`))
+      await this.#fail(ctx, new WorkflowRunError(`user node "${node.id}" requires a foreground run`))
       return
     }
-    const approval = this.ctx?.get?.('approval') ?? null
-    if (approval === null || typeof approval.request !== 'function') {
-      await this.#fail(ctx, new WorkflowRunError('gate node needs the approval service'))
+    const userQuestions = this.ctx?.get?.('userQuestions') ?? null
+    if (userQuestions === null || typeof userQuestions.ask !== 'function') {
+      await this.#fail(ctx, new WorkflowRunError('user node needs the user-questions service'))
       return
     }
     const run = ctx.run
@@ -1596,88 +1807,138 @@ export class WorkflowSupervisor {
     }
     const visit = (ctx.visits.get(node.id) ?? 0) + 1
     const startedAt = Date.now()
+    let detail
+    try {
+      detail = renderUserDetail(node, ctx.values, ctx.plan, seq, run.runId)
+    } catch (error) {
+      await this.#fail(ctx, error)
+      return
+    }
     ctx.seq = seq
     ctx.visits.set(node.id, visit)
     run.status = 'waiting'
-    run.current = {
+    run.pendingUser = {
       nodeId: node.id,
       visit,
       seq,
-      type: 'gate',
-      robot: null,
-      startedAt,
-    }
-    run.pendingGate = {
-      nodeId: node.id,
       title: node.title,
-      detail: node.detail,
+      detail,
+      options: (Array.isArray(node.next) ? node.next : []).map((rule) => ({
+        name: rule.name,
+        label: rule.label,
+        ...(typeof rule.description === 'string' && rule.description !== ''
+          ? { description: rule.description }
+          : {}),
+      })),
+      questions: (Array.isArray(node.questions) ? node.questions : []).map((question) => ({
+        ...question,
+        options: (Array.isArray(question.options) ? question.options : []).map((option) => ({ ...option })),
+      })),
       requestedAt: startedAt,
+      sessionId: typeof ctx.agent?.id === 'string' ? ctx.agent.id : null,
     }
     await this.#save(ctx)
-    await this.store.appendEvent(run.runId, 'gate/waiting', { nodeId: node.id })
+    await this.store.appendEvent(run.runId, 'user/waiting', { nodeId: node.id })
 
-    let outcome
+    let answer
     try {
-      outcome = await approval.request({
+      answer = await userQuestions.ask({
+        questions: buildUserQuestions(node, detail),
         agent: ctx.agent,
-        toolName: 'buka_workflow_gate',
-        reason: gateReason(node),
         signal: ctx.controller.signal,
       })
     } catch (error) {
-      run.pendingGate = null
+      run.pendingUser = null
       run.current = null
-      if (ctx.cancelled === true || ctx.controller.signal.aborted === true) {
-        await this.#finish(ctx, 'cancelled', { nodeId: node.id, message: 'gate approval was cancelled' })
+      const code = typeof error?.code === 'string' ? error.code : ''
+      if (ctx.cancelled === true || ctx.controller.signal.aborted === true || code === 'ASK_CANCELLED') {
+        await this.#finish(ctx, 'cancelled', {
+          nodeId: node.id,
+          message: `user node "${node.id}" was cancelled before the user answered`,
+        })
+        return
+      }
+      if (code === 'NO_PROVIDER') {
+        await this.#fail(
+          ctx,
+          new WorkflowRunError(
+            `user node "${node.id}" could not ask the user: no user-questions answerer is available in this composition`,
+            { cause: error },
+          ),
+        )
         return
       }
       await this.#fail(
         ctx,
-        new WorkflowRunError(`gate "${node.id}" approval failed: ${describeError(error)}`, { cause: error }),
+        new WorkflowRunError(`user node "${node.id}" could not ask the user: ${describeError(error)}`, {
+          cause: error,
+        }),
       )
       return
     }
 
-    const decision = mapApproval(outcome)
+    const resolved = resolveUserAnswer(node, answer)
     const finishedAt = Date.now()
-    run.pendingGate = null
+    if (resolved.error !== undefined) {
+      run.pendingUser = null
+      run.current = null
+      await this.#fail(
+        ctx,
+        new WorkflowRunError(`invalid answer for user node "${node.id}": ${resolved.error}`),
+      )
+      return
+    }
+    const cancelled = resolved.cancelled === true
+    const route = resolved.route ?? null
+    run.pendingUser = null
     run.current = null
     run.status = 'running'
     run.steps.push({
       seq,
       nodeId: node.id,
       visit,
-      type: 'gate',
+      type: 'user',
       robot: null,
       sessionId: null,
-      status: decision,
-      decision,
+      status: cancelled ? 'cancelled' : 'completed',
+      route: cancelled ? null : (route?.name ?? null),
+      routeTo: cancelled ? null : (route?.to ?? null),
+      answers: resolved.answers,
+      input: detail,
+      text: resolved.text,
       startedAt,
       finishedAt,
-      text: '',
-      error: decision === 'unavailable' ? 'approval unavailable' : null,
+      error: null,
     })
-    ctx.values[node.id] = { decision }
+    run.updatedAt = finishedAt
+    ctx.stepCount = run.steps.length
+    ctx.values[node.id] = {
+      route: cancelled ? null : (route?.name ?? null),
+      routeTo: cancelled ? null : (route?.to ?? null),
+      answers: answersValue(resolved.answers),
+      text: resolved.text,
+    }
     await this.#save(ctx)
-    await this.store.appendEvent(run.runId, 'gate/decided', { nodeId: node.id, decision })
+    await this.store.appendEvent(run.runId, 'user/answered', {
+      nodeId: node.id,
+      ...(cancelled ? { cancelled: true } : { route: route?.name ?? null }),
+    })
 
-    if (decision === 'cancelled') {
-      await this.#finish(ctx, 'cancelled', { nodeId: node.id, message: 'gate approval was cancelled' })
+    if (cancelled) {
+      await this.#finish(ctx, 'cancelled', {
+        nodeId: node.id,
+        message: `user node "${node.id}" was submitted without a choice; the run was cancelled`,
+      })
       return
     }
-    if (decision === 'unavailable') {
-      await this.#fail(ctx, new WorkflowRunError(`gate "${node.id}" approval is unavailable in this composition`))
+    if (route === null) {
+      await this.#maybeFinish(ctx)
       return
     }
-    const target = decision === 'approved' ? node.onApprove : node.onReject
-    if (target === null || target === undefined) {
-      await this.#finish(ctx, decision === 'approved' ? 'completed' : 'rejected', { nodeId: node.id })
-      return
-    }
-    ctx.next = {
-      nodeId: target.to,
-      edgePrompt: typeof target.prompt === 'string' && target.prompt !== '' ? target.prompt : null,
-    }
+    ctx.frontier.push({
+      nodeId: route.to,
+      edgePrompt: typeof route.prompt === 'string' && route.prompt !== '' ? route.prompt : null,
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -1692,7 +1953,7 @@ export class WorkflowSupervisor {
    * @returns {void}
    */
   #armTimeout(ctx, entry) {
-    const current = ctx.run.current
+    const current = this.#findActive(ctx, entry.seq)
     const timeoutMs = positive(entry.timeoutMs)
     if (timeoutMs === undefined || current === null) return
     const startedAt =
@@ -1719,8 +1980,8 @@ export class WorkflowSupervisor {
    */
   async #onTimeout(ctx, entry, timeoutMs) {
     if (ctx.closed || ctx.cancelled || entry.claimed === true) return
-    const current = ctx.run.current
-    if (current === null || current.seq !== entry.seq) return
+    const current = this.#findActive(ctx, entry.seq)
+    if (current === null) return
     entry.claimed = true
     this.#removeEntry(entry)
     let result = { text: '' }
@@ -1729,6 +1990,8 @@ export class WorkflowSupervisor {
     } catch {
       // 会话已经不可读：保留空结果。
     }
+    // 取消落定后再清 plan 模式：此时 turn 已关闭，set(false) 能直接提交。
+    this.#clearEntryPlanMode(entry)
     try {
       await entry.handle?.dispose?.()
     } catch {
@@ -1746,6 +2009,7 @@ export class WorkflowSupervisor {
     })
     await this.#completeNode(
       ctx,
+      current,
       node,
       {
         ...result,
@@ -1770,12 +2034,12 @@ export class WorkflowSupervisor {
     if (runId === '' || this.runs.has(runId)) return 'skipped'
     if (
       run.status === 'waiting' ||
-      (run.pendingGate !== null && run.pendingGate !== undefined) ||
-      run.current?.type === 'gate'
+      (run.pendingUser !== null && run.pendingUser !== undefined) ||
+      run.current?.type === 'user'
     ) {
       await this.store.markInterrupted(
         runId,
-        'the run was waiting for approval when the host restarted; gate approvals cannot be recreated',
+        'the run was waiting for the user when the host restarted; a user-question prompt cannot be recreated',
       )
       return 'interrupted'
     }
@@ -1786,10 +2050,10 @@ export class WorkflowSupervisor {
       return 'interrupted'
     }
     const planOrder = Array.isArray(plan.order) ? plan.order : Object.keys(plan.nodes)
-    if (run.status === 'waiting' || planOrder.some((id) => plan.nodes[id]?.type === 'gate')) {
+    if (run.status === 'waiting' || planOrder.some((id) => plan.nodes[id]?.type === 'user')) {
       await this.store.markInterrupted(
         runId,
-        'this run contains approval gates; gate approvals need an active caller turn and cannot be recreated after a restart',
+        'this run contains user nodes; their questions need an active caller turn and cannot be recreated after a restart',
       )
       return 'interrupted'
     }
@@ -1823,42 +2087,59 @@ export class WorkflowSupervisor {
     await this.#save(ctx)
     await this.store.appendEvent(runId, 'run/recover', {
       status: run.status,
-      currentNode: run.current?.nodeId ?? null,
+      activeCount: Array.isArray(run.active) ? run.active.length : 0,
     })
 
-    const current = run.current
-    if (current === null || current === undefined) {
-      const next = this.#deriveNext(ctx)
-      if (next === null) {
+    // 并发运行可能有多个活跃会话：逐个恢复；任一失败则整体中断（不新开会话）。
+    const actives = Array.isArray(run.active) ? run.active.filter((entry) => entry?.type === 'robot') : []
+    if (actives.length === 0) {
+      const frontier = this.#deriveFrontier(ctx)
+      if (frontier.length === 0) {
         await this.#finish(ctx, 'completed')
         return 'recovered'
       }
-      ctx.next = next
+      ctx.frontier = frontier
       await this.#advance(ctx)
       return 'recovered'
     }
+    for (const current of actives) {
+      const outcome = await this.#resumeActive(ctx, current)
+      if (outcome !== 'recovered') {
+        this.runs.delete(runId)
+        return 'interrupted'
+      }
+    }
+    return 'recovered'
+  }
+
+  /**
+   * 恢复一个活跃的机器人节点：同一会话续接；不新开会话。上一轮已经结束时直接收
+   * 结果，否则 compact 后发「继续」prompt。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} current
+   * @returns {Promise<'recovered' | 'interrupted'>}
+   */
+  async #resumeActive(ctx, current) {
+    const runId = ctx.runId
+    const run = ctx.run
     if (current.type !== 'robot') {
       await this.store.markInterrupted(runId, `cannot recover a ${String(current.type)} node after a restart`)
-      this.runs.delete(runId)
       return 'interrupted'
     }
     if (typeof current.prompt !== 'string' || current.prompt === '') {
       await this.store.markInterrupted(runId, 'this run predates observer recovery data and cannot be resumed safely')
-      this.runs.delete(runId)
       return 'interrupted'
     }
-
-    const node = plan.nodes[current.nodeId]
+    const node = ctx.plan.nodes[current.nodeId]
     if (node === undefined) {
       await this.store.markInterrupted(runId, `workflow node "${current.nodeId}" is missing from the definition`)
-      this.runs.delete(runId)
       return 'interrupted'
     }
     const robots = this.robots ?? this.ctx?.get?.('bukaRobots') ?? null
     const sessionId = typeof current.sessionId === 'string' ? current.sessionId : ''
     const interrupt = async (message) => {
       await this.store.markInterrupted(runId, message)
-      this.runs.delete(runId)
       return 'interrupted'
     }
     if (sessionId === '') {
@@ -1885,13 +2166,26 @@ export class WorkflowSupervisor {
         check.turnEnded === true &&
         !RECOVERABLE_STOP_REASONS.has(check.stopReason)
       ) {
-        try {
-          await handle.dispose?.()
-        } catch {
-          // 已释放：忽略。
+        current.recovering = false
+        const recoveredEntry = {
+          runId,
+          seq: current.seq,
+          startSeq: current.startSeq,
+          handle,
+          early: [],
+          claimed: true,
+          recoveryRequested: false,
+          disposedEarly: false,
+          resultExhausted: false,
+          timer: null,
+          timeoutMs: current.timeoutMs ?? 0,
+          planMode: node.mode === 'plan',
+          planReviewAsked: false,
+          planNudged: false,
         }
+        this.dispatchBySession.set(sessionId, recoveredEntry)
         let result = check
-        let route = null
+        let routes = null
         if (check.structured === undefined) {
           result = {
             ...check,
@@ -1901,7 +2195,7 @@ export class WorkflowSupervisor {
         } else {
           const abort = resolveAbort(check.structured)
           if (abort?.abort !== undefined) {
-            await this.#abortNode(ctx, node, check, abort.abort.reason, {
+            await this.#abortNode(ctx, current, node, check, abort.abort.reason, {
               recovered: true,
               recoveryAttempts: 1,
               workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
@@ -1923,7 +2217,7 @@ export class WorkflowSupervisor {
                 error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join('; ')}`,
               }
             } else {
-              const resolved = resolveRoute(node, check.structured)
+              const resolved = resolveRoutes(node, check.structured)
               if (resolved.error !== undefined) {
                 result = {
                   ...check,
@@ -1931,15 +2225,23 @@ export class WorkflowSupervisor {
                   error: `invalid workflow route: ${resolved.error}`,
                 }
               } else {
-                route = resolved.rule
+                routes = resolved.rules
               }
             }
           }
         }
-        await this.#completeNode(ctx, node, result, {
+        if (await this.#handlePlanGate(ctx, recoveredEntry, current, node, result)) return 'recovered'
+        this.#clearEntryPlanMode(recoveredEntry)
+        this.#removeEntry(recoveredEntry)
+        try {
+          await handle.dispose?.()
+        } catch {
+          // 已释放：忽略。
+        }
+        await this.#completeNode(ctx, current, node, result, {
           recovered: true,
           recoveryAttempts: 1,
-          route,
+          routes,
           workspace: typeof handle.cwd === 'string' ? handle.cwd : undefined,
         })
         return 'recovered'
@@ -1963,6 +2265,9 @@ export class WorkflowSupervisor {
         resultExhausted: false,
         timer: null,
         timeoutMs: current.timeoutMs ?? 0,
+        planMode: node.mode === 'plan',
+        planReviewAsked: false,
+        planNudged: false,
       }
       rememberSessionEntry(run, node.robot, {
         nodeId: node.id,
@@ -1985,6 +2290,7 @@ export class WorkflowSupervisor {
       this.#armTimeout(ctx, entry)
       return 'recovered'
     } catch (error) {
+      if (node.mode === 'plan') this.#clearEntryPlanMode({ planMode: true, handle })
       try {
         await handle?.dispose?.()
       } catch {
@@ -2001,45 +2307,39 @@ export class WorkflowSupervisor {
   }
 
   /**
-   * 从最后的 step 推导下一个节点；没有 step 时从 start 的出边开始。
+   * 从已落盘的 step 推导恢复后的 frontier（没有 step 时从 start 的全部出边开始）。
    *
    * @param {Record<string, any>} ctx
-   * @returns {{ nodeId: string, edgePrompt: string | null } | null}
+   * @returns {Array<{ nodeId: string, edgePrompt: string | null }>}
    */
-  #deriveNext(ctx) {
+  #deriveFrontier(ctx) {
     const steps = Array.isArray(ctx.run.steps) ? ctx.run.steps : []
     if (steps.length === 0) {
       const startNode = ctx.plan.nodes[ctx.plan.start]
-      if (startNode === undefined || startNode.type !== 'start') return null
-      const rule = Array.isArray(startNode.next) ? startNode.next[0] : null
-      if (rule === null || rule === undefined) return null
-      return {
+      if (startNode === undefined || startNode.type !== 'start') return []
+      return (Array.isArray(startNode.next) ? startNode.next : []).map((rule) => ({
         nodeId: rule.to,
         edgePrompt: typeof rule.prompt === 'string' && rule.prompt !== '' ? rule.prompt : null,
-      }
+      }))
     }
     const last = steps[steps.length - 1]
     const node = ctx.plan.nodes[last.nodeId]
-    if (node === undefined) return null
-    if (node.type === 'gate') {
-      const decision = typeof last.decision === 'string' ? last.decision : ''
-      if (decision === 'approved' || decision === 'rejected') {
-        const target = decision === 'approved' ? node.onApprove : node.onReject
-        if (target === null || target === undefined) return null
-        return {
-          nodeId: target.to,
-          edgePrompt: typeof target.prompt === 'string' && target.prompt !== '' ? target.prompt : null,
-        }
-      }
-      return null
-    }
-    const routeName = typeof last.route === 'string' ? last.route : ''
-    const edge = (Array.isArray(node.next) ? node.next : []).find((rule) => rule.name === routeName)
-    if (edge === undefined) return null
-    return {
-      nodeId: edge.to,
-      edgePrompt: typeof edge.prompt === 'string' && edge.prompt !== '' ? edge.prompt : null,
-    }
+    if (node === undefined) return []
+    // 并发 fan-out 的 step 记录了全部出口（routes）；旧记录退回单条 route。
+    const routes =
+      Array.isArray(last.routes) && last.routes.length > 0
+        ? last.routes
+        : typeof last.route === 'string' && last.route !== ''
+          ? [{ name: last.route, to: typeof last.routeTo === 'string' ? last.routeTo : null }]
+          : []
+    const edges = Array.isArray(node.next) ? node.next : []
+    return routes
+      .map((route) => edges.find((rule) => rule.name === route.name))
+      .filter((edge) => edge !== undefined)
+      .map((edge) => ({
+        nodeId: edge.to,
+        edgePrompt: typeof edge.prompt === 'string' && edge.prompt !== '' ? edge.prompt : null,
+      }))
   }
 
   // -------------------------------------------------------------------------
@@ -2060,7 +2360,8 @@ export class WorkflowSupervisor {
     run.updatedAt = Date.now()
     run.finishedAt = run.updatedAt
     run.current = null
-    run.pendingGate = null
+    run.active = []
+    run.pendingUser = null
     run.pendingInteraction = null
     run.result = {
       status,
@@ -2070,6 +2371,7 @@ export class WorkflowSupervisor {
       ...(status === 'failed' && run.error !== null ? { error: run.error } : {}),
     }
     for (const entry of this.#dispatchEntriesForRun(ctx.runId)) {
+      this.#clearEntryPlanMode(entry)
       this.#removeEntry(entry)
       try {
         await entry.handle?.dispose?.()
@@ -2095,20 +2397,102 @@ export class WorkflowSupervisor {
    */
   async #fail(ctx, error) {
     if (ctx.closed) return ctx.run
+    const activeNodeId = this.#activeNodeId(ctx)
     if (error instanceof WorkflowCancelledError || ctx.cancelled === true) {
       return await this.#finish(ctx, 'cancelled', {
-        nodeId: ctx.run.current?.nodeId ?? null,
+        nodeId: activeNodeId,
         message: describeError(error),
       })
     }
     ctx.run.error = describeError(error)
     this.logger?.warn?.(`buka-workflows: run ${ctx.runId} failed: ${ctx.run.error}`)
-    return await this.#finish(ctx, 'failed', { nodeId: ctx.run.current?.nodeId ?? null })
+    return await this.#finish(ctx, 'failed', { nodeId: activeNodeId })
+  }
+
+  /**
+   * 当前（第一个）活跃节点的 id，用于失败 / 取消记录里的 lastNode。
+   *
+   * @param {Record<string, any>} ctx
+   * @returns {string | null}
+   */
+  #activeNodeId(ctx) {
+    const active = Array.isArray(ctx.run.active) ? ctx.run.active : []
+    const first = active.find((entry) => typeof entry?.nodeId === 'string')
+    return first !== undefined ? first.nodeId : null
   }
 
   // -------------------------------------------------------------------------
   // 小工具
   // -------------------------------------------------------------------------
+
+  /**
+   * 按序号在 run.active 里找活跃的机器人节点。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {number} seq
+   * @returns {Record<string, any> | null}
+   */
+  #findActive(ctx, seq) {
+    const active = Array.isArray(ctx.run.active) ? ctx.run.active : []
+    return active.find((entry) => entry?.seq === seq) ?? null
+  }
+
+  /**
+   * 从 run.active 里移除一个已终结的活跃节点。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} current
+   * @returns {void}
+   */
+  #removeActive(ctx, current) {
+    if (!Array.isArray(ctx.run.active)) return
+    const index = ctx.run.active.findIndex((entry) => entry === current || entry?.seq === current.seq)
+    if (index >= 0) ctx.run.active.splice(index, 1)
+  }
+
+  /**
+   * 并发 fan-out 激活 join：把每个 join 的「本次启动子集」（inputs ∩ 已启动任务）
+   * 记为待完成集合。join 放行条件就是这些任务全部完成；没被启动的 input 不计入。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {string[]} startedIds 本次 fan-out 启动的任务节点 id
+   * @returns {void}
+   */
+  #activateJoins(ctx, startedIds) {
+    const started = new Set(startedIds)
+    for (const id of ctx.plan.order) {
+      const node = ctx.plan.nodes[id]
+      if (node.type !== 'join') continue
+      const awaiting = new Set(node.inputs.filter((input) => started.has(input)))
+      if (awaiting.size > 0) ctx.joins.set(id, awaiting)
+    }
+  }
+
+  /**
+   * 一个任务完成：喂给引用它的所有 join，等待集合清空的 join 放行一次（沿唯一出边
+   * 推进 frontier）。不在这里调用 #advanceInner，由 #completeNode 收尾统一推进。
+   *
+   * @param {Record<string, any>} ctx
+   * @param {string} nodeId 完成的任务节点 id
+   * @returns {Promise<void>}
+   */
+  async #contributeJoins(ctx, nodeId) {
+    for (const [joinId, awaiting] of ctx.joins) {
+      if (!awaiting.has(nodeId)) continue
+      awaiting.delete(nodeId)
+      if (awaiting.size !== 0) continue
+      ctx.joins.delete(joinId)
+      const join = ctx.plan.nodes[joinId]
+      const edge = Array.isArray(join?.next) ? join.next[0] : null
+      if (edge !== undefined && edge !== null && typeof edge.to === 'string') {
+        ctx.frontier.push({
+          nodeId: edge.to,
+          edgePrompt: typeof edge.prompt === 'string' && edge.prompt !== '' ? edge.prompt : null,
+        })
+      }
+      await this.store.appendEvent(ctx.runId, 'join/fire', { joinId })
+    }
+  }
 
   /**
    * @param {Record<string, any>} ctx
@@ -2121,14 +2505,13 @@ export class WorkflowSupervisor {
 
   /**
    * @param {Record<string, any>} ctx
+   * @param {Record<string, any>} current 活跃节点
    * @param {Record<string, any>} node
    * @param {string} prompt
    * @param {number} startedAt
    * @returns {Promise<void>}
    */
-  async #saveRunningNodeResult(ctx, node, prompt, startedAt) {
-    const current = ctx.run.current
-    if (current === null) return
+  async #saveRunningNodeResult(ctx, current, node, prompt, startedAt) {
     const promptText = truncateUtf8(prompt, this.options.maxNodeTextBytes)
     try {
       await this.store.saveNodeResult(ctx.runId, current.seq, node.id, {
@@ -2168,6 +2551,9 @@ export class WorkflowSupervisor {
       signal: ctx.controller.signal,
       ...(creator === undefined ? {} : { agent: creator }),
       ...(this.options.robotPreset === '' ? {} : { agentPreset: this.options.robotPreset }),
+      // 恢复时不强行改变 plan 状态：plan 节点保留会话日志里的状态（批准后可能
+      // 已经退出）；普通节点清掉可能残留的 plan 模式。
+      ...(node.mode === 'plan' ? {} : { planMode: false }),
     }
   }
 
@@ -2325,6 +2711,9 @@ export class WorkflowSupervisor {
           remember(effectiveRunId, entry?.sessionId)
         }
       }
+      for (const current of Array.isArray(run.active) ? run.active : []) {
+        remember(effectiveRunId, current?.sessionId)
+      }
       remember(effectiveRunId, run.current?.sessionId)
     }
   }
@@ -2352,6 +2741,30 @@ export class WorkflowSupervisor {
   }
 
   /**
+   * 节点结束 / 运行终止时尽力关闭该 entry 进入的 plan 模式。
+   *
+   * 失败只记日志：模式清理不能改变节点结果；下一次进入同一机器人时 supervisor
+   * 会按节点的 `mode` 重新归一，所以这里只是避免把 plan 状态留在用户可见的
+   * 会话里。超时 / 取消时 turn 可能还没关闭，`set(false)` 会排队；不影响结果。
+   *
+   * @param {Record<string, any>} entry
+   * @returns {void}
+   */
+  #clearEntryPlanMode(entry) {
+    if (entry?.planMode !== true) return
+    entry.planMode = false
+    const handle = entry.handle
+    if (handle === null || handle === undefined || typeof handle.setPlanMode !== 'function') return
+    try {
+      handle.setPlanMode(false)
+    } catch (error) {
+      this.logger?.warn?.(
+        `buka-workflows: could not leave plan mode for the robot session: ${describeError(error)}`,
+      )
+    }
+  }
+
+  /**
    * 从 dispatch 表里移除并释放这一轮的句柄。
    *
    * @param {Record<string, any>} ctx
@@ -2362,6 +2775,7 @@ export class WorkflowSupervisor {
     if (typeof sessionId !== 'string' || sessionId === '') return
     const entry = this.dispatchBySession.get(sessionId)
     if (entry === undefined || entry.runId !== ctx.runId) return
+    this.#clearEntryPlanMode(entry)
     this.#removeEntry(entry)
     try {
       Promise.resolve(entry.handle?.dispose?.()).catch(() => undefined)

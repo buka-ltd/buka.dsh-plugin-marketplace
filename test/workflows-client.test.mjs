@@ -12,7 +12,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { buildRunGraph, layoutRunGraph } from '../plugins/workflows/lib/graph.js'
+import { buildRunGraph, buildTemplateGraph, layoutRunGraph } from '../plugins/workflows/lib/graph.js'
 
 const CLIENT_PATH = path.resolve('plugins/workflows/client.js')
 
@@ -242,18 +242,36 @@ async function loadClient() {
 }
 
 /**
- * 一次门禁 + 两个机器人分支的运行。
+ * 一次用户介入 + 两个机器人分支的运行。
  *
  * @returns {{ run: Record<string, any>, definition: Record<string, any>, graph: Record<string, any>, nodeResults: Array<Record<string, any>> }}
  */
 function fixture() {
   const raw = {
     goal: '为 v1.2 写发布说明并发布',
-    start: 'gate',
+    start: 'confirm',
     nodes: [
-      { id: 'gate', type: 'gate', title: '发布确认', detail: '是否同意发布？', onApprove: 'publish', onReject: 'revise' },
-      { id: 'publish', type: 'robot', robot: 'publisher', summary: '发布 v1.2 的说明', prompt: '执行发布', next: 'done' },
-      { id: 'revise', type: 'robot', robot: 'writer', prompt: '修改发布说明', next: 'done' },
+      {
+        id: 'confirm',
+        type: 'user',
+        title: '发布确认',
+        detail: '是否同意发布？',
+        next: [
+          { to: 'publish', name: 'approve', label: '批准并发布', prompt: '执行发布' },
+          { to: 'revise', name: 'revise', label: '返回修改' },
+        ],
+        questions: [
+          { id: 'notes', header: '修改意见', question: '哪里需要改？', multiSelect: false, options: [] },
+        ],
+      },
+      {
+        id: 'publish',
+        type: 'robot',
+        robot: 'publisher',
+        summary: '发布 v1.2 的说明',
+        next: [{ to: 'done', name: '已发布' }],
+      },
+      { id: 'revise', type: 'robot', robot: 'writer', next: [{ to: 'done', name: '修改完成' }] },
       { id: 'done', type: 'end', status: 'completed' },
     ],
   }
@@ -265,7 +283,7 @@ function fixture() {
     createdAt: 1,
     finishedAt: 2,
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     // 一个机器人一次运行只有一个会话；每次进入都记在同一条会话的 entries 里。
     sessions: [
       {
@@ -278,10 +296,30 @@ function fixture() {
       },
     ],
     steps: [
-      { seq: 1, nodeId: 'gate', type: 'gate', status: 'approved', decision: 'approved', startedAt: 1, finishedAt: 2 },
+      {
+        seq: 1,
+        nodeId: 'confirm',
+        visit: 1,
+        type: 'user',
+        robot: null,
+        sessionId: null,
+        status: 'completed',
+        route: 'approve',
+        routeTo: 'publish',
+        answers: [
+          { id: 'route', selected: ['批准并发布'], custom: '' },
+          { id: 'notes', selected: [], custom: '' },
+        ],
+        input: '是否同意发布？（已渲染）',
+        text: '选择：批准并发布',
+        startedAt: 1,
+        finishedAt: 2,
+        error: null,
+      },
       {
         seq: 2,
         nodeId: 'publish',
+        visit: 1,
         type: 'robot',
         robot: 'publisher',
         status: 'completed',
@@ -447,7 +485,7 @@ function loopFixture() {
     createdAt: 1,
     finishedAt: 2,
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     sessions: sessionsFromSteps(steps),
     steps,
     result: { status: 'completed', lastNode: 'done' },
@@ -491,8 +529,8 @@ function startFixture() {
         robot: 'tester',
         summary: '检查导出实现',
         next: [
-          { to: 'dev', name: '测试打回', prompt: '测试打回：{{nodes.test.text}}' },
-          { to: 'done', name: '测试通过' },
+          { to: 'dev', name: '测试打回', tone: 'failure', prompt: '测试打回：{{nodes.test.text}}' },
+          { to: 'done', name: '测试通过', tone: 'success' },
         ],
       },
       { id: 'done', type: 'end', status: 'completed' },
@@ -525,7 +563,7 @@ function startFixture() {
     createdAt: 1,
     finishedAt: 2,
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     sessions: sessionsFromSteps(steps),
     steps,
     result: { status: 'completed', lastNode: 'done' },
@@ -586,7 +624,7 @@ function legacyFixture() {
     createdAt: 1,
     finishedAt: 2,
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     // 旧格式：同一个机器人在两个会话里执行过，每次进入仍是自己的一条记录。
     sessions: [
       {
@@ -660,7 +698,7 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   const traversedEdges = classLists.filter(
     (list) => list.includes('buka-workflows-edge') && list.includes('is-traversed'),
   )
-  assert.equal(traversedEdges.length, 2, 'approved path is traversed')
+  assert.equal(traversedEdges.length, 2, 'the path the run took is traversed')
   const footer = findByClass(tree, 'buka-workflows-footer')
   assert.ok(footer, 'the legend lives in the footer')
   assert.ok(collect(footer).classes.includes('buka-workflows-legend'))
@@ -674,12 +712,42 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   assert.ok(!collect(graphPane).classes.includes('buka-workflows-legend'))
   assert.ok(tags.has('circle'))
   assert.ok(paths.length >= data.graph.edges.length)
-  // 胶囊只显示名字：机器人名、门禁标题、终止节点 id；没有 R/G/E 角标。
+  // 胶囊只显示名字：机器人名、用户节点标题、终止节点 id；没有 R/G/E 角标。
   assert.ok(texts.includes('publisher'))
   assert.ok(texts.includes('writer'))
   assert.ok(texts.includes('发布确认'))
   assert.ok(texts.includes('done'))
   for (const letter of ['R', 'G', 'E']) assert.ok(!texts.includes(letter), `no ${letter} badge`)
+  // 用户介入节点有自己的胶囊样式，图例同时列出它；批准 / 拒绝的连线样式已经消失。
+  const userCapsule = findCapsule(tree, '发布确认')
+  assert.ok(userCapsule, 'the user node capsule shows its title')
+  assert.ok(userCapsule.props.className.split(/\s+/).includes('is-user'), 'the user capsule uses its own type style')
+  const footerLists = collect(footer).classLists
+  assert.ok(
+    footerLists.some((list) => list.includes('buka-workflows-legendCapsule') && list.includes('is-user')),
+    'the legend lists the user node type',
+  )
+  assert.equal(
+    footerLists.some(
+      (list) => list.includes('buka-workflows-legendLine') && (list.includes('is-approve') || list.includes('is-reject')),
+    ),
+    false,
+    'the edge legend only has traversed / pending',
+  )
+  assert.equal(
+    footerLists.filter((list) => list.includes('buka-workflows-legendLine')).length,
+    2,
+    'the run legend keeps its traversed / pending edge samples',
+  )
+  assert.equal(
+    classLists.some((list) => list.includes('buka-workflows-edge') && list.includes('is-static')),
+    false,
+    'run edges keep the traversed / pending styling, not the static template style',
+  )
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-capsule\.is-user\{[^}]*state-warn-primary/u)
+  assert.doesNotMatch(css, /is-gate/u, 'the gate styles are gone')
+  assert.doesNotMatch(css, /is-approve|is-reject/u, 'approved / rejected edge styles are gone')
   // 右侧默认展示最近执行过的节点，即 publish 的交付物。
   assert.ok(classes.includes('buka-workflows-inspector'))
   assert.ok(texts.includes('published the release'))
@@ -708,6 +776,63 @@ test('client: the vertical graph renders capsules, rails, dots and the legend', 
   assert.ok(!classes.includes('buka-workflows-timeline'))
 })
 
+test('client: edge tone paints success / failure lines and survives hover', async () => {
+  const client = await loadClient()
+  const data = startFixture()
+  const failure = data.graph.edges.find((edge) => edge.from === 'test' && edge.to === 'dev')
+  const success = data.graph.edges.find((edge) => edge.from === 'test' && edge.to === 'done')
+  assert.equal(failure.tone, 'failure')
+  assert.equal(success.tone, 'success')
+
+  const tree = client.render(detailStates(data, 'test'))
+  const { classLists } = collect(tree)
+  const edgeLists = classLists.filter((list) => list.includes('buka-workflows-edge'))
+  assert.equal(edgeLists.length, data.graph.edges.length, 'every edge is drawn once')
+  assert.equal(edgeLists.filter((list) => list.includes('is-failure')).length, 1)
+  assert.equal(edgeLists.filter((list) => list.includes('is-success')).length, 1)
+  assert.equal(
+    edgeLists.filter((list) => !list.includes('is-failure') && !list.includes('is-success')).length,
+    data.graph.edges.length - 2,
+    'edges without a tone keep the neutral styling',
+  )
+  const arrowLists = classLists.filter((list) => list.includes('buka-workflows-edgeArrow'))
+  assert.equal(arrowLists.filter((list) => list.includes('is-failure')).length, 1)
+  assert.equal(arrowLists.filter((list) => list.includes('is-success')).length, 1)
+
+  // 悬停时 tone 颜色保留（CSS 用 .is-success.is-hovered 压过品牌色），只变粗变实。
+  const hovered = client.render([
+    ...detailStates(data, 'test'),
+    { key: failure.key, text: '测试打回', x: 10, y: 20 },
+  ])
+  const hoveredLists = collect(hovered).classLists
+  assert.ok(
+    hoveredLists.some(
+      (list) => list.includes('buka-workflows-edge') && list.includes('is-hovered') && list.includes('is-failure'),
+    ),
+    'the hovered failure edge keeps its tone class',
+  )
+  assert.ok(
+    hoveredLists.some(
+      (list) =>
+        list.includes('buka-workflows-edgeArrow') && list.includes('is-hovered') && list.includes('is-failure'),
+    ),
+    'the hovered arrow keeps its tone class',
+  )
+
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-edge\.is-success\{stroke:var\(--dsw-alias-state-success-primary\)\}/u)
+  assert.match(css, /\.buka-workflows-edge\.is-failure\{stroke:var\(--dsw-alias-state-error-primary\)\}/u)
+  assert.match(
+    css,
+    /\.buka-workflows-edge\.is-success\.is-hovered\{stroke:var\(--dsw-alias-state-success-primary\)\}/u,
+    'hover keeps the success colour instead of the brand colour',
+  )
+  assert.match(
+    css,
+    /\.buka-workflows-edgeArrow\.is-failure\.is-hovered\{fill:var\(--dsw-alias-state-error-primary\)\}/u,
+  )
+})
+
 test('client: clicking a capsule switches the right-hand panel', async () => {
   const client = await loadClient()
   const data = fixture()
@@ -716,8 +841,7 @@ test('client: clicking a capsule switches the right-hand panel', async () => {
 
   assert.ok(classes.includes('buka-workflows-inspector'))
   assert.ok(texts.includes('revise'))
-  assert.ok(texts.includes('nodePrompt'))
-  assert.ok(texts.includes('修改发布说明'))
+  assert.ok(texts.includes('writer'), 'the robot executor is labelled')
   assert.ok(texts.includes('nodeNotRun'), 'the idle node has no execution yet')
   // 选中的胶囊有 is-selected，其他节点的交付物不再展示。
   const selectedCapsules = collect(tree).classLists.filter((list) => list.includes('is-selected'))
@@ -968,7 +1092,11 @@ test('client: a pending question shows a warning notice with an open-session act
   const body = findByClass(tree, 'buka-workflows-pageBody')
   assert.ok(body)
   assert.ok(
-    String(body.children[0]?.props?.className ?? '').includes('buka-workflows-interactionNotice'),
+    String(body.children[0]?.props?.className ?? '').includes('buka-workflows-detailBackButton'),
+    'the run detail opens with an inline back action',
+  )
+  assert.ok(
+    String(body.children[1]?.props?.className ?? '').includes('buka-workflows-interactionNotice'),
     'the notice sits above the graph / detail split',
   )
 
@@ -1032,6 +1160,104 @@ test('client: a pending approval names the tool and prefers the display reason',
   assert.ok(collect(client.render(detailStates(fallback, 'publish'))).texts.includes('rm -rf dist'))
 })
 
+test('client: a run waiting at a user node shows the user notice above the graph', async () => {
+  const client = await loadClient()
+  const base = fixture()
+  const waitingRun = {
+    ...base.run,
+    status: 'waiting',
+    finishedAt: null,
+    result: null,
+    steps: [],
+    sessions: [],
+    current: { nodeId: 'confirm', visit: 1, seq: 1, type: 'user', robot: null, startedAt: 1 },
+    pendingUser: {
+      nodeId: 'confirm',
+      visit: 1,
+      seq: 1,
+      title: '发布确认',
+      detail: '渲染后的等待说明',
+      options: [
+        { name: 'approve', label: '批准并发布', description: '直接发布到生产环境' },
+        { name: 'revise', label: '返回修改' },
+      ],
+      questions: [
+        { id: 'notes', header: '修改意见', question: '哪里需要改？', multiSelect: false, options: [] },
+      ],
+      requestedAt: 1_700_000_000_000,
+      sessionId: 'session-creator',
+    },
+  }
+  const model = buildRunGraph({ run: waitingRun, definition: base.definition })
+  assert.ok(model)
+  const data = {
+    ...base,
+    run: waitingRun,
+    graph: { ...model, ...layoutRunGraph(model) },
+    nodeResults: [],
+  }
+  const tree = client.render(detailStates(data, null))
+  const { classes, texts } = collect(tree)
+
+  assert.ok(classes.includes('buka-workflows-userNotice'), 'the user notice has its own class')
+  assert.ok(classes.includes('buka-workflows-interactionNotice'), 'it reuses the warning notice styling')
+  assert.ok(classes.includes('buka-workflows-userChoiceList'))
+  assert.ok(classes.includes('buka-workflows-userQuestionList'))
+  assert.ok(texts.includes('userWaitingTitle'))
+  assert.ok(texts.includes('渲染后的等待说明'), 'the rendered detail is shown')
+  assert.ok(texts.includes('userChoice'))
+  assert.ok(texts.includes('批准并发布'), 'every option label is listed')
+  assert.ok(texts.includes('直接发布到生产环境'), 'option descriptions are shown')
+  assert.ok(texts.includes('返回修改'))
+  assert.ok(texts.includes('userAnswers'))
+  assert.ok(texts.includes('修改意见'), 'the extra question header is listed')
+  assert.ok(texts.includes('哪里需要改？'))
+  assert.ok(texts.includes('userWaitingBody'), 'the notice explains where to answer')
+  assert.ok(texts.includes('openSession'), 'the creator session can be opened')
+  // 默认聚焦等待中的用户节点。
+  const inspectorTitle = findByClass(tree, 'buka-workflows-inspectorTitle')
+  assert.ok(inspectorTitle)
+  assert.deepEqual(collect(inspectorTitle).texts, ['发布确认'], 'a waiting run focuses its user node')
+  // 节点详情行：等待中的渲染结果优先于定义快照里的模板。
+  assert.ok(texts.includes('userDetail'))
+  assert.ok(texts.includes('typeUser'))
+  assert.equal(
+    texts.filter((text) => text === '渲染后的等待说明').length,
+    1,
+    'the node detail row shows the rendered detail once',
+  )
+  assert.equal(texts.includes('是否同意发布？'), false, 'the unrendered template is not shown while waiting')
+
+  // 用户提示排在最前：机器人提问 / 审批提示排在它后面。
+  data.run.pendingInteraction = {
+    kind: 'question',
+    nodeId: 'publish',
+    sessionId: 'session-1',
+    askedAt: 1,
+    questions: [{ id: 'q1', header: '发布范围', question: '要发布到生产环境吗？' }],
+  }
+  const both = client.render(detailStates(data, null))
+  const body = findByClass(both, 'buka-workflows-pageBody')
+  assert.ok(body)
+  const first = String(body.children[1]?.props?.className ?? '')
+  const second = String(body.children[2]?.props?.className ?? '')
+  assert.ok(first.includes('buka-workflows-userNotice'), 'the user notice sits above the robot interaction notice')
+  assert.ok(
+    second.includes('buka-workflows-interactionNotice') && !second.includes('buka-workflows-userNotice'),
+    'the robot interaction notice comes second',
+  )
+
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openSession'))
+  assert.ok(openButton, 'the notice offers an open-session action')
+  assert.equal(typeof openButton.props.onClick, 'function')
+  openButton.props.onClick() // 桩里没有 uiWorkspace，只会走到错误 Toast，不应抛错
+
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-userNotice\{[^}]*display:flex/u)
+  assert.match(css, /\.buka-workflows-userChoiceList,\.buka-workflows-userQuestionList\{/u)
+  assert.match(css, /\.buka-workflows-userChoice,\.buka-workflows-userQuestion\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/u)
+})
+
 test('client: an execution shows the selected route as a small label', async () => {
   const client = await loadClient()
   const data = fixture()
@@ -1044,6 +1270,50 @@ test('client: an execution shows the selected route as a small label', async () 
   assert.equal(texts.includes('routeTo'), false)
   assert.equal(texts.some((text) => text.includes('"next"')), false)
   assert.equal(texts.some((text) => text.includes('"to"')), false)
+})
+
+test('client: a user edge is labelled by the option text the user chose', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const approve = data.graph.edges.find((edge) => edge.from === 'confirm' && edge.to === 'publish')
+  assert.ok(approve, 'the selected choice has its own edge')
+  assert.equal(approve.kind, 'next', 'user edges are ordinary next edges')
+  assert.deepEqual(approve.labels, ['批准并发布'], 'the user-facing option text is the edge label')
+  assert.deepEqual(approve.names, ['approve'], 'the route key stays in names')
+  const robotEdge = data.graph.edges.find((edge) => edge.from === 'publish' && edge.to === 'done')
+  assert.ok(robotEdge)
+  assert.deepEqual(robotEdge.labels, [], 'robot edges carry no option labels')
+
+  /** @type {Array<Record<string, any>>} */
+  const hits = []
+  walk(client.render(detailStates(data, null)), (node) => {
+    const className = node.props?.className
+    if (typeof className === 'string' && className.split(/\s+/).includes('buka-workflows-edgeHit')) hits.push(node)
+  })
+  const hoverable = data.graph.edges.filter((edge) => {
+    const labels = Array.isArray(edge.labels) ? edge.labels.filter(Boolean) : []
+    const names = Array.isArray(edge.names) ? edge.names.filter(Boolean) : []
+    return typeof edge.d === 'string' && edge.d !== '' && (labels.length > 0 || names.length > 0)
+  })
+  const hover = (hit) =>
+    hit.props.onMouseEnter({
+      currentTarget: { ownerSVGElement: { getBoundingClientRect: () => ({ left: 80, top: 0 }) } },
+      clientX: 10,
+      clientY: 10,
+    })
+
+  const userHit = hits[hoverable.indexOf(approve)]
+  assert.ok(userHit, 'the user edge has a hit area')
+  hover(userHit)
+  const userTip = client.updates().filter((update) => update !== null && typeof update === 'object').pop()
+  assert.equal(userTip.text, '批准并发布', 'the hover tip shows the option label, not the route key')
+
+  // 机器人边没有 labels，仍然退回路由名。
+  const robotHit = hits[hoverable.indexOf(robotEdge)]
+  assert.ok(robotHit)
+  hover(robotHit)
+  const robotTip = client.updates().filter((update) => update !== null && typeof update === 'object').pop()
+  assert.equal(robotTip.text, '已发布')
 })
 
 test('client: the run list tags a run that is waiting for the user', async () => {
@@ -1128,7 +1398,7 @@ test('client: robot capsules and the inspector show the robot avatar', async () 
   )
 })
 
-test('client: the general-purpose robot renders its fixed 🤖 avatar', async () => {
+test('client: an unknown avatar id renders no avatar instead of crashing', async () => {
   const client = await loadClient()
   const data = loopFixture()
   data.graph = {
@@ -1139,7 +1409,7 @@ test('client: the general-purpose robot renders its fixed 🤖 avatar', async ()
     })),
   }
   const { texts } = collect(client.render(detailStates(data, 'check')))
-  assert.ok(texts.includes('🤖'), 'avatarMap 里的机器人头像 id 要画成固定 🤖')
+  assert.equal(texts.includes('🤖'), false, '未知头像 id 不再画固定 🤖')
 })
 
 test('client: a node the run did not reach is a gray dashed capsule', async () => {
@@ -1194,7 +1464,7 @@ test('client: the start node is marked and an unreachable node explains why it n
     createdAt: 1,
     finishedAt: 2,
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     steps: [
       { seq: 1, nodeId: 'a', type: 'robot', robot: 'worker', status: 'completed', stopReason: 'completed', startedAt: 1, finishedAt: 2 },
     ],
@@ -1219,10 +1489,10 @@ test('client: the start node is marked and an unreachable node explains why it n
 test('client: an execution links to the execution it led to', async () => {
   const client = await loadClient()
   const data = fixture()
-  const tree = client.render(detailStates(data, 'gate'))
+  const tree = client.render(detailStates(data, 'confirm'))
   const { texts } = collect(tree)
 
-  // 门禁批准后走到 publish 的第 1 次执行，按步骤概要显示并带上执行序号。
+  // 用户选定「批准并发布」后走到 publish 的第 1 次执行，按步骤概要显示并带上执行序号。
   assert.ok(texts.includes('executionNext'), 'the tab shows where the run went next')
   const nextTitle = findByClass(tree, 'buka-workflows-nextTitle')
   assert.ok(nextTitle, 'the next execution is rendered as a target')
@@ -1267,9 +1537,9 @@ test('client: an execution footer walks both backward and forward', async () => 
   prevLink.props.onClick()
 
   // 第一次执行没有上一步：明确说明，而不是留空。
-  const gateTree = client.render(detailStates(data, 'gate'))
-  assert.ok(collect(gateTree).texts.includes('executionPrevNone'))
-  assert.equal(findByClass(gateTree, 'buka-workflows-prevLink'), null)
+  const confirmTree = client.render(detailStates(data, 'confirm'))
+  assert.ok(collect(confirmTree).texts.includes('executionPrevNone'))
+  assert.equal(findByClass(confirmTree, 'buka-workflows-prevLink'), null)
 })
 
 test('client: the first execution can walk back to the start node', async () => {
@@ -1355,6 +1625,29 @@ test('client: the output tab shows the deliverable content, not routing fields',
   assert.match(css, /\.buka-workflows-page\{[^}]*overflow:hidden/u)
   assert.match(css, /\.buka-workflows-body\{[^}]*overflow-y:auto/u)
   assert.match(css, /\.buka-workflows-footer\{[^}]*flex:none/u)
+})
+
+test('client: a user execution shows the rendered instruction, the answers and the option label', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  const tree = client.render(detailStates(data, 'confirm'))
+  const { texts } = collect(tree)
+
+  // 节点详情行：类型 + 定义快照里的说明。
+  assert.ok(texts.includes('typeUser'))
+  assert.ok(texts.includes('userDetail'))
+  assert.ok(texts.includes('是否同意发布？'), 'the definition detail explains the node before it runs')
+  // 输入取 step.input（host 渲染后的说明），输出是答案文本。
+  assert.ok(texts.includes('是否同意发布？（已渲染）'), 'the execution input is the rendered instruction')
+  assert.ok(texts.includes('选择：批准并发布'), 'the execution output is the readable answer text')
+  assert.equal(texts.includes('executionNoOutput'), false)
+  // route 标签显示用户看到的选项文字，不显示路由键。
+  assert.ok(texts.includes('routeLabel: 批准并发布'))
+  assert.equal(texts.includes('routeLabel: approve'), false)
+  assert.equal(texts.includes('approve'), false, 'the route key is not dumped anywhere')
+  // 用户节点没有会话：不显示节点会话入口，也不重复执行级入口。
+  assert.equal(texts.includes('nodeSession'), false)
+  assert.equal(texts.includes('openSession'), false)
 })
 
 test('client: the end node shows the final deliverable, not a definition message', async () => {
@@ -1658,11 +1951,9 @@ test('client: the run list shows sequence numbers and the archived entry', async
   assert.deepEqual(collect(archivedButton).texts, ['archiveView (2)'])
   assert.equal(typeof archivedButton.props.onClick, 'function')
   assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
-  const heading = findByClass(tree, 'buka-workflows-title')
-  assert.ok(heading, 'the list has a page title')
-  assert.deepEqual(collect(heading).texts, ['title'], 'the normal list keeps the workflows title')
+  assert.equal(findByClass(tree, 'buka-workflows-title'), null, 'the list view has no redundant page title; the tab is the heading')
 
-  // 标题行与工具栏同一行：标题列可收缩，工具栏不换行、不缩小；按钮用 32px 的
+  // 页签与工具栏同一行：页签列可收缩，工具栏不换行、不缩小；按钮用 32px 的
   // 工具栏尺寸（与 Robots 页一致），比执行面板里的 28px 小按钮更大。
   const toolbarClasses = collect(toolbar).classes
   assert.equal(
@@ -1670,14 +1961,14 @@ test('client: the run list shows sequence numbers and the archived entry', async
     3,
     'the archived, settings and refresh buttons use the toolbar size',
   )
-  // 标题与工具栏是同一个 titleRow 的两个子元素，行内不换行；标题列可收缩，
+  // 页签与工具栏是同一个 titleRow 的两个子元素，行内不换行；页签列可收缩，
   // 工具栏固定宽度，所以窗口再窄按钮也不会掉到下一行。
   const titleRow = findByClass(tree, 'buka-workflows-titleRow')
   assert.ok(titleRow, 'the header has one title row')
   const titleRowChildren = titleRow.children.filter((child) => typeof child === 'object' && child !== null)
   assert.ok(
-    titleRowChildren.some((child) => child.props?.className === 'buka-workflows-titleCluster'),
-    'the title is the first cell of the row',
+    titleRowChildren.some((child) => child.props?.className === 'buka-workflows-tabbar'),
+    'the tabs are the first cell of the row',
   )
   assert.ok(
     titleRowChildren.includes(toolbar),
@@ -1685,7 +1976,7 @@ test('client: the run list shows sequence numbers and the archived entry', async
   )
   const css = client.css()
   assert.match(css, /\.buka-workflows-titleRow\{[^}]*flex-wrap:nowrap/u)
-  assert.match(css, /\.buka-workflows-titleCluster\{[^}]*flex:1 1 auto/u)
+  assert.match(css, /\.buka-workflows-tabbar\{[^}]*flex:1 1 auto/u)
   assert.match(css, /\.buka-workflows-toolbar\{[^}]*flex:none/u)
   assert.match(css, /\.buka-workflows-toolbarButton\{[^}]*height:32px/u)
 })
@@ -1710,35 +2001,34 @@ test('client: the archived view marks its filter and can go back', async () => {
   ])
   const { texts } = collect(tree)
 
-  // 归档视图里只有卡片带「已归档」标签，右上角工具栏不再放这个 tag，只剩归档设置与刷新；
-  // 页面标题改成「已归档的工作流」。
+  // 归档视图里只有卡片带「已归档」标签，右上角工具栏不放这个 tag；归档入口切换成
+  // 「返回列表」，加上归档设置与刷新。列表视图不再渲染页头标题（页签就是页头）。
   assert.ok(texts.includes('archived'), 'archived runs keep their tag')
-  const heading = findByClass(tree, 'buka-workflows-title')
-  assert.ok(heading, 'the archived list has a page title')
-  assert.deepEqual(collect(heading).texts, ['archiveTitle'], 'the archived list has its own title')
+  assert.equal(findByClass(tree, 'buka-workflows-title'), null, 'the archived list has no page title')
   const toolbar = findByClass(tree, 'buka-workflows-toolbar')
   assert.ok(toolbar, 'the title row keeps a toolbar')
   assert.equal(collect(toolbar).texts.includes('archived'), false, 'the toolbar has no archived tag')
-  assert.equal(collect(toolbar).texts.includes('archiveBack'), false, 'the back entry is not in the toolbar')
   assert.equal(
     collect(toolbar).classes.filter((name) => name === 'buka-workflows-toolbarButton').length,
-    2,
-    'only the settings and refresh buttons stay in the toolbar',
+    3,
+    'the back, settings and refresh buttons stay in the toolbar',
   )
 
-  // 返回按钮在标题左侧（标题列里），通过它会回到普通运行列表。
-  const backButton = findByClass(tree, 'buka-workflows-backButton')
-  assert.ok(backButton, 'the back entry sits next to the title')
-  assert.equal(backButton.props['aria-label'], 'archiveBack')
-  const titleCluster = findByClass(tree, 'buka-workflows-titleCluster')
-  assert.ok(titleCluster, 'the header has a title cluster')
-  let backInsideTitle = false
-  walk(titleCluster, (node) => {
-    if (node === backButton) backInsideTitle = true
+  // 返回入口在工具栏里（「返回列表」按钮），点击后回到普通运行列表；页头不再有
+  // 独立的返回按钮与标题列。
+  assert.equal(findByClass(tree, 'buka-workflows-backButton'), null, 'the header has no separate back button')
+  assert.equal(findByClass(tree, 'buka-workflows-titleCluster'), null, 'the header has no title cluster')
+  const backEntry = findBy(tree, (node) => {
+    const name = node.props?.className
+    return (
+      typeof name === 'string' &&
+      name.includes('buka-workflows-toolbarButton') &&
+      (node.children ?? []).includes('archiveBack')
+    )
   })
-  assert.ok(backInsideTitle, 'the back button is on the left of the title')
-  assert.equal(typeof backButton.props.onClick, 'function')
-  backButton.props.onClick()
+  assert.ok(backEntry, 'the toolbar shows a back-to-active entry')
+  assert.equal(typeof backEntry.props.onClick, 'function')
+  backEntry.props.onClick()
   assert.deepEqual(client.updates().slice(-1), [false], 'clicking back leaves the archived view')
 
   assert.equal(findByClass(tree, 'buka-workflows-archivedRow'), null, 'no archived entry under the list')
@@ -1898,4 +2188,246 @@ test('client: opening a known node session does not refresh the client list', as
   assert.ok(openButton)
   await openButton.props.onClick()
   assert.deepEqual(calls, ['open:session-1'], 'a known session opens without a list refresh')
+})
+
+/**
+ * 造一份模板页的 state：前 15 个 state 保持默认，后 3 个是 view / templates /
+ * selectedTemplateId / selectedTemplateNodeId。模板页渲染不关心运行列表 / 详情 state。
+ *
+ * @param {Array<Record<string, any>>} items 模板目录
+ * @param {string | null} selectedTemplateId 选中的模板 id
+ * @param {string | null} [selectedTemplateNodeId] 详情里选中的节点 id
+ * @returns {Array<any>}
+ */
+function templateStates(items, selectedTemplateId = null, selectedTemplateNodeId = null) {
+  return [
+    { status: 'loading', runs: [], archivedCount: 0, error: null },
+    null,
+    { status: 'idle', data: null, error: null },
+    0,
+    null,
+    null,
+    null,
+    null,
+    false,
+    false,
+    null,
+    false,
+    false,
+    null,
+    'templates',
+    { status: 'ready', items, error: null },
+    selectedTemplateId,
+    selectedTemplateNodeId,
+  ]
+}
+
+/** 模板页的目录 fixture：给 develop-test 一个带循环的分支流程，并像路由一样附带图模型。 */
+const TEMPLATE_FIXTURES = [
+  {
+    id: 'develop-test',
+    name: '开发与测试',
+    description: '当需求涉及代码改动并需要质量把关时参考。',
+    nodes: [
+      { id: 'start', type: 'start', next: [{ to: 'dev', name: 'begin', prompt: '实现需求。' }] },
+      {
+        id: 'dev',
+        type: 'robot',
+        robot: '开发',
+        summary: '实现需求',
+        next: [{ to: 'test', name: '完成', prompt: '开发完成。' }],
+      },
+      {
+        id: 'test',
+        type: 'robot',
+        robot: '测试',
+        summary: '验证改动',
+        next: [
+          { to: 'accept', name: '通过', prompt: '测试通过，进入验收。' },
+          { to: 'dev', name: '不通过', prompt: '测试不通过，回开发修复。' },
+        ],
+      },
+      {
+        id: 'accept',
+        type: 'user',
+        title: '验收',
+        detail: '请验收确认。',
+        next: [{ to: 'done', name: 'ok', label: '验收通过' }],
+      },
+      { id: 'done', type: 'end', status: 'completed' },
+    ],
+  },
+  {
+    id: 'draft-review',
+    name: '起草与审校',
+    description: '当交付物是需要质量把关的文字内容时参考。',
+    nodes: [
+      { id: 'start', type: 'start', next: [{ to: 'draft', name: 'begin', prompt: '起草。' }] },
+      {
+        id: 'draft',
+        type: 'robot',
+        robot: '起草',
+        summary: '起草内容',
+        next: [{ to: 'done', name: '完成', prompt: '起草完成。' }],
+      },
+      { id: 'done', type: 'end', status: 'completed' },
+    ],
+  },
+].map((template) => {
+  const model = buildTemplateGraph(template)
+  return { ...template, graph: model === null ? null : { ...model, ...layoutRunGraph(model) } }
+})
+
+test('client: the templates tab lists templates with a runs/templates tab bar', async () => {
+  const client = await loadClient()
+  const tree = client.render(templateStates(TEMPLATE_FIXTURES))
+  const { classes, texts } = collect(tree)
+  assert.ok(classes.includes('buka-workflows-tabbar'), 'the header renders the tab bar')
+  // 页签用 SegmentedTabs（DS 基座组件）承载；标签文本放在 items.label 里。
+  const segmented = findBy(tree, (node) => Array.isArray(node.props?.items))
+  assert.ok(segmented, 'the tab bar uses the SegmentedTabs primitive')
+  const tabLabels = (segmented.props.items ?? []).map((item) => item.label)
+  assert.deepEqual(tabLabels, ['runsTab', 'templatesTab'], 'the runs/templates tabs are labelled')
+  assert.equal(segmented.props.value, 'templates', 'the templates tab is the active value')
+  assert.ok(classes.includes('buka-workflows-templateCard'), 'templates render as cards')
+  assert.ok(texts.includes('开发与测试'), 'the template name is shown')
+  assert.ok(texts.includes('起草与审校'), 'the second template name is shown')
+  assert.ok(texts.includes(TEMPLATE_FIXTURES[0].description), 'the description is shown on the card')
+})
+
+test('client: a template detail renders a node graph and a node inspector', async () => {
+  const client = await loadClient()
+  const tree = client.render(templateStates(TEMPLATE_FIXTURES, 'develop-test'))
+  const { classes, texts, classLists } = collect(tree)
+
+  // 图 + 右侧节点说明双栏，不再是平面步骤列表。
+  assert.ok(classes.includes('buka-workflows-split'), 'the template detail uses the graph split')
+  assert.ok(classes.includes('buka-workflows-capsule'), 'the template flow renders node capsules')
+  assert.ok(classes.includes('buka-workflows-edge'), 'the template flow draws its edges')
+  assert.ok(classes.includes('buka-workflows-inspector'), 'the right pane explains the node')
+  assert.ok(classes.includes('buka-workflows-templateBackButton'), 'the detail offers a visible back action')
+  const templateBack = findByClass(tree, 'buka-workflows-templateBackButton')
+  assert.ok(templateBack, 'the template detail has a back action')
+  assert.equal(templateBack.props['aria-label'], 'templatesBack', 'the icon-only back action keeps an accessible label')
+  assert.equal(texts.includes('templatesBack'), false, 'the back action has no visible text label')
+  // 返回图标放在模板名称左侧（同一个 head 行里，先于标题）。
+  const templateHead = findByClass(tree, 'buka-workflows-templateHead')
+  assert.ok(templateHead, 'the template detail has a head row')
+  const headChildren = templateHead.children.filter((child) => typeof child === 'object' && child !== null)
+  const backIndex = headChildren.indexOf(templateBack)
+  const titleIndex = headChildren.findIndex((child) => child.props?.className === 'buka-workflows-templateTitle')
+  assert.ok(backIndex !== -1 && titleIndex !== -1 && backIndex < titleIndex, 'the back action sits left of the template name')
+  // 默认聚焦 start：它不执行，只通过出边把 prompt 交给第一个机器人节点。
+  assert.ok(texts.includes('startNodeHint'), 'the start node explains its role')
+  assert.ok(texts.some((text) => text.includes('begin')), 'the start edge route name appears in the transitions')
+
+  // 模板是参考流程，没有执行状态：胶囊按节点类型上色，不能一律套运行页那套
+  // 「未运行」的灰虚线——否则整张模板图看起来全是浅灰色，读不出节点类型。
+  const templateCapsules = classLists.filter((list) => list.includes('buka-workflows-capsule'))
+  for (const type of ['start', 'robot', 'user', 'end']) {
+    const capsule = templateCapsules.find((list) => list.includes(`is-${type}`))
+    assert.ok(capsule, `the template graph renders a ${type} capsule`)
+    assert.equal(capsule.includes('is-idle'), false, `the ${type} capsule keeps its type colour, not the idle gray`)
+  }
+  const capsuleTitles = []
+  walk(tree, (node) => {
+    if (typeof node.props?.title === 'string') capsuleTitles.push(node.props.title)
+  })
+  assert.equal(
+    capsuleTitles.some((title) => title.includes('未运行')),
+    false,
+    'template capsules never claim a run state',
+  )
+
+  // 连线也不属于运行状态：模板里的边是中性实线（不是「未走过」的虚线），
+  // 图例也只留一条「流程走向」，不再列「已走过 / 未走过」。
+  const staticEdges = classLists.filter(
+    (list) => list.includes('buka-workflows-edge') && list.includes('is-static'),
+  )
+  assert.ok(staticEdges.length > 0, 'template edges are drawn as static flow lines')
+  assert.equal(
+    staticEdges.some((list) => list.includes('is-traversed')),
+    false,
+    'template edges are never marked as traversed',
+  )
+  assert.ok(texts.includes('legendFlow'), 'the template legend labels the edges as flow')
+  assert.equal(texts.includes('legendTraversed'), false, 'the template legend has no run-state edge labels')
+  assert.equal(texts.includes('legendPending'), false, 'the template legend has no run-state edge labels')
+  assert.equal(
+    classLists.filter((list) => list.includes('buka-workflows-legendLine')).length,
+    1,
+    'the template footer shows a single edge sample',
+  )
+  const css = client.css()
+  assert.match(css, /\.buka-workflows-edge\.is-static\{[^}]*stroke-dasharray:none/u, 'static edges are solid')
+  assert.match(
+    css,
+    /\.buka-workflows-legendLine\.is-static\{[^}]*border-top-style:solid/u,
+    'the static edge legend sample is a solid line',
+  )
+
+  // 选一个机器人节点：右侧显示抽象角色、目的与流转去向。
+  const devTree = client.render(templateStates(TEMPLATE_FIXTURES, 'develop-test', 'dev'))
+  const devTexts = collect(devTree).texts
+  assert.ok(devTexts.includes('开发'), 'the abstract role name is shown')
+  assert.ok(devTexts.includes('templatesAbstractRole'), 'the abstract-role tag is shown')
+  assert.ok(devTexts.includes('templatesRole'), 'the role is labelled')
+  assert.ok(devTexts.includes('实现需求'), 'the node purpose is shown')
+  assert.ok(devTexts.includes('templatesPurpose'), 'the purpose is labelled')
+  assert.ok(devTexts.includes('templatesTransitions'), 'the node transitions are listed')
+})
+
+test('client: a pending plan review shows a plan-review notice with an open-session action', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  data.run = {
+    ...data.run,
+    status: 'waiting',
+    result: null,
+    pendingInteraction: {
+      kind: 'question',
+      planReview: true,
+      nodeId: 'publish',
+      visit: 1,
+      seq: 2,
+      robot: 'publisher',
+      sessionId: 'session-1',
+      askedAt: 1_700_000_000_002,
+      questions: [
+        {
+          id: 'plan-review',
+          question: 'Approve this plan and leave plan mode?',
+          options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+          intent: { kind: 'plan-review', approve: 'Approve' },
+        },
+      ],
+    },
+  }
+  const tree = client.render(detailStates(data, 'publish'))
+  const { classes, texts } = collect(tree)
+
+  assert.ok(classes.includes('buka-workflows-interactionNotice'))
+  assert.ok(texts.includes('waitingForPlanReview'))
+  assert.ok(texts.includes('planReviewBody'))
+  assert.equal(texts.includes('Approve this plan and leave plan mode?'), false, 'the raw review question is not dumped')
+  assert.ok(texts.includes('openPlanReviewSession'))
+  const openButton = findBy(tree, (node) => (node.children ?? []).includes('openPlanReviewSession'))
+  assert.ok(openButton)
+  assert.equal(typeof openButton.props.onClick, 'function')
+})
+
+test('client: a plan-mode robot node shows its mode tag in the detail panel', async () => {
+  const client = await loadClient()
+  const data = fixture()
+  data.definition.plan.nodes.publish.mode = 'plan'
+  const model = buildRunGraph({ run: data.run, definition: data.definition })
+  assert.ok(model)
+  data.graph = { ...model, ...layoutRunGraph(model) }
+  const tree = client.render(detailStates(data, 'publish'))
+  const { texts } = collect(tree)
+  assert.ok(texts.includes('modePlan'))
+
+  // 普通机器人节点不显示这个标签。
+  const plain = fixture()
+  assert.equal(collect(client.render(detailStates(plain, 'publish'))).texts.includes('modePlan'), false)
 })

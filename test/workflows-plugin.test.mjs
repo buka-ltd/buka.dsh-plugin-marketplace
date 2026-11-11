@@ -1,6 +1,6 @@
 /**
  * @buka/dsh-plugin-workflows 纯逻辑模块的单测：模板、落盘存储与自动归档。
- * 定义校验/路由由 test/workflows-format-v2.test.mjs 覆盖，执行由
+ * 定义校验/路由由 test/workflows-format-v3.test.mjs 覆盖，执行由
  * test/workflows-supervisor.test.mjs 覆盖。
  */
 

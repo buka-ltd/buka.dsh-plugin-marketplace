@@ -2,7 +2,7 @@
  * 机器人会话里的四个只读工作流工具：总览、执行输入、执行输出与附件读取。
  *
  * 用真实 WorkflowRunStore + 假 defineTool / resolveSession，覆盖节点图、执行顺序、
- * 门禁记录、运行中节点、截断标记与错误分支。
+ * 用户介入记录、运行中节点、截断标记与错误分支。
  */
 
 import assert from 'node:assert/strict'
@@ -30,11 +30,14 @@ const DEFINITION = {
     },
     {
       id: 'review',
-      type: 'gate',
+      type: 'user',
       title: '发布确认',
-      detail: 'GATE-DETAIL',
-      onApprove: { to: 'done', name: '同意' },
-      onReject: { to: 'done', name: '拒绝' },
+      detail: '用户说明：{{nodes.dev.text}}',
+      next: [
+        { to: 'done', name: 'approve', label: '同意', description: '直接结束' },
+        { to: 'done', name: 'reject', label: '拒绝' },
+      ],
+      questions: [{ id: 'notes', header: '备注', question: '还需要说明什么？' }],
     },
     { id: 'done', type: 'end', status: 'completed' },
   ],
@@ -87,7 +90,7 @@ async function writeRun({ run, definition = DEFINITION, sessionId = 'session-dev
 async function completedRun(runId) {
   const now = Date.now()
   return {
-    version: 2,
+    version: 3,
     runId,
     seq: 7,
     goal: '写发布说明',
@@ -97,7 +100,7 @@ async function completedRun(runId) {
     finishedAt: now,
     createdBy: { sessionId: 'root' },
     current: null,
-    pendingGate: null,
+    pendingUser: null,
     pendingInteraction: null,
     steps: [
       {
@@ -121,14 +124,20 @@ async function completedRun(runId) {
         seq: 2,
         nodeId: 'review',
         visit: 1,
-        type: 'gate',
+        type: 'user',
         robot: null,
         sessionId: null,
-        status: 'approved',
-        decision: 'approved',
+        status: 'completed',
+        route: 'approve',
+        routeTo: 'done',
+        answers: [
+          { id: 'route', selected: ['同意'], custom: '' },
+          { id: 'notes', selected: [], custom: '可以发布' },
+        ],
+        input: '用户说明：OUTPUT-PREVIEW',
         startedAt: now - 400,
         finishedAt: now - 300,
-        text: '',
+        text: '选择：同意\n备注：（可以发布）',
         error: null,
       },
     ],
@@ -179,7 +188,7 @@ test('session tools: overview exposes graph, states, summaries and execution ord
       [
         ['start', 'completed'],
         ['dev', 'completed'],
-        ['review', 'approved'],
+        ['review', 'completed'],
         ['done', 'completed'],
       ],
     )
@@ -187,25 +196,24 @@ test('session tools: overview exposes graph, states, summaries and execution ord
     assert.deepEqual(overview.edges.map((edge) => [edge.from, edge.to, edge.names]), [
       ['start', 'dev', ['开始']],
       ['dev', 'review', ['pass']],
-      ['review', 'done', ['同意']],
-      ['review', 'done', ['拒绝']],
+      ['review', 'done', ['approve', 'reject']],
     ])
     assert.deepEqual(overview.executions.map((execution) => [execution.seq, execution.nodeId, execution.status]), [
       [1, 'dev', 'completed'],
-      [2, 'review', 'approved'],
+      [2, 'review', 'completed'],
     ])
     const serialized = JSON.stringify(overview)
-    assert.doesNotMatch(serialized, /PROMPT-DEV|OUTPUT-DEV|GATE-DETAIL/)
+    assert.doesNotMatch(serialized, /PROMPT-DEV|OUTPUT-DEV|用户说明/)
     const rendered = tools.buka_workflow_overview.output.render({}, overview)[0].text
     assert.match(rendered, /nodes:/)
     assert.match(rendered, /executions:/)
-    assert.doesNotMatch(rendered, /PROMPT-DEV|OUTPUT-DEV|GATE-DETAIL/)
+    assert.doesNotMatch(rendered, /PROMPT-DEV|OUTPUT-DEV|用户说明/)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('session tools: input reads the robot prompt and the gate title/detail', async () => {
+test('session tools: input reads the robot prompt and the user title/instruction/choices', async () => {
   const { store, dir, tools } = await writeRun({ run: await completedRun('wf-input') })
   try {
     await store.saveNodeResult('wf-input', 1, 'dev', {
@@ -229,18 +237,20 @@ test('session tools: input reads the robot prompt and the gate title/detail', as
       /PROMPT-DEV/,
     )
 
-    const gate = await tools.buka_workflow_execution_input.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
-    assert.equal(gate.type, 'gate')
-    assert.equal(gate.robot, null)
-    assert.equal(gate.status, 'approved')
-    assert.match(gate.input, /发布确认/)
-    assert.match(gate.input, /GATE-DETAIL/)
+    const user = await tools.buka_workflow_execution_input.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
+    assert.equal(user.type, 'user')
+    assert.equal(user.robot, null)
+    assert.equal(user.status, 'completed')
+    assert.match(user.input, /发布确认/)
+    assert.match(user.input, /用户说明：OUTPUT-PREVIEW/)
+    assert.match(user.input, /同意/)
+    assert.match(user.input, /拒绝/)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('session tools: output reads deliverable, structured data and gate decision', async () => {
+test('session tools: output reads deliverable, structured data and user answers', async () => {
   const { store, dir, tools } = await writeRun({ run: await completedRun('wf-output') })
   try {
     await store.saveNodeResult('wf-output', 1, 'dev', {
@@ -267,10 +277,18 @@ test('session tools: output reads deliverable, structured data and gate decision
       /OUTPUT-DEV/,
     )
 
-    const gate = await tools.buka_workflow_execution_output.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
-    assert.equal(gate.type, 'gate')
-    assert.equal(gate.output, 'approved')
-    assert.equal(gate.structured, null)
+    const user = await tools.buka_workflow_execution_output.execute({ seq: 2 }, { agent: { id: 'session-dev' } })
+    assert.equal(user.type, 'user')
+    assert.equal(user.output, '选择：同意\n备注：（可以发布）')
+    assert.equal(user.route, 'approve')
+    assert.deepEqual(user.structured, {
+      route: 'approve',
+      routeTo: 'done',
+      answers: [
+        { id: 'route', selected: ['同意'], custom: '' },
+        { id: 'notes', selected: [], custom: '可以发布' },
+      ],
+    })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -371,7 +389,7 @@ test('session tools: output lists attachments and the attachment tool reads them
 test('session tools: an attachment tool refuses a running execution', async () => {
   const now = Date.now()
   const run = {
-    version: 2,
+    version: 3,
     runId: 'wf-file-running',
     seq: 10,
     goal: '运行中',
@@ -390,7 +408,7 @@ test('session tools: an attachment tool refuses a running execution', async () =
       sessionId: 'session-run',
       startedAt: now,
     },
-    pendingGate: null,
+    pendingUser: null,
     pendingInteraction: null,
     steps: [],
     sessions: [],
@@ -422,7 +440,7 @@ test('session tools: an attachment tool refuses a running execution', async () =
 test('session tools: current running execution exposes input but not output', async () => {
   const now = Date.now()
   const run = {
-    version: 2,
+    version: 3,
     runId: 'wf-running',
     seq: 8,
     goal: '运行中',
@@ -441,7 +459,7 @@ test('session tools: current running execution exposes input but not output', as
       sessionId: 'session-run',
       startedAt: now,
     },
-    pendingGate: null,
+    pendingUser: null,
     pendingInteraction: null,
     steps: [],
     sessions: [],
@@ -470,20 +488,30 @@ test('session tools: current running execution exposes input but not output', as
   }
 })
 
-test('session tools: a waiting gate exposes input but not output', async () => {
+test('session tools: a waiting user node exposes input but not output', async () => {
   const now = Date.now()
   const run = {
-    version: 2,
-    runId: 'wf-gate',
+    version: 3,
+    runId: 'wf-user-waiting',
     seq: 9,
-    goal: '等待审批',
+    goal: '等待用户',
     status: 'waiting',
     createdAt: now - 1000,
     updatedAt: now,
     finishedAt: null,
     createdBy: { sessionId: 'root' },
-    current: { nodeId: 'review', visit: 1, seq: 1, type: 'gate', robot: null, startedAt: now },
-    pendingGate: { nodeId: 'review', title: '发布确认', detail: 'GATE-DETAIL', requestedAt: now },
+    current: { nodeId: 'review', visit: 1, seq: 1, type: 'user', robot: null, startedAt: now },
+    pendingUser: {
+      nodeId: 'review',
+      title: '发布确认',
+      detail: 'GATE-DETAIL',
+      options: [
+        { name: 'approve', label: '同意' },
+        { name: 'reject', label: '拒绝' },
+      ],
+      questions: [],
+      requestedAt: now,
+    },
     pendingInteraction: null,
     steps: [],
     sessions: [],
@@ -493,13 +521,14 @@ test('session tools: a waiting gate exposes input but not output', async () => {
   const { dir, tools } = await writeRun({ run })
   try {
     const input = await tools.buka_workflow_execution_input.execute({ seq: 1 }, { agent: { id: 'session-dev' } })
-    assert.equal(input.type, 'gate')
+    assert.equal(input.type, 'user')
     assert.equal(input.status, 'waiting')
     assert.match(input.input, /发布确认/)
     assert.match(input.input, /GATE-DETAIL/)
+    assert.match(input.input, /同意/)
     await assert.rejects(
       () => tools.buka_workflow_execution_output.execute({ seq: 1 }, { agent: { id: 'session-dev' } }),
-      /waiting for approval/,
+      /waiting for the user/,
     )
   } finally {
     await fs.rm(dir, { recursive: true, force: true })

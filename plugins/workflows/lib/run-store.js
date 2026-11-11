@@ -8,7 +8,7 @@
  * runs/<runId>/
  *   definition.json  本次一次性定义的快照（goal、节点、创建者、时间）
  *   run.json         权威状态快照：原子写（临时文件 + rename）
- *   events.jsonl     追加事件：node/start、node/end、gate/decided、run/end …
+ *   events.jsonl     追加事件：node/start、node/end、user/answered、run/end …
  *   nodes/<seq>-<id>/
  *     result.json       节点结果全文（run.json 里只留预览；机器人会话的只读
  *                       工具从这里读某次执行的 prompt / 输出）
@@ -74,7 +74,7 @@ export const SEQUENCE_FILE = 'sequence.json'
  * 当前运行数据格式版本。启动时会把版本不符（或 run.json / definition.json
  * 缺失、损坏）的运行目录整个删掉：旧格式没有迁移路径。
  */
-export const WORKFLOW_FORMAT_VERSION = 2
+export const WORKFLOW_FORMAT_VERSION = 3
 
 /** 一个小时的毫秒数：归档设置的时间单位。 */
 const HOUR_MS = 60 * 60 * 1000
@@ -773,9 +773,9 @@ export class WorkflowRunStore {
         createdAt: run.createdAt ?? null,
         finishedAt: run.finishedAt ?? null,
         archivedAt: archived ? run.archivedAt : null,
-        lastNode: run.current?.nodeId ?? run.result?.lastNode ?? null,
+        lastNode: run.active?.[0]?.nodeId ?? run.current?.nodeId ?? run.result?.lastNode ?? null,
         error: run.error ?? null,
-        waitingForUser: Boolean(run.pendingInteraction),
+        waitingForUser: Boolean(run.pendingInteraction || run.pendingUser),
       })
     }
     runs.sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0))
@@ -830,7 +830,8 @@ export class WorkflowRunStore {
     run.updatedAt = now
     run.finishedAt = now
     run.current = null
-    run.pendingGate = null
+    run.active = []
+    run.pendingUser = null
     run.pendingInteraction = null
     run.error = typeof reason === 'string' && reason !== '' ? reason : 'host restarted before this workflow finished'
     run.result = { status: 'interrupted', lastNode: run.result?.lastNode ?? null }

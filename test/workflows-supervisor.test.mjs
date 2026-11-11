@@ -24,15 +24,19 @@ function harness({
   autoFinish = true,
   resumable = true,
   results = [],
+  userAnswers = [],
   approval = 'allowed-once',
   workspace = '/robot',
+  planModeService = true,
+  supportsPlanMode = true,
 } = {}) {
   /** @type {Map<string, Array<Function>>} */
   const listeners = new Map()
   /** @type {Map<string, Record<string, any>>} */
   const sessions = new Map()
   const script = [...results]
-  const calls = { dispatch: [], open: [], sends: [], disposals: [], approval: 0 }
+  const userScript = [...userAnswers]
+  const calls = { dispatch: [], open: [], sends: [], disposals: [], approval: 0, user: [], planMode: [] }
   let counter = 0
   let retries = 0
 
@@ -93,6 +97,15 @@ function harness({
         calls.disposals.push(state.sessionId)
         state.disposed = true
       },
+      getPlanMode() {
+        return planModeService ? { active: state.planMode === true } : null
+      },
+      setPlanMode(active) {
+        if (!planModeService) return null
+        state.planMode = active === true
+        calls.planMode.push({ sessionId: state.sessionId, active: state.planMode })
+        return 'committed'
+      },
     }
     return handle
   }
@@ -106,6 +119,7 @@ function harness({
       result: nextResult(),
       disposed: false,
       cancelled: null,
+      planMode: request.planMode === true,
       request,
     }
     sessions.set(sessionId, state)
@@ -134,6 +148,7 @@ function harness({
       }
       state.prompt = request.prompt
       state.disposed = false
+      if (request.planMode === true || request.planMode === false) state.planMode = request.planMode
       const handle = makeHandle(state, request, existing !== undefined)
       if (autoFinish) setImmediate(() => finish(sessionId, state.result.stopReason ?? 'completed'))
       return handle
@@ -143,8 +158,10 @@ function harness({
       const state = sessions.get(request.sessionId)
       if (!resumable || state === undefined) throw new Error('session cannot be resumed')
       state.disposed = false
+      if (request.planMode === true || request.planMode === false) state.planMode = request.planMode
       return makeHandle(state, request, true)
     },
+    supportsPlanMode,
   }
 
   const ctx = {
@@ -165,6 +182,16 @@ function harness({
           async request() {
             calls.approval += 1
             return approval
+          },
+        }
+      }
+      if (name === 'userQuestions') {
+        return {
+          async ask(request) {
+            calls.user.push(request)
+            const answer = userScript.length > 0 ? userScript.shift() : { answers: [] }
+            if (answer instanceof Error) throw answer
+            return answer
           },
         }
       }
@@ -301,7 +328,11 @@ test('supervisor: a turn/end event advances the run without an awaited session r
     assert.equal(host.calls.dispatch[0].approval, 'ask')
     assert.equal('report' in host.calls.dispatch[0], false)
     assert.equal(host.calls.dispatch[0].outputSchema.required, undefined)
-    assert.deepEqual(host.calls.dispatch[0].outputSchema.properties.next.enum, ['完成'])
+    assert.deepEqual(
+      host.calls.dispatch[0].outputSchema.properties.next.oneOf.map((branch) => branch.type),
+      ['string', 'array'],
+    )
+    assert.deepEqual(host.calls.dispatch[0].outputSchema.properties.next.oneOf[0].enum, ['完成'])
     assert.equal(host.calls.dispatch[0].outputSchema.properties.abort.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.summary.type, 'string')
     assert.equal(host.calls.dispatch[0].outputSchema.properties.attachments.type, 'array')
@@ -368,7 +399,7 @@ test('supervisor: session index falls back to steps when sessions is missing', a
       finishedAt: now,
       createdBy: { sessionId: 'root' },
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       pendingInteraction: null,
       steps: [
         {
@@ -632,12 +663,12 @@ test('supervisor: a disposed session is resumed and the node continues', async (
       agent: { id: 'root' },
       mode: 'background',
     })
-    const sessionId = started.run.current.sessionId
+    const sessionId = started.run.active[0].sessionId
     assert.equal(typeof sessionId, 'string')
     host.dispose(sessionId)
     await waitFor(async () => {
       const run = await store.readRun(started.runId)
-      return run?.current?.recovering === true || run?.current?.recoveryAttempts > 0
+      return run?.active?.[0]?.recovering === true || run?.active?.[0]?.recoveryAttempts > 0
     }, 'recovery start')
     // openSession 后 send 一条恢复 prompt；让它在同一会话里完成。
     host.result(sessionId, { text: 'continued', structured: { next: '完成' }, stopReason: 'completed' })
@@ -645,6 +676,7 @@ test('supervisor: a disposed session is resumed and the node continues', async (
     await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'recovered completion')
     const run = await store.readRun(started.runId)
     assert.equal(host.calls.open.length, 1)
+    assert.equal(host.calls.open[0].planMode, false, 'a normal node clears stale plan mode on recovery')
     assert.equal(host.calls.sends.length, 1)
     assert.match(host.calls.sends[0].text, /interrupted/i)
     assert.equal(run.steps[0].text, 'continued')
@@ -668,7 +700,7 @@ test('supervisor: a disposed session that cannot reopen terminates the run witho
       agent: { id: 'root' },
       mode: 'background',
     })
-    const sessionId = started.run.current.sessionId
+    const sessionId = started.run.active[0].sessionId
     host.dispose(sessionId)
     await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'recovery failure')
     const run = await store.readRun(started.runId)
@@ -799,7 +831,7 @@ test('supervisor: resumeAll finalizes a turn that completed before the restart',
         attempt: 1,
         recoveryAttempts: 0,
       },
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       sessions: [],
       result: null,
@@ -842,7 +874,7 @@ test('supervisor: cancel stops the run and ignores late turns', async () => {
       agent: { id: 'root' },
       mode: 'background',
     })
-    const sessionId = started.run.current.sessionId
+    const sessionId = started.run.active[0].sessionId
     assert.equal(await supervisor.cancel(started.runId), true)
     const run = await store.readRun(started.runId)
     assert.equal(run.status, 'cancelled')
@@ -870,7 +902,7 @@ test('supervisor: no timer by default; an explicit timeout cancels the node', as
     })
     await new Promise((resolve) => setTimeout(resolve, 80))
     assert.equal((await store.readRun(started.runId)).status, 'running')
-    const sessionId = started.run.current.sessionId
+    const sessionId = started.run.active[0].sessionId
     host.result(sessionId, { text: 'long done', structured: { next: '完成' }, stopReason: 'completed' })
     host.finish(sessionId)
     await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'default no timeout')
@@ -900,8 +932,8 @@ test('supervisor: no timer by default; an explicit timeout cancels the node', as
   }
 })
 
-const GATE = {
-  goal: '审批后发布',
+const USER = {
+  goal: '确认后发布',
   maxSteps: 10,
   nodes: [
     { id: 'start', type: 'start', next: [{ to: 'prepare', name: '开始', prompt: 'prepare' }] },
@@ -914,11 +946,14 @@ const GATE = {
     },
     {
       id: 'confirm',
-      type: 'gate',
+      type: 'user',
       title: '发布确认',
       detail: '是否发布？',
-      onApprove: { to: 'publish', name: '发布', prompt: 'publish it' },
-      onReject: { to: 'done', name: '取消' },
+      next: [
+        { to: 'publish', name: 'approve', label: '同意发布', description: '直接发布', prompt: 'publish it' },
+        { to: 'done', name: 'reject', label: '取消' },
+      ],
+      questions: [{ id: 'notes', header: '备注', question: '还有什么要说明？' }],
     },
     {
       id: 'publish',
@@ -931,11 +966,24 @@ const GATE = {
   ],
 }
 
-test('supervisor: gate runs foreground, waits for approval and continues', async () => {
+test('supervisor: user runs foreground, waits for the user and continues', async () => {
   const { store, dir } = await makeStore()
   try {
-    const host = harness({ results: [{ text: 'prepared', structured: { next: '准备完成' }, stopReason: 'completed' }, { text: 'published', structured: { next: '完成' }, stopReason: 'completed' }] })
-    const definition = GATE
+    const host = harness({
+      results: [
+        { text: 'prepared', structured: { next: '准备完成' }, stopReason: 'completed' },
+        { text: 'published', structured: { next: '完成' }, stopReason: 'completed' },
+      ],
+      userAnswers: [
+        {
+          answers: [
+            { id: 'route', selected: ['同意发布'] },
+            { id: 'notes', selected: [], custom: '记得发公告' },
+          ],
+        },
+      ],
+    })
+    const definition = USER
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     const run = await supervisor.start({
@@ -945,21 +993,43 @@ test('supervisor: gate runs foreground, waits for approval and continues', async
       mode: 'foreground',
     })
     assert.equal(run.status, 'completed')
-    assert.equal(host.calls.approval, 1)
-    const gateStep = run.steps.find((step) => step.nodeId === 'confirm')
-    assert.equal(gateStep.decision, 'approved')
+    assert.equal(host.calls.approval, 0)
+    assert.equal(host.calls.user.length, 1)
+    assert.deepEqual(
+      host.calls.user[0].questions.map((question) => question.id),
+      ['route', 'notes'],
+    )
+    assert.deepEqual(
+      host.calls.user[0].questions[0].options,
+      [
+        { label: '同意发布', description: '直接发布' },
+        { label: '取消' },
+      ],
+    )
+    const userStep = run.steps.find((step) => step.nodeId === 'confirm')
+    assert.equal(userStep.type, 'user')
+    assert.equal(userStep.status, 'completed')
+    assert.equal(userStep.route, 'approve')
+    assert.equal(userStep.routeTo, 'publish')
+    assert.deepEqual(userStep.answers, [
+      { id: 'route', selected: ['同意发布'], custom: '' },
+      { id: 'notes', selected: [], custom: '记得发公告' },
+    ])
+    assert.match(userStep.text, /选择：同意发布/u)
     assert.equal(run.steps.find((step) => step.nodeId === 'publish').text, 'published')
-    assert.equal((await store.readRun(run.runId)).status, 'completed')
+    const persisted = await store.readRun(run.runId)
+    assert.equal(persisted.status, 'completed')
+    assert.equal(persisted.pendingUser, null)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('supervisor: a gate definition cannot start in background mode', async () => {
+test('supervisor: a user definition cannot start in background mode', async () => {
   const { store, dir } = await makeStore()
   try {
     const host = harness()
-    const definition = GATE
+    const definition = USER
     const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
     supervisor.attachRobots(host.robots)
     await assert.rejects(
@@ -970,8 +1040,58 @@ test('supervisor: a gate definition cannot start in background mode', async () =
           agent: { id: 'root' },
           mode: 'background',
         }),
-      /gate/i,
+      /user node/i,
     )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a skipped user choice cancels the run', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [{ text: 'prepared', structured: { next: '准备完成' }, stopReason: 'completed' }],
+      userAnswers: [{ answers: [{ id: 'route', selected: [] }, { id: 'notes', selected: [], custom: '再想想' }] }],
+    })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const run = await supervisor.start({
+      plan: planOf(USER),
+      definition: USER,
+      agent: { id: 'root' },
+      mode: 'foreground',
+    })
+    assert.equal(run.status, 'cancelled')
+    const userStep = run.steps.find((step) => step.nodeId === 'confirm')
+    assert.equal(userStep.status, 'cancelled')
+    assert.equal(userStep.route, null)
+    assert.match(run.result.message, /submitted without a choice/u)
+    assert.equal(run.steps.some((step) => step.nodeId === 'publish'), false)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a missing user-questions answerer fails the run with a clear error', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const error = new Error('no user-questions answerer accepted the request')
+    error.code = 'NO_PROVIDER'
+    const host = harness({
+      results: [{ text: 'prepared', structured: { next: '准备完成' }, stopReason: 'completed' }],
+      userAnswers: [error],
+    })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const run = await supervisor.start({
+      plan: planOf(USER),
+      definition: USER,
+      agent: { id: 'root' },
+      mode: 'foreground',
+    })
+    assert.equal(run.status, 'failed')
+    assert.match(run.error, /no user-questions answerer/u)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -1030,7 +1150,7 @@ test('supervisor: restart recovery rehydrates attachments into the next prompt',
       finishedAt: null,
       createdBy: { sessionId: 'root' },
       current: null,
-      pendingGate: null,
+      pendingUser: null,
       pendingInteraction: null,
       steps: [
         {
@@ -1101,7 +1221,7 @@ test('supervisor: resumeAll sends a continuation prompt for a turn that never fi
         attempt: 1,
         recoveryAttempts: 0,
       },
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       sessions: [],
       result: null,
@@ -1161,7 +1281,7 @@ test('supervisor: resumeAll interrupts a run that cannot reopen its session, wit
         attempt: 1,
         recoveryAttempts: 0,
       },
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       sessions: [],
       result: null,
@@ -1182,23 +1302,23 @@ test('supervisor: resumeAll interrupts a run that cannot reopen its session, wit
   }
 })
 
-test('supervisor: resumeAll interrupts a gate run because approval cannot be recreated', async () => {
+test('supervisor: resumeAll interrupts a user run because the question cannot be recreated', async () => {
   const { store, dir } = await makeStore()
   try {
-    const definition = GATE
+    const definition = USER
     const plan = planOf(definition)
     const run = {
       version: 1,
-      runId: 'wf-recover-gate',
+      runId: 'wf-recover-user',
       seq: 1,
-      goal: '门禁恢复',
+      goal: '用户介入恢复',
       status: 'waiting',
       createdAt: 1,
       updatedAt: 1,
       finishedAt: null,
       createdBy: { sessionId: 'root' },
-      current: { nodeId: 'confirm', visit: 1, seq: 2, type: 'gate', robot: null, startedAt: 1 },
-      pendingGate: { nodeId: 'confirm', title: '发布确认', requestedAt: 1 },
+      current: { nodeId: 'confirm', visit: 1, seq: 2, type: 'user', robot: null, startedAt: 1 },
+      pendingUser: { nodeId: 'confirm', title: '发布确认', requestedAt: 1 },
       steps: [],
       sessions: [],
       result: null,
@@ -1211,7 +1331,9 @@ test('supervisor: resumeAll interrupts a gate run because approval cannot be rec
     await supervisor.resumeAll()
     const persisted = await store.readRun(run.runId)
     assert.equal(persisted.status, 'interrupted')
-    assert.match(persisted.error, /approval/i)
+    assert.match(persisted.error, /user|question/i)
+    assert.equal(persisted.pendingUser, null)
+    assert.equal(host.calls.user.length, 0, 'no question is re-asked after a restart')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -1234,7 +1356,7 @@ test('supervisor: resumeAll interrupts an old run without observer recovery data
       createdBy: { sessionId: 'root' },
       // 旧版运行：current 没有 prompt / sessionId，无法安全恢复。
       current: { nodeId: 'work', visit: 1, seq: 1, type: 'robot', robot: 'writer', startedAt: 1 },
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       sessions: [],
       result: null,
@@ -1404,7 +1526,7 @@ test('supervisor: pending question and approval are recorded and cleared', async
       agent: { id: 'root' },
       mode: 'background',
     })
-    const sessionId = started.run.current.sessionId
+    const sessionId = started.run.active[0].sessionId
 
     let releaseQuestion
     const questionAnswer = new Promise((resolve) => {
@@ -1650,7 +1772,7 @@ test('supervisor: resumeAll finalizes a completed abort result as an aborted run
         attempt: 1,
         recoveryAttempts: 0,
       },
-      pendingGate: null,
+      pendingUser: null,
       steps: [],
       sessions: [],
       result: null,
@@ -1702,6 +1824,304 @@ test('supervisor: a valid abort wins over session recovery', async () => {
     assert.equal(run.steps[0].aborted, true)
     assert.equal(run.result.aborted, true)
     assert.equal(host.calls.open.length, 0, 'the session is not resumed when it already aborted')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 并发 fan-out + join
+// ---------------------------------------------------------------------------
+
+const CONCURRENT = {
+  goal: '并行开发',
+  maxSteps: 20,
+  nodes: [
+    { id: 'start', type: 'start', next: [{ to: 'plan', name: '开始', prompt: '规划并行任务。' }] },
+    {
+      id: 'plan',
+      type: 'robot',
+      robot: 'planner',
+      output: { type: 'object', properties: {} },
+      next: [
+        { to: 't1', name: 'a', prompt: '任务一。' },
+        { to: 't2', name: 'b', prompt: '任务二。' },
+        { to: 't3', name: 'c', prompt: '任务三。' },
+      ],
+    },
+    { id: 't1', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 't2', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 't3', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 'merge', type: 'join', inputs: ['t1', 't2', 't3'], next: [{ to: 'done' }] },
+    { id: 'done', type: 'end', status: 'completed' },
+  ],
+}
+
+test('supervisor: fan-out runs tasks concurrently and the join fires after all inputs', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'planned', structured: { next: ['a', 'b', 'c'] }, stopReason: 'completed' },
+        { text: 't1', structured: {}, stopReason: 'completed' },
+        { text: 't2', structured: {}, stopReason: 'completed' },
+        { text: 't3', structured: {}, stopReason: 'completed' },
+      ],
+    })
+    const definition = CONCURRENT
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'concurrent completion')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps.length, 4, 'planner + 3 tasks')
+    assert.deepEqual(
+      run.steps.map((step) => step.nodeId),
+      ['plan', 't1', 't2', 't3'],
+    )
+    // planner fan-out 记录了三条例全部出口。
+    assert.deepEqual(run.steps[0].routes, [
+      { name: 'a', to: 't1' },
+      { name: 'b', to: 't2' },
+      { name: 'c', to: 't3' },
+    ])
+    assert.equal(run.steps[0].route, null, 'fan-out 不止一条边时不写单值 route')
+    assert.equal(host.calls.dispatch.length, 4, 'planner + 3 concurrent tasks')
+    assert.equal(run.result.lastNode, 'done')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+const OVERLAP = {
+  goal: '重叠汇合',
+  maxSteps: 30,
+  nodes: [
+    { id: 'start', type: 'start', next: [{ to: 'plan', name: '开始', prompt: '规划。' }] },
+    {
+      id: 'plan',
+      type: 'robot',
+      robot: 'planner',
+      output: { type: 'object', properties: {} },
+      next: [
+        { to: 't1', name: 'e1', prompt: '任务一。' },
+        { to: 't2', name: 'e2', prompt: '任务二。' },
+        { to: 't3', name: 'e3', prompt: '任务三。' },
+        { to: 't4', name: 'e4', prompt: '任务四（未启动）。' },
+      ],
+    },
+    { id: 't1', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 't2', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 't3', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 't4', type: 'robot', robot: 'worker', output: { type: 'object', properties: {} } },
+    { id: 'x', type: 'join', inputs: ['t1', 't2', 't4'], next: [{ to: 'done' }] },
+    { id: 'y', type: 'join', inputs: ['t2', 't3'], next: [{ to: 'done' }] },
+    { id: 'done', type: 'end', status: 'completed' },
+  ],
+}
+
+test('supervisor: a join waits only for its started inputs and supports overlap', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({
+      results: [
+        { text: 'planned', structured: { next: ['e1', 'e2', 'e3'] }, stopReason: 'completed' },
+        { text: 't1', structured: {}, stopReason: 'completed' },
+        { text: 't2', structured: {}, stopReason: 'completed' },
+        { text: 't3', structured: {}, stopReason: 'completed' },
+      ],
+    })
+    const definition = OVERLAP
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(definition),
+      definition,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'overlap completion')
+    const run = await store.readRun(started.runId)
+    assert.equal(run.steps.length, 4, 'planner + started tasks (t4 未启动)')
+    // t4 没有启动，所以两个 join 都不等它；t2 同时喂给 x 和 y。
+    assert.deepEqual(
+      run.steps.map((step) => step.nodeId),
+      ['plan', 't1', 't2', 't3'],
+    )
+    assert.equal(run.result.status, 'completed')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+const PLAN = {
+  goal: '先计划再实施',
+  maxSteps: 10,
+  nodes: [
+    { id: 'start', type: 'start', next: [{ to: 'implement', name: '开始', prompt: '先给计划，批准后再实施。' }] },
+    {
+      id: 'implement',
+      type: 'robot',
+      robot: 'developer',
+      mode: 'plan',
+      summary: '计划后实施',
+      output: { type: 'object', properties: {} },
+      agentOptions: { provider: 'test-provider', model: 'test-model' },
+      next: [{ to: 'done', name: '完成' }],
+    },
+    { id: 'done', type: 'end', status: 'completed' },
+  ],
+}
+
+test('supervisor: plan nodes dispatch with planMode true and normal nodes with false', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const normal = harness({ results: [{ text: 'done', structured: { next: '完成' }, stopReason: 'completed' }] })
+    const normalSupervisor = new WorkflowSupervisor({ ctx: normal.ctx, store, logger: normal.ctx.logger })
+    normalSupervisor.attachRobots(normal.robots)
+    const normalStarted = await normalSupervisor.start({
+      plan: planOf(SIMPLE),
+      definition: SIMPLE,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    assert.equal(normal.calls.dispatch[0].planMode, false)
+    await waitFor(async () => (await store.readRun(normalStarted.runId))?.status === 'completed', 'normal completion')
+
+    const plan = harness({ autoFinish: false, results: [{ text: '', stopReason: 'completed' }] })
+    const planSupervisor = new WorkflowSupervisor({ ctx: plan.ctx, store, logger: plan.ctx.logger })
+    planSupervisor.attachRobots(plan.robots)
+    const planStarted = await planSupervisor.start({
+      plan: planOf(PLAN),
+      definition: PLAN,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    assert.equal(plan.calls.dispatch[0].planMode, true)
+    const planSessionId = planStarted.run.active[0].sessionId
+    // 模拟用户批准：plan 模式已退出，机器人实施完并交回结果。
+    plan.sessions.get(planSessionId).planMode = false
+    plan.result(planSessionId, { text: 'done', structured: { next: '完成' }, stopReason: 'completed' })
+    plan.finish(planSessionId)
+    await waitFor(async () => (await store.readRun(planStarted.runId))?.status === 'completed', 'plan completion')
+    const run = await store.readRun(planStarted.runId)
+    assert.equal(run.steps[0].mode, 'plan')
+    assert.ok(
+      plan.calls.planMode.some((call) => call.active === false),
+      'the plan mode is cleared when the node ends',
+    )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a dismissed plan review waits for the user instead of retrying the result', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({ autoFinish: false, results: [{ text: '', stopReason: 'completed' }] })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(PLAN),
+      definition: PLAN,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    const sessionId = started.run.active[0].sessionId
+    let resolveAnswer
+    const answer = new Promise((resolve) => {
+      resolveAnswer = resolve
+    })
+    host.emit(
+      'user-questions/request',
+      {
+        agent: { id: sessionId },
+        questions: [
+          {
+            id: 'plan-review',
+            question: 'Approve this plan and leave plan mode?',
+            options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+            intent: { kind: 'plan-review', approve: 'Approve' },
+          },
+        ],
+      },
+      () => answer,
+    )
+    await waitFor(async () => (await store.readRun(started.runId))?.pendingInteraction?.planReview === true, 'plan review recorded')
+    resolveAnswer({ answers: [] })
+    host.result(sessionId, { text: '', stopReason: 'completed' })
+    host.finish(sessionId)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    let run = await store.readRun(started.runId)
+    assert.equal(run.status, 'running', 'dismissal keeps the node waiting')
+    assert.equal(run.active.length, 1)
+    assert.equal(host.calls.sends.length, 0, 'no structured-result retry is sent after a dismissal')
+
+    // 用户批准后（plan 模式已退出）这一轮正常交回结果并路由。
+    host.sessions.get(sessionId).planMode = false
+    host.result(sessionId, { text: 'implemented', structured: { next: '完成' }, stopReason: 'completed' })
+    host.finish(sessionId)
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'completed', 'after approval')
+    run = await store.readRun(started.runId)
+    assert.equal(run.steps.length, 1)
+    assert.equal(run.steps[0].text, 'implemented')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: a plan node that stops in plan mode is nudged once, then fails', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({ autoFinish: false, results: [{ text: '', stopReason: 'completed' }] })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(PLAN),
+      definition: PLAN,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    const sessionId = started.run.active[0].sessionId
+    host.result(sessionId, { text: '', stopReason: 'completed' })
+    host.finish(sessionId)
+    await waitFor(() => host.calls.sends.length === 1, 'plan review nudge')
+    assert.match(host.calls.sends[0].text, /exit_plan_mode/u)
+    assert.equal(host.calls.sends[0].compactFirst, false)
+    let run = await store.readRun(started.runId)
+    assert.equal(run.status, 'running', 'the first stop is nudged, not failed')
+
+    host.result(sessionId, { text: '', stopReason: 'completed' })
+    host.finish(sessionId)
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'second stop fails')
+    run = await store.readRun(started.runId)
+    assert.match(run.error, /without presenting a plan/u)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('supervisor: an old robots service without supportsPlanMode fails the plan node clearly', async () => {
+  const { store, dir } = await makeStore()
+  try {
+    const host = harness({ supportsPlanMode: false })
+    const supervisor = new WorkflowSupervisor({ ctx: host.ctx, store, logger: host.ctx.logger })
+    supervisor.attachRobots(host.robots)
+    const started = await supervisor.start({
+      plan: planOf(PLAN),
+      definition: PLAN,
+      agent: { id: 'root' },
+      mode: 'background',
+    })
+    await waitFor(async () => (await store.readRun(started.runId))?.status === 'failed', 'capability failure')
+    const run = await store.readRun(started.runId)
+    assert.match(run.error, /supportsPlanMode is missing/u)
+    assert.equal(host.calls.dispatch.length, 0, 'no session is dispatched without the capability')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
