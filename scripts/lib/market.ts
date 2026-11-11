@@ -2,68 +2,156 @@
  * 从仓库里的插件目录生成 format 1 索引。
  *
  * 索引的每一栏都有唯一事实来源，不在这里重复维护：
- * - 包名、版本、engines.dsh、简介来自 `plugins/<dir>/package.json`
- * - 展示信息（标题、图标、分类、标签、关键词）来自 `plugins/<dir>/market.json`
+ * - 包名、版本、engines.dsh 来自 `plugins/<dir>/package.json`
+ * - 展示文案（标题、简介）来自 `plugins/<dir>/locale/{en,zh}.json` 的 `meta`
+ *   （ADR 0003：locale 是文案的唯一来源；`zh` 在索引里写 `zh-cn`）
+ * - 挂牌字段（图标、分类、标签、关键词）来自 `plugins/<dir>/market.json`
  * - 安装来源是 git：`commit` 取该目录最后一次提交（HEAD 与发布产物总能对上），
  *   `publishTimestamp` 取同一次提交的时间
  */
 
 import { execFileSync } from 'node:child_process'
+import type { ExecFileSyncOptions } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 
-import { MarketIndexError, parseMarketIndex } from './format.mjs'
-import { isExactVersion, isValidRange } from './semver.mjs'
+import { MarketIndexError, parseMarketIndex } from './format.ts'
+import type { IndexMetadata, LocalizedText, MarketIndex, MarketPlugin, Repository } from './format.ts'
+import type { MarketProblem } from './report.ts'
+import { isExactVersion, isValidRange } from './semver.ts'
 
-/** 读 JSON 文件，解析失败时带上文件路径。 */
-export function readJson(file) {
-  try {
-    return JSON.parse(readFileSync(file, 'utf8'))
-  } catch (error) {
-    throw new Error(`无法解析 JSON：${path.relative(process.cwd(), file)}\n${error.message}`)
+/** `plugins/<dir>/package.json` 里本仓库关心的字段。 */
+interface PluginManifest {
+  name: string
+  version: string
+  main?: string
+  exports?: Record<string, { default?: string } | undefined>
+  files?: unknown
+  engines?: { dsh?: string; [key: string]: unknown }
+  peerDependencies?: Record<string, unknown>
+  dsh?: { manifestVersion?: unknown; bundle?: { patch?: string | string[] } }
+}
+
+/** `plugins/<dir>/market.json` 里本仓库关心的字段；只留索引专属的挂牌信息。 */
+interface PluginMarketInfo {
+  listed?: boolean
+  icon?: string
+  author?: string
+  homepage?: string
+  repository?: Repository
+  category?: string
+  labels?: string[]
+  keywords?: string[]
+  sortKeys?: Record<string, number>
+}
+
+/** `plugins/<dir>/locale/<lang>.json` 里本仓库关心的字段；DSH 只认 meta.title/description/detail。 */
+interface PluginLocale {
+  meta?: {
+    title?: unknown
+    description?: unknown
+    detail?: unknown
   }
 }
 
-function git(cwd, args, options = {}) {
-  return execFileSync('git', ['-C', cwd, ...args], {
+/**
+ * locale 文件名到索引语言 id 的映射：DSH 的 locale 文件用 `zh`，索引里写 `zh-cn`。
+ * `en` 排在第一位：它是 format 1 强制要求的语言，也是缺省回退的文案。
+ */
+const LOCALE_LANGUAGES: ReadonlyArray<readonly [file: string, language: string]> = [
+  ['en', 'en'],
+  ['zh', 'zh-cn'],
+]
+
+/** 仓库根的 `market.json`。 */
+interface RootMarketConfig {
+  title: LocalizedText
+  description?: LocalizedText
+  publicUrl: string
+  packageScope?: string
+  packagePrefix?: string
+  metadata?: IndexMetadata
+}
+
+/** 生成索引时读到的单个插件摘要。 */
+export interface PluginSummary {
+  directory: string
+  name: string
+  version: string
+  commit: string | null
+  listed: boolean
+}
+
+/** `loadMarket` 的入参。 */
+export interface LoadMarketOptions {
+  readonly root?: string | undefined
+  readonly sourceUrl?: string | undefined
+}
+
+/** `loadMarket` 的返回值。 */
+export interface LoadedMarket {
+  root: string
+  indexUrl: string
+  index: MarketIndex
+  plugins: PluginSummary[]
+  assets: Array<{ from: string; to: string }>
+  problems: MarketProblem[]
+  sourceUrl: string
+}
+
+/** 读 JSON 文件，解析失败时带上文件路径。 */
+export function readJson<T = Record<string, unknown>>(file: string): T {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    throw new Error(`无法解析 JSON：${path.relative(process.cwd(), file)}\n${(error as Error).message}`)
+  }
+}
+
+function git(cwd: string, args: string[], options: ExecFileSyncOptions = {}): string {
+  const output = execFileSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options,
   })
+  return output.toString()
 }
 
 /**
  * 把常见的 git remote 写法归一成 https 仓库地址（去掉 `.git`）。
  * 索引里 `source.url` 只接受 https，所以不留 ssh 形式。
  */
-export function normalizeRemote(remote) {
+export function normalizeRemote(remote: string): string {
   const text = remote.trim()
   const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+?)(?:\.git)?\/?$/u.exec(text)
   if (ssh !== null) return `https://${ssh[1]}/${ssh[2]}`
   const http = /^(https?:\/\/[^/]+\/.+?)(?:\.git)?\/?$/u.exec(text)
-  if (http !== null) return http[1]
+  if (http !== null) return http[1] ?? ''
   throw new Error(`无法把 origin（${text}）归一成 https 仓库地址，请用 --source-url 指定`)
 }
 
 /** 某个目录最后一次提交的 { commit, commitTime }；还没有任何提交时返回 null。 */
-export function lastCommit(cwd, directory) {
-  let output
+export function lastCommit(
+  cwd: string,
+  directory: string,
+): { commit: string; commitTime: number } | null {
+  let output: string
   try {
     output = git(cwd, ['log', '-1', '--format=%H %ct', '--', directory]).trim()
   } catch {
     return null
   }
   if (output === '') return null
-  const [commit, seconds] = output.split(' ')
+  const [commit = '', seconds = ''] = output.split(' ')
   return { commit, commitTime: Number(seconds) }
 }
 
 /** 该目录是否有未提交改动。 */
-export function isDirty(cwd, directory) {
+export function isDirty(cwd: string, directory: string): boolean {
   return git(cwd, ['status', '--porcelain', '--', directory]).trim() !== ''
 }
 
-function pluginDirectories(root) {
+function pluginDirectories(root: string): string[] {
   const base = path.join(root, 'plugins')
   if (!existsSync(base)) return []
   return readdirSync(base, { withFileTypes: true })
@@ -72,7 +160,7 @@ function pluginDirectories(root) {
     .sort()
 }
 
-function iconTarget(directory, icon) {
+function iconTarget(directory: string, icon: string): string {
   const extension = path.extname(icon).toLowerCase()
   if (!['.svg', '.png', '.jpg', '.jpeg', '.webp'].includes(extension)) {
     throw new Error(`market.json 的 icon 只支持 .svg/.png/.jpg/.jpeg/.webp，收到 ${icon}`)
@@ -80,11 +168,66 @@ function iconTarget(directory, icon) {
   return `icons/${directory}${extension === '.jpeg' ? '.jpg' : extension}`
 }
 
+/** 从 locale 读到的展示文案；某个字段整份缺失时，索引里就不写它。 */
+interface LocaleCopy {
+  title?: LocalizedText
+  description?: LocalizedText
+}
+
+/**
+ * 读 `plugins/<dir>/locale/{en,zh}.json` 的 `meta`，生成索引里的标题与简介。
+ *
+ * ADR 0003：展示文案只从 locale 生成，`market.json` 不再写 title/description。
+ * 缺 `en` 是错误（format 1 要求本地化文本必须有 en）；缺 `zh` 只是少一份中文文案。
+ */
+function localeCopy(
+  pluginRoot: string,
+  directory: string,
+  error: (message: string, plugin?: string) => void,
+): LocaleCopy {
+  const title: Record<string, string> = {}
+  const description: Record<string, string> = {}
+  for (const [file, language] of LOCALE_LANGUAGES) {
+    const localeFile = path.join(pluginRoot, 'locale', `${file}.json`)
+    if (!existsSync(localeFile)) {
+      if (language === 'en') error('缺少 locale/en.json，展示文案必须从 locale 的 meta 生成', directory)
+      continue
+    }
+    const meta = readJson<PluginLocale>(localeFile).meta
+    if (meta === undefined) {
+      error(`locale/${file}.json 缺少 meta，无法生成展示文案`, directory)
+      continue
+    }
+    for (const key of ['title', 'description'] as const) {
+      const value = meta[key]
+      if (value === undefined) continue
+      if (typeof value !== 'string' || value.trim() === '') {
+        error(`locale/${file}.json 的 meta.${key} 必须是非空字符串`, directory)
+        continue
+      }
+      const target = key === 'title' ? title : description
+      target[language] = value
+    }
+  }
+  for (const [key, text] of [
+    ['title', title],
+    ['description', description],
+  ] as const) {
+    if (!Object.hasOwn(text, 'en') && existsSync(path.join(pluginRoot, 'locale', 'en.json'))) {
+      error(`locale/en.json 缺少 meta.${key}，索引里的本地化文案必须有 en`, directory)
+    }
+  }
+  return {
+    ...(Object.keys(title).length === 0 ? {} : { title }),
+    ...(Object.keys(description).length === 0 ? {} : { description }),
+  }
+}
+
 /**
  * 命令行入口读取环境变量：CI 用 `DSH_MARKET_SOURCE_URL` 固定索引里的安装来源，
  * 避免 PR 的 fork 地址混进索引。生成器本身不读环境变量，单测因此不受 CI 环境影响。
  */
-export function sourceUrlFromEnvironment() {
+export function sourceUrlFromEnvironment(): string | undefined {
   const sourceUrl = process.env.DSH_MARKET_SOURCE_URL
   return sourceUrl === undefined || sourceUrl === '' ? undefined : sourceUrl
 }
@@ -94,23 +237,17 @@ export function sourceUrlFromEnvironment() {
  *
  * `sourceUrl` 为空时从仓库的 `origin` 推导；`DSH_MARKET_SOURCE_URL` 只由命令行入口
  * （build/check）通过 `sourceUrlFromEnvironment()` 传进来，这里不读环境变量。
- *
- * @param {{ root?: string, sourceUrl?: string }} [options]
- * @returns {{
- *   root: string,
- *   indexUrl: string,
- *   index: object,
- *   plugins: Array<{ directory: string, name: string, version: string, commit: string, listed: boolean }>,
- *   assets: Array<{ from: string, to: string }>,
- *   problems: Array<{ level: 'error' | 'warning', plugin?: string, message: string }>,
- * }}
  */
-export function loadMarket(options = {}) {
+export function loadMarket(options: LoadMarketOptions = {}): LoadedMarket {
   const root = options.root ?? process.cwd()
-  const config = readJson(path.join(root, 'market.json'))
-  const problems = []
-  const error = (message, plugin) => problems.push({ level: 'error', message, ...(plugin ? { plugin } : {}) })
-  const warning = (message, plugin) => problems.push({ level: 'warning', message, ...(plugin ? { plugin } : {}) })
+  const config = readJson<RootMarketConfig>(path.join(root, 'market.json'))
+  const problems: MarketProblem[] = []
+  const error = (message: string, plugin?: string): void => {
+    problems.push({ level: 'error', message, ...(plugin ? { plugin } : {}) })
+  }
+  const warning = (message: string, plugin?: string): void => {
+    problems.push({ level: 'warning', message, ...(plugin ? { plugin } : {}) })
+  }
 
   if (typeof config.publicUrl !== 'string' || !URL.canParse(config.publicUrl)) {
     throw new Error('market.json 的 publicUrl 必须是索引发布后的绝对地址')
@@ -119,7 +256,7 @@ export function loadMarket(options = {}) {
 
   let sourceUrl = options.sourceUrl
   if (sourceUrl === undefined || sourceUrl === '') {
-    let remote
+    let remote: string
     try {
       remote = git(root, ['remote', 'get-url', 'origin'])
     } catch {
@@ -134,9 +271,9 @@ export function loadMarket(options = {}) {
 
   const scope = config.packageScope
   const prefix = config.packagePrefix
-  const plugins = []
-  const assets = []
-  const entries = []
+  const plugins: PluginSummary[] = []
+  const assets: Array<{ from: string; to: string }> = []
+  const entries: MarketPlugin[] = []
 
   for (const directory of pluginDirectories(root)) {
     const pluginRoot = path.join(root, 'plugins', directory)
@@ -146,8 +283,8 @@ export function loadMarket(options = {}) {
       error('缺少 package.json', directory)
       continue
     }
-    const manifest = readJson(packageFile)
-    const info = existsSync(marketFile) ? readJson(marketFile) : null
+    const manifest = readJson<PluginManifest>(packageFile)
+    const info = existsSync(marketFile) ? readJson<PluginMarketInfo>(marketFile) : null
     if (info === null) {
       error('缺少 market.json，无法在市场上挂牌', directory)
       continue
@@ -164,7 +301,10 @@ export function loadMarket(options = {}) {
       }
     }
     if (!isExactVersion(manifest.version)) {
-      error(`package.json 的 version 必须是精确 SemVer，实际是 ${JSON.stringify(manifest.version)}`, directory)
+      error(
+        `package.json 的 version 必须是精确 SemVer，实际是 ${JSON.stringify(manifest.version)}`,
+        directory,
+      )
     }
     const patch = manifest.dsh?.bundle?.patch
     if (patch === undefined) {
@@ -200,6 +340,11 @@ export function loadMarket(options = {}) {
       }
     }
 
+    const copy = localeCopy(pluginRoot, directory, error)
+    if (Object.hasOwn(info, 'title') || Object.hasOwn(info, 'description')) {
+      warning('market.json 的 title/description 已废弃，展示文案改由 locale 的 meta 提供', directory)
+    }
+
     const commitInfo = lastCommit(root, path.posix.join('plugins', directory))
     if (commitInfo === null) {
       error('目录还没有提交，索引无法钉住安装用的 commit；先提交插件再生成索引', directory)
@@ -209,7 +354,7 @@ export function loadMarket(options = {}) {
       warning('目录有未提交改动，索引钉住的 commit 不含这些改动', directory)
     }
 
-    let icon
+    let icon: string | undefined
     if (info.icon !== undefined) {
       if (typeof info.icon !== 'string') {
         error('market.json 的 icon 必须是字符串', directory)
@@ -237,10 +382,10 @@ export function loadMarket(options = {}) {
       labels: info.labels ?? [],
       ...(info.sortKeys === undefined ? {} : { sortKeys: info.sortKeys }),
     }
-    const entry = {
+    const entry: MarketPlugin = {
       name: manifest.name,
-      ...(info.title === undefined ? {} : { title: info.title }),
-      description: info.description ?? manifest.description,
+      ...(copy.title === undefined ? {} : { title: copy.title }),
+      ...(copy.description === undefined ? {} : { description: copy.description }),
       ...(icon === undefined ? {} : { icon }),
       ...(info.author === undefined ? {} : { author: info.author }),
       ...(info.homepage === undefined ? {} : { homepage: info.homepage }),
@@ -265,7 +410,7 @@ export function loadMarket(options = {}) {
     })
   }
 
-  const index = {
+  const index: MarketIndex = {
     format: 1,
     title: config.title,
     ...(config.description === undefined ? {} : { description: config.description }),

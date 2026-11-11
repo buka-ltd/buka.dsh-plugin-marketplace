@@ -7,14 +7,15 @@
  * 的判断宁可更严，不要更松。
  */
 
-import { compareVersions, isExactVersion, isValidRange } from './semver.mjs'
+import { compareVersions, isExactVersion, isValidRange } from './semver.ts'
 
 const LANGUAGE_ID = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/u
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
 const PACKAGE_NAME_MAX_LENGTH = 214
 const COMMIT = /^[0-9a-f]{40}$/u
 const PATH_SEGMENT = /^[A-Za-z0-9._@+-]+$/u
-const DATA_ICON = /^data:(?:image\/svg\+xml|image\/png|image\/jpeg|image\/webp);base64,([A-Za-z0-9+/]*={0,2})$/u
+const DATA_ICON =
+  /^data:(?:image\/svg\+xml|image\/png|image\/jpeg|image\/webp);base64,([A-Za-z0-9+/]*={0,2})$/u
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u
 
 /** inline data URL 图标解码后的最大字节数。 */
@@ -22,13 +23,94 @@ export const MAX_INLINE_ICON_BYTES = 32 * 1024
 
 const MAX_PUBLISH_TIMESTAMP = 1e11
 
+/** 语言 id 到文案的映射；允许直接写一种语言（通常是 `en`）。 */
+export type LocalizedText = string | Record<string, string>
+
+/** 索引 metadata 里声明的一种分类 / 标签。 */
+export interface TextDeclaration {
+  readonly title: LocalizedText
+}
+
+/** 索引 metadata 里声明的一个排序键。 */
+export interface SortKeyDeclaration {
+  readonly title: LocalizedText
+  readonly order: 'asc' | 'desc'
+}
+
+/** 索引级别的 metadata 声明。 */
+export interface IndexMetadata {
+  readonly categories: Record<string, TextDeclaration>
+  readonly labels: Record<string, TextDeclaration>
+  readonly sortKeys: Record<string, SortKeyDeclaration>
+}
+
+/** 插件自己的 metadata。 */
+export interface PluginMetadata {
+  category?: string
+  keywords: string[]
+  labels: string[]
+  sortKeys?: Record<string, number>
+}
+
+/** 插件的仓库地址；`directory` 是 monorepo 里的子目录。 */
+export interface Repository {
+  url: string
+  directory?: string
+}
+
+/** 从 npm 安装。 */
+export interface NpmSource {
+  type: 'npm'
+  registry?: string
+}
+
+/** 从 git 安装，钉住 commit。 */
+export interface GitSource {
+  type: 'git'
+  url: string
+  commit: string
+  path?: string
+}
+
+export type MarketSource = NpmSource | GitSource
+
+/** 一个精确版本及其安装来源。 */
+export interface MarketVersion {
+  version: string
+  publishTimestamp: number
+  source: MarketSource
+  engines?: { dsh?: string }
+}
+
+/** 索引里的一个插件条目。 */
+export interface MarketPlugin {
+  name: string
+  title?: LocalizedText
+  description?: LocalizedText | undefined
+  icon?: string
+  author?: string
+  homepage?: string
+  repository?: Repository
+  metadata: PluginMetadata
+  versions: MarketVersion[]
+}
+
+/** 一份校验过的 format 1 索引。 */
+export interface MarketIndex {
+  format: 1
+  title: LocalizedText
+  description?: LocalizedText
+  metadata: IndexMetadata
+  plugins: MarketPlugin[]
+}
+
 /** 索引不满足 format 1；`path` 是出错值的 JSON 路径，例如 `$.plugins[0].versions[1].version`。 */
 export class MarketIndexError extends Error {
-  /**
-   * @param {string} path JSON 路径
-   * @param {string} reason 违反的规则
-   */
-  constructor(path, reason) {
+  readonly path: string
+  readonly reason: string
+
+  /** @param path JSON 路径 @param reason 违反的规则 */
+  constructor(path: string, reason: string) {
     super(`${path} ${reason}`)
     this.name = 'MarketIndexError'
     this.path = path
@@ -36,28 +118,37 @@ export class MarketIndexError extends Error {
   }
 }
 
-function fail(path, reason) {
+function fail(path: string, reason: string): never {
   throw new MarketIndexError(path, reason)
 }
 
-function objectAt(value, path) {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(path, 'must be an object')
+function objectAt(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    fail(path, 'must be an object')
+  }
+  return value as Record<string, unknown>
+}
+
+function stringAt(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    fail(path, 'must be a string with a non-whitespace character')
+  }
   return value
 }
 
-function stringAt(value, path) {
-  if (typeof value !== 'string' || value.trim() === '') fail(path, 'must be a string with a non-whitespace character')
-  return value
-}
-
-function optional(object, key, path, read) {
+function optional<T>(
+  object: Record<string, unknown>,
+  key: string,
+  path: string,
+  read: (value: unknown, path: string) => T,
+): T | undefined {
   return Object.hasOwn(object, key) ? read(object[key], `${path}.${key}`) : undefined
 }
 
-function localizedText(value, path) {
+function localizedText(value: unknown, path: string): LocalizedText {
   if (typeof value === 'string') return stringAt(value, path)
   const object = objectAt(value, path)
-  const text = {}
+  const text: Record<string, string> = {}
   for (const [language, member] of Object.entries(object)) {
     if (!LANGUAGE_ID.test(language)) fail(`${path}.${language}`, 'must be keyed by a lowercase language id')
     text[language] = stringAt(member, `${path}.${language}`)
@@ -66,8 +157,12 @@ function localizedText(value, path) {
   return text
 }
 
-function declarations(value, path, read) {
-  const result = {}
+function declarations<T>(
+  value: unknown,
+  path: string,
+  read: (object: Record<string, unknown>, path: string) => T,
+): Record<string, T> {
+  const result: Record<string, T> = {}
   for (const [id, member] of Object.entries(objectAt(value, path))) {
     if (id === '') fail(path, 'must not declare an empty id')
     result[id] = read(objectAt(member, `${path}.${id}`), `${path}.${id}`)
@@ -75,38 +170,42 @@ function declarations(value, path, read) {
   return result
 }
 
-function declaration(object, path) {
+function declaration(object: Record<string, unknown>, path: string): TextDeclaration {
   return { title: localizedText(object.title, `${path}.title`) }
 }
 
-function sortKeyDeclaration(object, path) {
-  if (object.order !== 'asc' && object.order !== 'desc') fail(`${path}.order`, 'must be "asc" or "desc"')
+function sortKeyDeclaration(object: Record<string, unknown>, path: string): SortKeyDeclaration {
+  const order = object.order
+  if (order !== 'asc' && order !== 'desc') fail(`${path}.order`, 'must be "asc" or "desc"')
   return {
     title: localizedText(object.title, `${path}.title`),
-    order: object.order,
+    order,
   }
 }
 
-function indexMetadata(value, path) {
+function indexMetadata(value: unknown, path: string): IndexMetadata {
   const object = value === undefined ? {} : objectAt(value, path)
   return {
     categories:
       optional(object, 'categories', path, (member, at) => declarations(member, at, declaration)) ?? {},
     labels: optional(object, 'labels', path, (member, at) => declarations(member, at, declaration)) ?? {},
     sortKeys:
-      optional(object, 'sortKeys', path, (member, at) => declarations(member, at, sortKeyDeclaration)) ?? {},
+      optional(object, 'sortKeys', path, (member, at) => declarations(member, at, sortKeyDeclaration)) ??
+      {},
   }
 }
 
-function declaredId(value, path, declared) {
+function declaredId(value: unknown, path: string, declared: Record<string, unknown>): string {
   const id = stringAt(value, path)
   if (!Object.hasOwn(declared, id)) fail(path, `references undeclared id ${JSON.stringify(id)}`)
   return id
 }
 
-function pluginMetadata(value, path, index) {
+function pluginMetadata(value: unknown, path: string, index: IndexMetadata): PluginMetadata {
   const object = value === undefined ? {} : objectAt(value, path)
-  const category = optional(object, 'category', path, (member, at) => declaredId(member, at, index.categories))
+  const category = optional(object, 'category', path, (member, at) =>
+    declaredId(member, at, index.categories),
+  )
   const keywords =
     optional(object, 'keywords', path, (member, at) => {
       if (!Array.isArray(member)) fail(at, 'must be an array')
@@ -124,10 +223,12 @@ function pluginMetadata(value, path, index) {
     }) ?? []
   const sortKeys =
     optional(object, 'sortKeys', path, (member, at) => {
-      const values = {}
+      const values: Record<string, number> = {}
       for (const [id, sortValue] of Object.entries(objectAt(member, at))) {
         declaredId(id, `${at}.${id}`, index.sortKeys)
-        if (typeof sortValue !== 'number' || !Number.isFinite(sortValue)) fail(`${at}.${id}`, 'must be a finite number')
+        if (typeof sortValue !== 'number' || !Number.isFinite(sortValue)) {
+          fail(`${at}.${id}`, 'must be a finite number')
+        }
         values[id] = sortValue
       }
       return values
@@ -135,9 +236,9 @@ function pluginMetadata(value, path, index) {
   return { ...(category === undefined ? {} : { category }), keywords, labels, sortKeys }
 }
 
-function httpUrl(value, path, protocols) {
+function httpUrl(value: unknown, path: string, protocols: string[]): URL {
   const text = stringAt(value, path)
-  let url
+  let url: URL
   try {
     url = new URL(text)
   } catch {
@@ -150,7 +251,7 @@ function httpUrl(value, path, protocols) {
 }
 
 /** npm 的 homepage 常带 `#readme`，这里保留 query 与 fragment。 */
-function homepageUrl(value, path) {
+function homepageUrl(value: unknown, path: string): string {
   const text = stringAt(value, path)
   if (!URL.canParse(text)) fail(path, 'must be an absolute URL')
   const url = new URL(text)
@@ -158,30 +259,34 @@ function homepageUrl(value, path) {
   return url.href
 }
 
-function gitUrl(value, path) {
+function gitUrl(value: unknown, path: string): string {
   const url = httpUrl(value, path, ['https:'])
   if (url.href !== value) fail(path, 'must be a canonical URL')
-  if (!/^(?:\/[^/]+){2,}$/u.test(url.pathname)) fail(path, 'must name a repository with at least two path segments')
+  if (!/^(?:\/[^/]+){2,}$/u.test(url.pathname)) {
+    fail(path, 'must name a repository with at least two path segments')
+  }
   if (/\.(?:tgz|tar\.gz)$/iu.test(url.pathname)) fail(path, 'must name a repository, not a tarball')
   return url.href
 }
 
-function packagePath(value, path) {
+function packagePath(value: unknown, path: string): string {
   const text = stringAt(value, path)
-  if (text.split('/').some((segment) => segment === '.' || segment === '..' || !PATH_SEGMENT.test(segment))) {
+  if (
+    text.split('/').some((segment) => segment === '.' || segment === '..' || !PATH_SEGMENT.test(segment))
+  ) {
     fail(path, 'must be a relative directory of letters, digits, and ._@+- segments without . or ..')
   }
   return text
 }
 
-function repository(value, path) {
+function repository(value: unknown, path: string): Repository {
   const object = objectAt(value, path)
   const url = httpUrl(object.url, `${path}.url`, ['https:', 'http:']).href
   const directory = optional(object, 'directory', path, packagePath)
   return { url, ...(directory === undefined ? {} : { directory }) }
 }
 
-function source(value, path) {
+function source(value: unknown, path: string): MarketSource {
   const object = objectAt(value, path)
   switch (object.type) {
     case 'npm': {
@@ -206,7 +311,7 @@ function source(value, path) {
   }
 }
 
-function engines(value, path) {
+function engines(value: unknown, path: string): { dsh?: string } {
   const dsh = optional(objectAt(value, path), 'dsh', path, (member, at) => {
     const range = stringAt(member, at)
     if (range.startsWith('workspace:')) fail(at, 'must not be a workspace: range')
@@ -216,7 +321,7 @@ function engines(value, path) {
   return dsh === undefined ? {} : { dsh }
 }
 
-function iconAt(value, path, indexUrl) {
+function iconAt(value: unknown, path: string, indexUrl: URL): string {
   const text = stringAt(value, path)
   if (text.startsWith('data:')) {
     const payload = DATA_ICON.exec(text)?.[1]
@@ -229,7 +334,7 @@ function iconAt(value, path, indexUrl) {
     }
     return text
   }
-  let resolved
+  let resolved: URL
   try {
     resolved = new URL(text, indexUrl)
   } catch {
@@ -241,7 +346,7 @@ function iconAt(value, path, indexUrl) {
   return resolved.href
 }
 
-function marketVersion(value, path) {
+function marketVersion(value: unknown, path: string): MarketVersion {
   const object = objectAt(value, path)
   const version = stringAt(object.version, `${path}.version`)
   if (!isExactVersion(version)) fail(`${path}.version`, 'must be an exact SemVer version')
@@ -262,9 +367,9 @@ function marketVersion(value, path) {
   }
 }
 
-function versions(value, path) {
+function versions(value: unknown, path: string): MarketVersion[] {
   if (!Array.isArray(value) || value.length === 0) fail(path, 'must be a non-empty array')
-  const seen = new Set()
+  const seen = new Set<string>()
   const entries = value.map((member, position) => {
     const at = `${path}[${position}]`
     const entry = marketVersion(member, at)
@@ -275,7 +380,7 @@ function versions(value, path) {
   return entries.sort((left, right) => compareVersions(right.version, left.version))
 }
 
-function plugin(value, path, index, indexUrl) {
+function plugin(value: unknown, path: string, index: IndexMetadata, indexUrl: URL): MarketPlugin {
   const object = objectAt(value, path)
   const name = stringAt(object.name, `${path}.name`)
   if (name.length > PACKAGE_NAME_MAX_LENGTH || !PACKAGE_NAME.test(name)) {
@@ -305,13 +410,10 @@ function plugin(value, path, index, indexUrl) {
  * 未定义的成员被丢弃；缺失的 metadata 组与列表补空值；版本按降序排列；
  * 相对 icon 解析成绝对地址。
  *
- * @param {unknown} value 解析后的 JSON
- * @param {string | URL} indexUrl 索引的绝对地址，相对 icon 以它为基准
- * @returns {object} 校验后的索引
  * @throws {MarketIndexError} 第一条不满足的规则
  */
-export function parseMarketIndex(value, indexUrl) {
-  let url
+export function parseMarketIndex(value: unknown, indexUrl: string | URL): MarketIndex {
+  let url: URL
   try {
     url = indexUrl instanceof URL ? indexUrl : new URL(String(indexUrl))
   } catch {
@@ -322,7 +424,7 @@ export function parseMarketIndex(value, indexUrl) {
   if (object.format !== 1) fail('$.format', 'must be 1')
   const metadata = indexMetadata(object.metadata, '$.metadata')
   if (!Array.isArray(object.plugins)) fail('$.plugins', 'must be an array')
-  const names = new Set()
+  const names = new Set<string>()
   const plugins = object.plugins.map((entry, position) => {
     const parsed = plugin(entry, `$.plugins[${position}]`, metadata, url)
     if (names.has(parsed.name)) fail(`$.plugins[${position}].name`, `duplicates ${parsed.name}`)
@@ -343,15 +445,17 @@ export function parseMarketIndex(value, indexUrl) {
 /**
  * 构造安装一个精确版本所需参数：npm 是 `name@version`，git 是钉住 commit 的
  * `git+https` 地址，包在子目录时带 pnpm 的 `path:` 参数。
- *
- * @param {string} name 包名
- * @param {object} version 校验过的版本记录
- * @returns {{ spec: string, registry?: string }}
  */
-export function marketInstallTarget(name, version) {
+export function marketInstallTarget(
+  name: string,
+  version: MarketVersion,
+): { spec: string; registry?: string } {
   const from = version.source
   if (from.type === 'npm') {
-    return { spec: `${name}@${version.version}`, ...(from.registry === undefined ? {} : { registry: from.registry }) }
+    return {
+      spec: `${name}@${version.version}`,
+      ...(from.registry === undefined ? {} : { registry: from.registry }),
+    }
   }
   const base = from.url.endsWith('.git') ? from.url : `${from.url}.git`
   const path = from.path === undefined ? '' : `&path:/${from.path}`

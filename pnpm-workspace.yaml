@@ -1,5 +1,6 @@
 packages:
   - plugins/*
+  - packages/*
 
 # 插件的 peerDependencies 由 DSH 运行时提供，不在本仓库安装。
 autoInstallPeers: false

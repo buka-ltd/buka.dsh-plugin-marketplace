@@ -6,7 +6,7 @@
  * 只有 Electron 的 node 能读 asar，所以要这样调用：
  *
  *   ELECTRON_RUN_AS_NODE=1 "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness" \
- *     --expose-internals scripts/official-check.mjs dist/index.json
+ *     --expose-internals scripts/official-check.ts dist/index.json
  *
  * 索引地址默认取根 market.json 的 publicUrl；也可作为第二个参数传入。
  */
@@ -14,29 +14,50 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
+/** 官方校验器里本脚本用到的两件事。 */
+interface OfficialVersion {
+  version: string
+}
+
+interface OfficialPlugin {
+  name: string
+  versions: OfficialVersion[]
+}
+
+interface OfficialMarketIndex {
+  parseMarketIndex(value: unknown, indexUrl: string): { plugins: OfficialPlugin[] }
+  marketInstallTarget(
+    name: string,
+    version: OfficialVersion,
+  ): { spec: string; registry?: string | undefined }
+}
+
 const DEFAULT_APP = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar'
 const OFFICIAL_PACKAGE =
   process.env.DSH_MARKET_INDEX_PACKAGE ??
-  path.join(process.env.DSH_APP_ASAR ?? DEFAULT_APP, 'dsh/node_modules/@deepseek-ai/dsh-plugin-market-index/lib/index.js')
+  path.join(
+    process.env.DSH_APP_ASAR ?? DEFAULT_APP,
+    'dsh/node_modules/@deepseek-ai/dsh-plugin-market-index/lib/index.js',
+  )
 
 const [, , file, explicitUrl] = process.argv
 if (file === undefined) {
-  console.error('用法：official-check.mjs <index.json> [indexUrl]')
+  console.error('用法：official-check.ts <index.json> [indexUrl]')
   console.error('需要以 Electron 的 node 运行，见文件顶部的调用示例')
   process.exit(2)
 }
 
-let official
+let official: OfficialMarketIndex
 try {
   official = await import(OFFICIAL_PACKAGE)
 } catch (error) {
   console.error(`读不到官方校验器：${OFFICIAL_PACKAGE}`)
   console.error('确认 DSH 装在默认位置，或用 DSH_APP_ASAR / DSH_MARKET_INDEX_PACKAGE 指定路径')
-  console.error(String(error.message))
+  console.error(String((error as Error).message))
   process.exit(2)
 }
 
-const indexUrl = explicitUrl ?? JSON.parse(readFileSync('market.json', 'utf8')).publicUrl
+const indexUrl: string = explicitUrl ?? JSON.parse(readFileSync('market.json', 'utf8')).publicUrl
 const raw = JSON.parse(readFileSync(file, 'utf8'))
 const parsed = official.parseMarketIndex(raw, indexUrl)
 
@@ -45,6 +66,8 @@ for (const plugin of parsed.plugins) {
   for (const version of plugin.versions) {
     const target = official.marketInstallTarget(plugin.name, version)
     console.log(`  ${plugin.name}@${version.version}`)
-    console.log(`    ${target.spec}${target.registry === undefined ? '' : ` (registry: ${target.registry})`}`)
+    console.log(
+      `    ${target.spec}${target.registry === undefined ? '' : ` (registry: ${target.registry})`}`,
+    )
   }
 }

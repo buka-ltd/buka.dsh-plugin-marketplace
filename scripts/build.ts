@@ -8,8 +8,8 @@ import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { loadMarket, sourceUrlFromEnvironment } from './lib/market.mjs'
-import { formatProblems, reportProblems } from './lib/report.mjs'
+import { loadMarket, sourceUrlFromEnvironment } from './lib/market.ts'
+import { formatProblems, reportProblems } from './lib/report.ts'
 
 const { values } = parseArgs({
   options: {
@@ -41,8 +41,10 @@ const listed = market.index.plugins
 console.log(`\n索引 ${relative.startsWith('..') ? outFile : relative}：${listed.length} 个插件`)
 for (const entry of listed) {
   const version = entry.versions[0]
+  if (version === undefined) continue
   const source = version.source
-  const pinned = source.type === 'npm' ? `${entry.name}@${version.version}` : `git ${source.commit.slice(0, 7)}`
+  const pinned =
+    source.type === 'npm' ? `${entry.name}@${version.version}` : `git ${source.commit.slice(0, 7)}`
   console.log(`  ${entry.name.padEnd(34)} ${version.version.padEnd(10)} ${pinned}`)
 }
 console.log(`\n索引地址（写进 Discover）：${market.indexUrl}`)

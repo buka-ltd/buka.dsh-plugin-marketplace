@@ -1,0 +1,16 @@
+{
+  "name": "@buka/plugin-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "插件宿主侧公共工具：HTTP 路由辅助、错误处理、原子写入、npx 包装",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

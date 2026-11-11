@@ -10,7 +10,7 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
-const MIME = {
+const MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
@@ -66,6 +66,8 @@ const server = createServer((request, response) => {
 server.listen(port, values.host, () => {
   const indexUrl = `http://${values.host}:${port}/index.json`
   console.log(`索引地址：${indexUrl}`)
-  console.log('在 DSH 里：Plugins → More（Experimental plugins）→ 打开 Custom plugin markets → Discover → 添加索引来源，粘贴上面的地址。')
-  console.log('预览的是 dist/，改完插件记得重新 pnpm run build。')
+  console.log(
+    '在 DSH 里：Plugins → More（Experimental plugins）→ 打开 Custom plugin markets → Discover → 添加索引来源，粘贴上面的地址。',
+  )
+  console.log('预览的是 dist/，改完插件记得重新跑 pnpm run build。')
 })

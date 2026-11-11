@@ -26,13 +26,42 @@ jobs:
         with:
           # 必须加引号：YAML 会把裸写的 22.20 当成浮点数 22.2，
           # setup-node 于是装 22.2.0，pnpm 11 要求 >= 22.13，直接退出 1
-          node-version: '22.20'
+          node-version: "22.20"
+          cache: pnpm
+      # TypeScript、Biome、tsdown 与官方类型包都是开发依赖，必须先安装。
+      - run: pnpm install --frozen-lockfile
+
+      # 格式与静态检查：Biome 一次管两件事（YAML 不在检查范围内，补丁层按原文维护）。
+      - run: pnpm run lint
+
+      # 类型检查：严格模式全开，任何类型错误都算失败。
+      - run: pnpm run build:code
+
+      # 打包：宿主一半与界面一半都从 src/ 生成到 lib/。
+      - run: pnpm run build:clients
+
+      # 产物一致性：lib/ 是提交进 git 的运行文件，构建后必须与提交的完全一致。
+      # 有人改了 src/ 却忘记重新构建并提交产物时，这一步会失败并指出具体文件。
+      - name: 检查编译产物是否与源码一致
+        run: |
+          if ! git diff --exit-code -- 'plugins/*/lib'; then
+            echo '::error::plugins/*/lib 与源码不一致：本地跑 pnpm run build:code && pnpm run build:clients 后一起提交'
+            exit 1
+          fi
+          untracked=$(git ls-files --others --exclude-standard -- 'plugins/*/lib')
+          if [ -n "$untracked" ]; then
+            echo "::error::以下产物没有提交：$untracked"
+            exit 1
+          fi
+
+      # 单测自己造 fixture，不该读 DSH_MARKET_SOURCE_URL，所以这一步不设它
+      - run: pnpm test
+
       - run: pnpm run check
         env:
           # 索引里的安装地址必须指向上游仓库，不能是 PR 的 fork
           DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
-      # 单测自己造 fixture，不该读这个变量，所以这一步不设它
-      - run: pnpm test
+
       - run: pnpm run build
         env:
           DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace
@@ -56,9 +85,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          # 必须加引号：YAML 会把裸写的 22.20 当成浮点数 22.2，
-          # setup-node 于是装 22.2.0，pnpm 11 要求 >= 22.13，直接退出 1
-          node-version: '22.20'
+          node-version: "22.20"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: pnpm run build
         env:
           DSH_MARKET_SOURCE_URL: https://github.com/buka-ltd/buka.dsh-plugin-marketplace

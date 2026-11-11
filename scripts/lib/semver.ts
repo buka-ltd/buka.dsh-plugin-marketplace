@@ -14,30 +14,36 @@ const EXACT = new RegExp(
     '(?:\\+[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*)?$',
   'u',
 )
-const PARTIAL = /^(?:v)?(0|[1-9]\d*|[xX*])(?:\.(0|[1-9]\d*|[xX*])(?:\.(0|[1-9]\d*|[xX*])(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)?)?$/u
+const PARTIAL =
+  /^(?:v)?(0|[1-9]\d*|[xX*])(?:\.(0|[1-9]\d*|[xX*])(?:\.(0|[1-9]\d*|[xX*])(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)?)?$/u
 
 /** 是否是精确的三段式版本号。 */
-export function isExactVersion(text) {
+export function isExactVersion(text: unknown): boolean {
   return typeof text === 'string' && EXACT.test(text)
 }
 
+interface PartialVersion {
+  readonly parts: string[]
+  readonly wildcard: boolean
+  readonly prerelease: string | undefined
+}
+
 /** 解析成 { parts, prerelease }，不合法时返回 null。 */
-function parsePartial(text) {
+function parsePartial(text: string): PartialVersion | null {
   const match = PARTIAL.exec(text)
   if (match === null) return null
-  const parts = [match[1], match[2], match[3]].filter((part) => part !== undefined)
-  const isWildcard = (part) => part === 'x' || part === 'X' || part === '*'
+  const parts = [match[1], match[2], match[3]].filter((part): part is string => part !== undefined)
+  const isWildcard = (part: string): boolean => part === 'x' || part === 'X' || part === '*'
   const wildcardAt = parts.findIndex(isWildcard)
   if (wildcardAt !== -1 && parts.slice(wildcardAt).some((part) => !isWildcard(part))) return null
   if (match[4] !== undefined && (wildcardAt !== -1 || parts.length !== 3)) return null
   return { parts, wildcard: wildcardAt !== -1, prerelease: match[4] }
 }
+
 /**
  * 按 SemVer 2.0.0 优先级比较两个精确版本，返回 -1 / 0 / 1。
- * @param {string} left
- * @param {string} right
  */
-export function compareVersions(left, right) {
+export function compareVersions(left: string, right: string): -1 | 0 | 1 {
   const a = EXACT.exec(left)
   const b = EXACT.exec(right)
   if (a === null || b === null) throw new TypeError(`不是精确版本号：${a === null ? left : right}`)
@@ -53,8 +59,8 @@ export function compareVersions(left, right) {
   for (let index = 0; index < Math.max(aPre.length, bPre.length); index += 1) {
     if (index >= aPre.length) return -1
     if (index >= bPre.length) return 1
-    const x = aPre[index]
-    const y = bPre[index]
+    const x = aPre[index] ?? ''
+    const y = bPre[index] ?? ''
     const xNumeric = /^\d+$/u.test(x)
     const yNumeric = /^\d+$/u.test(y)
     if (xNumeric && yNumeric) {
@@ -69,22 +75,23 @@ export function compareVersions(left, right) {
   return 0
 }
 
-function isValidComparator(token) {
+function isValidComparator(token: string): boolean {
   if (token === '') return false
   const match = /^(<=|>=|<|>|=|~|\^)?(.*)$/u.exec(token)
+  if (match === null) return false
   const operator = match[1] ?? ''
-  const partial = parsePartial(match[2])
+  const partial = parsePartial(match[2] ?? '')
   if (partial === null) return false
-  if (operator === '^' && (partial.parts[0] === undefined || /^[xX*]$/u.test(partial.parts[0]))) return false
+  const first = partial.parts[0]
+  if (operator === '^' && (first === undefined || /^[xX*]$/u.test(first))) return false
   return true
 }
 
 /**
  * 校验一个 SemVer 范围（比较符、`||`、连字符区间、通配）。
  * 只判断语法，不做求值。
- * @param {string} range
  */
-export function isValidRange(range) {
+export function isValidRange(range: unknown): boolean {
   if (typeof range !== 'string') return false
   const text = range.trim()
   if (text === '') return false
@@ -92,7 +99,9 @@ export function isValidRange(range) {
     const set = group.trim()
     if (set === '') return false
     const hyphen = /^(\S+)\s+-\s+(\S+)$/u.exec(set)
-    if (hyphen !== null) return parsePartial(hyphen[1]) !== null && parsePartial(hyphen[2]) !== null
+    if (hyphen !== null) {
+      return parsePartial(hyphen[1] ?? '') !== null && parsePartial(hyphen[2] ?? '') !== null
+    }
     return set.split(/\s+/u).every(isValidComparator)
   })
 }

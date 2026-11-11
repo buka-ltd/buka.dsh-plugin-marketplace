@@ -1,6 +1,14 @@
 # 构建产物：由 `pnpm run build` 生成，不进版本库
 dist/
 node_modules/
+*.tsbuildinfo
+
+# tsc 编译出的中间产物，打包脚本的输入；最终运行文件在 plugins/*/lib/
+.build/
+
+# 内部公共包（packages/*）只在本仓库构建时使用，不随插件发布，编译产物不进版本库。
+# 插件的 plugins/*/lib/ 相反：它是随插件发布的运行文件，必须提交。
+packages/*/lib/
 
 # 本地临时目录（调研脚本、验证产物）
 .tmp/

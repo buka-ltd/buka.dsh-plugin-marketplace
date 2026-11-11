@@ -1,0 +1,16 @@
+{
+  "name": "@buka/plugin-ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "插件界面侧公共工具：JSON 请求、头像预设、React 元素工厂",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib",
+    "declaration": true,
+    "tsBuildInfoFile": "lib/plugin-kit.tsbuildinfo"
+  },
+  "include": ["src"]
+}
