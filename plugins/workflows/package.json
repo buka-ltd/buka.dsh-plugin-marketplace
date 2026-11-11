@@ -1,6 +1,6 @@
 {
   "name": "@buka/dsh-plugin-workflows",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "用编排 preset 创建并运行一次性工作流，在关键节点停下来等待人工介入。",
   "type": "module",
   "main": "lib/index.js",
