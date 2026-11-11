@@ -35,18 +35,18 @@
 一次进入的时间线：
 
 1. supervisor 通过 `ctx.bukaRobots.dispatchSession()` / `openSession()` 传 `planMode: true`；
-2. robots 在投递第一轮 prompt **之前**调用 `ctx.planMode.set(agent, true)`，机器人拿到 plan 指引与 `exit_plan_mode`；
+2. robots 在投递第一轮 prompt **之前**对目标 agent 执行 `/plan` 命令（与用户在会话里输入 `/plan` 相同；无需读取根作用域的 planMode 服务），机器人拿到 plan 指引与 `exit_plan_mode`；
 3. 机器人先探索，调用 `exit_plan_mode(plan)`：批准 → 同一 turn 继续实施，最后交回结构化结果；继续计划 → 修订后再次提交；关闭审阅自己写回复 → 本轮结束，workflow 不抢答，等用户在机器人会话里的下一条消息继续这个节点；
-4. 节点结束（完成 / abort / 超时 / 取消）时 supervisor 尽力退出 plan 模式；同一机器人下一次进入节点时按新节点的 `mode` 显式归一，不会把残留状态带过去。
+4. 节点结束（完成 / abort / 超时 / 取消）时 supervisor 尽力退出 plan 模式（会话日志里仍为 active 时才执行 `/plan off`）；同一机器人下一次进入节点时按新节点的 `mode` 显式归一，不会把残留状态带过去。
 
 注意：
 
 - 这是**单节点**流程，不要再用 `user` 节点为同一份计划重复审批；需要用户在多个方案里选路时，`user` 节点仍然是正确工具。
 - 审阅卡在**机器人自己的会话**里，运行页会显示「机器人正在等待你审阅计划」与「打开会话」入口；后台运行也可以，不需要创建者会话有活跃 turn。
 - plan 模式是 DSH 的**软指引**，不是沙箱：工具仍可调用，写文件限制要靠沙箱 / 审批策略，本插件不改变这一点。
-- 需要 DSH 组合里有 `@deepseek-ai/dsh-plan-mode` 与 `userQuestions`，以及 `@buka/dsh-plugin-robots` 0.9.0+（`supportsPlanMode`）；缺任何一样 `buka_workflow_start` 会在创建运行前拒绝。
+- plan 模式由 DSH 的 plan 插件以 `/plan` 命令提供（web/desktop 的组成把它 isolate 在会话 preset 内，根作用域看不到 planMode 服务）；工作流只检查 `commands` 命令服务、原生审阅卡需要的 `userQuestions`，以及支持命令入口的 `@buka/dsh-plugin-robots` 0.9.0+（`supportsPlanMode`）；缺任何一样 `buka_workflow_start` 会在创建运行前拒绝。
 - `timeoutMs` 覆盖整个节点，包括等待审阅的时间；默认仍不设超时。
-- 宿主重启恢复 plan 节点时保留会话日志里的 plan 状态（批准后可能已退出）；普通节点恢复时会清掉残留的 plan 模式。
+- 宿主重启恢复 plan 节点时保留会话日志里的 plan 状态（批准后可能已退出）；普通节点恢复时只有在日志仍显示 plan 模式 active 时才发 `/plan off` 清掉残留。
 - 机器人自己停在计划阶段、既没有弹出审阅卡也没有交回结果时，观察者只发一次协议提示（要求先 `exit_plan_mode` 审阅），第二次仍如此则节点失败并写明原因。
 
 ## 工具

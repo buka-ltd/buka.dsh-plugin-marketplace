@@ -345,7 +345,7 @@ await resumed.dispose() // 只释放 live agent，会话日志保留
 - `startSession({ ...request, wait: false })`：等价于 `dispatchSession(request)`；默认仍是 `wait: true`，既有调用方不受影响；
 - `dispatchSession({ robot, prompt, sessionId?, routes?, outputSchema?, abortable?, planMode?, ... })`：把 prompt 投进机器人会话后立即返回一个**可观测句柄**，不在服务里等待这一轮结束，也不设默认超时；
 - `openSession({ robot, sessionId, planMode?, ... })`：只 resume / attach 一个已有会话，**不发 prompt**；恢复时先用 `readResult()` 检查上一轮是否其实已经结束（`turnEnded`），确认要继续再 `send()`。
-- `planMode?: boolean`：`true` 在投递第一轮 prompt **之前**把会话切到 DSH plan 模式（机器人会先探索并交计划，原生审阅批准后再继续）；`false` 确保退出（普通节点用它清掉上一次残留）；省略表示不改变。进入失败（组合里没有 `@deepseek-ai/dsh-plan-mode`、或会话已有开放 turn）会在创建会话前抛错。服务公开 `supportsPlanMode === true`，调用方可用它判断是否需要升级本插件。
+- `planMode?: boolean`：`true` 在投递第一轮 prompt **之前**对目标 agent 执行 `/plan` 命令把会话切到 DSH plan 模式（与用户在会话里输入 `/plan` 相同；机器人会先探索并交计划，原生审阅批准后再继续）；`false` 确保退出（普通节点用它清掉上一次残留，只有会话日志里的 plan 状态仍为 active 时才真的执行 `/plan off`）；省略表示不改变。plan 模式是否可用取决于组合里的 `commands` 服务与目标 agent 的 preset 是否挂载 plan 模式：普通节点不会因此失败，plan 节点会在开跑前以明确错误失败。服务公开 `supportsPlanMode === true`，调用方可用它判断是否需要升级本插件。
 
 句柄字段：`mode`（固定 `session`）、`sessionId`、`robot`、`cwd`、`resumed`、`compacted`、`compactionError?`、`startSeq`（这一轮的起点序号），以及：
 
@@ -354,8 +354,8 @@ await resumed.dispose() // 只释放 live agent，会话日志保留
 | `readResult({ sinceSeq? })`                              | 从会话日志读 `sinceSeq` 之后的这一轮：`{ sessionId, text, stopReason, turnEnded, turnEndSeq?, structured?, resultRetries? }`                                        |
 | `send(text, { compactFirst? })`                          | 在同一会话里再发一条（恢复续跑 / 结果追问），默认先 compact；返回新的起点 seq                                                                                       |
 | `retryReport({ routes?, abortable?, reason?, detail? })` | 结果不合法时取下一条追问（会列出合法 route 与当前问题；`reason: 'invalid-output'` 时附上 `detail`，`abortable: true` 时同时给出 abort 出口）；没有额度时返回 `null` |
-| `getPlanMode()`                                          | 读当前 live agent 的 DSH plan 状态 `{ active, pending? }`；组合里没有 plan-mode 服务时返回 `null`                                                                   |
-| `setPlanMode(active)`                                    | 设置 / 清除 plan 模式，返回 `committed` / `queued` / `cancelled` / `noop`；服务缺失时返回 `null`                                                                    |
+| `getPlanMode()`                                          | 读当前 live agent 的 DSH plan 状态 `{ active, pending? }`，从会话日志的 `plan/mode` 事件折叠；读不到时返回 `null`                                                   |
+| `setPlanMode(active)`                                    | 尽力设置 / 清除 plan 模式（对 agent 执行 `/plan` / `/plan off`，best-effort，失败只记日志）；不返回执行结果                                                         |
 | `cancel(reason?)`                                        | 取消当前轮，等它落定后返回已经写下的结果                                                                                                                            |
 | `dispose()`                                              | 只释放这一轮的 live agent，会话日志仍然保留；释放后服务会把这条仍然持久化的会话补通告回客户端（`api-session/added`），所以侧边栏与「打开会话」都不受影响            |
 
