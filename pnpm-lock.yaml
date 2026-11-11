@@ -14,8 +14,6 @@ importers:
         specifier: ~3.18.5
         version: 3.18.5
 
-  plugins/hello: {}
-
   plugins/robots:
     dependencies:
       '@deepseek-ai/schemastery':

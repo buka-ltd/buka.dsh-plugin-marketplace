@@ -1,7 +1,7 @@
 {
   "title": {
-    "en": "Buka DSH Plugins",
-    "zh-cn": "Buka DSH 插件市场"
+    "en": "Buka DSH Workshop",
+    "zh-cn": "Buka DSH Workshop"
   },
   "description": {
     "en": "Skill, robot and workflow plugins for DeepSeek Harness: Skills package capability and knowledge, Robots turn that into individuals with a defined role, and Workflows drive several robots through a pre-defined flow with explicit human-intervention checkpoints. Installable from Plugins → Discover.",

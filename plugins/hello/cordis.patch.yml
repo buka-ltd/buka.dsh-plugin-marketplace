@@ -1,9 +1,0 @@
-# `@buka/dsh-plugin-hello` 的 bundle 层：把本插件自己插进组成。
-#
-# 一个「既是 bundle 又是插件」的包只需这一行：
-# - bundle 的身份由 package.json 的 dsh.bundle.patch 给出
-# - 这一行把这个包作为插件行加载，`id` 是它在组成里的唯一名字
-# - `name` 必须是包名；包由 profile 的依赖解析，不需要写路径
-- insert:
-    - id: tool-buka-hello
-      name: '@buka/dsh-plugin-hello'

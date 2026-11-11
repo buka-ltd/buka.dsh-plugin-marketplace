@@ -62,11 +62,11 @@ cp -R ~/.dsh/profiles/desktop "$DSH_HOME/profiles/verify"
 # 把 $DSH_HOME/profiles/verify/package.json 的 name 改成 dsh-profile-verify
 # （web / desktop 这两个 profile 名由应用独占，--dump-config 会拒绝）
 
-dsh plugin --profile verify add "link:$PWD/plugins/hello"
-dsh --profile verify --dump-config | grep -A2 tool-buka-hello
+dsh plugin --profile verify add "link:$PWD/plugins/bell"
+dsh --profile verify --dump-config | grep -A2 sound-buka-bell
 ```
 
-第二行能在输出里看到 `- id: tool-buka-hello` 与 `name: '@buka/dsh-plugin-hello'`，说明补丁层被应用、插件行进了 composition。想再往前一步，用 `dsh --profile verify` 启动这套配置（会占用一个本地端口，先关掉），日志里没有该插件的加载错误即可。
+第二行能在输出里看到 `- id: sound-buka-bell` 与 `name: '@buka/dsh-plugin-bell'`，说明补丁层被应用、插件行进了 composition。想再往前一步，用 `dsh --profile verify` 启动这套配置（会占用一个本地端口，先关掉），日志里没有该插件的加载错误即可。
 
 没有 `dsh` 命令时，用 DSH 应用自带的 CLI：
 
