@@ -15,3 +15,19 @@
 - `publishTimestamp` 与 `source.commit` 由 git 推出，不要手写时间戳或凭记忆填 commit
 
 提交与推送由用户发起，见 [Git 操作约束](docs/agent-rules/git.md)。
+
+## Agent skills
+
+> 本节的 `docs/agents/*.md` 是工程技能的配置（issue tracker、标签、领域文档位置），不同于 `docs/agent-rules/` 里的本仓库协作规则。
+
+### Issue tracker
+
+Issue 记在 GitHub Issues（`buka-ltd/buka.dsh-plugin-marketplace`），用 `gh` CLI 读写。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个 triage 角色沿用默认标签字符串。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文（single-context）：根 `GLOSSARY.md` + `docs/adr/`。见 `docs/agents/domain.md`。
