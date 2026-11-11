@@ -24,17 +24,13 @@
  *
  * 页面有两个视图，共用同一个标题行与工具栏：
  *
- * - 列表视图：最上面是固定的「通用型机器人」卡片（🤖 头像；职责写明它是没有
- *   其他更合适机器人时的兜底；唯一动作「进入工作区」会列出 DSH 里已有的工作区，
- *   选中一个就以标准模式打开它），
- *   下面是登记表里的机器人：逐个「新会话 / 挂载 / 配置 / 删除」。删除先摘掉
- *   工作区注册、再删插件记录，目录与文件保留；登记文件损坏时只允许刷新，
- *   新建/删除/挂载都会禁用。列表**不展示目录**（机器人根目录与各机器人路径
- *   都只在详情页出现）；每张卡片显示机器人的一行描述（工作流靠它决定是否
- *   选用该机器人）；新建不再占页面里的常驻输入行：标题行「刷新」右侧的
- *   「创建机器人」按钮打开对话框填名称与描述后提交；「设置」按钮打开设置
- *   对话框，里面的开关决定通用型机器人是否出现在列表里（设置存 Host 的
- *   settings.json）；
+ * - 列表视图：整行点击（或点机器人名 / 键盘 Tab 到标题）进入详情，行内动作是
+ *   「新会话 / 挂载 / 删除」。删除先摘掉工作区注册、再删插件记录，目录与文件
+ *   保留；登记文件损坏时只允许刷新，新建/删除/挂载都会禁用。列表**不展示目录**
+ *   （机器人根目录与各机器人路径都只在详情页出现）；每张卡片显示机器人的一行
+ *   描述（工作流靠它决定是否选用该机器人）；标题行「刷新」右侧的「创建机器人」
+ *   按钮打开对话框填名称与描述后提交；全新安装（登记表为空）时插件会自动补上
+ *   「软件工程师」与「质量保障工程师」两个预设机器人；
  * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
  *   机器人名旁的铅笔按钮打开「重命名机器人」对话框：改的是机器人目录名，Host 会
  *   在新路径重建 DSH 工作区，已有会话日志保留但不再列在这个机器人下。正文用
@@ -76,7 +72,6 @@ window.__ModuleLoader__.load({
       IconNewChatOutlineRegular,
       IconPlusOutlineRegular,
       IconRefreshOutlineRegular,
-      IconSettingsOutlineRegular,
       IconTrashOutlineRegular,
       IconWarningOutlineRegular,
     } = require('@deepseek-ai/dsh-client-ui-primitives')
@@ -108,8 +103,6 @@ window.__ModuleLoader__.load({
     const AVAILABLE_ROUTE = '/buka-robots/skills/available'
     const INSTALL_ROUTE = '/buka-robots/skills/install'
     const SKILL_REMOVE_ROUTE = '/buka-robots/skills/remove'
-    const WORKSPACES_ROUTE = '/buka-robots/workspaces'
-    const SETTINGS_ROUTE = '/buka-robots/settings'
 
     /**
      * Skills 插件（`@buka/dsh-plugin-skills`）的收藏仓库路由。
@@ -161,12 +154,6 @@ window.__ModuleLoader__.load({
       { id: 'unicorn', emoji: '🦄', color: '#BB6BD9', labelKey: 'avatarUnicorn' },
       { id: 'mushroom', emoji: '🍄', color: '#EB5757', labelKey: 'avatarMushroom' },
     ]
-
-    /**
-     * 通用型机器人的固定头像：🤖 不再属于普通机器人的预设集合，只留给列表顶部
-     * 那个「通用型机器人」入口，避免用户创建的机器人跟它撞脸。
-     */
-    const GENERAL_AVATAR = { emoji: '🤖', color: '#3B82F6' }
 
     /** id → 预设；Host 已把旧记录兜底成合法 id，这里只防脏数据。 */
     const AVATAR_BY_ID = new Map(AVATARS.map((preset) => [preset.id, preset]))
@@ -221,26 +208,7 @@ window.__ModuleLoader__.load({
       revealFailed: 'Could not open the folder:',
       openFailed: 'Could not open the robot:',
       openUnmounted: 'This robot is not mounted to a workspace yet. Click “Mount” first.',
-      configure: 'Configure',
-      generalTitle: 'General-purpose robot',
-      generalIntro:
-        'Runs general tasks in any existing workspace in standard mode; it has no directory, AGENTS.md or skills of its own, and is used when no specialized robot is available.',
-      enterWorkspace: 'Enter workspace',
-      chooseWorkspace: 'Choose a workspace',
-      chooseWorkspaceHint: 'The general-purpose robot uses standard mode. Pick an existing workspace to enter.',
-      loadingWorkspaces: 'Reading workspaces…',
-      workspacesFailed: 'Could not read the workspace list:',
-      workspacesEmpty: 'No workspaces yet. Create one in the sidebar first.',
-      workspaceOpenFailed: 'Could not open the workspace:',
-      settings: 'Settings',
-      settingsTitle: 'Settings',
-      generalSetting: 'General-purpose robot',
-      generalSettingDesc:
-        'Pinned to the 🤖 avatar and standard mode. It can enter any existing workspace and also appears in the workflow robot list (its responsibility says when to use it); turn it off to hide it from the robot list and from workflows.',
-      settingsEnabled: 'Enabled',
-      settingsDisabled: 'Disabled',
-      settingsSaveFailed: 'Could not save the settings:',
-      settingsDone: 'Done',
+      openDetail: 'Open details',
       mount: 'Mount',
       mounting: 'Mounting…',
       mounted: 'Mounted to a workspace:',
@@ -386,26 +354,7 @@ window.__ModuleLoader__.load({
       revealFailed: '打开文件夹失败：',
       openFailed: '打开失败：',
       openUnmounted: '这个机器人还没有挂载到工作区，先点「挂载」。',
-      configure: '配置',
-      generalTitle: '通用型机器人',
-      generalIntro:
-        '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
-      enterWorkspace: '进入工作区',
-      chooseWorkspace: '选择工作区',
-      chooseWorkspaceHint: '通用型机器人使用标准模式，选一个已有的工作区进入。',
-      loadingWorkspaces: '正在读取工作区…',
-      workspacesFailed: '读取工作区失败：',
-      workspacesEmpty: '还没有工作区，先在侧边栏新建一个。',
-      workspaceOpenFailed: '打开工作区失败：',
-      settings: '设置',
-      settingsTitle: '设置',
-      generalSetting: '通用型机器人',
-      generalSettingDesc:
-        '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区，并会出现在工作流的机器人清单里（职责里写明没有专用机器人时使用）；关掉后它既不会出现在机器人列表里，也不会暴露给工作流。',
-      settingsEnabled: '启用',
-      settingsDisabled: '停用',
-      settingsSaveFailed: '保存设置失败：',
-      settingsDone: '完成',
+      openDetail: '打开详情',
       mount: '挂载',
       mounting: '挂载中…',
       mounted: '已挂载到工作区：',
@@ -535,11 +484,16 @@ window.__ModuleLoader__.load({
 .buka-robots-back svg{transform:rotate(180deg)}
 .buka-robots-cards{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
 .buka-robots-card{border-radius:var(--dsw-radius-xl);min-width:0;margin:0 -8px}
+.buka-robots-card.is-clickable{cursor:pointer}
+@media (hover:hover){.buka-robots-card.is-clickable:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.buka-robots-card.is-clickable:active{background:var(--dsw-alias-interactive-bg-active)}
 .buka-robots-cardHead{flex-direction:column;gap:6px;padding:8px;display:flex}
 .buka-robots-titleRow{justify-content:space-between;align-items:flex-start;gap:8px;min-width:0;display:flex}
 .buka-robots-titleCluster{flex:1 1 auto;flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}
 .buka-robots-titleActions{flex:none;align-items:center;gap:8px;display:inline-flex;flex-wrap:wrap;justify-content:flex-end}
-.buka-robots-cardTitle{text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;overflow:hidden}
+.buka-robots-cardTitle{box-sizing:border-box;min-width:0;max-width:100%;padding:0;margin:0;border:0;background:none;color:inherit;font:inherit;font-size:14px;font-weight:500;line-height:20px;text-align:left;cursor:pointer;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+.buka-robots-cardTitle:disabled{cursor:default}
+.buka-robots-cardTitle:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
 .buka-robots-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
 .buka-robots-avatarButton{padding:0;margin:0;border:0;background:0 0;line-height:0;cursor:pointer}
 @media (hover:hover){.buka-robots-avatarButton:hover{filter:brightness(.97)}}
@@ -579,8 +533,6 @@ window.__ModuleLoader__.load({
 @media (hover:hover){.buka-robots-iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
 .buka-robots-iconButton:active{background:var(--dsw-alias-interactive-bg-active)}
 .buka-robots-iconButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-.buka-robots-iconButton.buka-robots-iconDanger{color:var(--dsw-alias-state-error-primary)}
-@media (hover:hover){.buka-robots-iconButton.buka-robots-iconDanger:hover{background:var(--dsw-alias-interactive-bg-hover-danger,var(--dsw-alias-interactive-bg-hover))}}
 .buka-robots-sourceRow{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .buka-robots-input{flex:1 1 260px;display:flex;min-width:0}
 .buka-robots-submit,.buka-robots-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
@@ -808,30 +760,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 通用型机器人的固定头像：🤖 画在蓝色浅底圆片里，尺寸与普通头像一致。
-     *
-     * @param {number} size 直径（px）
-     * @returns {object} React 元素
-     */
-    function renderGeneralAvatar(size) {
-      return h(
-        'span',
-        {
-          className: 'buka-robots-avatar',
-          style: {
-            width: `${size}px`,
-            height: `${size}px`,
-            fontSize: `${Math.max(9, Math.round(size * 0.6))}px`,
-            backgroundColor: `color-mix(in srgb, ${GENERAL_AVATAR.color} 18%, transparent)`,
-            borderColor: `color-mix(in srgb, ${GENERAL_AVATAR.color} 38%, transparent)`,
-          },
-          'aria-hidden': true,
-        },
-        GENERAL_AVATAR.emoji,
-      )
-    }
-
-    /**
      * 侧边栏的图标：一个机器人头（圆角矩形 + 两眼 + 天线）。侧边栏只给尺寸与
      * 选中态；颜色通过 `currentColor` 继承面板行的前景色，不自己写死颜色。
      *
@@ -960,19 +888,6 @@ window.__ModuleLoader__.load({
       /** Toast 文案；同一时刻只保留最后一条。 */
       const [notice, setNotice] = React.useState(null)
 
-      /**
-       * 通用型机器人「进入工作区」对话框：`workspacesState` 是 Host 返回的工作区
-       * 清单，`workspaceBusy` 是正在打开的工作区 id（防连点）。
-       */
-      const [workspacesOpen, setWorkspacesOpen] = React.useState(false)
-      const [workspacesState, setWorkspacesState] = React.useState({ status: 'idle', items: [], error: null })
-      const [workspaceBusy, setWorkspaceBusy] = React.useState(null)
-
-      /** 设置对话框：通用型机器人开关的保存中 / 失败状态。 */
-      const [settingsOpen, setSettingsOpen] = React.useState(false)
-      const [settingsSaving, setSettingsSaving] = React.useState(false)
-      const [settingsError, setSettingsError] = React.useState(null)
-
       // 首次挂载与每次刷新（reloadKey 变化）都重新读 Host 的机器人登记表。
       React.useEffect(() => {
         let cancelled = false
@@ -990,39 +905,10 @@ window.__ModuleLoader__.load({
         }
       }, [reloadKey])
 
-      // 「进入工作区」对话框每次打开都重新读一遍工作区：用户可能刚在侧边栏
-      // 新建 / 删除了工作区。关掉对话框后回来的响应直接丢弃。
-      React.useEffect(() => {
-        if (!workspacesOpen) return
-        let cancelled = false
-        setWorkspacesState({ status: 'loading', items: [], error: null })
-        requestJson(WORKSPACES_ROUTE).then(
-          (body) => {
-            if (cancelled) return
-            const items = Array.isArray(body?.workspaces) ? body.workspaces : []
-            setWorkspacesState({ status: 'ready', items, error: null })
-          },
-          (failure) => {
-            if (!cancelled) {
-              setWorkspacesState({
-                status: 'error',
-                items: [],
-                error: `${t('workspacesFailed')} ${messageOf(failure)}`,
-              })
-            }
-          },
-        )
-        return () => {
-          cancelled = true
-        }
-      }, [workspacesOpen])
-
       const data = list.data
       const robots = Array.isArray(data?.robots) ? data.robots : []
       const registry = typeof data?.registry === 'string' ? data.registry : ''
       const corrupt = data?.corrupt === true
-      /** 通用型机器人开关；列表响应里带回来，设置对话框保存后局部更新。 */
-      const generalEnabled = data?.general?.enabled === true
       const selectedRobot = selectedName === null ? null : (robots.find((robot) => robot.name === selectedName) ?? null)
 
       /** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
@@ -1171,86 +1057,6 @@ window.__ModuleLoader__.load({
           flash('error', `${t('openFailed')} ${messageOf(failure)}`)
         } finally {
           setBusy(null)
-        }
-      }
-
-      /** 打开通用型机器人的「进入工作区」对话框；实际读取由上面的 effect 负责。 */
-      function openWorkspacePicker() {
-        if (mutating || workspaceBusy !== null) return
-        setWorkspacesOpen(true)
-      }
-
-      /** 关闭「进入工作区」对话框；正在打开工作区时不响应关闭。 */
-      function closeWorkspacePicker() {
-        if (workspaceBusy !== null) return
-        setWorkspacesOpen(false)
-      }
-
-      /**
-       * 进入一个已有工作区：通用型机器人就是一个普通的标准模式会话，所以这里
-       * 显式指定 `agentPreset: 'standard'`，不复用工作区里别的 preset 的空会话。
-       * 打开成功后对话框关闭，主区域切到该工作区。
-       *
-       * @param {{ id: string, title: string, path: string }} workspace 工作区
-       */
-      async function enterWorkspace(workspace) {
-        if (workspaceBusy !== null) return
-        const uiWorkspace = service('uiWorkspace')
-        if (uiWorkspace === null || typeof uiWorkspace.openWorkspace !== 'function') {
-          flash('error', t('noUiWorkspace'))
-          return
-        }
-        setWorkspaceBusy(workspace.id)
-        setWorkspacesState((prev) => ({ ...prev, error: null }))
-        try {
-          await uiWorkspace.openWorkspace(workspace.id, undefined, { agentPreset: 'standard' })
-          setWorkspacesOpen(false)
-        } catch (failure) {
-          setWorkspacesState((prev) => ({
-            ...prev,
-            error: `${t('workspaceOpenFailed')} ${messageOf(failure)}`,
-          }))
-        } finally {
-          setWorkspaceBusy(null)
-        }
-      }
-
-      /** 打开设置对话框；开关当前值来自列表响应里的 `general.enabled`。 */
-      function openSettingsDialog() {
-        setSettingsError(null)
-        setSettingsOpen(true)
-      }
-
-      /** 关闭设置对话框；保存中不响应关闭。 */
-      function closeSettingsDialog() {
-        if (settingsSaving) return
-        setSettingsOpen(false)
-        setSettingsError(null)
-      }
-
-      /**
-       * 启用 / 停用通用型机器人：写 Host 的设置文件，成功后只局部更新列表。
-       * 停用后列表里的内置卡片立刻消失，再打开设置对话框仍可重新启用。
-       *
-       * @param {boolean} enabled 新的开关值
-       */
-      async function saveGeneralEnabled(enabled) {
-        if (settingsSaving) return
-        setSettingsSaving(true)
-        setSettingsError(null)
-        try {
-          const body = await requestJson(SETTINGS_ROUTE, {
-            method: 'POST',
-            body: JSON.stringify({ general: { enabled } }),
-          })
-          const saved = body?.general?.enabled === true
-          setList((prev) =>
-            prev.data === null ? prev : { ...prev, data: { ...prev.data, general: { enabled: saved } } },
-          )
-        } catch (failure) {
-          setSettingsError(`${t('settingsSaveFailed')} ${messageOf(failure)}`)
-        } finally {
-          setSettingsSaving(false)
         }
       }
 
@@ -1838,50 +1644,6 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 通用型机器人卡片：固定 🤖 头像 + 标准模式标签，唯一的动作是「进入工作区」。
-       * 它没有目录、AGENTS.md 与 skills，所以不显示挂载状态、配置与删除。
-       *
-       * @returns {object} React 元素
-       */
-      function renderGeneralCard() {
-        return h(
-          'li',
-          { className: 'buka-robots-card', key: '__general__' },
-          h(
-            'div',
-            { className: 'buka-robots-cardHead' },
-            h(
-              'div',
-              { className: 'buka-robots-titleRow' },
-              h(
-                'div',
-                { className: 'buka-robots-titleCluster' },
-                renderGeneralAvatar(26),
-                h('span', { className: 'buka-robots-cardTitle' }, t('generalTitle')),
-              ),
-              h(
-                'div',
-                { className: 'buka-robots-titleActions' },
-                h(
-                  Button,
-                  {
-                    variant: 'outline',
-                    size: 'sm',
-                    icon: h(IconChevronRightOutlineRegular, { size: 13 }),
-                    disabled: mutating || workspaceBusy !== null,
-                    'aria-label': `${t('enterWorkspace')} ${t('generalTitle')}`,
-                    onClick: openWorkspacePicker,
-                  },
-                  t('enterWorkspace'),
-                ),
-              ),
-            ),
-            h('p', { className: 'buka-robots-intro' }, t('generalIntro')),
-          ),
-        )
-      }
-
-      /**
        * 一条机器人卡片：名称、skills / AGENTS.md / 挂载状态、路径、动作与删除确认。
        *
        * @param {object} robot 一条机器人记录
@@ -1894,6 +1656,9 @@ window.__ModuleLoader__.load({
         const missing = robot.exists === false
         const mounted = robot.mounted === true
         const anyBusy = mutating || corrupt
+        // 整行点击进入详情：写操作进行中（重命名 / 删除 / 挂载）时先别切页，
+        // 避免把正在操作的卡片切走；登记文件损坏时列表为空，不会走到这里。
+        const canOpen = !mutating
 
         const actions = confirmingThis
           ? [
@@ -1953,38 +1718,35 @@ window.__ModuleLoader__.load({
                     },
                     busy === `mount:${robot.name}` ? t('mounting') : t('mount'),
                   ),
+              // 删除与其它行内动作共用同一套按钮（outline + sm + 危险色），
+              // 不再用裸图标按钮，避免这一行里出现两种按钮风格。
               h(
                 Button,
                 {
-                  key: 'configure',
+                  key: 'delete',
                   variant: 'outline',
                   size: 'sm',
-                  disabled: mutating,
-                  'aria-label': `${t('configure')} ${robot.name}`,
-                  onClick: () => openDetail(robot),
+                  className: 'buka-robots-danger',
+                  icon: h(IconTrashOutlineRegular, { size: 13 }),
+                  disabled: anyBusy,
+                  'aria-label': `${t('delete')} ${robot.name}`,
+                  onClick: () => setConfirming(robot.name),
                 },
-                t('configure'),
-              ),
-              h(
-                Tooltip,
-                { key: 'delete', label: t('delete'), side: 'top', delayMs: 400 },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'buka-robots-iconButton buka-robots-iconDanger',
-                    'aria-label': `${t('delete')} ${robot.name}`,
-                    disabled: anyBusy,
-                    onClick: () => setConfirming(robot.name),
-                  },
-                  h(IconTrashOutlineRegular, { size: 16 }),
-                ),
+                t('delete'),
               ),
             ]
 
         return h(
           'li',
-          { className: 'buka-robots-card', key: robot.name, 'aria-busy': busy !== null ? true : undefined },
+          {
+            className: `buka-robots-card${canOpen ? ' is-clickable' : ''}`,
+            key: robot.name,
+            'aria-busy': busy !== null ? true : undefined,
+            // 整行可点进详情；行内动作区自己挡住冒泡，点按钮不会误触。
+            onClick: () => {
+              if (canOpen) openDetail(robot)
+            },
+          },
           h(
             'div',
             { className: 'buka-robots-cardHead' },
@@ -1995,13 +1757,36 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'buka-robots-titleCluster' },
                 renderAvatar(robot.avatar, 26),
-                h('span', { className: 'buka-robots-cardTitle', title: robot.name }, String(robot.name ?? '')),
+                // 标题本身就是按钮：鼠标点整行都能进详情，键盘 Tab 也能落到这里，
+                // 不依赖一个单独的「配置」按钮。
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'buka-robots-cardTitle',
+                    title: robot.name,
+                    'aria-label': `${t('openDetail')} ${robot.name}`,
+                    disabled: !canOpen,
+                    onClick: (event) => {
+                      event.stopPropagation()
+                      openDetail(robot)
+                    },
+                  },
+                  String(robot.name ?? ''),
+                ),
                 renderMountedTag(robot),
                 h(Tag, { tone: 'neutral' }, countBadge(skills.length, t)),
                 h(Tag, { tone: agents.exists ? 'success' : 'neutral' }, agents.exists ? t('agentsBadge') : t('noAgentsBadge')),
                 missing ? h(Tag, { tone: 'warning' }, t('missingDir')) : null,
               ),
-              h('div', { className: 'buka-robots-titleActions' }, ...actions.filter(Boolean)),
+              h(
+                'div',
+                {
+                  className: 'buka-robots-titleActions',
+                  onClick: (event) => event.stopPropagation(),
+                },
+                ...actions.filter(Boolean),
+              ),
             ),
             // 描述是工作流选择机器人的依据，列表里直接展示，避免必须点进详情才能比较。
             typeof robot.description === 'string' && robot.description !== ''
@@ -2052,12 +1837,11 @@ window.__ModuleLoader__.load({
             : null,
           data === null
             ? null
-            : robots.length === 0 && !generalEnabled && !list.loading && !corrupt
+            : robots.length === 0 && !list.loading && !corrupt
               ? h('p', { className: 'buka-robots-empty' }, t('empty'))
               : h(
                   'ul',
                   { className: 'buka-robots-cards' },
-                  generalEnabled ? renderGeneralCard() : null,
                   ...robots.map((robot) => renderRobotCard(robot)),
                 ),
         )
@@ -2612,24 +2396,6 @@ window.__ModuleLoader__.load({
             )
           : null
 
-      // 设置入口只在列表页显示：设置作用于整个页面（目前是通用型机器人开关），
-      // 详情页的工具栏留给单个机器人。
-      const settingsButton =
-        selectedRobot === null
-          ? h(
-              Button,
-              {
-                variant: 'outline',
-                size: 'sm',
-                className: 'buka-robots-toolbarButton',
-                icon: h(IconSettingsOutlineRegular, { size: 13 }),
-                'aria-label': t('settings'),
-                onClick: openSettingsDialog,
-              },
-              t('settings'),
-            )
-          : null
-
       const detailActions =
         selectedRobot === null
           ? null
@@ -2745,7 +2511,7 @@ window.__ModuleLoader__.load({
                   : h('span', { className: 'buka-robots-headingTag' }, renderMountedTag(selectedRobot)),
               ),
             ),
-            h('div', { className: 'buka-robots-toolbar' }, detailActions, settingsButton, refreshButton, createButton),
+            h('div', { className: 'buka-robots-toolbar' }, detailActions, refreshButton, createButton),
             selectedRobot === null
               ? null
               : h(
@@ -2993,133 +2759,6 @@ window.__ModuleLoader__.load({
             ),
           },
           installOpen && selectedRobot !== null ? renderInstallDialog() : null,
-        ),
-        // 通用型机器人「进入工作区」对话框：列出 DSH 里已有的工作区，点一行就进入。
-        // 每次打开都重新读，侧边栏刚新建 / 删除的工作区也能看到。
-        h(
-          Modal,
-          {
-            open: workspacesOpen,
-            onClose: closeWorkspacePicker,
-            title: t('chooseWorkspace'),
-            closeLabel: t('close'),
-            footer: h(
-              React.Fragment,
-              null,
-              h(
-                Button,
-                { variant: 'outline', onClick: closeWorkspacePicker, disabled: workspaceBusy !== null },
-                t('cancel'),
-              ),
-            ),
-          },
-          workspacesOpen
-            ? h(
-                'div',
-                { className: 'buka-robots-dialogForm' },
-                h('p', { className: 'buka-robots-fieldHint' }, t('chooseWorkspaceHint')),
-                workspacesState.error === null
-                  ? null
-                  : h('p', { className: 'buka-robots-formError', role: 'alert' }, workspacesState.error),
-                workspacesState.status === 'loading'
-                  ? h(
-                      'p',
-                      { className: 'buka-robots-statusWithDot', role: 'status' },
-                      h(StateDot, { state: 'ongoing' }),
-                      t('loadingWorkspaces'),
-                    )
-                  : workspacesState.items.length === 0
-                    ? workspacesState.status === 'ready'
-                      ? h('p', { className: 'buka-robots-fieldHint' }, t('workspacesEmpty'))
-                      : null
-                    : h(
-                        'div',
-                        { className: 'buka-robots-workspaces' },
-                        ...workspacesState.items.map((workspace) =>
-                          h(
-                            'button',
-                            {
-                              key: workspace.id,
-                              type: 'button',
-                              className: `buka-robots-workspace${workspaceBusy === workspace.id ? ' is-busy' : ''}`,
-                              disabled: workspaceBusy !== null,
-                              'aria-label': `${t('enterWorkspace')} ${workspace.title}`,
-                              onClick: () => enterWorkspace(workspace),
-                            },
-                            h(
-                              'span',
-                              { className: 'buka-robots-workspaceText' },
-                              h('span', { className: 'buka-robots-workspaceTitle' }, String(workspace.title ?? '')),
-                              h('span', { className: 'buka-robots-workspacePath' }, String(workspace.path ?? '')),
-                            ),
-                            workspaceBusy === workspace.id
-                              ? h(StateDot, { state: 'ongoing', size: 13 })
-                              : h(IconChevronRightOutlineRegular, { size: 13 }),
-                          ),
-                        ),
-                      ),
-              )
-            : null,
-        ),
-        // 设置对话框：目前只有一个「通用型机器人」开关，改动立即写 Host 的设置
-        // 文件；停用后列表里的内置卡片消失，但这里始终可以重新启用。
-        h(
-          Modal,
-          {
-            open: settingsOpen,
-            onClose: closeSettingsDialog,
-            title: t('settingsTitle'),
-            closeLabel: t('close'),
-            footer: h(
-              React.Fragment,
-              null,
-              h(
-                Button,
-                { variant: 'outline', onClick: closeSettingsDialog, disabled: settingsSaving },
-                t('settingsDone'),
-              ),
-            ),
-          },
-          h(
-            'div',
-            { className: 'buka-robots-dialogForm' },
-            h(
-              'div',
-              { className: 'buka-robots-settingRow' },
-              h(
-                'div',
-                { className: 'buka-robots-settingText' },
-                h(
-                  'div',
-                  { className: 'buka-robots-settingHead' },
-                  h('span', { className: 'buka-robots-settingTitle' }, t('generalSetting')),
-                  h(
-                    Tag,
-                    { tone: generalEnabled ? 'success' : 'neutral' },
-                    generalEnabled ? t('settingsEnabled') : t('settingsDisabled'),
-                  ),
-                ),
-                h('span', { className: 'buka-robots-settingDesc' }, t('generalSettingDesc')),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  role: 'switch',
-                  'aria-checked': generalEnabled,
-                  'aria-label': t('generalSetting'),
-                  'aria-busy': settingsSaving,
-                  className: `buka-robots-switch${generalEnabled ? ' is-on' : ''}`,
-                  disabled: settingsSaving,
-                  onClick: () => saveGeneralEnabled(!generalEnabled),
-                },
-                h('span', { className: 'buka-robots-switchThumb', 'aria-hidden': true }),
-              ),
-            ),
-            settingsError === null
-              ? null
-              : h('p', { className: 'buka-robots-formError', role: 'alert' }, settingsError),
-          ),
         ),
       )
     }

@@ -745,18 +745,6 @@ test('buildRobot：newName 必须配 update，目标名/目录被占用时拒绝
       () => buildRobot({ ...store, name: 'writer', newName: 'ghost', update: true, workspaceRegistry: registry }),
       (error) => error.code === BUILD_ERROR_CODES.nameTaken,
     )
-    // 内置「通用型机器人」的名字保留。
-    await assert.rejects(
-      () =>
-        buildRobot({
-          ...store,
-          name: 'writer',
-          newName: '通用型机器人',
-          update: true,
-          workspaceRegistry: registry,
-        }),
-      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
-    )
     // 不能把不存在的机器人「改名」出来。
     await assert.rejects(
       () => buildRobot({ ...store, name: 'nobody', newName: 'author', update: true, workspaceRegistry: registry }),

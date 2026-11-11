@@ -30,7 +30,6 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { isAvatarId, pickDefaultAvatar, resolveAvatar } from './avatar.js'
-import { isGeneralRobotName } from './general-robot.js'
 
 /** 每个机器人工作区里的协作说明文件名。 */
 export const AGENTS_FILE = 'AGENTS.md'
@@ -644,8 +643,7 @@ export async function setRobotDescription({ file, name, description } = {}) {
  * - 名称规则与新建一致；新名等于旧名时按 no-op 返回（`renamed: false`），
  *   不碰磁盘与登记表；
  * - 新名不能与登记表里其它机器人重名，也不能与 `robotsDir` 下已存在的目录
- *   重名（抛 `code = 'name-taken'`），避免两个登记条目指向同一个目录；内置
- *   「通用型机器人」的名字也保留，不能被普通机器人占用；
+ *   重名（抛 `code = 'name-taken'`），避免两个登记条目指向同一个目录；
  * - 大小写不敏感的文件系统（macOS 默认）上允许只改大小写：目标路径与旧目录
  *   是同一个目录时继续改名，而不是误判成「目标已存在」；
  * - 只移动 `robotsDir` 的直接子目录：登记表被手改到别处时拒绝
@@ -692,13 +690,6 @@ export async function renameRobot({ robotsDir, file, name, newName } = {}) {
 
   if (registry.robots.some((robot) => robot.name === nextName)) {
     throw Object.assign(new Error(`机器人名称已被占用：${nextName}`), { code: 'name-taken' })
-  }
-  // 内置「通用型机器人」不在登记表里，但它的名字是保留的：普通机器人叫这个名字
-  // 会让工具清单 / 工作流选择出现两个同名条目。
-  if (isGeneralRobotName(nextName)) {
-    throw Object.assign(new Error(`机器人名称是内置「${nextName}」保留名，不能使用`), {
-      code: 'name-taken',
-    })
   }
 
   const configuredRoot =
@@ -910,37 +901,6 @@ export async function listRobots({ file, workspaceRegistry, robotsDir } = {}) {
     })
   }
   return { root, registry: registryFile, corrupt: false, robots }
-}
-
-// ---- 工作区清单（通用型机器人「进入工作区」对话框用） ----------------------
-
-/**
- * 把 DSH 的工作区注册表投影成页面用的紧凑清单，保留注册表顺序。
- *
- * 通用型机器人的「进入工作区」对话框用它列出现有工作区；页面不自己排序，
- * 标题缺省时回落到路径（与 DSH 侧边栏一致）。注册表不可用时返回空表。
- *
- * @param {{ list?: () => Array<Record<string, unknown>> } | undefined} workspaceRegistry
- * @returns {Array<{ id: string, title: string, path: string, sessions: number }>}
- */
-export function summarizeWorkspaces(workspaceRegistry) {
-  let snapshot
-  try {
-    snapshot = workspaceRegistry?.list?.()
-  } catch {
-    snapshot = undefined
-  }
-  return (Array.isArray(snapshot) ? snapshot : [])
-    .filter((workspace) => workspace !== null && typeof workspace === 'object')
-    .map((workspace) => ({
-      id: String(workspace.id),
-      title:
-        typeof workspace.title === 'string' && workspace.title.trim() !== ''
-          ? workspace.title
-          : String(workspace.path ?? ''),
-      path: String(workspace.path ?? ''),
-      sessions: Array.isArray(workspace.sessionIds) ? workspace.sessionIds.length : 0,
-    }))
 }
 
 /**

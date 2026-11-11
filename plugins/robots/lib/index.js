@@ -19,9 +19,6 @@
  * | `POST /buka-robots/skills/install` | 只安装选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
  * | `POST /buka-robots/skills/remove` | 在机器人目录里执行 `npx skills remove <skill> -y` |
  * | `POST /buka-robots/reveal` | 用系统文件管理器（macOS 的 Finder）打开机器人目录 |
- * | `GET /buka-robots/workspaces` | 列出 DSH 里已有的工作区，给通用型机器人的「进入工作区」对话框用 |
- * | `GET /buka-robots/settings` | 读设置（目前只有通用型机器人开关） |
- * | `POST /buka-robots/settings` | 写入设置；设置文件与登记表同级（`settings.json`） |
  *
  * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
  * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_robots`
@@ -53,10 +50,9 @@ import { normalizePresets, resolveRobotBuildAccess } from './access.js'
 import { AVATAR_IDS } from './avatar.js'
 import { buildRobot } from './builder.js'
 import { createRobotBuildTool } from './build-tool.js'
-import { GENERAL_ROBOT_NAME, generalRobotEntry } from './general-robot.js'
 import { NPX_TIMEOUT_MS, createNpxRunner, parseSkillList } from './npx.js'
+import { seedPresetRobots } from './presets.js'
 import { revealDirectory } from './reveal.js'
-import { readSettings, resolveSettingsFile, setGeneralRobotEnabled } from './settings.js'
 import {
   AGENTS_MAX_WRITE_BYTES,
   addRobot,
@@ -73,7 +69,6 @@ import {
   resolveRobotRegistryFile,
   resolveRobotsDir,
   scanProjectSkills,
-  summarizeWorkspaces,
   writeAgentsFile,
 } from './robot-store.js'
 import { RobotSessionService, SERVICE_NAME } from './service.js'
@@ -116,12 +111,6 @@ const SKILL_REMOVE_ROUTE = '/buka-robots/skills/remove'
 
 /** 页面「打开 Finder」用的路由。 */
 const REVEAL_ROUTE = '/buka-robots/reveal'
-
-/** 通用型机器人「进入工作区」对话框读取已有工作区用的路由。 */
-const WORKSPACES_ROUTE = '/buka-robots/workspaces'
-
-/** 读 / 写插件设置（通用型机器人开关）用的路由。 */
-const SETTINGS_ROUTE = '/buka-robots/settings'
 
 /** 请求体上限：页面发送的 JSON 都很小，超过这个大小按恶意请求处理。 */
 const MAX_BODY_BYTES = 1024 * 1024
@@ -215,18 +204,23 @@ export const Config = z.object({
     .description(
       '能看到并调用 buka_robot_build（创建 / 修改机器人）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `robot-builder`。',
     ),
+  seedPresets: z
+    .boolean()
+    .default(true)
+    .description(
+      '全新安装（登记表为空）时是否自动补上「软件工程师」与「质量保障工程师」两个预设机器人；设为 false 则不初始化预设。',
+    ),
 })
 
 /**
  * 注册 HTTP 路由、只读工具与「机器人构建」preset 的写工具。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx 提供 `workspaceRegistry` 的插件上下文
- * @param {{ robotsDir?: string, resultRetries?: number, builderPresets?: string[] } | undefined} [config] 插件行配置
+ * @param {{ robotsDir?: string, resultRetries?: number, builderPresets?: string[], seedPresets?: boolean } | undefined} [config] 插件行配置
  */
 export function apply(ctx, config) {
   const robotsDir = resolveRobotsDir(config?.robotsDir)
   const registryFile = resolveRobotRegistryFile(robotsDir)
-  const settingsFile = resolveSettingsFile(robotsDir)
   const runNpx = createNpxRunner({ timeoutMs: NPX_TIMEOUT_MS })
   // `add --list` 的输出要整段解析：默认 runner 只留末尾 4 KB 会把列表头截掉。
   const runNpxList = createNpxRunner({ timeoutMs: NPX_TIMEOUT_MS, maxOutputBytes: LIST_OUTPUT_BYTES })
@@ -238,7 +232,6 @@ export function apply(ctx, config) {
       ctx,
       robotsDir,
       registryFile,
-      settingsFile,
       defineTool,
       resultRetries: config?.resultRetries,
     }),
@@ -267,6 +260,22 @@ export function apply(ctx, config) {
       () => undefined,
     )
     return run
+  }
+
+  // 全新安装（登记表为空）时补上两个预设机器人；串行进队列，避免与页面上的
+  // 首次新建抢写。异步完成、不阻塞启动，失败只记日志。`seedPresets: false` 时跳过。
+  if (config?.seedPresets !== false) {
+    void serializeRegistry(() =>
+      seedPresetRobots({ robotsDir, file: registryFile, workspaceRegistry: ctx.workspaceRegistry }).then(
+        (result) => {
+          if (result.seeded.length > 0) {
+            ctx.logger?.info?.('buka-robots: 已初始化预设机器人：%s', result.seeded.join('、'))
+          }
+        },
+      ),
+    ).catch((error) => {
+      ctx.logger?.warn?.('buka-robots: 初始化预设机器人失败：%s', describeError(error))
+    })
   }
 
   // ---- 机器人构建 preset 的可见性 ---------------------------------------
@@ -402,14 +411,7 @@ export function apply(ctx, config) {
                 workspaceRegistry: ctx.workspaceRegistry,
                 robotsDir,
               })
-              // 通用型机器人不是登记表里的条目，只是页面上的固定入口；开关放在
-              // 设置文件里，列表顺手把它带回去，页面一次请求就够渲染。
-              const settings = await readSettings({ file: settingsFile })
-              sendJson(res, 200, {
-                ok: true,
-                ...snapshot,
-                general: { enabled: settings.generalRobot.enabled },
-              })
+              sendJson(res, 200, { ok: true, ...snapshot })
             } catch (error) {
               webCtx.logger?.warn?.('buka-robots: 读取机器人列表失败：%s', describeError(error))
               sendError(res, 500, 'list-failed', `读取机器人列表失败：${describeError(error)}`)
@@ -417,72 +419,6 @@ export function apply(ctx, config) {
           },
         }),
       `buka-robots: GET ${LIST_ROUTE}`,
-    )
-
-    webCtx.effect(
-      () =>
-        webCtx.webServer.register({
-          kind: 'exact',
-          path: WORKSPACES_ROUTE,
-          handler: async (req, res) => {
-            if (rejected(req, res)) return
-            if (req.method !== 'GET') {
-              sendMethodNotAllowed(res, 'GET')
-              return
-            }
-            try {
-              // 工作区注册表是 Host 侧的权威顺序：通用型机器人的「进入工作区」
-              // 对话框按它列，页面不自己排序。
-              sendJson(res, 200, { ok: true, workspaces: summarizeWorkspaces(ctx.workspaceRegistry) })
-            } catch (error) {
-              webCtx.logger?.warn?.('buka-robots: 读取工作区列表失败：%s', describeError(error))
-              sendError(res, 500, 'workspaces-failed', `读取工作区列表失败：${describeError(error)}`)
-            }
-          },
-        }),
-      `buka-robots: GET ${WORKSPACES_ROUTE}`,
-    )
-
-    webCtx.effect(
-      () =>
-        webCtx.webServer.register({
-          kind: 'exact',
-          path: SETTINGS_ROUTE,
-          handler: async (req, res) => {
-            if (rejected(req, res)) return
-            if (req.method === 'GET') {
-              try {
-                const settings = await readSettings({ file: settingsFile })
-                sendJson(res, 200, { ok: true, general: { enabled: settings.generalRobot.enabled } })
-              } catch (error) {
-                webCtx.logger?.warn?.('buka-robots: 读取设置失败：%s', describeError(error))
-                sendError(res, 500, 'settings-failed', `读取设置失败：${describeError(error)}`)
-              }
-              return
-            }
-            if (req.method !== 'POST') {
-              sendMethodNotAllowed(res, 'GET, POST')
-              return
-            }
-            const body = await readJsonBody(req, res)
-            if (body === undefined) return
-
-            const enabled = body?.general?.enabled
-            if (typeof enabled !== 'boolean') {
-              sendError(res, 400, 'invalid-settings', 'general.enabled 必须是布尔值')
-              return
-            }
-            try {
-              const saved = await setGeneralRobotEnabled({ file: settingsFile, enabled })
-              webCtx.logger?.info?.('buka-robots: 通用型机器人已%s', enabled ? '启用' : '停用')
-              sendJson(res, 200, { ok: true, general: { enabled: saved.settings.generalRobot.enabled } })
-            } catch (error) {
-              webCtx.logger?.warn?.('buka-robots: 保存设置失败：%s', describeError(error))
-              sendError(res, 500, 'settings-failed', `保存设置失败：${describeError(error)}`)
-            }
-          },
-        }),
-      `buka-robots: GET/POST ${SETTINGS_ROUTE}`,
     )
 
     webCtx.effect(
@@ -1211,45 +1147,6 @@ export function apply(ctx, config) {
             skills: robot.skills.map((skill) => ({ name: skill.name })),
             agentsFile: robot.agents.exists,
           }))
-
-          // 通用型机器人启用时排在最后；对外字段与普通机器人完全同形（没有标记位）。
-          // 它没有固定目录，这里用调用方会话所在的工作区当 path / workspaceId，让它在
-          // 清单里看起来就是一个普通机器人。
-          const settings = await readSettings({ file: settingsFile })
-          if (
-            settings.generalRobot.enabled &&
-            !snapshot.robots.some((robot) => robot.name === GENERAL_ROBOT_NAME)
-          ) {
-            const cwd = exec?.agent?.session?.header?.cwd
-            let workspaceId = null
-            if (typeof cwd === 'string' && cwd !== '' && typeof ctx.workspaceRegistry?.list === 'function') {
-              try {
-                const workspaces = ctx.workspaceRegistry.list()
-                const match = Array.isArray(workspaces)
-                  ? workspaces.find((workspace) => workspace?.path === cwd)
-                  : undefined
-                if (match !== undefined && match !== null && typeof match.id === 'string') {
-                  workspaceId = match.id
-                }
-              } catch {
-                workspaceId = null
-              }
-            }
-            const general = generalRobotEntry({
-              path: typeof cwd === 'string' ? cwd : '',
-              workspaceId,
-              mounted: workspaceId !== null,
-            })
-            robots.push({
-              name: general.name,
-              path: general.path,
-              description: general.description,
-              mounted: general.mounted,
-              workspaceId: general.workspaceId,
-              skills: [],
-              agentsFile: false,
-            })
-          }
 
           return {
             root: snapshot.root,

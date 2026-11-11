@@ -3,17 +3,14 @@
  *
  * 页面模块不能直接 import（顶层依赖 `window.__ModuleLoader__`），这里用最小的
  * React 桩与假的模块加载器把工厂跑起来，再按页面的 `useState` 顺序注入状态，
- * 直接调用注册到 `main` 的页面组件，检查通用型机器人卡片、设置对话框与
- * 「进入工作区」对话框是否按状态渲染。它不是浏览器测试，但能在不启动 DSH 的
- * 情况下抓到渲染函数里的运行时错误。
+ * 直接调用注册到 `main` 的页面组件，检查列表卡片与各对话框是否按状态渲染。
+ * 它不是浏览器测试，但能在不启动 DSH 的情况下抓到渲染函数里的运行时错误。
  */
 
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
-
-import { AVATAR_IDS } from '../plugins/robots/lib/avatar.js'
 
 const CLIENT_PATH = path.resolve('plugins/robots/client.js')
 
@@ -114,7 +111,10 @@ async function loadClient() {
     return h(
       'button',
       {
-        className: `x-button x-button-${props.variant ?? 'primary'}`,
+        // 调用方传进来的 className 一并保留：测试要区分危险色按钮与普通按钮。
+        className: ['x-button', `x-button-${props.variant ?? 'primary'}`, props.className]
+          .filter((part) => typeof part === 'string' && part !== '')
+          .join(' '),
         type: props.type ?? 'button',
         disabled: props.disabled === true,
         'aria-label': props['aria-label'],
@@ -273,22 +273,6 @@ const zh = {
   title: '机器人',
   refresh: '刷新',
   create: '创建机器人',
-  settings: '设置',
-  settingsTitle: '设置',
-  generalSetting: '通用型机器人',
-  generalSettingDesc:
-    '固定使用 🤖 头像与标准模式，可以进入任何已存在的工作区，并会出现在工作流的机器人清单里（职责里写明没有专用机器人时使用）；关掉后它既不会出现在机器人列表里，也不会暴露给工作流。',
-  settingsEnabled: '启用',
-  settingsDisabled: '停用',
-  settingsDone: '完成',
-  generalTitle: '通用型机器人',
-  generalIntro: '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
-  enterWorkspace: '进入工作区',
-  chooseWorkspace: '选择工作区',
-  chooseWorkspaceHint: '通用型机器人使用标准模式，选一个已有的工作区进入。',
-  loadingWorkspaces: '正在读取工作区…',
-  workspacesEmpty: '还没有工作区，先在侧边栏新建一个。',
-  workspacesFailed: '读取工作区失败：',
   empty: '还没有机器人。',
   mountedBadge: '已挂载',
   unmountedBadge: '未挂载',
@@ -296,7 +280,7 @@ const zh = {
   agentsBadge: 'AGENTS.md',
   noAgentsBadge: '无 AGENTS.md',
   newSession: '新会话',
-  configure: '配置',
+  openDetail: '打开详情',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
   descriptionHint: '工作流会读它来决定是否把节点交给这个机器人；用一句话写清这个机器人负责什么。',
@@ -345,18 +329,16 @@ function robot(name, avatar, description = '') {
 }
 
 /**
- * 列表响应（`general.enabled` 决定通用型机器人卡片是否出现）。
+ * 列表响应。
  *
- * @param {boolean} generalEnabled
  * @returns {Record<string, any>}
  */
-function listData(generalEnabled) {
+function listData() {
   return {
     ok: true,
     root: '/Users/x/.cache/dsh-plugin-robots/robots',
     registry: '/Users/x/.cache/dsh-plugin-robots/robots.json',
     corrupt: false,
-    general: { enabled: generalEnabled },
     robots: [robot('writer', 'panda', '写发布说明与测试报告')],
   }
 }
@@ -375,14 +357,11 @@ function listData(generalEnabled) {
  *   renameSaving?: boolean,
  *   renameError?: string | null,
  *   tab?: string,
- *   settingsOpen?: boolean,
- *   workspacesOpen?: boolean,
- *   workspaces?: Array<Record<string, any>> | null,
  * }} [options]
  * @returns {Array<any>}
  */
 function states({
-  data = listData(true),
+  data = listData(),
   selectedName = null,
   dialogOpen = false,
   draftDescription = '',
@@ -392,9 +371,6 @@ function states({
   renameSaving = false,
   renameError = null,
   tab = 'agents',
-  settingsOpen = false,
-  workspacesOpen = false,
-  workspaces = null,
 } = {}) {
   return [
     { data, error: null, loading: false }, // list
@@ -433,132 +409,20 @@ function states({
     false, // installing
     { status: 'unavailable', repos: [] }, // favourites
     null, // notice
-    workspacesOpen, // workspacesOpen
-    workspaces === null
-      ? { status: 'idle', items: [], error: null }
-      : { status: 'ready', items: workspaces, error: null }, // workspacesState
-    null, // workspaceBusy
-    settingsOpen, // settingsOpen
-    false, // settingsSaving
-    null, // settingsError
   ]
 }
-
-test('机器人页：通用型机器人卡片固定在列表最前，停用后不渲染', async () => {
-  const client = await loadClient()
-  const tree = client.render(states({ data: listData(true) }))
-  const { texts, nodes } = collect(tree)
-
-  assert.ok(texts.includes('通用型机器人'), '列表顶部应有通用型机器人')
-  assert.ok(
-    texts.includes(
-      '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
-    ),
-    '通用型机器人说明里要写清职责与兜底定位',
-  )
-  assert.equal(texts.includes('通用型 · 标准模式'), false, '标准模式写在说明里，不再单独做标签')
-  assert.ok(
-    texts.includes(
-      '以标准模式在任意已有工作区里执行通用任务，自身没有目录、AGENTS.md 或 skills；没有专用机器人时使用。',
-    ),
-  )
-  assert.ok(texts.includes('进入工作区'))
-
-  const generalButton = findNode(
-    tree,
-    (node) => node.props?.['aria-label'] === '进入工作区 通用型机器人',
-  )
-  assert.ok(generalButton, '通用型机器人卡片应有进入工作区按钮')
-
-  // 通用型卡片排在登记机器人之前。
-  const cards = nodes.filter((node) => {
-    const value = node.props?.className
-    return typeof value === 'string' && value.split(/\s+/).includes('buka-robots-card')
-  })
-  assert.equal(cards.length, 2)
-  assert.ok(String(cards[0].props?.key ?? '').includes('general'))
-
-  // 停用后列表里没有通用型机器人。
-  const off = collect(client.render(states({ data: listData(false) })))
-  assert.equal(off.texts.includes('通用型机器人'), false)
-  assert.ok(off.texts.includes('writer'))
-})
-
-test('机器人页：设置按钮只在列表页显示，对话框按开关状态渲染', async () => {
-  const client = await loadClient()
-  const list = client.render(states({ data: listData(true) }))
-  assert.ok(findNode(list, (node) => node.props?.['aria-label'] === '设置'), '列表页应有设置按钮')
-
-  const detail = client.render(states({ data: listData(true), selectedName: 'writer' }))
-  assert.equal(findNode(detail, (node) => node.props?.['aria-label'] === '设置'), null, '详情页不显示页面设置')
-
-  const open = collect(client.render(states({ data: listData(true), settingsOpen: true })))
-  assert.ok(open.texts.includes('设置'))
-  assert.ok(open.texts.includes('通用型机器人'))
-  assert.ok(open.texts.includes('启用'))
-  assert.ok(open.texts.includes('完成'))
-  const enabledSwitch = findNode(
-    client.render(states({ data: listData(true), settingsOpen: true })),
-    (node) => node.props?.role === 'switch',
-  )
-  assert.equal(enabledSwitch?.props?.['aria-checked'], true)
-
-  const off = collect(client.render(states({ data: listData(false), settingsOpen: true })))
-  assert.ok(off.texts.includes('停用'))
-  const disabledSwitch = findNode(
-    client.render(states({ data: listData(false), settingsOpen: true })),
-    (node) => node.props?.role === 'switch',
-  )
-  assert.equal(disabledSwitch?.props?.['aria-checked'], false)
-})
-
-test('机器人页：进入工作区对话框按 Host 返回渲染工作区', async () => {
-  const client = await loadClient()
-  const workspaces = [
-    { id: 'ws-1', title: '卟咔课堂', path: '/Users/x/work/class', sessions: 2 },
-    { id: 'ws-2', title: 'writer', path: '/Users/x/.cache/dsh-plugin-robots/robots/writer', sessions: 0 },
-  ]
-  const { texts, nodes } = collect(
-    client.render(states({ data: listData(true), workspacesOpen: true, workspaces })),
-  )
-  assert.ok(texts.includes('选择工作区'))
-  assert.ok(texts.includes('卟咔课堂'))
-  assert.ok(texts.includes('/Users/x/work/class'))
-  assert.ok(texts.includes('writer'))
-  const rows = nodes.filter((node) => {
-    const value = node.props?.className
-    return (
-      typeof value === 'string' &&
-      value.split(/\s+/).includes('buka-robots-workspace') &&
-      typeof node.props?.['aria-label'] === 'string'
-    )
-  })
-  assert.equal(rows.length, 2, '每个工作区一行')
-
-  const empty = collect(
-    client.render(states({ data: listData(true), workspacesOpen: true, workspaces: [] })),
-  )
-  assert.ok(empty.texts.includes('还没有工作区，先在侧边栏新建一个。'))
-})
-
-test('机器人页：头像预设里没有 🤖，通用型机器人卡片自己画固定头像', async () => {
-  assert.equal(AVATAR_IDS.includes('robot'), false)
-  const client = await loadClient()
-  const { texts } = collect(client.render(states({ data: listData(true) })))
-  assert.ok(texts.includes('🤖'), '通用型机器人卡片应显示 🤖')
-})
 
 test('机器人页：卡片与职责页签展示职责，创建对话框带职责字段', async () => {
   const client = await loadClient()
   const description = '写发布说明与测试报告'
 
   // 列表卡片直接展示职责，便于比较机器人。
-  const list = collect(client.render(states({ data: listData(true) })))
+  const list = collect(client.render(states({ data: listData() })))
   assert.ok(list.texts.includes(description))
 
   // 职责是详情页的独立页签：说明 + textarea + 保存按钮。
   const tabStates = {
-    data: listData(true),
+    data: listData(),
     selectedName: 'writer',
     descriptionDraft: description,
     tab: 'description',
@@ -580,7 +444,7 @@ test('机器人页：卡片与职责页签展示职责，创建对话框带职�
   assert.ok(draftField)
 
   // 默认 AGENTS.md 页签不显示职责编辑器。
-  const agentsTab = client.render(states({ data: listData(true), selectedName: 'writer' }))
+  const agentsTab = client.render(states({ data: listData(), selectedName: 'writer' }))
   assert.equal(
     findNode(agentsTab, (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责'),
     null,
@@ -588,7 +452,7 @@ test('机器人页：卡片与职责页签展示职责，创建对话框带职�
 
   // 创建对话框里也能直接填职责。
   const createField = findNode(
-    client.render(states({ data: listData(true), dialogOpen: true })),
+    client.render(states({ data: listData(), dialogOpen: true })),
     (node) => node.type === 'textarea' && node.props?.placeholder === '例如：负责把会议记录整理成三点结论',
   )
   assert.ok(createField)
@@ -598,13 +462,13 @@ test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名
   const client = await loadClient()
 
   // 配置视图标题行：机器人名旁有铅笔按钮（tooltip / aria-label 带机器人名）。
-  const detail = client.render(states({ data: listData(true), selectedName: 'writer' }))
+  const detail = client.render(states({ data: listData(), selectedName: 'writer' }))
   const renameButton = findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer')
   assert.ok(renameButton, '配置视图标题行应有重命名按钮')
   assert.equal(renameButton.props?.disabled, false)
 
   // 目录缺失时入口禁用。
-  const missingData = listData(true)
+  const missingData = listData()
   missingData.robots[0].exists = false
   const missingButton = findNode(
     client.render(states({ data: missingData, selectedName: 'writer' })),
@@ -614,7 +478,7 @@ test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名
 
   // renameOpen 时对话框要有标题、新名称字段、后果提示与保存 / 取消。
   const dialogStates = {
-    data: listData(true),
+    data: listData(),
     selectedName: 'writer',
     renameOpen: true,
     renameDraft: 'writer',
@@ -662,11 +526,73 @@ test('机器人页：详情页有重命名入口，renameOpen 时渲染重命名
   assert.ok(failed.texts.includes('重命名失败：机器人名称已被占用'))
 
   // 登记文件损坏时重命名入口禁用。
-  const corruptData = listData(true)
+  const corruptData = listData()
   corruptData.corrupt = true
   const corruptButton = findNode(
     client.render(states({ data: corruptData, selectedName: 'writer' })),
     (node) => node.props?.['aria-label'] === '重命名 writer',
   )
   assert.equal(corruptButton?.props?.disabled, true, '登记文件损坏时重命名按钮禁用')
+})
+
+test('机器人页：列表整行点击进详情，行内动作统一为 outline 按钮', async () => {
+  const client = await loadClient()
+  const tree = client.render(states({ data: listData() }))
+  const list = collect(tree)
+
+  // 不再有单独的「配置」按钮：进入详情靠整行点击 / 标题按钮。
+  assert.ok(!list.texts.includes('配置'), '列表里不再有「配置」按钮文案')
+
+  const card = findNode(
+    tree,
+    (node) => node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
+  )
+  assert.ok(card, '列表里有机器人卡片')
+  assert.equal(typeof card.props?.onClick, 'function', '整行可点击进入详情')
+  assert.match(String(card.props?.className), /is-clickable/u)
+
+  // 标题本身是按钮：键盘 Tab 能落到这里，点它把事件拦在行内，避免重复进入。
+  const titleButton = findNode(
+    tree,
+    (node) => node.type === 'button' && node.props?.['aria-label'] === '打开详情 writer',
+  )
+  assert.ok(titleButton, '机器人名是进入详情的按钮')
+  let stopped = false
+  titleButton.props.onClick({ stopPropagation: () => { stopped = true } })
+  assert.equal(stopped, true, '点标题不再冒泡到整行')
+
+  // 行内动作：新会话 / 删除；删除与其它动作同一套 outline 按钮（危险色），
+  // 不再是那个裸图标按钮。
+  assert.ok(list.texts.includes('新会话'))
+  assert.ok(list.texts.includes('删除'))
+  const deleteButton = findNode(
+    tree,
+    (node) => node.type === 'button' && node.props?.['aria-label'] === '删除 writer',
+  )
+  assert.ok(deleteButton, '有删除按钮')
+  assert.match(String(deleteButton.props?.className), /x-button-outline/u)
+  assert.match(String(deleteButton.props?.className), /buka-robots-danger/u)
+  assert.equal(
+    findNode(
+      tree,
+      (node) => node.type === 'button' && String(node.props?.className ?? '').includes('buka-robots-iconDanger'),
+    ),
+    null,
+    '列表里不再有裸图标删除按钮',
+  )
+
+  // 写操作进行中（busy）时整行不进入详情，标题按钮也禁用。
+  const busyStates = states({ data: listData() })
+  busyStates[8] = 'delete:writer' // busy
+  const busyTree = client.render(busyStates)
+  const busyCard = findNode(
+    busyTree,
+    (node) => node.type === 'li' && String(node.props?.className ?? '').includes('buka-robots-card'),
+  )
+  assert.ok(!String(busyCard.props?.className).includes('is-clickable'), '写操作中整行不可点')
+  const busyTitle = findNode(
+    busyTree,
+    (node) => node.type === 'button' && node.props?.['aria-label'] === '打开详情 writer',
+  )
+  assert.equal(busyTitle.props?.disabled, true, '写操作中标题按钮禁用')
 })

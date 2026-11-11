@@ -128,7 +128,7 @@ async function makeHarness() {
   }
 
   const { apply } = await import(`${pathToFileURL(path.resolve('plugins/robots/lib/index.js')).href}`)
-  apply(ctx, { robotsDir, builderPresets: ['robot-builder'] })
+  apply(ctx, { robotsDir, builderPresets: ['robot-builder'], seedPresets: false })
 
   const entry = registeredTools.find((item) => item.tool.name === 'buka_robot_build')
   assert.ok(entry, 'buka_robot_build 应已注册')
@@ -245,13 +245,6 @@ test('POST /buka-robots/rename：错误码映射（内置名 409、非法名 400
     })
     assert.equal(taken.status, 409)
     assert.equal(taken.body.code, 'name-taken')
-
-    // 内置「通用型机器人」的名字保留。
-    const reserved = await callRoute(harness.routes, '/buka-robots/rename', {
-      body: { name: 'writer', newName: '通用型机器人' },
-    })
-    assert.equal(reserved.status, 409)
-    assert.equal(reserved.body.code, 'name-taken')
 
     // 非法新名 / 与旧名相同。
     const invalid = await callRoute(harness.routes, '/buka-robots/rename', {

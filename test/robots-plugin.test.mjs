@@ -22,14 +22,8 @@ import {
   resolveAvatar,
 } from '../plugins/robots/lib/avatar.js'
 import { cleanOutput, parseSkillList } from '../plugins/robots/lib/npx.js'
+import { PRESET_ROBOTS, seedPresetRobots } from '../plugins/robots/lib/presets.js'
 import { revealCommand, revealDirectory } from '../plugins/robots/lib/reveal.js'
-import {
-  DEFAULT_GENERAL_ROBOT_ENABLED,
-  SETTINGS_FILE,
-  readSettings,
-  resolveSettingsFile,
-  setGeneralRobotEnabled,
-} from '../plugins/robots/lib/settings.js'
 import {
   AGENTS_MAX_READ_BYTES,
   CLAUDE_FILE,
@@ -55,7 +49,6 @@ import {
   ROBOT_DESCRIPTION_MAX_LENGTH,
   scanProjectSkills,
   setRobotDescription,
-  summarizeWorkspaces,
   writeAgentsFile,
   writeRobotRegistry,
 } from '../plugins/robots/lib/robot-store.js'
@@ -838,80 +831,12 @@ test('头像契约：Host 与两个浏览器一半共用同一组 id、emoji 与
 })
 
 
-test('通用型机器人专属 🤖：预设头像里不再有 robot', () => {
-  assert.equal(AVATAR_IDS.includes('robot'), false, '🤖 只留给通用型机器人')
+test('历史遗留的 robot 头像 id 不在预设里，会按名字哈希落回其它预设', () => {
+  assert.equal(AVATAR_IDS.includes('robot'), false)
   assert.equal(isAvatarId('robot'), false)
   // 旧登记表里残留的 robot 会按名字哈希落回其它预设，而不是原样显示。
   assert.notEqual(resolveAvatar('robot', 'writer'), 'robot')
   assert.ok(AVATAR_IDS.includes(resolveAvatar('robot', 'writer')))
-})
-
-test('通用型机器人设置：默认启用、可读写、损坏时回落默认', async () => {
-  const root = await makeRoot()
-  try {
-    const robotsDir = path.join(root, 'robots')
-    const file = resolveSettingsFile(robotsDir)
-    assert.equal(file, path.join(root, SETTINGS_FILE), '设置文件与登记表同级')
-
-    // 文件不存在：按默认值启用。
-    const missing = await readSettings({ file })
-    assert.equal(missing.generalRobot.enabled, DEFAULT_GENERAL_ROBOT_ENABLED)
-
-    // 停用：写文件、读回 false，文件权限 0600、内容是规范化的 JSON。
-    const saved = await setGeneralRobotEnabled({ file, enabled: false })
-    assert.equal(saved.settings.generalRobot.enabled, false)
-    assert.equal((await readSettings({ file })).generalRobot.enabled, false)
-    assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
-    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), {
-      version: 1,
-      generalRobot: { enabled: false },
-    })
-
-    // 再启用。
-    await setGeneralRobotEnabled({ file, enabled: true })
-    assert.equal((await readSettings({ file })).generalRobot.enabled, true)
-
-    // 损坏 / 字段类型不对：回落默认，不抛错（页面照常可用）。
-    await fs.writeFile(file, '{broken')
-    assert.equal((await readSettings({ file })).generalRobot.enabled, DEFAULT_GENERAL_ROBOT_ENABLED)
-    await fs.writeFile(file, JSON.stringify({ generalRobot: { enabled: 'yes' } }))
-    assert.equal((await readSettings({ file })).generalRobot.enabled, DEFAULT_GENERAL_ROBOT_ENABLED)
-
-    // 开关必须是布尔值，避免接口被塞入奇怪的值。
-    await assert.rejects(
-      () => setGeneralRobotEnabled({ file, enabled: 'no' }),
-      (error) => error.code === 'invalid-settings',
-    )
-  } finally {
-    await removeRoot(root)
-  }
-})
-
-test('通用型机器人的工作区清单：保留注册表顺序、标题回落路径、容错', () => {
-  const registry = {
-    list: () => [
-      { id: 'ws-1', title: '课堂', path: '/work/class', sessionIds: ['a', 'b'] },
-      { id: 'ws-2', title: '', path: '/work/empty', sessionIds: [] },
-      { id: 'ws-3', title: '   ', path: '/work/blank' },
-      null,
-    ],
-  }
-  assert.deepEqual(summarizeWorkspaces(registry), [
-    { id: 'ws-1', title: '课堂', path: '/work/class', sessions: 2 },
-    { id: 'ws-2', title: '/work/empty', path: '/work/empty', sessions: 0 },
-    { id: 'ws-3', title: '/work/blank', path: '/work/blank', sessions: 0 },
-  ])
-
-  // 没有注册表 / list 抛错：空表，不把页面带崩。
-  assert.deepEqual(summarizeWorkspaces(undefined), [])
-  assert.deepEqual(
-    summarizeWorkspaces({
-      list() {
-        throw new Error('boom')
-      },
-    }),
-    [],
-  )
 })
 
 test('机器人描述：空白折叠、上限、登记表与列表读写', async () => {
@@ -1137,13 +1062,6 @@ test('renameRobot：同名 no-op、名称/目录冲突、未知与缺失目录�
     )
     assert.equal((await fs.stat(outside)).isDirectory(), true)
 
-    // 内置「通用型机器人」的名字保留。
-    await addRobot({ robotsDir, file, name: 'reserved-check' })
-    await assert.rejects(
-      () => renameRobot({ robotsDir, file, name: 'reserved-check', newName: '通用型机器人' }),
-      (error) => error.code === 'name-taken',
-    )
-
     // 只改大小写：macOS 默认大小写不敏感，目标「已存在」其实是同一个目录，
     // 不能被误判成 name-taken；Linux 上本来就是普通改名。
     await addRobot({ robotsDir, file, name: 'writer-case' })
@@ -1203,6 +1121,46 @@ test('renameRobot：登记表写失败时把目录改回旧名（失败后两侧
     assert.equal(registry.robots[0].path, writer.robot.path)
   } finally {
     await fs.chmod(path.join(root, 'cache', 'dsh-plugin-robots'), 0o700).catch(() => {})
+    await removeRoot(root)
+  }
+})
+
+test('预设机器人：只在登记表为空时种子一次，非空 / 损坏都不动', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    // 空登记表：补上两个预设，每个都有目录、AGENTS.md 与登记条目。
+    const seeded = await seedPresetRobots({ robotsDir, file })
+    assert.equal(seeded.corrupt, false)
+    assert.deepEqual(seeded.seeded.sort(), PRESET_ROBOTS.map((preset) => preset.name).sort())
+    const registry = await readRobotRegistry({ file })
+    assert.deepEqual(
+      registry.robots.map((robot) => robot.name).sort(),
+      PRESET_ROBOTS.map((preset) => preset.name).sort(),
+    )
+    for (const preset of PRESET_ROBOTS) {
+      const entry = registry.robots.find((robot) => robot.name === preset.name)
+      assert.ok(entry, `预设 ${preset.name} 应已登记`)
+      assert.equal(entry.avatar, preset.avatar)
+      assert.ok((await fs.stat(entry.path)).isDirectory())
+      const agents = await fs.readFile(path.join(entry.path, 'AGENTS.md'), 'utf8')
+      assert.ok(agents.includes(preset.name), 'AGENTS.md 模板里带上机器人名')
+    }
+
+    // 再次种子：登记表非空，不再新增。
+    const again = await seedPresetRobots({ robotsDir, file })
+    assert.deepEqual(again.seeded, [])
+
+    // 登记表损坏：拒绝写入，不覆盖文件。
+    await fs.writeFile(file, '{broken')
+    const corrupt = await seedPresetRobots({ robotsDir, file })
+    assert.equal(corrupt.corrupt, true)
+    assert.deepEqual(corrupt.seeded, [])
+    assert.equal(await fs.readFile(file, 'utf8'), '{broken')
+  } finally {
     await removeRoot(root)
   }
 })

@@ -36,12 +36,6 @@ import {
   readRobotRegistry,
 } from './robot-store.js'
 import { resolveAvatar } from './avatar.js'
-import {
-  GENERAL_ROBOT_AVATAR_ID,
-  GENERAL_ROBOT_NAME,
-  isGeneralRobotName,
-} from './general-robot.js'
-import { readSettings, resolveSettingsFile } from './settings.js'
 
 /** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaRobots`。 */
 export const SERVICE_NAME = 'bukaRobots'
@@ -99,7 +93,6 @@ export class RobotSessionService {
    *   ctx: import('@deepseek-ai/cordis').Context,
    *   robotsDir: string,
    *   registryFile: string,
-   *   settingsFile?: string,
    *   defineTool?: Function,
    *   resultRetries?: number,
    * }} options
@@ -108,15 +101,17 @@ export class RobotSessionService {
     this.ctx = options.ctx
     this.robotsDir = options.robotsDir
     this.registryFile = options.registryFile
-    this.settingsFile =
-      typeof options.settingsFile === 'string' && options.settingsFile.trim() !== ''
-        ? options.settingsFile
-        : resolveSettingsFile(options.robotsDir)
     this.defineTool = options.defineTool
     this.resultRetries =
       Number.isInteger(options.resultRetries) && options.resultRetries >= 0
         ? options.resultRetries
         : DEFAULT_RESULT_RETRIES
+    /**
+     * 能力标志：本版本支持在 dispatch / resume 时切换 DSH plan 模式。工作流的
+     * plan 节点在启动前用它判断是否需要提示用户升级 robots 插件；旧版本没有
+     * 这个字段，planMode 请求会被静默忽略。
+     */
+    this.supportsPlanMode = true
   }
 
   /**
@@ -147,23 +142,16 @@ export class RobotSessionService {
    * 机器人名 → 头像 id。给工作流这类只关心「谁在执行」的消费方用：只读登记表，
    * 不扫描每个机器人目录里的 skills / AGENTS.md，所以可以频繁调用。
    *
-   * 旧登记表里缺头像的机器人按名字兜底成一个确定的预设。通用型机器人启用时
-   * 额外返回 `通用型机器人: 'robot'`（工作流节点图画固定 🤖）；登记表损坏时
-   * 只返回这一项（或空表）。
+   * 旧登记表里缺头像的机器人按名字兜底成一个确定的预设。登记表损坏时返回空表。
    *
    * @returns {Promise<Record<string, string>>}
    */
   async avatarMap() {
     const registry = await readRobotRegistry({ file: this.registryFile })
-    const settings = await readSettings({ file: this.settingsFile })
     /** @type {Record<string, string>} */
     const map = {}
     if (!registry.corrupt) {
       for (const robot of registry.robots) map[robot.name] = resolveAvatar(robot.avatar, robot.name)
-    }
-    // 通用型机器人启用时也暴露给工作流节点图；同名登记机器人优先，避免撞名字。
-    if (settings.generalRobot.enabled && !Object.hasOwn(map, GENERAL_ROBOT_NAME)) {
-      map[GENERAL_ROBOT_NAME] = GENERAL_ROBOT_AVATAR_ID
     }
     return map
   }
@@ -190,6 +178,7 @@ export class RobotSessionService {
    *   sessionId?: string,
    *   newSessionId?: string,
    *   wait?: boolean,
+   *   planMode?: boolean, // 只对 dispatchSession / startSession({ wait: false }) 生效
    * }} request
    * @returns {Promise<{
    *   id: string,
@@ -205,6 +194,11 @@ export class RobotSessionService {
     // 观察者模式：把 prompt 投进去就返回句柄，结果由调用方订阅会话事件后自己读。
     // 默认仍是 wait:true，保持既有调用方的语义不变。
     if (request.wait === false) return await this.dispatchSession(request)
+    if (request.planMode !== undefined) {
+      throw new Error(
+        'planMode is only supported by dispatchSession/openSession (and startSession({ wait: false })); the blocking startSession disposes the agent after one turn and cannot leave a session in plan mode',
+      )
+    }
     if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
       throw new Error('startSession requires a non-empty prompt')
     }
@@ -250,6 +244,7 @@ export class RobotSessionService {
    *   signal?: AbortSignal,
    *   sessionId?: string,
    *   newSessionId?: string,
+   *   planMode?: boolean, // true 进入 plan 模式；false 确保退出；省略表示不改
    * }} request
    * @returns {Promise<Record<string, any>>}
    */
@@ -257,6 +252,7 @@ export class RobotSessionService {
     if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
       throw new Error('dispatchSession requires a non-empty prompt')
     }
+    this.#assertPlanModeRequest(request)
     const robot = await this.#resolveRobot(request.robot, request)
     const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions)
     if (typeof agentOptions.provider !== 'string' || typeof agentOptions.model !== 'string') {
@@ -289,12 +285,14 @@ export class RobotSessionService {
    *   agentOptions?: { provider?: string, model?: string, reasoningEffort?: string, maxTokens?: number },
    *   approval?: 'ask' | 'never', // 省略 / 'ask' 沿用部署策略；'never' 强制拒绝需要审批的操作。
    *   signal?: AbortSignal,
+   *   planMode?: boolean, // 恢复时通常省略：保留会话日志里的 plan 状态
    * }} request
    * @returns {Promise<Record<string, any>>}
    */
   async openSession(request = {}) {
     const sessionId = typeof request.sessionId === 'string' ? request.sessionId.trim() : ''
     if (sessionId === '') throw new Error('openSession requires a sessionId')
+    this.#assertPlanModeRequest(request)
     const robot = await this.#resolveRobot(request.robot, request)
     const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions)
     if (typeof agentOptions.provider !== 'string' || typeof agentOptions.model !== 'string') {
@@ -305,6 +303,16 @@ export class RobotSessionService {
     const signal = request.signal
     signal?.throwIfAborted?.()
     const prepared = await this.#resumeAgent({ request, robot, agentOptions, signal, sessionId })
+    try {
+      this.#applyPlanMode(prepared.agent, request)
+    } catch (error) {
+      try {
+        await prepared.handle?.dispose?.()
+      } catch {
+        // 已释放：忽略。
+      }
+      throw error
+    }
     return this.#observeHandle({
       agent: prepared.agent,
       state: prepared.state,
@@ -870,6 +878,63 @@ export class RobotSessionService {
   }
 
   /**
+   * 读取可选的 plan 模式服务；组合里没有时返回 undefined。
+   *
+   * @returns {any}
+   */
+  #planModeService() {
+    return this.ctx?.get?.('planMode') ?? this.ctx?.planMode
+  }
+
+  /**
+   * 创建 / 恢复会话之前检查请求能否满足：要求进入 plan 模式但组合里没有
+   * plan-mode 服务时直接失败，避免留下一个没人接管模式的新会话。
+   *
+   * @param {Record<string, any>} request
+   * @returns {void}
+   */
+  #assertPlanModeRequest(request) {
+    if (request?.planMode !== true) return
+    const planMode = this.#planModeService()
+    if (planMode === undefined || typeof planMode.set !== 'function') {
+      throw new Error(
+        'plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a robot node with mode "plan"',
+      )
+    }
+  }
+
+  /**
+   * 在投递第一轮 prompt 之前设置 / 清除 plan 模式。
+   *
+   * `true` 进入、`false` 确保退出、省略表示不改变。进入必须发生在第一轮之前：
+   * 此时没有开放 turn，`set()` 会立即写入 `plan/mode`，第一步的请求组装就能
+   * 看到 `plan:policy` 与 `exit_plan_mode`。
+   *
+   * @param {any} agent
+   * @param {Record<string, any>} request
+   * @returns {void}
+   */
+  #applyPlanMode(agent, request) {
+    const requested = request?.planMode
+    if (requested !== true && requested !== false) return
+    const planMode = this.#planModeService()
+    if (planMode === undefined || typeof planMode.set !== 'function') {
+      if (requested === true) {
+        throw new Error(
+          'plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a robot node with mode "plan"',
+        )
+      }
+      return
+    }
+    const outcome = planMode.set(agent, requested === true)
+    if (requested === true && outcome === 'queued') {
+      throw new Error(
+        'plan mode cannot be entered while the robot session already has an open turn; dispatch a plan node only after the previous turn has ended',
+      )
+    }
+  }
+
+  /**
    * 新会话的非阻塞 dispatch：建会话、投 prompt、返回句柄；不等待这一轮结束。
    *
    * @param {{
@@ -888,6 +953,18 @@ export class RobotSessionService {
       throw this.#creationError(robot, error, signal)
     }
     const startSeq = seqOf(prepared.agent)
+    // plan 模式必须在第一轮 prompt 之前提交：此时没有开放 turn，set() 会立即
+    // 写 plan/mode，第一步的请求组装就能看到 plan:policy 与 exit_plan_mode。
+    try {
+      this.#applyPlanMode(prepared.agent, request)
+    } catch (error) {
+      try {
+        await prepared.handle?.dispose?.()
+      } catch {
+        // 已释放：忽略。
+      }
+      throw error
+    }
     prepared.agent.followup(followupMessage(request.prompt))
     return this.#observeHandle({
       agent: prepared.agent,
@@ -931,6 +1008,17 @@ export class RobotSessionService {
 
     const compaction = await this.#compactSession(prepared.agent, signal)
     const startSeq = seqOf(prepared.agent)
+    // plan 模式必须在第一轮 prompt 之前提交；compact 不会改变 plan 状态。
+    try {
+      this.#applyPlanMode(prepared.agent, request)
+    } catch (error) {
+      try {
+        await prepared.handle?.dispose?.()
+      } catch {
+        // 已释放：忽略。
+      }
+      throw error
+    }
     prepared.agent.followup(followupMessage(request.prompt))
     return this.#observeHandle({
       agent: prepared.agent,
@@ -1058,6 +1146,36 @@ export class RobotSessionService {
           reason: typeof options?.reason === 'string' ? options.reason : undefined,
           detail: typeof options?.detail === 'string' ? options.detail : undefined,
         })
+      },
+      /**
+       * 读当前 live agent 的 plan 模式状态；组合里没有 plan-mode 服务时返回 null。
+       * 工作流观察者用它判断一个 plan 节点结束一轮时是否仍停在计划阶段。
+       *
+       * @returns {{ active: boolean, pending?: boolean } | null}
+       */
+      getPlanMode() {
+        const planMode = service.#planModeService()
+        if (planMode === undefined || typeof planMode.get !== 'function') return null
+        try {
+          return planMode.get(agent)
+        } catch (error) {
+          service.ctx?.logger?.warn?.(
+            `buka-robots: could not read plan mode for session "${observer.sessionId}": ${describeError(error)}`,
+          )
+          return null
+        }
+      },
+      /**
+       * 设置 / 清除当前 live agent 的 plan 模式；组合里没有服务时返回 null。
+       * 工作流在节点结束时尽力清除自己进入的 plan 模式。
+       *
+       * @param {boolean} active
+       * @returns {'committed'|'queued'|'cancelled'|'noop'|null}
+       */
+      setPlanMode(active) {
+        const planMode = service.#planModeService()
+        if (planMode === undefined || typeof planMode.set !== 'function') return null
+        return planMode.set(agent, active === true)
       },
       /**
        * 取消当前轮；等它落定后把已经写下的文本读回来。
@@ -1217,12 +1335,9 @@ export class RobotSessionService {
   /**
    * 解析机器人名称并在登记表 / 磁盘上确认。
    *
-   * 通用型机器人不在登记表里：启用时它的会话落在调用方所在的工作区（标准模式），
-   * 停用时直接拒绝。同名登记机器人优先，避免用户自建的机器人被内置项顶掉。
-   *
    * @param {unknown} name
-   * @param {Record<string, any>} [request] 调用方的请求；用来取 `agent.session.header.cwd`
-   * @returns {Promise<{ name: string, path: string, general?: true }>}
+   * @param {Record<string, any>} [request] 调用方的请求；保留以便未来扩展
+   * @returns {Promise<{ name: string, path: string }>}
    */
   async #resolveRobot(name, request = {}) {
     const trimmed = typeof name === 'string' ? name.trim() : ''
@@ -1246,41 +1361,10 @@ export class RobotSessionService {
       }
     }
 
-    if (isGeneralRobotName(trimmed)) return await this.#resolveGeneralRobot(request)
     if (registry.corrupt) {
       throw new Error(`robot registry is unreadable: ${this.registryFile}`)
     }
     throw new Error(`unknown robot: ${trimmed}`)
-  }
-
-  /**
-   * 解析通用型机器人：确认启用，并选一个「调用方所在工作区」当 cwd。
-   *
-   * 它没有自己的目录，所以在工作流里跑在编排器会话的 cwd（也就是工作流所在的
-   * 工作区）；没有调用方会话时退回宿主的默认工作目录。
-   *
-   * @param {Record<string, any>} request
-   * @returns {Promise<{ name: string, path: string }>}
-   */
-  async #resolveGeneralRobot(request) {
-    const settings = await readSettings({ file: this.settingsFile })
-    if (!settings.generalRobot.enabled) {
-      throw new Error('the general-purpose robot is disabled; enable it on the Robots page first')
-    }
-
-    const sessionCwd = request?.agent?.session?.header?.cwd
-    const working = this.ctx?.get?.('workingDirectory')
-    const fallback = working?.defaultDirectory
-    const cwd =
-      typeof sessionCwd === 'string' && sessionCwd.trim() !== ''
-        ? sessionCwd
-        : typeof fallback === 'string' && fallback.trim() !== ''
-          ? fallback
-          : ''
-    if (cwd === '') {
-      throw new Error('the general-purpose robot needs a workspace directory, but none is available')
-    }
-    return { name: GENERAL_ROBOT_NAME, path: cwd }
   }
 
   /**

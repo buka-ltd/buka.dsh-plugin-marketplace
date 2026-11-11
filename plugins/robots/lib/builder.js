@@ -22,7 +22,6 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { AVATAR_IDS, isAvatarId } from './avatar.js'
-import { GENERAL_ROBOT_NAME } from './general-robot.js'
 import {
   AGENTS_MAX_WRITE_BYTES,
   addRobot,
@@ -306,12 +305,6 @@ export async function buildRobot({
       throw buildError(
         BUILD_ERROR_CODES.unknownRobot,
         `cannot rename "${request.name}": no robot with that name exists.`,
-      )
-    }
-    if (request.newName === GENERAL_ROBOT_NAME) {
-      throw buildError(
-        BUILD_ERROR_CODES.nameTaken,
-        `"${GENERAL_ROBOT_NAME}" is reserved for the built-in general-purpose robot.`,
       )
     }
 
