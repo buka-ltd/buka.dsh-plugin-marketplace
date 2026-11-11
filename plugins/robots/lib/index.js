@@ -22,7 +22,8 @@
  *
  * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
  * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_robots`
- * 让模型回答「有哪些机器人、挂没挂载、各自装了什么」；写工具
+ * 让模型回答「有哪些机器人、挂没挂载、是否写了 AGENTS.md、装了什么技能」
+ * （见 `lib/list-tool.js`；工作流编排 preset 固定看不到技能清单）；写工具
  * `buka_robot_build`（见 `lib/builder.js`、`lib/build-tool.js`）负责创建 /
  * 修改 / 重命名机器人、写 AGENTS.md 并挂到工作区，但**只对随包发布的
  * 「机器人构建」preset 的根会话可见**（Config.builderPresets，判定见
@@ -46,10 +47,11 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import { normalizePresets, resolveRobotBuildAccess } from './access.js'
+import { normalizePresets, resolveRobotBuildAccess, resolveRobotSkillsVisibility } from './access.js'
 import { AVATAR_IDS } from './avatar.js'
 import { buildRobot } from './builder.js'
 import { createRobotBuildTool } from './build-tool.js'
+import { createRobotsListTool } from './list-tool.js'
 import { NPX_TIMEOUT_MS, createNpxRunner, parseSkillList } from './npx.js'
 import { seedPresetRobots } from './presets.js'
 import { revealDirectory } from './reveal.js'
@@ -303,6 +305,22 @@ export function apply(ctx, config) {
 
   /** 工具在每一步的可见性条件。 */
   const builderVisibleWhen = (context) => builderAccessOf(context?.agent).visible
+
+  /**
+   * 判定某个 agent 能否看到 `buka_robots` 输出的机器人技能清单。
+   *
+   * 工作流编排 preset 固定看不到：编排者只按一句职责选人，不按技能清单。
+   *
+   * @param {{ id?: string } | null | undefined} agent
+   * @returns {boolean}
+   */
+  function skillsVisibleFor(agent) {
+    return resolveRobotSkillsVisibility({
+      agentId: typeof agent?.id === 'string' ? agent.id : '',
+      sessions: ctx.get('sessions'),
+      agentPresets: ctx.get('agentPresets'),
+    }).visible
+  }
 
   /**
    * 调用时兜底再校验一次：即便绕过 `when` 直接调用也要被挡住。
@@ -1028,133 +1046,13 @@ export function apply(ctx, config) {
 
   ctx.inject(['tools'], (toolCtx) => {
     toolCtx.tools.register(
-      defineTool({
-        name: 'buka_robots',
-        description:
-          'List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.',
-        parameters: {},
-        output: {
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              root: { type: 'string', required: true, description: 'Robots root directory.' },
-              registry: {
-                type: 'string',
-                required: true,
-                description: 'Absolute path of the plugin robots.json registry.',
-              },
-              corrupt: {
-                type: 'boolean',
-                required: true,
-                description: 'Whether the registry file is unreadable; robots is then empty.',
-              },
-              robots: {
-                type: 'array',
-                required: true,
-                description: 'Robots in registry order (newest first).',
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    name: { type: 'string', required: true, description: 'Robot name.' },
-                    path: { type: 'string', required: true, description: 'Absolute robot directory.' },
-                    description: {
-                      type: 'string',
-                      required: true,
-                      description:
-                        'One-sentence description of what the robot does and when to use it; empty when none was set.',
-                    },
-                    mounted: {
-                      type: 'boolean',
-                      required: true,
-                      description: 'Whether a DSH workspace is mounted at this robot directory.',
-                    },
-                    workspaceId: {
-                      required: true,
-                      description: 'Mounted DSH workspace id, or null when not mounted.',
-                      oneOf: [{ type: 'string' }, { type: 'null' }],
-                    },
-                    skills: {
-                      type: 'array',
-                      required: true,
-                      description: 'Project-level skills installed in the robot directory.',
-                      items: {
-                        type: 'object',
-                        additionalProperties: false,
-                        properties: {
-                          name: { type: 'string', required: true, description: 'Skill name.' },
-                        },
-                      },
-                    },
-                    agentsFile: {
-                      type: 'boolean',
-                      required: true,
-                      description: 'Whether the robot directory has an AGENTS.md.',
-                    },
-                  },
-                },
-              },
-            },
-          },
-          render: (_args, value) => {
-            if (value?.corrupt === true) {
-              return [
-                {
-                  type: 'text',
-                  text: `The robot registry is unreadable: ${String(value?.registry ?? '')}. Renew or remove that file, then refresh.`,
-                },
-              ]
-            }
-            const robots = Array.isArray(value?.robots) ? value.robots : []
-            if (robots.length === 0) {
-              return [{ type: 'text', text: 'No robots have been created yet.' }]
-            }
-            return [
-              {
-                type: 'text',
-                text: robots
-                  .map((robot) => {
-                    const count = Array.isArray(robot.skills) ? robot.skills.length : 0
-                    const skills = count === 1 ? '1 skill' : `${count} skills`
-                    const agents = robot.agentsFile ? 'AGENTS.md' : 'no AGENTS.md'
-                    const mounted = robot.mounted
-                      ? `mounted as ${String(robot.workspaceId)}`
-                      : 'not mounted'
-                    const description = typeof robot.description === 'string' && robot.description !== ''
-                      ? robot.description
-                      : '(no description)'
-                    const location = typeof robot.path === 'string' && robot.path !== '' ? ` (${robot.path})` : ''
-                    return `- ${robot.name} — ${description}${location} · ${skills} · ${agents} · ${mounted}`
-                  })
-                  .join('\n'),
-              },
-            ]
-          },
-        },
-        async execute(_args, exec) {
-          const snapshot = await listRobots({
-            file: registryFile,
-            workspaceRegistry: ctx.workspaceRegistry,
-            robotsDir,
-          })
-          const robots = snapshot.robots.map((robot) => ({
-            name: robot.name,
-            path: robot.path,
-            description: robot.description ?? '',
-            mounted: robot.mounted,
-            workspaceId: robot.workspaceId,
-            skills: robot.skills.map((skill) => ({ name: skill.name })),
-            agentsFile: robot.agents.exists,
-          }))
-
-          return {
-            root: snapshot.root,
-            registry: snapshot.registry,
-            corrupt: snapshot.corrupt,
-            robots,
-          }
-        },
+      createRobotsListTool({
+        defineTool,
+        listRobots,
+        registryFile,
+        robotsDir,
+        workspaceRegistry: ctx.workspaceRegistry,
+        isSkillsVisible: skillsVisibleFor,
       }),
     )
 

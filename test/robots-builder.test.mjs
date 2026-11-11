@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { normalizePresets, resolveRobotBuildAccess } from '../plugins/robots/lib/access.js'
+import { normalizePresets, resolveRobotBuildAccess, resolveRobotSkillsVisibility } from '../plugins/robots/lib/access.js'
 import { AVATAR_IDS, DEFAULT_AVATAR_ID } from '../plugins/robots/lib/avatar.js'
 import { ROBOT_BUILD_TOOL_NAME, createRobotBuildTool } from '../plugins/robots/lib/build-tool.js'
 import {
@@ -208,6 +208,40 @@ test('resolveRobotBuildAccess：只放行点名 preset 的根会话，服务缺�
 
   assert.deepEqual(normalizePresets([' robot-builder ', '', 42, 'standard']), ['robot-builder', 'standard'])
   assert.deepEqual(normalizePresets('robot-builder'), [])
+})
+
+test('resolveRobotSkillsVisibility：工作流编排 preset 固定看不到技能清单，识别不出调用方时保持可见', () => {
+  const sessions = new Map([
+    ['orchestrator', { id: 'orchestrator', header: {} }],
+    ['builder', { id: 'builder', header: {} }],
+    ['fresh', { id: 'fresh', header: {} }],
+  ])
+  const presets = new Map([
+    ['orchestrator', 'workflow-orchestrator'],
+    ['builder', 'robot-builder'],
+    ['fresh', null],
+  ])
+  const services = {
+    sessions: { get: (id) => sessions.get(id) },
+    agentPresets: { presetForSession: (session) => presets.get(session.id) ?? null },
+  }
+  const visibility = (agentId) => resolveRobotSkillsVisibility({ agentId, ...services })
+
+  // 固定规则：随包发布的工作流编排 preset 看不到技能清单，其他 preset 正常可见。
+  assert.deepEqual(visibility('orchestrator'), { visible: false, preset: 'workflow-orchestrator', reason: 'hidden' })
+  assert.deepEqual(visibility('builder'), { visible: true, preset: 'robot-builder', reason: 'visible' })
+  assert.deepEqual(visibility('fresh'), { visible: true, preset: null, reason: 'no-preset' })
+  assert.deepEqual(visibility('missing'), { visible: true, preset: null, reason: 'no-session' })
+  assert.equal(visibility('').reason, 'no-session')
+
+  // 只读信息的收窄：识别不出调用方时保持可见（与写操作的收紧策略不同）。
+  assert.deepEqual(resolveRobotSkillsVisibility({ agentId: 'orchestrator' }), {
+    visible: true,
+    preset: null,
+    reason: 'unavailable',
+  })
+  assert.equal(resolveRobotSkillsVisibility().reason, 'unavailable')
+  assert.equal(resolveRobotSkillsVisibility().visible, true)
 })
 
 test('buildRobot：新建机器人写目录、登记、AGENTS.md、CLAUDE.md 链接并挂载', async () => {

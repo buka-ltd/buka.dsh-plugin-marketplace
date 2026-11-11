@@ -17,7 +17,8 @@
 - 每个机器人可以：
   - **选一个预设头像**（新建时默认带一个，之后点详情页标题旁的头像即可更换）；
   - **写一句职责**（`description`，类似 skill 的 description）：工作流通过只读工具
-    `buka_robots` 读到它，据此决定是否把某个节点交给这个机器人；
+    `buka_robots` 读到它，据此决定是否把某个节点交给这个机器人；编排者只拿这句职责，
+    看不到它装了哪些 skills（`buka_robots` 对工作流编排 preset 固定省略技能清单）；
   - **重命名**：改机器人目录名并重建 DSH 工作区，已有会话日志保留但不再列在这个机器人下；
   - 用 `npx skills` **按需选择**安装/移除**项目级** skills（落到 `<机器人目录>/.agents/skills`，
     同时给 Claude Code 建 `<机器人目录>/.claude/skills` 链接）；
@@ -64,7 +65,7 @@ bundle 补丁除了插入页面本身，还插入一个 agent preset（DSH 里�
     seedPresets: true
 ```
 
-`resultRetries`（默认 2）是机器人没有交回合法 JSON 结果时在原会话里追问的次数上限；`0` 表示不重试。`builderPresets`（默认 `['robot-builder']`）是能看到并调用 `buka_robot_build` 的 agent preset 名单，见上文「机器人构建模式」。`seedPresets`（默认 `true`）决定全新安装（登记表为空）时是否自动补上「软件工程师」与「质量保障工程师」两个预设机器人。
+`resultRetries`（默认 2）是机器人没有交回合法 JSON 结果时在原会话里追问的次数上限；`0` 表示不重试。`builderPresets`（默认 `['robot-builder']`）是能看到并调用 `buka_robot_build` 的 agent preset 名单，见上文「机器人构建模式」。工作流编排 preset（`workflow-orchestrator`）调用 `buka_robots` 时固定看不到技能清单——输出里没有 `skills` 字段、渲染文本也不显示技能数量；编排者只按每个机器人的一句职责选人，不按技能清单排流程。这是硬规则，不提供配置开关。`seedPresets`（默认 `true`）决定全新安装（登记表为空）时是否自动补上「软件工程师」与「质量保障工程师」两个预设机器人。
 
 `robots.json`（version 1）是「哪些算机器人」的唯一来源：
 
@@ -220,7 +221,7 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 
 ## 模型工具
 
-- `buka_robots`（只读，所有会话可见）：返回机器人根目录、登记文件、是否损坏，以及登记表里每个机器人的名称、路径、**职责**、是否已挂载、项目级 skills 与是否有 AGENTS.md。职责是工作流编排器选择机器人的主要依据。本工具只读：新建、修改与**重命名**都走 `buka_robot_build`（或页面）。
+- `buka_robots`（只读，所有会话可见）：返回机器人根目录、登记文件、是否损坏，以及登记表里每个机器人的名称、路径、**职责**、是否已挂载、项目级 skills 与是否有 AGENTS.md。职责是工作流编排器选择机器人的唯一依据：工作流编排 preset（`workflow-orchestrator`）调用时固定没有 `skills` 字段，渲染文本也不显示技能数量（硬规则，不可配置）。本工具只读：新建、修改与**重命名**都走 `buka_robot_build`（或页面）。
 - `buka_robot_build`（写，只对 `builderPresets` 点名的 preset 根会话可见）：创建、修改或重命名一个机器人并挂到工作区。参数是 `name` / `newName` / `avatar` / `description` / `agents`（完整 AGENTS.md）/ `update`；同名已存在且没传 `update: true` 时拒绝，避免模型覆盖用户的机器人。`newName` 把 `name` 指定的**已存在**机器人改名为 `newName`，必须同时传 `update: true`，同一次调用还可以继续改头像 / 职责 / AGENTS.md；改名会移动机器人目录并重建 DSH 工作区，已有会话日志保留但不再列在该机器人下，所以**应先和用户确认再改**，也不要改用户没要求改的机器人。输出增加 `renamed` 与 `previousName`（未改名时分别为 `false` / `null`）。挂载失败不算构建失败：返回 `mounted: false` 与 `mountError`，机器人本身已经建好。删除机器人、安装 skills、在页面上编辑 AGENTS.md 仍然只属于页面上的用户操作。
 
 ## 结构
@@ -229,10 +230,11 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 | --- | --- |
 | `package.json` | 包身份、`engines.dsh` 兼容范围、`dsh.bundle.patch`、`dsh.client`、`locale` / `icon` 导出 |
 | `cordis.patch.yml` | bundle 层两条 insert：`page-buka-robots`（本插件）与 `preset-robot-builder`（随包发布的「机器人构建」preset） |
-| `lib/index.js` | Host 一半：插件入口、`robotsDir` / `builderPresets` 配置、包内路由（含 `POST /buka-robots/rename`）、`buka_robots` 只读工具、`buka_robot_build` 的注册与可见性判定 |
+| `lib/index.js` | Host 一半：插件入口、`robotsDir` / `builderPresets` 配置、包内路由（含 `POST /buka-robots/rename`）、`buka_robots` 只读工具与 `buka_robot_build` 的注册与可见性判定 |
+| `lib/list-tool.js` | `buka_robots` 的工具定义、输出 schema（`skills` 可选）与 `render`：按调用方 preset 决定是否带技能清单；`defineTool` 与 `listRobots` 由入口注入，便于单测 |
 | `lib/robot-store.js` | 名称校验、目录创建与重命名（连目录一起改、失败回滚）、AGENTS.md 模板、frontmatter、项目 skills 扫描、AGENTS.md 读写、机器人登记表与头像写入、挂载状态汇总；不依赖 DSH 运行时，便于单测 |
 | `lib/avatar.js` | 预设头像 id、默认分配与校验；id 是跨插件契约，浏览器一半各自维护 emoji / 底色映射 |
-| `lib/access.js` | `buka_robot_build` 的可见性判定：只放行点名 preset 的根会话；preset 服务缺失时收紧为不可见；纯函数，便于单测 |
+| `lib/access.js` | 两处可见性判定：`buka_robot_build` 只放行点名 preset 的根会话（preset 服务缺失时收紧为不可见）；`buka_robots` 的技能清单对工作流编排 preset 固定隐藏（识别不出调用方时保持可见）。都是纯函数，便于单测 |
 | `lib/builder.js` | 一次「构建」的语义：请求规范化、已存在机器人要 `update: true`、改名（`newName`）移动目录并重建工作区、写 AGENTS.md、补 CLAUDE.md 链接、按规范路径判断挂载并只在需要时 `workspaceRegistry.create()`；不依赖 DSH 包，便于单测 |
 | `lib/build-tool.js` | `buka_robot_build` 的工具定义、参数（含 `newName`）/ 结果 schema（含 `renamed` / `previousName`）与 `render`；`defineTool` 由入口注入，便于单测 |
 | `lib/presets.js` | 随包发布的两个预设机器人（软件工程师 / 质量保障工程师）与其种子逻辑；只在登记表为空时初始化，幂等；不依赖 DSH 包，便于单测 |
@@ -245,7 +247,8 @@ npx --yes skills remove <name> -y        # cwd = 机器人目录
 | `locale/*.json` | Plugins 页读的 `meta.title` / `meta.description`，不需要激活插件 |
 | 仓库根 `test/robots-plugin.test.mjs` | robot-store、头像契约、预设机器人种子与 npx 输出清理的单测 |
 | 仓库根 `test/robots-client.test.mjs` | 浏览器一半的渲染冒烟：列表卡片与各对话框 |
-| 仓库根 `test/robots-builder.test.mjs` | 可见性判定、构建 / 挂载与工具映射的单测 |
+| 仓库根 `test/robots-builder.test.mjs` | 可见性判定（含技能清单隐藏）、构建 / 挂载与工具映射的单测 |
+| 仓库根 `test/robots-list-tool.test.mjs` | `buka_robots` 的输出映射、技能清单隐藏与渲染文本的单测 |
 
 ## 对外 Service：`ctx.bukaRobots`
 

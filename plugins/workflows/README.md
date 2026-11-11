@@ -104,7 +104,7 @@
 2. 只有配置 `orchestratorPresets` 里点名的 preset **根会话**能看到创建 / 启动 / 状态 / 取消工具；
 3. 子会话（机器人节点）、其他 preset 的会话看不到这些创建类工具；机器人节点会话只额外拥有上面四个只读观测工具。
 
-随插件的 bundle 补丁会插入一个 `workflow-orchestrator` preset（`id: workflow-orchestrator`，显示为「工作流编排」）：它带一段编排 persona，以及 bash / fs / fs-search / ask-user 等基础工具，但**不做具体工作**，只负责计划节点图并启动。新建会话时选择这个 preset 即可创建工作流。想换成自己的 preset，把 `orchestratorPresets` 改成对应 id；留空表示不做收窄（所有会话可见，不推荐）。
+随插件的 bundle 补丁会插入一个 `workflow-orchestrator` preset（`id: workflow-orchestrator`，显示为「工作流编排」）：它带一段编排 persona，以及 bash / fs / fs-search / ask-user 等基础工具，但**不做具体工作**，只负责计划节点图并启动。它本身没有技能，也看不到机器人装了哪些 skills：`buka_robots` 对随包发布的 `workflow-orchestrator` preset 固定省略 `skills` 字段，它只能按每个机器人的一句职责选人、按能力排流程（硬规则，不可配置；换成自定义编排 preset 后 `buka_robots` 仍会照常返回技能清单）。新建会话时选择这个 preset 即可创建工作流。想换成自己的 preset，把 `orchestratorPresets` 改成对应 id；留空表示不做收窄（所有会话可见，不推荐）。
 
 
 ## 定义格式
