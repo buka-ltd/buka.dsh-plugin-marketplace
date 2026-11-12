@@ -1,19 +1,20 @@
 /**
  * `@buka/dsh-plugin-workflows` 的浏览器一半：侧边栏的「工作流」页面。
  *
- * 这一半只做**只读观测**：workflow 由编排 preset（默认 `workflow-orchestrator`）
- * 的会话现场创建，没有可复用的流程列表，也没有“从这里启动流程”的入口。页面
- * 展示落盘的运行记录：
+ * 页面只做一条链：工作流列表 → 工作流详情 → 作业详情。
  *
- * - 列表：最近运行的状态、目标、runId、开始时间；
- * - 详情：分层二维节点图占据页面主体，并行的节点在同一排；点节点从右侧抽屉看
- *   节点详情（按「第几次执行」拆成 Tab），点连线从右侧抽屉看这条边的配置；
- * - 每个节点可以「打开会话」，复用 DSH 的 `uiWorkspace.openSession(sessionId)`；
- *   客户端会话列表里还没有这个会话时先补一次 `sessions.refresh()`。
+ * - 工作流列表：名称、描述、版本、状态与作业数；
+ * - 工作流详情：流程图（岗位 + 内建开始 / 结束）、岗位 / 任务类型 / 边 /
+ *   开始结束契约 / 预算的只读展示、作业列表，以及激活 / 停用与新建作业；
+ * - 作业详情：默认看板（行 = 岗位含开始 / 结束，列 = 排队 / 待认领 / 进行中 /
+ *   已完成 / 异常），另有流程图、任务列表、附件库与时间线；点卡片从右侧抽屉看
+ *   任务（payload、依赖、执行记录、结果、附件与允许的操作），人任务按产出
+ *   schema 填表提交；
+ * - 作业有 `running` 时每 1.5 秒刷新一次，否则 5 秒。
  *
- * 运行记录由 Host 的 `/buka-workflows/runs` 与 `/buka-workflows/run` 两条只读
- * 路由提供，附件下载走 `/buka-workflows/attachment`；有运行在跑时每 1.5 秒刷新一次（否则 5 秒），后台运行也能看到进度。
- *
+ * 数据来自 Host 的 `/buka-workflows/*` 只读路由；附件下载 / 预览走
+ * `/buka-workflows/attachment`。会话入口复用 `uiWorkspace.openSession(sessionId)`，
+ * 客户端会话列表里还没有这个会话时先补一次 `sessions.refresh()`。
  *
  * 本文件只导出 `inject` 与 `apply`：`window.__ModuleLoader__.load({ id, factory })`
  * 那层外壳由构建脚本 `scripts/build-clients.ts` 生成，源码里不写死包名。

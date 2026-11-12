@@ -1,10 +1,11 @@
-import { defineTool } from "@deepseek-ai/dsh-tools";
-import os from "node:os";
-import path from "node:path";
-import z from "@deepseek-ai/schemastery";
+import { createHash, randomUUID } from "node:crypto";
 import { isUtf8 } from "node:buffer";
 import { createReadStream, promises } from "node:fs";
-import { randomUUID } from "node:crypto";
+import path from "node:path";
+import os from "node:os";
+import z from "@deepseek-ai/schemastery";
+import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 // .build/workflows/access.js
 /**
 * 判断某个 agent 能否看到 / 调用工作流工具。
@@ -74,33 +75,215 @@ function normalizePresets(value) {
 	}
 	return presets;
 }
-// .build/workflows/attachments.js
+// .build/workflows/engine/types.js
 /**
-* 工作流节点附件：输入规范化、从机器人工作区复制到节点目录、文本读取。
+* 引擎依赖的宿主服务形状与公共类型。
 *
-* 节点在结构化结果里返回 `attachments`，这里负责把结果里的清单变成落盘文件。本模块
-* 不 import 任何 DSH 包，也不决定运行目录布局；目录与清单的持久化由
-* `run-store.js` 负责，便于单测。
+* 跨插件只走服务：robots 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
+* 结构类型；启动者会话投递用宿主 `sessionController` / `agents` 的「解析 live
+* agent + followup」能力（与官方 schedule 插件同一机制）。
 *
-* 路径安全规则：相对路径基于机器人工作区；绝对路径必须位于机器人工作区或
-* 当前运行目录内；符号链接会先 `realpath` 再判断，不能借它越界。
+* @module @buka/dsh-plugin-workflows/engine/types
+*/
+/** 引擎对外抛出的输入 / 状态错误。 */
+var WorkflowError = class extends Error {
+	/** 稳定错误码，路由与工具会原样透传。 */
+	code;
+	constructor(code, message) {
+		super(message);
+		this.name = "WorkflowError";
+		this.code = code;
+	}
+};
+/** 把任意错误转成一句话。 */
+function describeError$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+// .build/workflows/commands/job.js
+/**
+* `/job` 命令：普通会话启动作业，启动者 = 当前会话。
+*
+* 语法：
+*
+* - `/job`：列出已激活工作流与它们的启动输入要求；
+* - `/job <workflowId> <原始输入>`：创建作业，启动任务回到本会话执行（下一轮
+*   agent 按提示调用 `buka_task_complete` 交回结构化输入）。
+*
+* 宿主 `commands` 服务没有注册 API 时返回 false，由 `index.ts` 记录日志；页面与
+* `buka_job_start` 工具仍是可用入口（spec §13.2 的降级路径）。
+*
+* @module @buka/dsh-plugin-workflows/commands/job
+*/
+/**
+* 注册 `/job` 命令。
+*
+* @param deps 上下文与引擎 getter
+* @returns 注册成功返回 true；宿主不支持命令注册时返回 false
+*/
+function registerJobCommand({ ctx, ready }) {
+	const commands = ctx.get("commands");
+	if (commands === void 0 || commands === null || typeof commands.register !== "function") return false;
+	const dispose = commands.register({
+		name: "job",
+		description: "启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出已激活的工作流。",
+		async handler(invocation) {
+			const engine = await ready();
+			const agentId = typeof invocation.agent?.id === "string" ? invocation.agent.id : "";
+			if (agentId === "") return {
+				kind: "error",
+				text: "/job 需要在一个会话里使用（启动者 = 当前会话）"
+			};
+			const raw = typeof invocation.rawInput === "string" ? invocation.rawInput.trim() : "";
+			if (raw === "") return {
+				kind: "success",
+				text: describeAvailableWorkflows(engine)
+			};
+			const space = raw.search(/\s/u);
+			const workflowId = (space < 0 ? raw : raw.slice(0, space)).trim();
+			const request = space < 0 ? "" : raw.slice(space + 1).trim();
+			if (workflowId === "" || request === "") return {
+				kind: "error",
+				text: "用法：/job <workflowId> <原始输入>；不带参数可列出已激活的工作流"
+			};
+			try {
+				const job = await engine.createJobFromSession({
+					workflowId,
+					rawInput: { request },
+					sessionId: agentId
+				});
+				return {
+					kind: "success",
+					text: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话：按提示把原始输入转换成结构化输入，并调用 buka_task_complete 提交。`
+				};
+			} catch (error) {
+				return {
+					kind: "error",
+					text: error instanceof WorkflowError ? error.message : `创建工作流作业失败：${describeError$1(error)}`
+				};
+			}
+		}
+	});
+	ctx.effect(() => dispose, "buka-workflows: /job command");
+	return true;
+}
+/** 列出已激活工作流与启动输入要求。 */
+function describeAvailableWorkflows(engine) {
+	const workflows = engine.listWorkflowSummaries().filter((workflow) => workflow.status === "active");
+	if (workflows.length === 0) return "没有已激活的工作流。先在「工作流」页面创建工作流并激活，或让编排会话保存一份定义。";
+	const lines = ["已激活的工作流："];
+	for (const workflow of workflows) {
+		const id = typeof workflow.id === "string" ? workflow.id : "";
+		const name = typeof workflow.name === "string" ? workflow.name : id;
+		lines.push(`- ${id}「${name}」`);
+	}
+	lines.push("用法：/job <workflowId> <原始输入>");
+	return lines.join("\n");
+}
+// .build/workflows/domain/ids.js
+/**
+* 记录 id 生成与时间戳。
+*
+* 形态遵循 `.tmp/workflow-v4-spec.md` §7.1：`task-<base36 time>-<uuid8>`；
+* 其余记录沿用同一风格。启动任务固定使用保留 id `$start`，不经过这里。
+*
+* @module @buka/dsh-plugin-workflows/domain/ids
+*/
+/** 启动任务的保留 id；定义里 `dependsOn: ["$start"]` 引用它。 */
+const START_TASK_ID = "$start";
+/** 一段 base36 时间戳。 */
+function timeSegment() {
+	return Date.now().toString(36);
+}
+/** 八位 uuid 片段。 */
+function uuidSegment() {
+	return randomUUID().replace(/-/gu, "").slice(0, 8);
+}
+/**
+* 生成一条带前缀的记录 id。
+*
+* @param prefix 记录类型前缀，例如 `task`
+* @returns `<prefix>-<base36 time>-<uuid8>`
+*/
+function newRecordId(prefix) {
+	return `${prefix}-${timeSegment()}-${uuidSegment()}`;
+}
+/**
+* 新工作流 id。
+*
+* @returns `wf-…`
+*/
+function newWorkflowId() {
+	return newRecordId("wf");
+}
+/**
+* 新作业 id。
+*
+* @returns `job-…`
+*/
+function newJobId() {
+	return newRecordId("job");
+}
+/**
+* 新任务 id（启动任务除外）。
+*
+* @returns `task-…`
+*/
+function newTaskId() {
+	return newRecordId("task");
+}
+/**
+* 新执行记录 id。
+*
+* @returns `att-…`
+*/
+function newAttemptId() {
+	return newRecordId("att");
+}
+/**
+* 新附件 id。
+*
+* @returns `att-file-…`
+*/
+function newAttachmentId() {
+	return newRecordId("att-file");
+}
+/**
+* 当前时间的 ISO 字符串。
+*
+* @returns ISO 时间戳
+*/
+function nowIso() {
+	return (/* @__PURE__ */ new Date()).toISOString();
+}
+// .build/workflows/attachments/index.js
+/**
+* 作业附件库：文件落盘、元数据、读取与「按数据流授权」的可见集合。
+*
+* 规则来自 `.tmp/workflow-v4-spec.md` §10 与 ADR 0012：
+*
+* - 附件属于作业，每条附件必须有来源任务 / 岗位；
+* - 文件本体放在作业目录的 `attachments/` 下，记录里只存文件名；
+* - 附件对「产出它的任务、直接或传递依赖它的任务（下游）、启动者、看板页面」
+*   可见；引擎在任务上下文与检索时按这个集合过滤。
+*
+* 路径安全：相对路径基于任务执行者（机器人）的工作区；绝对路径必须位于工作区
+* 内；符号链接先 `realpath` 再判断。
 *
 * @module @buka/dsh-plugin-workflows/attachments
 */
 /** 单个附件默认上限：8 MiB。 */
 const DEFAULT_MAX_ATTACHMENT_BYTES = 8388608;
-/** 每次执行默认附件总量上限：64 MiB。 */
-const DEFAULT_MAX_NODE_ATTACHMENTS_BYTES = 67108864;
+/** 每次任务完成默认附件总量上限：64 MiB。 */
+const DEFAULT_MAX_TASK_ATTACHMENTS_BYTES = 67108864;
 /** prompt 内联单个文本附件的默认上限：32 KiB。 */
 const DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 32768;
-/** 运行页附件预览一次读取的文本上限：64 KiB。 */
+/** 页面附件预览一次读取的文本上限：64 KiB。 */
 const DEFAULT_PREVIEW_TEXT_BYTES = 65536;
-/**
-* 可直接 inline 预览的图片扩展名 → MIME。
-*
-* 只列白名单：其它类型一律按文本嗅探或走下载，不把任意内容标成可执行 /
-* 可内联的 MIME。
-*/
+/** 附件清单里文件名允许的最大 UTF-8 字节数。 */
+const MAX_NAME_BYTES = 160;
+/** 描述允许的最大字符数。 */
+const MAX_DESCRIPTION_LENGTH$1 = 500;
+/** 可直接 inline 预览的图片扩展名 → MIME；其它类型按文本嗅探或下载。 */
 const IMAGE_MIME_BY_EXTENSION = /* @__PURE__ */ new Map([
 	[".png", "image/png"],
 	[".jpg", "image/jpeg"],
@@ -111,17 +294,13 @@ const IMAGE_MIME_BY_EXTENSION = /* @__PURE__ */ new Map([
 	[".ico", "image/x-icon"],
 	[".svg", "image/svg+xml"]
 ]);
-/** 清单里文件名允许的最大 UTF-8 字节数。 */
-const MAX_NAME_BYTES = 160;
-/** 清单里描述允许的最大字符数。 */
-const MAX_DESCRIPTION_LENGTH$1 = 500;
 /**
 * 把任意错误转成一句话。
 *
 * @param error 任意错误
 * @returns 一句话错误
 */
-function describeError$4(error) {
+function describeError(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /**
@@ -131,7 +310,7 @@ function describeError$4(error) {
 * @param maxBytes 字节上限
 * @returns 截断后的文本
 */
-function clipUtf8$1(text, maxBytes) {
+function clipUtf8(text, maxBytes) {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
 	let used = 0;
 	let output = "";
@@ -147,10 +326,10 @@ function clipUtf8$1(text, maxBytes) {
 * 正整数或默认值。
 *
 * @param value 待校验的值
-* @param fallback 不合法时使用的默认值
+* @param fallback 默认值
 * @returns 正整数或默认值
 */
-function positive$2(value, fallback) {
+function positive$1(value, fallback) {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 /**
@@ -165,16 +344,13 @@ function sanitizeAttachmentName(value, fallbackSource = "") {
 	let name = (typeof value === "string" && value.trim() !== "" ? value.trim() : path.basename(String(fallbackSource).replace(/\\/gu, "/"))).replace(/\\/gu, "/").split("/").pop() ?? "";
 	name = name.replace(/[\u0000-\u001f\u007f<>:"|?*]/gu, "-").replace(/[.\s]+$/u, "").trim();
 	if (name === "" || name === "." || name === "..") name = "attachment";
-	name = clipUtf8$1(name, MAX_NAME_BYTES);
+	name = clipUtf8(name, MAX_NAME_BYTES);
 	return name === "" ? "attachment" : name;
 }
 /**
 * 预览类型：按扩展名先划分可 inline 的图片 / PDF，其余交给文本嗅探。
 *
-* 返回的 `kind: 'text'` 只表示「按文本尝试」；真正的二进制由读取内容后的
-* UTF-8 / NUL 判定改成 `binary`。这里不读磁盘，便于单测。
-*
-* @param name 附件清单里的文件名
+* @param name 附件文件名
 * @returns 预览类型与对应的 MIME
 */
 function attachmentPreviewInfo(name) {
@@ -194,47 +370,17 @@ function attachmentPreviewInfo(name) {
 	};
 }
 /**
-* 同名附件去重：`report.md`、`report-2.md`。大小写不敏感，兼容大小写不敏感
-* 的文件系统。
-*
-* @param name 原始文件名
-* @param used 已占用的文件名（小写）
-* @returns 去重后的文件名
-*/
-function uniqueAttachmentName(name, used) {
-	const key = name.toLowerCase();
-	if (!used.has(key)) {
-		used.add(key);
-		return name;
-	}
-	const extension = path.extname(name);
-	const base = extension === "" ? name : name.slice(0, -extension.length);
-	let index = 2;
-	while (index < 1e4) {
-		const candidate = `${base}-${index}${extension}`;
-		const candidateKey = candidate.toLowerCase();
-		if (!used.has(candidateKey)) {
-			used.add(candidateKey);
-			return candidate;
-		}
-		index += 1;
-	}
-	const fallback = `${base}-${Date.now()}${extension}`;
-	used.add(fallback.toLowerCase());
-	return fallback;
-}
-/**
 * 规范化一个附件请求；非法项抛出带下标的错误。
 *
 * @param raw 结果里的 `attachments`
-* @param options 可选上限
+* @param maxCount 数量上限
 * @returns 规范化后的附件请求
 */
-function normalizeAttachmentRequests(raw, options = {}) {
+function normalizeAttachmentRequests(raw, maxCount) {
 	if (raw === void 0 || raw === null) return [];
 	if (!Array.isArray(raw)) throw new Error("attachments must be an array of file paths or { path, name?, description? } objects");
-	const maxCount = positive$2(options.maxCount, 20);
-	if (raw.length > maxCount) throw new Error(`attachments must contain at most ${maxCount} files`);
+	const limit = positive$1(maxCount, 20);
+	if (raw.length > limit) throw new Error(`attachments must contain at most ${limit} files`);
 	const requests = [];
 	raw.forEach((item, index) => {
 		let source;
@@ -272,35 +418,36 @@ function isInside(root, candidate) {
 /**
 * 解析并校验附件源文件。
 *
-* @param request 规范化后的附件请求
-* @param roots 机器人工作区与当前运行目录
+* @param request 附件请求
+* @param workspace 机器人工作区（可省略）
 * @returns 真实源文件路径与字节数
 */
-async function resolveSource(request, roots) {
+async function resolveSource(request, workspace) {
 	const display = request.path;
 	let candidate;
 	if (path.isAbsolute(request.path)) candidate = request.path;
-	else if (typeof roots.workspace === "string" && roots.workspace !== "") candidate = path.resolve(roots.workspace, request.path);
-	else throw new Error(`cannot resolve attachment "${display}": the robot session did not report a workspace`);
+	else if (typeof workspace === "string" && workspace !== "") candidate = path.resolve(workspace, request.path);
+	else candidate = path.resolve(request.path);
 	let source;
 	try {
 		source = await promises.realpath(candidate);
 	} catch (error) {
-		throw new Error(`attachment source "${display}" is not readable: ${describeError$4(error)}`, { cause: error });
+		throw new Error(`attachment source "${display}" is not readable: ${describeError(error)}`, { cause: error });
 	}
-	const allowedRoots = [];
-	for (const root of [roots.workspace, roots.runDirectory]) {
-		if (typeof root !== "string" || root === "") continue;
+	if (typeof workspace === "string" && workspace !== "" && !path.isAbsolute(request.path)) {
+		let root;
 		try {
-			allowedRoots.push(await promises.realpath(root));
-		} catch {}
+			root = await promises.realpath(workspace);
+		} catch {
+			throw new Error(`attachment source "${display}" is outside the robot workspace`);
+		}
+		if (!isInside(root, source)) throw new Error(`attachment source "${display}" is outside the robot workspace`);
 	}
-	if (!allowedRoots.some((root) => isInside(root, source))) throw new Error(`attachment source "${display}" is outside the robot workspace and the current run directory`);
 	let stat;
 	try {
 		stat = await promises.stat(source);
 	} catch (error) {
-		throw new Error(`attachment source "${display}" is not readable: ${describeError$4(error)}`, { cause: error });
+		throw new Error(`attachment source "${display}" is not readable: ${describeError(error)}`, { cause: error });
 	}
 	if (!stat.isFile()) throw new Error(`attachment source "${display}" is not a regular file`);
 	return {
@@ -309,59 +456,112 @@ async function resolveSource(request, roots) {
 	};
 }
 /**
-* 把一组附件复制到目的地，返回稳定清单。
+* 文件名去重：`report.md`、`report-2.md`（大小写不敏感）。
 *
-* 复制前会清空目的地，失败时也清空，避免留下半套附件。清单顺序与输入一致；
-* 名字冲突时自动追加 `-2`、`-3`。
-*
-* @param input 附件清单与目标目录等
-* @returns 稳定清单（顺序与输入一致）
+* @param name 原始文件名
+* @param used 已占用的文件名（小写）
+* @returns 去重后的文件名
 */
-async function writeAttachments(input) {
-	const requests = normalizeAttachmentRequests(input.raw, { maxCount: input.maxCount });
-	const maxBytes = positive$2(input.maxBytes, DEFAULT_MAX_ATTACHMENT_BYTES);
-	const maxTotalBytes = positive$2(input.maxTotalBytes, DEFAULT_MAX_NODE_ATTACHMENTS_BYTES);
-	const roots = {
-		workspace: input.workspace,
-		runDirectory: input.runDirectory
-	};
-	const manifest = [];
+function uniqueAttachmentName(name, used) {
+	const key = name.toLowerCase();
+	if (!used.has(key)) {
+		used.add(key);
+		return name;
+	}
+	const extension = path.extname(name);
+	const base = extension === "" ? name : name.slice(0, -extension.length);
+	let index = 2;
+	while (index < 1e4) {
+		const candidate = `${base}-${index}${extension}`;
+		if (!used.has(candidate.toLowerCase())) {
+			used.add(candidate.toLowerCase());
+			return candidate;
+		}
+		index += 1;
+	}
+	const fallback = `${base}-${Date.now()}${extension}`;
+	used.add(fallback.toLowerCase());
+	return fallback;
+}
+/**
+* 把一组附件复制进作业附件库，返回附件记录。
+*
+* 失败时不留下半套文件：已复制的文件与已生成的记录一起回滚（记录由调用方写入，
+* 这里只负责文件）。记录里 `path` 是 `attachments/` 下的文件名。
+*
+* @param input 源清单、作业目录与限额
+* @returns 新的附件记录
+*/
+async function ingestAttachments(input) {
+	const directory = path.join(input.jobDirectory, "attachments");
+	const requests = normalizeAttachmentRequests(input.raw, input.limits.maxCount);
+	if (requests.length === 0) return [];
+	const maxBytes = positive$1(input.limits.maxBytes, DEFAULT_MAX_ATTACHMENT_BYTES);
+	const maxTotalBytes = positive$1(input.limits.maxTotalBytes, DEFAULT_MAX_TASK_ATTACHMENTS_BYTES);
+	await promises.mkdir(directory, { recursive: true });
+	const records = [];
+	const copied = [];
 	const used = /* @__PURE__ */ new Set();
 	let total = 0;
-	await promises.rm(input.destination, {
-		recursive: true,
-		force: true
-	});
-	if (requests.length === 0) return manifest;
-	await promises.mkdir(input.destination, { recursive: true });
 	try {
-		for (const [index, request] of requests.entries()) {
-			const resolved = await resolveSource(request, roots);
-			if (resolved.bytes > maxBytes) throw new Error(`attachment "${request.path}" is too large (${resolved.bytes} bytes; limit is ${maxBytes} bytes)`);
-			if (total + resolved.bytes > maxTotalBytes) throw new Error(`node attachments exceed the total size limit (${maxTotalBytes} bytes)`);
+		for (const request of requests) {
+			const resolved = await resolveSource(request, input.workspace);
+			if (resolved.bytes > maxBytes) throw new Error(`attachment "${request.path}" is too large (${resolved.bytes} bytes; limit is ${maxBytes})`);
+			if (total + resolved.bytes > maxTotalBytes) throw new Error(`task attachments exceed the total size limit (${maxTotalBytes} bytes)`);
+			const id = newAttachmentId();
 			const name = uniqueAttachmentName(sanitizeAttachmentName(request.name, request.path), used);
-			const destination = path.join(input.destination, name);
+			const fileName = `${id}-${name}`;
+			const destination = path.join(directory, fileName);
 			await promises.copyFile(resolved.source, destination, promises.constants.COPYFILE_EXCL);
 			const stat = await promises.stat(destination);
-			if (stat.size > maxBytes) throw new Error(`attachment "${request.path}" grew beyond the ${maxBytes}-byte limit while being copied`);
+			if (stat.size > maxBytes) throw new Error(`attachment "${request.path}" grew beyond the ${maxBytes}-byte limit`);
 			total += stat.size;
-			if (total > maxTotalBytes) throw new Error(`node attachments exceed the total size limit (${maxTotalBytes} bytes)`);
-			const entry = {
-				index,
+			if (total > maxTotalBytes) throw new Error(`task attachments exceed the total size limit (${maxTotalBytes} bytes)`);
+			const sha256 = await hashFile(destination);
+			const preview = attachmentPreviewInfo(name);
+			copied.push(destination);
+			records.push({
+				id,
+				jobId: input.jobId,
 				name,
-				bytes: stat.size
-			};
-			if (request.description !== void 0) entry.description = request.description;
-			manifest.push(entry);
+				bytes: stat.size,
+				mime: preview.kind === "text" ? "application/octet-stream" : preview.mime,
+				sha256,
+				description: request.description ?? "",
+				sourceTaskId: input.taskId,
+				sourcePositionId: input.position,
+				createdBy: input.createdBy,
+				createdAt: nowIso(),
+				path: fileName
+			});
 		}
 	} catch (error) {
-		await promises.rm(input.destination, {
-			recursive: true,
-			force: true
-		}).catch(() => void 0);
+		await Promise.all(copied.map((file) => promises.rm(file, { force: true }).catch(() => void 0)));
 		throw error;
 	}
-	return manifest;
+	return records;
+}
+/**
+* 计算文件 sha256。
+*
+* @param file 文件路径
+* @returns 十六进制摘要
+*/
+async function hashFile(file) {
+	const buffer = await promises.readFile(file);
+	return createHash("sha256").update(buffer).digest("hex");
+}
+/**
+* 解析附件的绝对路径；只允许作业附件目录里的单个文件名。
+*
+* @param jobDirectory 作业根目录
+* @param relative 记录里的 `path`
+* @returns 绝对路径
+* @throws 越界或非法文件名时抛出
+*/
+function resolveAttachmentFile(jobDirectory, relative) {
+	if (relative === "" || relative.includes("/") || relative.includes("\\") || relative === "..") throw new Error(`invalid attachment path: ${JSON.stringify(relative)}`);
+	return path.join(jobDirectory, "attachments", relative);
 }
 /**
 * 读取文本附件用于 prompt 内联；二进制或超过上限时不返回文本。
@@ -370,8 +570,8 @@ async function writeAttachments(input) {
 * @param maxBytes 内联字节上限
 * @returns 可内联时带文本，否则带原因
 */
-async function readInlineText(file, maxBytes) {
-	const limit = positive$2(maxBytes, DEFAULT_MAX_INLINE_ATTACHMENT_BYTES);
+async function readInlineText(file, maxBytes = DEFAULT_MAX_INLINE_ATTACHMENT_BYTES) {
+	const limit = positive$1(maxBytes, DEFAULT_MAX_INLINE_ATTACHMENT_BYTES);
 	const stat = await promises.stat(file);
 	if (!stat.isFile()) throw new Error(`attachment is not a regular file: ${file}`);
 	if (stat.size > limit) return {
@@ -396,13 +596,13 @@ async function readInlineText(file, maxBytes) {
 *
 * @param file 附件绝对路径
 * @param options 起始偏移与读取字节数
-* @returns 一段内容；文本按 UTF-8 解码，二进制返回 null 文本
+* @returns 一段内容
 */
 async function readAttachmentRange(file, options = {}) {
 	const stat = await promises.stat(file);
 	if (!stat.isFile()) throw new Error(`attachment is not a regular file: ${file}`);
 	const offset = typeof options.offset === "number" && Number.isInteger(options.offset) && options.offset >= 0 ? options.offset : 0;
-	const maxBytes = positive$2(options.maxBytes, 65536);
+	const maxBytes = positive$1(options.maxBytes, DEFAULT_PREVIEW_TEXT_BYTES);
 	const start = Math.min(offset, stat.size);
 	const length = Math.max(0, Math.min(maxBytes, stat.size - start));
 	let buffer = Buffer.alloc(0);
@@ -435,930 +635,76 @@ async function readAttachmentRange(file, options = {}) {
 		read: buffer.length
 	};
 }
-// .build/workflows/options.js
 /**
-* 插件配置与运行目录解析：Config schema、默认值与 runs 目录。
-*/
-/** 插件全局目录名。 */
-const PLUGIN_CACHE_DIR = "dsh-plugin-workflows";
-/** 默认配置。 */
-const DEFAULTS = {
-	runsDir: defaultRunsDir(),
-	maxRuns: 200,
-	nodeTimeoutMs: 0,
-	maxSteps: 64,
-	maxNodeTextBytes: 65536,
-	maxAttachmentBytes: DEFAULT_MAX_ATTACHMENT_BYTES,
-	maxAttachmentsPerNode: 20,
-	maxNodeAttachmentsBytes: DEFAULT_MAX_NODE_ATTACHMENTS_BYTES,
-	maxInlineAttachmentBytes: DEFAULT_MAX_INLINE_ATTACHMENT_BYTES,
-	orchestratorPresets: ["workflow-orchestrator"],
-	robotPreset: "standard"
-};
-/**
-* 可配置的运行记录目录与限额。
-*/
-const Config = z.object({
-	runsDir: z.string().default(DEFAULTS.runsDir).description("运行记录目录；每次运行在它下面建一个子目录。支持 ~ 前缀。"),
-	maxRuns: z.number().step(1).min(1).default(DEFAULTS.maxRuns).description("已归档运行最多保留多少条；超出时从最旧的已归档运行开始删除。未归档记录不受这个上限影响。"),
-	nodeTimeoutMs: z.number().step(1).min(0).default(DEFAULTS.nodeTimeoutMs).description("单个机器人节点的默认硬超时（毫秒）；0 表示不超时。默认不超时，建议由定义按节点显式设置 timeoutMs。"),
-	maxSteps: z.number().step(1).min(1).default(DEFAULTS.maxSteps).description("单次工作流的最大节点步数。"),
-	maxNodeTextBytes: z.number().step(1).min(1).default(DEFAULTS.maxNodeTextBytes).description("每个节点结果全文落盘时的字节上限。"),
-	maxAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentBytes).description("单个节点附件的字节上限。"),
-	maxAttachmentsPerNode: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentsPerNode).description("每次执行最多允许的附件数量。"),
-	maxNodeAttachmentsBytes: z.number().step(1).min(1).default(DEFAULTS.maxNodeAttachmentsBytes).description("每次执行的附件总量字节上限。"),
-	maxInlineAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxInlineAttachmentBytes).description("可在 prompt 中用 .text 内联的单个文本附件字节上限。"),
-	orchestratorPresets: z.array(z.string()).default(DEFAULTS.orchestratorPresets).description("能看到并调用工作流工具的 agent preset 名单。留空表示不做收窄（所有会话可见）；推荐只保留随插件发布的 `workflow-orchestrator`。"),
-	robotPreset: z.string().default(DEFAULTS.robotPreset).description("机器人节点会话使用的 agent preset。编排器跑在专用 preset 上，机器人节点不能继承它，否则会带上编排 persona 且缺少工作工具。")
-});
-/**
-* 合并配置与默认值，并解析 runs 目录。
+* 一个任务可见的附件：自己产出的，以及它直接 / 传递依赖的任务产出的。
 *
-* @param config 插件配置
-* @returns 合并默认值之后的配置
+* @param tasks 作业里的全部任务
+* @param currentTaskId 当前任务 id
+* @param attachments 作业附件库
+* @returns 可见附件（顺序与附件库一致）
 */
-function resolveOptions(config) {
-	const orchestratorPresets = Array.isArray(config?.orchestratorPresets) ? config.orchestratorPresets.map((preset) => String(preset).trim()).filter((preset) => preset !== "") : DEFAULTS.orchestratorPresets;
-	const robotPreset = typeof config?.robotPreset === "string" ? config.robotPreset.trim() : "";
-	return {
-		runsDir: resolveRunsDir(config?.runsDir),
-		maxRuns: positive$1(config?.maxRuns) ?? DEFAULTS.maxRuns,
-		nodeTimeoutMs: positive$1(config?.nodeTimeoutMs) ?? DEFAULTS.nodeTimeoutMs,
-		maxSteps: positive$1(config?.maxSteps) ?? DEFAULTS.maxSteps,
-		maxNodeTextBytes: positive$1(config?.maxNodeTextBytes) ?? DEFAULTS.maxNodeTextBytes,
-		maxAttachmentBytes: positive$1(config?.maxAttachmentBytes) ?? DEFAULTS.maxAttachmentBytes,
-		maxAttachmentsPerNode: positive$1(config?.maxAttachmentsPerNode) ?? DEFAULTS.maxAttachmentsPerNode,
-		maxNodeAttachmentsBytes: positive$1(config?.maxNodeAttachmentsBytes) ?? DEFAULTS.maxNodeAttachmentsBytes,
-		maxInlineAttachmentBytes: positive$1(config?.maxInlineAttachmentBytes) ?? DEFAULTS.maxInlineAttachmentBytes,
-		orchestratorPresets,
-		robotPreset: robotPreset === "" ? DEFAULTS.robotPreset : robotPreset
-	};
+function visibleAttachmentsForTask(tasks, currentTaskId, attachments) {
+	const visible = visibleTaskIds(tasks, currentTaskId);
+	return attachments.filter((attachment) => visible.has(attachment.sourceTaskId));
 }
 /**
-* 解析 runs 目录：默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workflows/runs`。
+* 可见任务集合：当前任务 + 它的依赖闭包。
 *
-* @param value 配置里的目录（支持 ~ 前缀）
-* @param env 环境变量
-* @returns 绝对路径
+* @param tasks 作业里的全部任务
+* @param currentTaskId 当前任务 id
+* @returns 可见来源任务 id
 */
-function resolveRunsDir(value, env = process.env) {
-	const text = typeof value === "string" ? value.trim() : "";
-	if (text === "") return defaultRunsDir(env);
-	if (text === "~") return path.join(homeDir(env), `.cache`, PLUGIN_CACHE_DIR, "runs");
-	if (text.startsWith("~/") || text.startsWith("~\\")) return path.resolve(homeDir(env), text.slice(2));
-	return path.resolve(text);
-}
-/**
-* 默认运行目录。
-*
-* @param env 环境变量
-* @returns 默认 runs 目录
-*/
-function defaultRunsDir(env = process.env) {
-	const cacheHome = typeof env.XDG_CACHE_HOME === "string" && env.XDG_CACHE_HOME.trim() !== "" ? env.XDG_CACHE_HOME.trim() : path.join(homeDir(env), ".cache");
-	return path.join(cacheHome, PLUGIN_CACHE_DIR, "runs");
-}
-/**
-* @param env 环境变量
-* @returns 用户主目录
-*/
-function homeDir(env) {
-	const home = typeof env.HOME === "string" ? env.HOME.trim() : "";
-	return home === "" ? os.homedir() : home;
-}
-/**
-* @param value 待校验的值
-* @returns 正整数或 undefined
-*/
-function positive$1(value) {
-	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
-}
-// .build/workflows/templates.js
-/**
-* 抽象工作流模板目录。
-*
-* `nodes` 复用可运行定义的节点图形状（start / robot / user / end + 出边），但有
-* 三点刻意不同，用来强调「这是参考」：robot 节点的 `robot` 是抽象角色名、没有
-* `output`；边上的 `prompt` 只描述交付关系，不写具体任务；整体不含 `goal`。
-*/
-const WORKFLOW_TEMPLATES = [
-	{
-		id: "develop-test",
-		name: "开发与测试",
-		description: "当需求涉及代码或配置改动，并且要走完「开发 → 测试 → 验收 → 合并 → 配置 → 构建部署 → 生产回归」的完整交付链路时参考。它演示了几种常见情况：开发被拆成多个仓库并行、测试不通过打回开发循环、测试需要用户介入操作、以及「当前条件无法完成需求测试」时交用户决定是否调整需求或放弃。参考时把「开发 / 测试 / 运维」替换成你真正拥有的机器人（先用 buka_robots 看清单），并给每个机器人节点补上它要交回的结果 schema。",
-		nodes: [
-			{
-				id: "start",
-				type: "start",
-				next: [{
-					to: "plan",
-					name: "begin",
-					prompt: "按需求拆解改动范围，确定涉及哪些仓库，并规划开发顺序。"
-				}]
-			},
-			{
-				id: "plan",
-				type: "robot",
-				robot: "开发",
-				summary: "拆解需求，规划各仓库的改动范围",
-				next: [{
-					to: "dev-backend",
-					name: "后端",
-					prompt: "实现后端服务改动（仓库 A），本地自测通过后交回。"
-				}, {
-					to: "dev-frontend",
-					name: "前端",
-					prompt: "实现前端页面改动（仓库 B），本地自测通过后交回。"
-				}]
-			},
-			{
-				id: "dev-backend",
-				type: "robot",
-				robot: "开发",
-				summary: "实现后端服务改动（仓库 A）并自测",
-				next: [{
-					to: "merge",
-					name: "完成",
-					prompt: "后端改动完成，进入集成步骤。"
-				}]
-			},
-			{
-				id: "dev-frontend",
-				type: "robot",
-				robot: "开发",
-				summary: "实现前端页面改动（仓库 B）并自测",
-				next: [{
-					to: "merge",
-					name: "完成",
-					prompt: "前端改动完成，进入集成步骤。"
-				}]
-			},
-			{
-				id: "merge",
-				type: "robot",
-				robot: "开发",
-				summary: "集成各仓库改动并部署到测试环境（只有一个仓库时无需合并）",
-				next: [{
-					to: "test",
-					name: "已部署",
-					prompt: "改动已集成并部署到测试环境，请验证是否满足需求。"
-				}]
-			},
-			{
-				id: "test",
-				type: "robot",
-				robot: "测试",
-				summary: "验证改动是否满足需求",
-				next: [
-					{
-						to: "accept",
-						name: "通过",
-						prompt: "测试通过，进入验收。"
-					},
-					{
-						to: "dev-backend",
-						name: "不通过",
-						prompt: "测试不通过，按失败信息回到开发修复后重新提交。"
-					},
-					{
-						to: "user-help",
-						name: "需用户介入",
-						prompt: "测试需要用户完成某项操作后才能继续。"
-					},
-					{
-						to: "user-blocked",
-						name: "无法完成",
-						prompt: "当前条件无法完成需求测试，交用户决定下一步。"
-					}
-				]
-			},
-			{
-				id: "user-help",
-				type: "user",
-				title: "需要用户介入操作",
-				detail: "测试环节需要你完成某个操作（提供账号、配置环境、确认外部依赖等）后才能继续。",
-				next: [{
-					to: "test",
-					name: "resume",
-					label: "已完成，继续测试"
-				}]
-			},
-			{
-				id: "user-blocked",
-				type: "user",
-				title: "条件无法完成需求测试",
-				detail: "当前条件（环境 / 数据 / 依赖 / 需求本身）下无法完成需求测试，请决定下一步。",
-				next: [{
-					to: "plan",
-					name: "adjust",
-					label: "调整需求后重来"
-				}, {
-					to: "end-rejected",
-					name: "abandon",
-					label: "放弃本次需求"
-				}]
-			},
-			{
-				id: "accept",
-				type: "user",
-				title: "验收",
-				detail: "改动已通过测试，请验收确认是否可以进入发布流程。",
-				next: [{
-					to: "config",
-					name: "ok",
-					label: "验收通过"
-				}, {
-					to: "dev-backend",
-					name: "rework",
-					label: "验收不通过"
-				}]
-			},
-			{
-				id: "config",
-				type: "robot",
-				robot: "运维",
-				summary: "按发布要求调整配置",
-				next: [{
-					to: "deploy",
-					name: "完成",
-					prompt: "配置已就绪，请构建并部署到生产。"
-				}]
-			},
-			{
-				id: "deploy",
-				type: "robot",
-				robot: "运维",
-				summary: "构建并部署到生产",
-				next: [{
-					to: "regression",
-					name: "已部署",
-					prompt: "已部署到生产，请做生产环境回归验证。"
-				}]
-			},
-			{
-				id: "regression",
-				type: "robot",
-				robot: "测试",
-				summary: "生产环境回归验证",
-				next: [{
-					to: "end-done",
-					name: "通过",
-					prompt: "回归通过，发布完成。"
-				}, {
-					to: "config",
-					name: "回滚/修复",
-					prompt: "回归发现问题，回到配置 / 修复后再重新部署。"
-				}]
-			},
-			{
-				id: "end-done",
-				type: "end",
-				status: "completed"
-			},
-			{
-				id: "end-rejected",
-				type: "end",
-				status: "rejected"
-			}
-		]
-	},
-	{
-		id: "draft-review",
-		name: "起草与审校",
-		description: "当交付物是一份需要质量把关的文字内容（文档、方案、文案、公告等）时参考。它演示「起草 → 审校 → 人工定稿」的主流程，以及审校不通过退回重写、审校需要用户澄清事实等分支。参考时把「起草 / 审校」替换成真实的机器人，并给节点补上各自的结果 schema。",
-		nodes: [
-			{
-				id: "start",
-				type: "start",
-				next: [{
-					to: "draft",
-					name: "begin",
-					prompt: "按需求起草内容并交回全文。"
-				}]
-			},
-			{
-				id: "draft",
-				type: "robot",
-				robot: "起草",
-				summary: "起草内容",
-				next: [{
-					to: "review",
-					name: "完成",
-					prompt: "起草完成，请审校内容质量与准确性。"
-				}]
-			},
-			{
-				id: "review",
-				type: "robot",
-				robot: "审校",
-				summary: "审校内容",
-				next: [
-					{
-						to: "finalize",
-						name: "通过",
-						prompt: "审校通过，请用户确认定稿。"
-					},
-					{
-						to: "draft",
-						name: "需修改",
-						prompt: "审校不通过，按修改意见重写后重新提交。"
-					},
-					{
-						to: "clarify",
-						name: "需澄清",
-						prompt: "内容需要用户澄清事实 / 口径后才能继续审校。"
-					}
-				]
-			},
-			{
-				id: "clarify",
-				type: "user",
-				title: "澄清需求",
-				detail: "审校过程中有些事实或口径需要你澄清，请说明后继续。",
-				next: [{
-					to: "draft",
-					name: "resume",
-					label: "已澄清，继续修改"
-				}]
-			},
-			{
-				id: "finalize",
-				type: "user",
-				title: "确认定稿",
-				detail: "内容已经过审校，请确认是否定稿。",
-				next: [{
-					to: "done",
-					name: "ok",
-					label: "定稿"
-				}, {
-					to: "draft",
-					name: "revise",
-					label: "继续修改"
-				}]
-			},
-			{
-				id: "done",
-				type: "end",
-				status: "completed"
-			}
-		]
-	},
-	{
-		id: "research-report",
-		name: "调研与报告",
-		description: "当任务需要先搜集资料、再汇总结论交给用户确认时参考。它演示「调研 → 报告 → 人工确认」的主流程，以及调研缺资料需用户提供、报告缺材料回调研补充、用户不满意可重写或补充调研等分支。参考时把「调研 / 报告」替换成真实机器人，并给节点补上结果 schema。",
-		nodes: [
-			{
-				id: "start",
-				type: "start",
-				next: [{
-					to: "research",
-					name: "begin",
-					prompt: "围绕主题搜集资料，整理出关键事实与来源。"
-				}]
-			},
-			{
-				id: "research",
-				type: "robot",
-				robot: "调研",
-				summary: "搜集资料",
-				next: [{
-					to: "report",
-					name: "完成",
-					prompt: "资料充分，请把材料汇总成结论报告。"
-				}, {
-					to: "user-source",
-					name: "需用户提供",
-					prompt: "缺少关键资料或访问权限，需要用户提供后才能继续。"
-				}]
-			},
-			{
-				id: "user-source",
-				type: "user",
-				title: "提供资料 / 权限",
-				detail: "调研缺少关键资料或访问权限，请你提供后继续。",
-				next: [{
-					to: "research",
-					name: "resume",
-					label: "已提供，继续调研"
-				}]
-			},
-			{
-				id: "report",
-				type: "robot",
-				robot: "报告",
-				summary: "汇总报告",
-				next: [{
-					to: "confirm",
-					name: "完成",
-					prompt: "报告完成，请用户确认结论。"
-				}, {
-					to: "research",
-					name: "缺材料",
-					prompt: "材料不足，请补充调研后再完善报告。"
-				}]
-			},
-			{
-				id: "confirm",
-				type: "user",
-				title: "确认结论",
-				detail: "请查看调研结论，确认是否接受。",
-				next: [
-					{
-						to: "done",
-						name: "ok",
-						label: "接受"
-					},
-					{
-						to: "research",
-						name: "more",
-						label: "补充调研"
-					},
-					{
-						to: "report",
-						name: "rewrite",
-						label: "重写报告"
-					}
-				]
-			},
-			{
-				id: "done",
-				type: "end",
-				status: "completed"
-			}
-		]
-	},
-	{
-		id: "collect-analyze",
-		name: "采集与分析",
-		description: "当需要先采集数据或素材、再分析产出结论，并且结论需要人工把关时参考。它演示「采集 → 分析 → 人工确认」的主流程，以及采集缺数据源需用户提供、分析发现素材不足回采集补充、用户不满意可重分析或重采集等分支。参考时把「采集 / 分析」替换成真实机器人，并给节点补上结果 schema。",
-		nodes: [
-			{
-				id: "start",
-				type: "start",
-				next: [{
-					to: "collect",
-					name: "begin",
-					prompt: "采集任务所需的数据或素材，整理后交回。"
-				}]
-			},
-			{
-				id: "collect",
-				type: "robot",
-				robot: "采集",
-				summary: "采集数据 / 素材",
-				next: [{
-					to: "analyze",
-					name: "完成",
-					prompt: "采集完成，请分析数据并给出结论。"
-				}, {
-					to: "user-data",
-					name: "需用户协助",
-					prompt: "缺少数据源或访问凭证，需要用户提供后才能继续采集。"
-				}]
-			},
-			{
-				id: "user-data",
-				type: "user",
-				title: "提供数据 / 凭证",
-				detail: "采集缺少数据源或访问凭证，请你提供后继续。",
-				next: [{
-					to: "collect",
-					name: "resume",
-					label: "已提供，继续采集"
-				}]
-			},
-			{
-				id: "analyze",
-				type: "robot",
-				robot: "分析",
-				summary: "分析并出结论",
-				next: [{
-					to: "confirm",
-					name: "完成",
-					prompt: "分析完成，请用户确认结论。"
-				}, {
-					to: "collect",
-					name: "素材不足",
-					prompt: "素材不足，请补充采集后再分析。"
-				}]
-			},
-			{
-				id: "confirm",
-				type: "user",
-				title: "确认结论",
-				detail: "请查看分析结论，确认是否接受。",
-				next: [
-					{
-						to: "done",
-						name: "ok",
-						label: "接受"
-					},
-					{
-						to: "analyze",
-						name: "redo",
-						label: "重新分析"
-					},
-					{
-						to: "collect",
-						name: "recollect",
-						label: "重新采集"
-					}
-				]
-			},
-			{
-				id: "done",
-				type: "end",
-				status: "completed"
-			}
-		]
-	},
-	{
-		id: "parallel-fanout",
-		name: "并行分派与汇合",
-		description: "当一项工作可以拆成多个互不依赖的任务、并行执行后再汇总结果时参考：一个规划节点 fan-out 出多个任务（每个任务一个机器人并行跑），join 节点等所有实际启动的任务都完成后放行到下游汇总。参考时把「规划 / 执行 / 汇总」替换成真实机器人，并给节点补上各自的结果 schema 与具体 prompt。",
-		nodes: [
-			{
-				id: "start",
-				type: "start",
-				next: [{
-					to: "plan",
-					name: "begin",
-					prompt: "拆解需求，规划并行任务。"
-				}]
-			},
-			{
-				id: "plan",
-				type: "robot",
-				robot: "规划",
-				summary: "拆解需求，规划并行任务",
-				next: [
-					{
-						to: "task-a",
-						name: "任务A",
-						prompt: "完成并行任务 A。"
-					},
-					{
-						to: "task-b",
-						name: "任务B",
-						prompt: "完成并行任务 B。"
-					},
-					{
-						to: "task-c",
-						name: "任务C",
-						prompt: "完成并行任务 C。"
-					}
-				]
-			},
-			{
-				id: "task-a",
-				type: "robot",
-				robot: "执行",
-				summary: "并行任务 A"
-			},
-			{
-				id: "task-b",
-				type: "robot",
-				robot: "执行",
-				summary: "并行任务 B"
-			},
-			{
-				id: "task-c",
-				type: "robot",
-				robot: "执行",
-				summary: "并行任务 C"
-			},
-			{
-				id: "merge",
-				type: "join",
-				inputs: [
-					"task-a",
-					"task-b",
-					"task-c"
-				],
-				next: [{
-					to: "summarize",
-					prompt: "全部并行任务完成，汇总结果。"
-				}]
-			},
-			{
-				id: "summarize",
-				type: "robot",
-				robot: "汇总",
-				summary: "汇总各并行任务的结果",
-				next: [{
-					to: "end",
-					name: "完成"
-				}]
-			},
-			{
-				id: "end",
-				type: "end",
-				status: "completed"
-			}
-		]
+function visibleTaskIds(tasks, currentTaskId) {
+	const byId = new Map(tasks.map((task) => [task.id, task]));
+	const visible = /* @__PURE__ */ new Set();
+	const queue = [currentTaskId];
+	while (queue.length > 0) {
+		const taskId = queue.pop();
+		if (visible.has(taskId)) continue;
+		visible.add(taskId);
+		const task = byId.get(taskId);
+		for (const dependency of task?.deps ?? []) queue.push(dependency);
 	}
-];
+	return visible;
+}
 /**
-* 模板清单（含完整 `nodes`）。浏览器「模板」页签与 Host 路由直接用它。
+* 检索附件：按名称 / 描述匹配，只返回可见集合里的条目。
 *
-* @returns 模板清单
+* @param attachments 作业附件库
+* @param visible 可见附件 id / 来源集合
+* @param query 关键词
+* @returns 匹配的附件
 */
-function listTemplates() {
-	return WORKFLOW_TEMPLATES;
-}
-/**
-* 按 id 取一份模板；找不到返回 null。
-*
-* @param id 模板 id
-* @returns 找到的模板；不存在时是 `null`
-*/
-function findTemplate(id) {
-	if (typeof id !== "string") return null;
-	const target = id.trim();
-	return WORKFLOW_TEMPLATES.find((template) => template.id === target) ?? null;
-}
-/**
-* 模板的摘要（不含 `nodes`）：给编排 agent 的清单，让它在选模板时先看
-* 名字与「什么时候该参考」。
-*
-* @param templates 模板清单
-* @returns 模板摘要
-*/
-function summarizeTemplates(templates = WORKFLOW_TEMPLATES) {
-	return templates.map((template) => ({
-		id: template.id,
-		name: template.name,
-		description: template.description
-	}));
-}
-/**
-* 把一份模板转成给模型看的可读流程：名字 + 描述 + 按拓扑顺序排的节点流。
-* 只做展示，不校验结构（校验见 `validateTemplates`）。
-*
-* @param template 模板
-* @returns 给模型看的可读流程
-*/
-function describeTemplate(template) {
-	const lines = [`workflow template "${template.name}" (id: ${template.id})`, template.description];
-	const nodes = Array.isArray(template.nodes) ? template.nodes : [];
-	if (nodes.length === 0) return lines.join("\n");
-	lines.push("abstract flow (roles are placeholders — map them to real robots):");
-	const order = topoOrder(nodes);
-	for (const id of order) {
-		const node = nodes.find((item) => item.id === id);
-		if (node === void 0) continue;
-		const role = node.type === "robot" && typeof node.robot === "string" ? ` role=${node.robot}` : "";
-		const title = typeof node.title === "string" && node.title !== "" ? ` "${node.title}"` : "";
-		const routes = (Array.isArray(node.next) ? node.next : []).map((rule) => {
-			const label = typeof rule.label === "string" && rule.label !== "" ? ` (label: ${rule.label})` : "";
-			return typeof rule.name === "string" ? `${rule.name}→${rule.to}${label}` : `→${rule.to}`;
-		}).filter((text) => text !== "");
-		const inputsText = node.type === "join" ? `  inputs=${(Array.isArray(node.inputs) ? node.inputs : []).join(", ")}` : "";
-		lines.push(`- ${node.id} [${node.type}${role}]${title}${inputsText}${routes.length === 0 ? "" : `  edges=${routes.join(" | ")}`}`);
-	}
-	return lines.join("\n");
-}
-/**
-* 节点的拓扑排序：模板里允许环（例如「测试 → 开发」回边），排序只保证 start 在前、
-* 并尽量按出边顺序排列；环内节点按首次出现位置排。
-*
-* @param nodes 模板节点数组
-* @returns 拓扑排序后的节点 id
-*/
-function topoOrder(nodes) {
-	const ids = nodes.map((node) => node.id);
-	const byId = new Map(nodes.map((node) => [node.id, node]));
-	const start = nodes.find((node) => node.type === "start");
-	const order = [];
-	const seen = /* @__PURE__ */ new Set();
-	const visit = (id) => {
-		if (id === void 0 || seen.has(id)) return;
-		seen.add(id);
-		order.push(id);
-		const node = byId.get(id);
-		for (const rule of Array.isArray(node?.next) ? node.next : []) if (typeof rule?.to === "string" && rule.to !== "") visit(rule.to);
-	};
-	visit(start === void 0 ? ids[0] : start.id);
-	for (const id of ids) visit(id);
-	return order;
-}
-// .build/workflows/render.js
-/**
-* 工具结果与错误的展示文本：工具输出收口、计划 / 运行 / 状态等渲染。
-*/
-/** 把运行时值收口成工具输出接受的 JSON 形状（值本身已经是可序列化的）。 */
-function jsonValue(value) {
-	return value;
-}
-/** 判断普通对象。 */
-function isRecord$2(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-/**
-* 定义错误的单行文本。
-*
-* @param errors 定义错误列表
-* @returns 单行文本
-*/
-function formatErrors(errors) {
-	return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
-}
-/**
-* `buka_workflow_plan` 的展示文本。
-*
-* @param value 工具返回值
-* @returns 展示文本
-*/
-function renderPlanResult(value) {
-	const record = isRecord$2(value) ? value : {};
-	const errors = Array.isArray(record.errors) ? record.errors : [];
-	const warnings = Array.isArray(record.warnings) ? record.warnings : [];
-	if (record.ok !== true) {
-		const lines = [`workflow definition is invalid (${errors.length} error${errors.length === 1 ? "" : "s"}):`];
-		for (const rawError of errors) {
-			const error = isRecord$2(rawError) ? rawError : {};
-			lines.push(`- ${String(error.path)}: ${String(error.message)}`);
-		}
-		for (const warning of warnings) lines.push(`! ${String(warning)}`);
-		return lines.join("\n");
-	}
-	const summary = isRecord$2(record.summary) ? record.summary : {};
-	const nodes = Array.isArray(summary.nodes) ? summary.nodes : [];
-	const lines = [`workflow definition is valid: start=${String(summary.start)}, ${nodes.length} node${nodes.length === 1 ? "" : "s"}, maxSteps=${String(summary.maxSteps)}`];
-	if (typeof summary.goal === "string" && summary.goal !== "") lines.push(`goal: ${summary.goal}`);
-	for (const rawNode of nodes) {
-		const node = isRecord$2(rawNode) ? rawNode : {};
-		const robot = node.robot === void 0 ? "" : ` robot=${String(node.robot)}`;
-		const title = typeof node.title === "string" && node.title !== "" ? ` "${node.title}"` : "";
-		const routes = Array.isArray(node.routes) ? node.routes.map((rawRoute) => {
-			if (typeof rawRoute === "string") return rawRoute;
-			const route = isRecord$2(rawRoute) ? rawRoute : {};
-			return `${String(route.name ?? "")}: ${String(route.label ?? "")}`;
-		}).filter((route) => route !== "") : [];
-		const questions = Array.isArray(node.questions) ? node.questions.filter((id) => typeof id === "string" && id !== "") : [];
-		const detail = [routes.length === 0 ? "" : ` routes=${routes.join(" | ")}`, questions.length === 0 ? "" : ` questions=${questions.join(" | ")}`].join("");
-		lines.push(`- ${String(node.id)} [${String(node.type)}${robot}]${title}${detail}`);
-	}
-	for (const warning of warnings) lines.push(`! ${String(warning)}`);
-	return lines.join("\n");
-}
-/**
-* 运行的序号标签：`#12 `；旧记录没有序号时是空串。
-*
-* @param run 运行记录（只读 seq）
-* @returns 序号标签
-*/
-function runSeqLabel(run) {
-	const record = isRecord$2(run) ? run : {};
-	return typeof record.seq === "number" && Number.isInteger(record.seq) && record.seq > 0 ? `#${record.seq} ` : "";
-}
-/**
-* 一次运行的展示文本。
-*
-* @param run 运行记录
-* @returns 展示文本
-*/
-function renderRun(run) {
-	if (run === null || run === void 0) return "No workflow run was recorded.";
-	const record = isRecord$2(run) ? run : {};
-	const lines = [`workflow ${runSeqLabel(record)}${String(record.runId)} — ${String(record.status)}`];
-	if (typeof record.goal === "string" && record.goal !== "") lines.push(`goal: ${record.goal}`);
-	const steps = Array.isArray(record.steps) ? record.steps : [];
-	if (steps.length === 0) lines.push("no steps completed");
-	for (const rawStep of steps) {
-		const step = isRecord$2(rawStep) ? rawStep : {};
-		const robot = typeof step.robot === "string" && step.robot !== "" ? ` robot=${step.robot}` : "";
-		const session = typeof step.sessionId === "string" && step.sessionId !== "" ? ` session=${step.sessionId}` : "";
-		const reason = typeof step.stopReason === "string" ? ` (${step.stopReason})` : "";
-		const route = typeof step.route === "string" && step.route !== "" ? ` route=${step.route}` : "";
-		const attachments = Array.isArray(step.attachments) && step.attachments.length > 0 ? ` attachments=${step.attachments.length}` : "";
-		lines.push(`- ${String(step.nodeId)} [${String(step.type)}${robot}] ${String(step.status)}${reason}${route}${attachments}${session}`);
-	}
-	if (record.result !== null && record.result !== void 0) lines.push(`result: ${JSON.stringify(record.result)}`);
-	if (typeof record.error === "string" && record.error !== "") lines.push(`error: ${record.error}`);
-	if (record.pendingUser !== null && record.pendingUser !== void 0) {
-		const pendingUser = isRecord$2(record.pendingUser) ? record.pendingUser : {};
-		lines.push(`waiting at user node: ${String(pendingUser.title ?? pendingUser.nodeId)}`);
-	}
-	if (record.pendingInteraction !== null && record.pendingInteraction !== void 0) {
-		const pending = isRecord$2(record.pendingInteraction) ? record.pendingInteraction : {};
-		const session = typeof pending.sessionId === "string" ? ` in session ${pending.sessionId}` : "";
-		if (pending.kind === "approval") {
-			const reason = typeof pending.reason === "string" && pending.reason !== "" ? `: ${pending.reason}` : "";
-			lines.push(`waiting for the user to approve ${String(pending.toolName ?? "a tool")}${session}${reason}`);
-		} else {
-			const first = Array.isArray(pending.questions) ? pending.questions[0] : null;
-			const question = isRecord$2(first) ? first : {};
-			const text = question.question || question.header || "";
-			lines.push(`waiting for the user to answer${session}${text === "" ? "" : `: ${String(text)}`}`);
-		}
-	}
-	return lines.join("\n");
-}
-/**
-* `buka_workflow_start` 的展示文本：后台运行只报 runId，前台运行给出终态摘要。
-*
-* @param value 工具返回值
-* @returns 展示文本
-*/
-function renderStart(value) {
-	const record = isRecord$2(value) ? value : {};
-	if (record.mode === "background") return [`workflow ${typeof record.seq === "number" && Number.isInteger(record.seq) && record.seq > 0 ? `#${record.seq} ` : ""}${String(record.runId)} started in the background`, "the host observer keeps scheduling node sessions; follow it with buka_workflow_status or the sidebar page"].join("\n");
-	return renderRun(record.run ?? null);
-}
-/**
-* `buka_workflow_cancel` 的展示文本。
-*
-* @param value 工具返回值
-* @returns 展示文本
-*/
-function renderCancel(value) {
-	const record = isRecord$2(value) ? value : {};
-	const run = isRecord$2(record.run) ? record.run : null;
-	if (record.cancelled === true) return `workflow ${String(run?.runId ?? "")} cancellation signalled`;
-	if (run === null) return "No workflow run was found.";
-	return `workflow ${String(run.runId)} is not live (status: ${String(run.status)}); nothing to cancel`;
-}
-/**
-* `buka_workflow_templates` 的展示文本：无 id 时列目录，有 id 时给一份模板的
-* 可读流程。
-*
-* @param value 工具返回值
-* @returns 展示文本
-*/
-function renderTemplates(value) {
-	const record = isRecord$2(value) ? value : {};
-	const template = isRecord$2(record.template) ? record.template : null;
-	if (template !== null) return describeTemplate(template);
-	const templates = Array.isArray(record.templates) ? record.templates : [];
-	if (templates.length === 0) return "No workflow templates are available.";
-	const lines = ["workflow template catalog (abstract reference, not runnable definitions):"];
-	for (const rawTemplate of templates) {
-		const entry = isRecord$2(rawTemplate) ? rawTemplate : {};
-		lines.push(`- ${String(entry.id)} — ${String(entry.name)}: ${String(entry.description)}`);
-	}
-	lines.push("pass an id to read one template in full; map its abstract roles to real robots before starting.");
-	return lines.join("\n");
-}
-/**
-* `buka_workflow_status` 的展示文本。
-*
-* @param value 工具返回值
-* @returns 展示文本
-*/
-function renderStatus(value) {
-	const record = isRecord$2(value) ? value : {};
-	if (record.run !== null && record.run !== void 0) return renderRun(record.run);
-	const runs = Array.isArray(record.runs) ? record.runs : [];
-	if (runs.length === 0) return "No workflow runs have been recorded yet.";
-	const lines = ["recent workflow runs:"];
-	for (const rawRun of runs) {
-		const run = isRecord$2(rawRun) ? rawRun : {};
-		const finished = run.finishedAt === null || run.finishedAt === void 0 ? "running" : new Date(run.finishedAt).toISOString();
-		const waiting = run.waitingForUser === true ? " · waiting for user" : "";
-		lines.push(`- ${runSeqLabel(run)}${String(run.runId)} ${String(run.status)}${waiting} (${finished})${run.goal ? ` — ${String(run.goal)}` : ""}`);
-	}
-	return lines.join("\n");
-}
-/**
-* @param error 任意错误
-* @returns 一句话错误
-*/
-function describeError$3(error) {
-	return error instanceof Error ? error.message : String(error);
+function searchAttachments(attachments, visible, query) {
+	const needle = query.trim().toLowerCase();
+	return attachments.filter((attachment) => {
+		if (!visible.has(attachment.id)) return false;
+		if (needle === "") return true;
+		return attachment.name.toLowerCase().includes(needle) || attachment.description.toLowerCase().includes(needle) || attachment.sourceTaskId.toLowerCase().includes(needle);
+	});
 }
 // .build/workflows/output.js
 /**
-* 节点结果 JSON 的 schema：定义校验、运行期校验与 prompt 结果契约。
+* 受限 JSON Schema 子集：定义校验、运行期结果校验与模板路径检查。
 *
-* 工作流的 robot 节点在定义里用 `output` 声明它交回的 JSON 对象长什么样。
-* 本模块只处理声明与结果之间的纯逻辑（不读盘、不依赖 DSH）：
+* 工作流 v4 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
+* 执行者必须交回的结构化结果；开始 / 结束节点也各自声明任务契约。本模块
+* 只处理声明与值之间的纯逻辑（不读盘、不依赖 DSH）：
 *
-* - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。定义由模型现场
-*   生成，所以这里只放行一组可移植关键字，避免把任意 schema 直接当成工具参数；
-* - `buildResultSchema`：把声明的 `output` 与引擎字段合并成真正交给
-*   `structured_output` 的 schema。`next` 由出边名生成；`abort` 是每个 robot
-*   节点内置的主动终止能力；`attachments` 是每个 robot 节点内置的能力，总是
-*   可选出现（不是主输出，只放独立数据 / 文件）；
-* - `outputProblems`：运行期按声明的 `output` 校验节点交回的结果；
-* - `resolveOutputPath`：定义校验时检查 prompt 里 `{{nodes.<id>.data.<path>}}`
-*   的路径是否真的在目标节点的 `output` 里；
-* - `renderOutputContract`：给节点 prompt 追加一段固定契约（schema + 最终文本
-*   与附件的边界）。
+* - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
+*   由编排 agent 生成，所以这里只放行一组可移植关键字，避免把任意 schema
+*   直接当成工具参数；
+* - `schemaProblems`：运行期按声明的 schema 校验 payload / output；
+* - `resolveOutputPath`：定义校验时检查 `{{start.output.<path>}}` 这类模板
+*   引用的路径是否真的在目标 schema 里；
+* - `schemaJson`：给 prompt 用的 schema 序列化。
 *
-* 本模块不修改调用方传入的定义对象：`buildResultSchema` 会 clone 后再合并。
+* 本模块不修改调用方传入的对象。
 *
 * @module @buka/dsh-plugin-workflows/output
 */
-/** 单份 `output` schema 序列化后的字节上限。 */
+/** 单份 schema 序列化后的字节上限。 */
 const MAX_OUTPUT_SCHEMA_BYTES = 16384;
-/** 引擎保留、不允许在 `output` 里声明的顶层字段。 */
-const RESERVED_OUTPUT_FIELDS = Object.freeze([
-	"next",
-	"attachments",
-	"abort"
-]);
 /** 属性名必须能被 prompt 模板的点号路径寻址。 */
 const PROPERTY_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
 /** 允许的子 schema 类型。 */
@@ -1406,11 +752,13 @@ function isPrimitive(value) {
 	return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 /**
-* 校验并规范化一个 robot 节点的 `output`。
+* 校验并规范化一份 payload / output schema。
 *
-* 返回只包含合法关键字的新对象；无法构成 schema 时返回 null（错误已记录）。
+* 顶层必须是 `type: "object"`：任务的 payload 与结构化结果都是 JSON 对象，
+* 页面表单与 `buka_task_complete` 都按对象读写。返回只包含合法关键字的新对象；
+* 无法构成 schema 时返回 null（错误已记录）。
 *
-* @param raw 声明的 `output`
+* @param raw 声明的 schema
 * @param path 出错时使用的路径前缀
 * @param fail 记录错误的回调
 * @returns 规范化后的 schema；不合法时是 `null`
@@ -1421,7 +769,7 @@ function parseOutputSchema(raw, path, fail) {
 		return null;
 	}
 	if (raw.type !== "object") {
-		fail(`${path}.type`, "must be \"object\": a robot node always returns a JSON object");
+		fail(`${path}.type`, "must be \"object\": task payload and results are JSON objects");
 		return null;
 	}
 	const schema = walkSchema(raw, path, 1, { properties: 0 }, fail);
@@ -1537,12 +885,7 @@ function walkSchema(raw, path, depth, state, fail) {
 			}
 			for (const [name, value] of Object.entries(raw.properties)) {
 				if (!PROPERTY_NAME_PATTERN.test(name)) {
-					fail(`${path}.properties.${name}`, "must match [A-Za-z0-9_-] and be at most 64 characters so prompts can address it as {{nodes.<id>.data.<field>}}");
-					invalid = true;
-					continue;
-				}
-				if (depth === 1 && RESERVED_OUTPUT_FIELDS.includes(name)) {
-					fail(`${path}.properties.${name}`, name === "next" ? "is added by the workflow from the outgoing edge names; do not declare it in output" : name === "abort" ? "is the built-in way to end the run when this node cannot complete its task; do not declare it in output" : "is always available as the built-in attachments capability; do not declare it in output");
+					fail(`${path}.properties.${name}`, "must match [A-Za-z0-9_-] and be at most 64 characters so prompts can address it by path");
 					invalid = true;
 					continue;
 				}
@@ -1615,95 +958,7 @@ function walkSchema(raw, path, depth, state, fail) {
 	return schema;
 }
 /**
-* 一个 robot 节点可用于 JSON `next` 的路由键（出边 name）。
-*
-* @param node 已规范化的节点
-* @returns 可用的路由键
-*/
-function routeNamesOf(node) {
-	return (Array.isArray(node?.next) ? node.next : []).map((rule) => typeof rule?.name === "string" ? rule.name.trim() : "").filter((name) => name !== "");
-}
-/**
-* 生成 attachments 数组的 schema（每次返回新对象，避免被调用方修改）。
-*
-* attachments 是每个 robot 节点内置的能力：用来交回与答案相互独立的数据 / 文件，
-* 不是主输出通道。
-*
-* @returns attachments 数组的 schema
-*/
-function attachmentSchema() {
-	return {
-		type: "array",
-		description: "Optional independent data or files this node produced (binary artifacts, archives, traces, large datasets). Supplementary only: never put the answer itself in an attachment. Paths are relative to your workspace; the workflow copies each file into this execution's node directory.",
-		items: { oneOf: [{
-			type: "string",
-			description: "Path to a file, relative to your workspace."
-		}, {
-			type: "object",
-			additionalProperties: false,
-			properties: {
-				path: {
-					type: "string",
-					description: "Path to a file, relative to your workspace."
-				},
-				name: {
-					type: "string",
-					description: "Optional destination name; defaults to the source file name."
-				},
-				description: {
-					type: "string",
-					description: "Optional one-line description shown with the attachment."
-				}
-			},
-			required: ["path"]
-		}] }
-	};
-}
-/**
-* 构造真正交给 `structured_output` 的 schema。
-*
-* 新定义以声明的 `output` 为底，合并 `next`（有出边时 enum）、内置的 `abort`
-* 与内置的 `attachments`；升级前已在跑的快照没有 `output`，退回旧的宽松对象
-* schema，保证未完成的运行能继续。`next` 不放进 `required`：节点可以用 `abort`
-* 代替它。返回值是新对象，不会修改节点。
-*
-* @param node 已规范化的节点
-* @returns 交给 `structured_output` 的 schema
-*/
-function buildResultSchema(node) {
-	const schema = (isPlainObject$1(node?.output) ? structuredClone(node.output) : null) ?? {
-		type: "object",
-		additionalProperties: true,
-		properties: {}
-	};
-	if (!isPlainObject$1(schema.properties)) schema.properties = {};
-	const routes = routeNamesOf(node);
-	if (routes.length > 0) schema.properties.next = {
-		oneOf: [{
-			type: "string",
-			enum: routes,
-			description: "A single route key; the workflow follows exactly one edge."
-		}, {
-			type: "array",
-			items: {
-				type: "string",
-				enum: routes
-			},
-			description: "One or more route keys (non-empty); the workflow starts every listed edge as a concurrent branch. Use this to fan out parallel work that a join node collects later."
-		}],
-		description: "Route key(s) from the workflow definition; selects the edge(s) to follow next. Use \"abort\" instead when you cannot complete this node's task."
-	};
-	schema.properties.abort = {
-		type: "string",
-		description: "Set this instead of \"next\" (or instead of a normal result on a terminal node) when you cannot complete this task: a short reason why. The workflow ends and the run is recorded as failed. Abort does not need to satisfy the declared output fields."
-	};
-	schema.properties.attachments = attachmentSchema();
-	return schema;
-}
-/**
-* 判断 prompt 里的 `data.<path>` 是否真的在声明的 `output` 里。
-*
-* 返回 null 表示存在；否则返回可以拼进错误信息的原因片段。
+* 判断 prompt 里的路径是否真的在声明的 schema 里。
 *
 * 规则：
 * - 对象按 `properties` 下钻；未声明的字段直接报错（即使 additionalProperties
@@ -1711,8 +966,8 @@ function buildResultSchema(node) {
 * - 数组只允许数字下标，并且必须声明了 `items` 才能继续下钻；
 * - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败。
 *
-* @param schema 节点声明的 output schema
-* @param segments `data` 之后的路径段
+* @param schema 声明的 schema
+* @param segments 路径段（不含 `start.output` 前缀）
 * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
 */
 function resolveOutputPath(schema, segments) {
@@ -1740,24 +995,15 @@ function resolveOutputPath(schema, segments) {
 	return null;
 }
 /**
-* 按声明的 `output` 校验节点交回的结果。
+* 按声明的 schema 校验一个值。
 *
-* 引擎保留的顶层 `next` / `abort` / `attachments` 不参与声明字段校验：`next`
-* 与 `abort` 由结果解析单独处理，`attachments` 是内置能力。返回可读问题列表，
-* 空数组表示通过。
-*
-* @param node 已规范化的节点
-* @param data 节点交回的结果
+* @param schema 声明的 schema
+* @param data 待校验的值
 * @returns 可读问题列表；空数组表示通过
 */
-function outputProblems(node, data) {
-	if (!isPlainObject$1(node?.output)) return [];
+function schemaProblems(schema, data) {
 	const problems = [];
-	if (!isPlainObject$1(data)) {
-		problems.push("result: expected a JSON object");
-		return problems;
-	}
-	checkValue(node.output, data, "", problems, 0);
+	checkValue(schema, data, "", problems, 0);
 	return problems;
 }
 /**
@@ -1772,7 +1018,7 @@ function outputProblems(node, data) {
 */
 function checkValue(schema, value, path, problems, depth) {
 	if (depth > MAX_CHECK_DEPTH) return;
-	const label = path === "" ? "result" : path;
+	const label = path === "" ? "payload" : path;
 	if (Array.isArray(schema.oneOf)) {
 		if (!schema.oneOf.some((branch) => {
 			const branchProblems = [];
@@ -1804,7 +1050,6 @@ function checkValue(schema, value, path, problems, depth) {
 			}
 			if (schema.additionalProperties === false) for (const name of Object.keys(value)) {
 				if (Object.hasOwn(properties, name)) continue;
-				if (depth === 0 && RESERVED_OUTPUT_FIELDS.includes(name)) continue;
 				problems.push(`${joinPath(path, name)}: unexpected field (additionalProperties is false)`);
 			}
 			for (const [name, child] of Object.entries(properties)) {
@@ -1863,28 +1108,13 @@ function actualType(value) {
 	return typeof value;
 }
 /**
-* 节点 prompt 末尾追加的结果契约。
+* 把 schema 序列化成 prompt 里展示的 JSON 文本。
 *
-* 升级前的快照没有 `output`，返回空串，保持旧 prompt 不变。
-*
-* @param node 已规范化的节点
-* @returns 追加到 prompt 末尾的契约；旧快照是空串
+* @param schema 声明的 schema
+* @returns 格式化后的 JSON
 */
-function renderOutputContract(node) {
-	if (!isPlainObject$1(node?.output)) return "";
-	const schema = buildResultSchema(node);
-	return [
-		"---",
-		"Result contract (added by the workflow):",
-		"Finish by calling the structured_output tool with one JSON object that matches this schema:",
-		"```json",
-		JSON.stringify(schema, null, 2),
-		"```",
-		"When this node has outgoing edges, the object must contain exactly one of \"next\" and \"abort\": \"next\" is a declared route name, or a non-empty list of route names to start several edges as concurrent branches; \"abort\" is a short non-empty reason.",
-		"If you cannot complete this task, do not choose a route you do not believe in: submit \"abort\" with a short non-empty reason instead. The workflow ends immediately, the run is recorded as failed, and the declared output fields and attachments are not required.",
-		"The final assistant text is this step's output shown on the run page; put the actual answer in the final text and the declared fields.",
-		"The \"attachments\" list is a built-in capability for independent data or files this node produced (archives, traces, images, large datasets); it is not a place for the answer itself."
-	].join("\n");
+function schemaJson(schema) {
+	return JSON.stringify(schema, null, 2);
 }
 // .build/workflows/template.js
 /**
@@ -2012,1777 +1242,4065 @@ function formatValue(value) {
 	if (typeof value === "object") return JSON.stringify(value, null, 2);
 	return String(value);
 }
-/** 节点 id 的合法字符集。 */
-const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u;
-/** 机器名称的最大长度。 */
-const MAX_ROBOT_NAME_LENGTH = 128;
-/** prompt 的字节上限。 */
-const MAX_PROMPT_BYTES = 262144;
-/** 用户节点说明的最大字符数。 */
-const MAX_USER_DETAIL_LENGTH = 4e3;
-/** 问题正文 / 标题的最大字符数。 */
-const MAX_QUESTION_TEXT_LENGTH = 1e3;
-const MAX_QUESTION_HEADER_LENGTH = 200;
-/** 单个问题最多多少个选项。 */
-const MAX_QUESTION_OPTIONS = 20;
-/** 问题 id 的合法字符集。 */
-const QUESTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
-/** route 问题的保留 id；用户节点的出边选项共用这个 id。 */
-const ROUTE_QUESTION_ID = "route";
-/** 终止节点允许的状态。 */
-const END_STATUSES$1 = /* @__PURE__ */ new Set([
-	"completed",
-	"failed",
-	"rejected"
-]);
-/** 节点类型。 */
-const NODE_TYPES$1 = /* @__PURE__ */ new Set([
-	"start",
-	"robot",
-	"user",
-	"join",
-	"end"
-]);
+// .build/workflows/definition/payload.js
 /**
-* 机器人节点可选的会话模式。`plan` 进入 DSH 的 plan 模式（先探索、交计划，
-* 原生审阅批准后再继续）；`goal` 暂未实现，定义里出现会被明确拒绝。
-*/
-const ROBOT_MODES = /* @__PURE__ */ new Set(["plan"]);
-/** format 3 的移除提示：旧 gate 节点被用户介入节点取代。 */
-const GATE_REMOVED = "gate was replaced by the user node in workflow format 3; use { \"type\": \"user\", \"title\", \"detail\"?, \"next\"?, \"questions\"? }";
-/** format 2 的移除提示：机器人节点不再有 `report`。 */
-const REPORT_REMOVED = "report was removed in workflow format 2; every robot node always returns JSON";
-/** format 2 的移除提示：边不再有 `when`。 */
-const WHEN_REMOVED = "when was removed; select the next edge with the JSON \"next\" route";
-/** 机器人节点 prompt 移除提示。 */
-const NODE_PROMPT_REMOVED = "robot nodes no longer carry a prompt; define it on the edge entering this node";
-/**
-* 边可选的展示色。它只影响运行页 / 模板页上那条线的颜色，不参与路由、
-* 调度或结果校验，所以只有「成功」与「失败」两个语义值。
-*/
-const EDGE_TONES = /* @__PURE__ */ new Set(["success", "failure"]);
-/**
-* 判断一个值是不是普通对象。
+* payload 模板：路径解析、引用遍历与执行开始时的递归渲染。
 *
-* @param value 待判断的值
-* @returns 是普通对象时为 true
+* 工作流 v4 的 payload 是 JSON 对象，字符串里可以写模板占位符：
+*
+* - `{{start.output.<path>}}`：启动任务交回的结构化输入；
+* - `{{task.<id>.output.<path>}}`：依赖任务的结构化结果；
+* - `{{task.<id>.text}}`：依赖任务的文本结果。
+*
+* 渲染在执行开始时进行（`renderPayload`）；定义校验阶段用 `inspectPayload`
+* 只提取路径、不求值，再按目标 schema / 已存在任务检查。路径不存在时抛错
+* （而不是静默变空串），避免把空提示词交给执行者。
+*
+* @module @buka/dsh-plugin-workflows/definition/payload
 */
-function isPlainObject(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+/** 一个任务 id 里允许的字符（`$start` 走 `start.` 前缀，不在这里）。 */
+const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/u;
 /**
-* 校验一份工作流定义。
+* 解析一个模板占位符路径。
 *
-* 返回 `{ ok, errors, warnings, plan }`：`ok` 为 true 时 `plan` 可执行；
-* 否则 `errors` 里是 `{ path, message }` 列表，`plan` 为 null。
-*
-* @param input agent 传入的定义
-* @param options 部署侧步数上限
-* @returns 校验结果；`ok` 为 true 时 `plan` 可执行
+* @param path 占位符里的点号路径
+* @returns 合法时是结构化的引用；不认识的前缀返回 null
 */
-function validateDefinition(input, options = {}) {
-	const errors = [];
-	const warnings = [];
-	const fail = (path, message) => errors.push({
-		path,
-		message
-	});
-	if (!isPlainObject(input)) {
-		fail("definition", "must be a JSON object");
+function parseTemplatePath(path) {
+	const segments = path.split(".");
+	const head = segments[0];
+	if (head === "start") {
+		if (segments[1] !== "output") return null;
 		return {
-			ok: false,
-			errors,
-			warnings,
-			plan: null
+			kind: "start",
+			segments: segments.slice(2)
 		};
 	}
-	const ceiling = normalizeStepCeiling(options.maxSteps);
-	const goal = readGoal(input.goal, fail);
-	const maxSteps = readMaxSteps(input.maxSteps, ceiling, fail);
-	const declaredStart = typeof input.start === "string" ? input.start.trim() : "";
-	if (declaredStart !== "") fail("start", "the legacy top-level \"start\" format was removed; add a node with type \"start\"");
-	const nodes = /* @__PURE__ */ new Map();
-	const order = [];
-	if (!Array.isArray(input.nodes)) fail("nodes", "must be a non-empty array of node objects");
-	else if (input.nodes.length === 0) fail("nodes", "must contain at least one node");
-	else if (input.nodes.length > 200) fail("nodes", `must contain at most 200 nodes`);
-	else input.nodes.forEach((raw, index) => {
-		const node = parseNode(raw, `nodes[${index}]`, fail);
-		if (node === null) return;
-		if (nodes.has(node.id)) {
-			fail(`nodes[${index}].id`, `duplicate node id "${node.id}"`);
-			return;
-		}
-		nodes.set(node.id, node);
-		order.push(node.id);
-	});
-	const startIds = order.filter((id) => nodes.get(id)?.type === "start");
-	let start = "";
-	if (startIds.length === 0) {
-		if (declaredStart === "") fail("start", "a workflow definition needs exactly one node with type \"start\"");
-	} else {
-		if (startIds.length > 1) for (const id of startIds.slice(1)) fail(`nodes[${order.indexOf(id)}]`, "the definition may contain exactly one start node");
-		start = startIds[0] ?? "";
-		const startIndex = order.indexOf(start);
-		const startNode = nodes.get(start);
-		if (startNode !== void 0) {
-			if (!Array.isArray(startNode.next) || startNode.next.length === 0) fail(`nodes[${startIndex}].next`, "a start node needs at least one outgoing edge");
-			else startNode.next.forEach((rule, ruleIndex) => {
-				const target = nodes.get(rule.to);
-				if (target !== void 0 && target.type !== "robot") fail(`nodes[${startIndex}].next[${ruleIndex}].to`, "the start edge must enter a robot node");
-				if (typeof rule.prompt !== "string" || rule.prompt.trim() === "") fail(`nodes[${startIndex}].next[${ruleIndex}].prompt`, "the start edge must carry the first robot prompt");
-			});
-		}
+	if (head !== "task") return null;
+	const taskId = segments[1] ?? "";
+	const field = segments[2];
+	if (!TASK_ID_PATTERN.test(taskId)) return null;
+	if (field === "text") {
+		if (segments.length !== 3) return null;
+		return {
+			kind: "task",
+			taskId,
+			field: "text",
+			segments: []
+		};
 	}
-	const edges = [];
-	for (const [index, id] of order.entries()) {
-		const node = nodes.get(id);
-		for (const [ruleIndex, rule] of (node?.next ?? []).entries()) edges.push({
-			edge: rule,
-			path: `nodes[${index}].next[${ruleIndex}]`
+	if (field === "output") return {
+		kind: "task",
+		taskId,
+		field: "output",
+		segments: segments.slice(3)
+	};
+	return null;
+}
+/** 递归遍历一个 JSON 值，收集字符串里的模板引用。 */
+function walkTemplateValue(value, out) {
+	if (typeof value === "string") {
+		const inspected = inspectTemplate(value);
+		for (const path of inspected.paths) out.push({
+			path,
+			reference: parseTemplatePath(path)
+		});
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) walkTemplateValue(item, out);
+		return;
+	}
+	if (typeof value === "object" && value !== null) for (const item of Object.values(value)) walkTemplateValue(item, out);
+}
+/**
+* 提取 payload 里的全部模板引用与语法错误；不求值。
+*
+* @param payload 待检查的 payload
+* @returns 引用与语法错误
+*/
+function inspectPayload(payload) {
+	const references = [];
+	const syntaxErrors = [];
+	walkTemplateValue(payload, references);
+	collectSyntaxErrors(payload, syntaxErrors);
+	return {
+		references,
+		syntaxErrors
+	};
+}
+/** 递归收集模板语法错误。 */
+function collectSyntaxErrors(value, errors) {
+	if (typeof value === "string") {
+		for (const error of inspectTemplate(value).errors) errors.push(error);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectSyntaxErrors(item, errors);
+		return;
+	}
+	if (typeof value === "object" && value !== null) for (const item of Object.values(value)) collectSyntaxErrors(item, errors);
+}
+/**
+* 判断一个值是否含模板占位符。
+*
+* 定义校验用它在 schema 检查时跳过「运行时才有值」的子树。
+*
+* @param value 待判断的值
+* @returns 含占位符时为 true
+*/
+function containsTemplate(value) {
+	if (typeof value === "string") return inspectTemplate(value).paths.length > 0;
+	if (Array.isArray(value)) return value.some((item) => containsTemplate(item));
+	if (typeof value === "object" && value !== null) return Object.values(value).some((item) => containsTemplate(item));
+	return false;
+}
+/**
+* 递归渲染 payload：字符串里的占位符按 `renderTemplate` 求值，容器逐项递归，
+* 其它值原样返回。返回新对象，不修改入参。
+*
+* @param payload 含模板的 payload
+* @param context 模板上下文（`start` / `task`）
+* @returns 渲染后的 payload
+*/
+function renderPayload(payload, context) {
+	if (typeof payload === "string") return renderTemplate(payload, context);
+	if (Array.isArray(payload)) return payload.map((item) => renderPayload(item, context));
+	if (typeof payload === "object" && payload !== null) {
+		const rendered = {};
+		for (const [key, value] of Object.entries(payload)) rendered[key] = renderPayload(value, context);
+		return rendered;
+	}
+	return payload;
+}
+/**
+* 组装模板上下文：
+*
+* ```json
+* { "start": { "output": {...} }, "task": { "<id>": { "output": {...}, "text": "…" } } }
+* ```
+*
+* `start` 与 `task` 都是普通对象，所以 `getPath` 可以按点号路径取值。
+*
+* @param input 启动任务的结构化输入与依赖任务结果
+* @returns 模板上下文
+*/
+function buildTemplateContext(input) {
+	const tasks = {};
+	for (const [taskId, value] of input.tasks ?? []) tasks[taskId] = {
+		...value.output === void 0 ? {} : { output: value.output },
+		...value.text === void 0 ? {} : { text: value.text }
+	};
+	return {
+		start: { output: input.startOutput ?? null },
+		task: tasks
+	};
+}
+// .build/workflows/definition/validate.js
+/**
+* 工作流 v4 定义校验（`.tmp/workflow-v4-spec.md` §5.8）。
+*
+* 纯函数：不读盘、不依赖 DSH。机器人存在性由调用方传入 `robots` 目录，
+* 这样 `buka_workflow_save` 用 robots 服务的登记表，单测用固定目录。
+*
+* 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回边、模板引用）。
+* 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
+*
+* @module @buka/dsh-plugin-workflows/definition/validate
+*/
+/** 岗位 id 与任务类型 id 的形状。 */
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+/** 内建节点 id。 */
+const START_ID = "start";
+const END_ID = "end";
+/** 收集错误。 */
+var Issues = class {
+	list = [];
+	add(path, message) {
+		this.list.push({
+			path,
+			message
 		});
 	}
-	for (const { edge, path } of edges) {
-		const target = nodes.get(edge.to);
-		if (target === void 0) {
-			fail(path, `transition to unknown node "${edge.to}"`);
-			continue;
-		}
-		if (target.type === "start") {
-			fail(path, "an edge cannot point at the start node");
-			continue;
-		}
-		if (target.type === "join") {
-			fail(path, "an edge cannot point at a join node; joins collect their inputs via the \"inputs\" list");
-			continue;
-		}
-		if (target.type === "robot") {
-			if (typeof edge.prompt !== "string" || edge.prompt.trim() === "") fail(`${path}.prompt`, "an edge entering a robot node must carry its prompt");
-		} else if (typeof edge.prompt === "string" && edge.prompt !== "") fail(`${path}.prompt`, "an edge prompt is only supported when the edge enters a robot node");
+	get failed() {
+		return this.list.length > 0;
 	}
-	const inputJoins = /* @__PURE__ */ new Map();
-	for (const [index, id] of order.entries()) {
-		const node = nodes.get(id);
-		if (node === void 0 || node.type !== "join") continue;
-		for (const [inputIndex, input] of (node.inputs ?? []).entries()) {
-			const target = nodes.get(input);
-			if (target === void 0) {
-				fail(`nodes[${index}].inputs[${inputIndex}]`, `references unknown node "${input}"`);
-				continue;
-			}
-			if (target.type !== "robot") {
-				fail(`nodes[${index}].inputs[${inputIndex}]`, `a join can only wait for robot nodes; "${input}" is a ${target.type} node`);
-				continue;
-			}
-			const list = inputJoins.get(input);
-			if (list === void 0) inputJoins.set(input, [id]);
-			else list.push(id);
-		}
+};
+/**
+* 校验一份工作流 v4 定义。
+*
+* @param raw 待校验的原始定义（来自工具参数或 storageDomain）
+* @param options 机器人目录
+* @returns 规范化定义，或全部校验错误
+*/
+function validateWorkflowDefinition(raw, options) {
+	const issues = new Issues();
+	if (!isPlainObject$1(raw)) {
+		issues.add("", "workflow definition must be a JSON object");
+		return {
+			ok: false,
+			issues: issues.list
+		};
 	}
-	if (errors.length === 0) {
-		const reachable = reachableNodes(nodes, start, inputJoins);
-		for (const [index, id] of order.entries()) {
-			if (reachable.has(id)) continue;
-			fail(`nodes[${index}]`, `node "${id}" is not reachable from start, so it would never run`);
-		}
-		if (errors.length === 0) validatePromptReferences(nodes, promptTemplates(nodes, order), fail);
-		const hasRobot = order.some((id) => nodes.get(id)?.type === "robot");
-		if (errors.length === 0 && !hasRobot) warnings.push("the workflow has no robot node, so nothing will be delegated");
+	if (raw.version !== 4) issues.add("version", "must be 4");
+	const name = readName(raw, "name", "", issues);
+	const description = readOptionalString(raw, "description", "description", issues) ?? "";
+	const budgets = readBudgets(raw.budgets, issues);
+	const positions = readPositions(raw.positions, options.robots, issues);
+	const positionById = new Map(positions.map((position) => [position.id, position]));
+	const typeById = /* @__PURE__ */ new Map();
+	for (const position of positions) for (const taskType of position.taskTypes) typeById.set(taskType.id, taskType);
+	for (const [positionIndex, position] of positions.entries()) for (const [taskTypeIndex, taskType] of position.taskTypes.entries()) for (const [requirementIndex, requirement] of (taskType.requires ?? []).entries()) for (const requiredType of requirement.types) {
+		if (typeById.has(requiredType)) continue;
+		issues.add(`positions[${positionIndex}].taskTypes[${taskTypeIndex}].requires[${requirementIndex}].types`, `unknown task type "${requiredType}": requires may only reference task types declared in this workflow`);
 	}
-	if (errors.length === 0) {
-		const cyclic = cyclicNodes(nodes, order, inputJoins);
-		for (const id of order) {
-			const node = nodes.get(id);
-			if (node === void 0 || node.type !== "robot") continue;
-			if (node.maxVisits !== void 0) continue;
-			if (!cyclic.has(id)) continue;
-			warnings.push(`node "${id}" is part of a cycle and does not set maxVisits; the run is only bounded by maxSteps (${maxSteps}). Add maxVisits to stop a no-progress loop.`);
-		}
-	}
-	if (errors.length > 0) return {
+	const edges = readEdges(raw.edges, positionById, typeById, issues);
+	const start = readStart(raw.start, positionById, typeById, issues);
+	const end = readEnd(raw.end, issues);
+	checkEdges(edges, positions, issues);
+	checkReachability(edges, positions, issues);
+	checkStartNext(start, positionById, typeById, edges, issues);
+	checkEnd(edges, positions, issues);
+	if (issues.failed) return {
 		ok: false,
-		errors,
-		warnings,
-		plan: null
+		issues: issues.list
+	};
+	if (name === null || budgets === null || start === null || end === null) return {
+		ok: false,
+		issues: issues.list
 	};
 	return {
 		ok: true,
-		errors,
-		warnings,
-		plan: {
-			goal,
+		definition: {
+			version: 4,
+			name,
+			...description === "" ? {} : { description },
+			budgets,
 			start,
-			maxSteps,
-			nodes: Object.fromEntries(nodes),
-			order
+			end,
+			positions,
+			edges
 		}
 	};
 }
-/**
-* 转成给模型看的一份摘要（不包含 prompt 正文）。
-*
-* 机器人节点额外带 `routes`：离开它的每条边的 `name`，也就是机器人结果里的
-* `next` 可以取的值。用户节点带 `title`、`routes`（每条边 `{ name, label }`）
-* 与 `questions`（追加问题的 id）。
-*
-* @param plan 校验通过后的计划
-* @returns 给模型看的摘要
-*/
-function describePlan(plan) {
+/** 读取必填字符串字段。 */
+function readName(source, key, path, issues) {
+	const value = source[key];
+	const at = path === "" ? key : `${path}.${key}`;
+	if (typeof value !== "string" || value.trim() === "") {
+		issues.add(at, "must be a non-empty string");
+		return null;
+	}
+	return value.trim();
+}
+/** 读取可选字符串字段。 */
+function readOptionalString(source, key, path, issues) {
+	const value = source[key];
+	if (value === void 0 || value === null) return null;
+	if (typeof value !== "string") {
+		issues.add(path, "must be a string");
+		return null;
+	}
+	return value;
+}
+/** 解析预算。 */
+function readBudgets(raw, issues) {
+	if (!isPlainObject$1(raw)) {
+		issues.add("budgets", "must declare maxTasks and maxDurationHours");
+		return null;
+	}
+	let valid = true;
+	const maxTasks = raw.maxTasks;
+	if (typeof maxTasks !== "number" || !Number.isInteger(maxTasks) || maxTasks < 1) {
+		issues.add("budgets.maxTasks", "must be a positive integer");
+		valid = false;
+	}
+	const maxDurationHours = raw.maxDurationHours;
+	if (typeof maxDurationHours !== "number" || !Number.isFinite(maxDurationHours) || maxDurationHours <= 0) {
+		issues.add("budgets.maxDurationHours", "must be a positive number of hours");
+		valid = false;
+	}
+	if (!valid) return null;
 	return {
-		start: plan.start,
-		maxSteps: plan.maxSteps,
-		goal: plan.goal,
-		nodes: plan.order.map((id) => {
-			const node = plan.nodes[id];
-			const summary = {
-				id,
-				type: node.type
-			};
-			if (node.robot !== void 0) summary.robot = node.robot;
-			if (node.type === "end") summary.status = node.status;
-			if (node.type === "robot") {
-				if (node.mode === "plan") summary.mode = "plan";
-				summary.routes = (Array.isArray(node.next) ? node.next : []).map((rule) => rule.name).filter((name) => typeof name === "string" && name !== "");
-			}
-			if (node.type === "user") {
-				summary.title = node.title;
-				summary.routes = (Array.isArray(node.next) ? node.next : []).map((rule) => ({
-					name: rule.name,
-					label: rule.label
-				}));
-				summary.questions = (Array.isArray(node.questions) ? node.questions : []).map((question) => question.id);
-			}
-			if (node.type === "join") {
-				summary.inputs = [...node.inputs ?? []];
-				summary.next = Array.isArray(node.next) && node.next.length > 0 ? node.next[0]?.to : null;
-			}
-			return summary;
-		})
+		maxTasks,
+		maxDurationHours
 	};
 }
-/**
-* 收集一个节点的所有出边目标。
-*
-* @param node 已规范化的节点
-* @returns 出边目标 id
-*/
-function targetsOf(node) {
-	const targets = [];
-	if (Array.isArray(node.next)) {
-		for (const rule of node.next) if (typeof rule?.to === "string" && rule.to !== "") targets.push(rule.to);
+/** 解析岗位列表。 */
+function readPositions(raw, robots, issues) {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		issues.add("positions", "must be a non-empty array");
+		return [];
 	}
-	return targets;
+	const positions = [];
+	const seenPositions = /* @__PURE__ */ new Set();
+	const seenTypes = /* @__PURE__ */ new Set();
+	for (const [index, entry] of raw.entries()) {
+		const path = `positions[${index}]`;
+		if (!isPlainObject$1(entry)) {
+			issues.add(path, "must be an object");
+			continue;
+		}
+		const id = readPositionId(entry, path, seenPositions, issues);
+		if (id === null) continue;
+		const label = readName(entry, "label", path, issues);
+		const description = readOptionalString(entry, "description", `${path}.description`, issues);
+		const executor = readExecutor(entry.executor, `${path}.executor`, robots, issues);
+		const taskTypes = readTaskTypes(entry.taskTypes, `${path}.taskTypes`, id, executor, robots, seenTypes, issues);
+		if (label === null || executor === null) continue;
+		if (taskTypes.length === 0) issues.add(`${path}.taskTypes`, "a position must declare at least one task type");
+		positions.push({
+			id,
+			label,
+			...description === null || description === "" ? {} : { description },
+			executor,
+			taskTypes
+		});
+	}
+	return positions;
 }
-/**
-* 一个节点在图上的全部出边目标：普通 `next` 出边，加上「任务 → 引用它的 join」
-* 的隐式入边（join.inputs 里列出该任务的那些 join）。join 自己只有 `next` 出边。
-*
-* @param node 已规范化的节点
-* @param inputJoins 任务节点 id → 引用它的 join id 列表
-* @returns 出边目标 id（含隐式 join 边）
-*/
-function allTargetsOf(node, inputJoins) {
-	const targets = targetsOf(node);
-	if (node.type === "robot") for (const joinId of inputJoins.get(node.id) ?? []) targets.push(joinId);
-	return targets;
+/** 读取岗位 id 并检查唯一性 / 保留字。 */
+function readPositionId(entry, path, seen, issues) {
+	const id = entry.id;
+	if (typeof id !== "string" || !ID_PATTERN.test(id)) {
+		issues.add(`${path}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+		return null;
+	}
+	if (id === START_ID || id === END_ID) {
+		issues.add(`${path}.id`, `"${id}" is reserved by the built-in start/end nodes`);
+		return null;
+	}
+	if (seen.has(id)) {
+		issues.add(`${path}.id`, `duplicate position id "${id}"`);
+		return null;
+	}
+	seen.add(id);
+	return id;
 }
-/**
-* 从 start 出发按出边做一次 BFS。
-*
-* @param nodes 节点表
-* @param start 起始节点 id
-* @param inputJoins 任务节点 id → 引用它的 join id 列表
-* @returns 从 start 可达的节点 id
-*/
-function reachableNodes(nodes, start, inputJoins) {
+/** 解析岗位执行者。 */
+function readExecutor(raw, path, robots, issues) {
+	if (!isPlainObject$1(raw)) {
+		issues.add(path, "must be { kind: \"robot\", name } or { kind: \"human\" }");
+		return null;
+	}
+	if (raw.kind === "human") return { kind: "human" };
+	if (raw.kind !== "robot") {
+		issues.add(`${path}.kind`, "must be \"robot\" or \"human\"");
+		return null;
+	}
+	const name = typeof raw.name === "string" ? raw.name.trim() : "";
+	if (name === "") {
+		issues.add(`${path}.name`, "must be a non-empty robot name");
+		return null;
+	}
+	if (!robots.has(name)) {
+		issues.add(`${path}.name`, `unknown robot "${name}": register it with the Buka Robots plugin first`);
+		return null;
+	}
+	return {
+		kind: "robot",
+		name
+	};
+}
+/** 解析一个岗位的任务类型列表。 */
+function readTaskTypes(raw, path, positionId, executor, robots, seenTypes, issues) {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		issues.add(path, "must be a non-empty array");
+		return [];
+	}
+	const taskTypes = [];
+	for (const [index, entry] of raw.entries()) {
+		const at = `${path}[${index}]`;
+		if (!isPlainObject$1(entry)) {
+			issues.add(at, "must be an object");
+			continue;
+		}
+		const taskType = readTaskType(entry, at, positionId, executor, robots, seenTypes, issues);
+		if (taskType !== null) taskTypes.push(taskType);
+	}
+	return taskTypes;
+}
+/** 解析一个任务类型。 */
+function readTaskType(entry, path, positionId, executor, robots, seenTypes, issues) {
+	const id = entry.id;
+	if (typeof id !== "string" || !ID_PATTERN.test(id)) {
+		issues.add(`${path}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+		return null;
+	}
+	if (seenTypes.has(id)) {
+		issues.add(`${path}.id`, `duplicate task type id "${id}": task type ids are unique in a workflow`);
+		return null;
+	}
+	seenTypes.add(id);
+	const label = readName(entry, "label", path, issues);
+	const description = readOptionalString(entry, "description", `${path}.description`, issues);
+	const payload = readSchema(entry.payload, `${path}.payload`, issues) ?? { type: "object" };
+	const output = readSchema(entry.output, `${path}.output`, issues) ?? { type: "object" };
+	const requires = readRequires(entry.requires, `${path}.requires`, issues);
+	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, executor, robots, issues);
+	const mode = readMode(entry.mode, `${path}.mode`, path, executor, robots, issues);
+	if (label === null) return null;
+	return {
+		id,
+		label,
+		...description === null || description === "" ? {} : { description },
+		payload,
+		output,
+		...requires === void 0 ? {} : { requires },
+		...assistant === void 0 ? {} : { assistant },
+		...mode === void 0 ? {} : { mode }
+	};
+}
+/** 解析 schema 字段。 */
+function readSchema(raw, path, issues) {
+	if (raw === void 0 || raw === null) return null;
+	return parseOutputSchema(raw, path, (at, message) => issues.add(at, message));
+}
+/** 解析 `requires`。 */
+function readRequires(raw, path, issues) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (!Array.isArray(raw)) {
+		issues.add(path, "must be an array of { types: [...] } requirements");
+		return;
+	}
+	const requirements = [];
+	for (const [index, entry] of raw.entries()) {
+		const at = `${path}[${index}]`;
+		if (!isPlainObject$1(entry) || !Array.isArray(entry.types) || entry.types.length === 0) {
+			issues.add(at, "must be { types: [<task type ids>] } with at least one type");
+			continue;
+		}
+		const types = [];
+		for (const [typeIndex, value] of entry.types.entries()) {
+			if (typeof value !== "string" || value.trim() === "") {
+				issues.add(`${at}.types[${typeIndex}]`, "must be a non-empty task type id");
+				continue;
+			}
+			types.push(value.trim());
+		}
+		if (types.length > 0) requirements.push({ types });
+	}
+	return requirements.length > 0 ? requirements : void 0;
+}
+/** 解析助理字段；只对人岗位有效。 */
+function readAssistant(raw, path, positionId, executor, robots, issues) {
+	if (raw === void 0) return void 0;
+	if (executor !== null && executor.kind !== "human") {
+		issues.add(path, `assistant is only valid on human positions (position "${positionId}")`);
+		return;
+	}
+	if (raw === null) return null;
+	if (typeof raw !== "string" || raw.trim() === "") {
+		issues.add(path, "must be a robot name or null");
+		return;
+	}
+	const name = raw.trim();
+	const robot = robots.get(name);
+	if (robot === void 0) {
+		issues.add(path, `unknown assistant robot "${name}": register it with the Buka Robots plugin first`);
+		return;
+	}
+	if (robot.driver !== "agent") {
+		issues.add(path, `assistant "${name}" must be an agent robot, not a program robot`);
+		return;
+	}
+	if (!robot.assistant) {
+		issues.add(path, `robot "${name}" is not marked as an assistant in the Buka Robots plugin`);
+		return;
+	}
+	return name;
+}
+/** 解析 plan 模式；只对 agent 型机器人有效。 */
+function readMode(raw, path, ownerPath, executor, robots, issues) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (raw !== "plan") {
+		issues.add(path, "must be \"plan\" or null");
+		return;
+	}
+	if (executor === null) return void 0;
+	if (executor.kind !== "robot") {
+		issues.add(path, "mode \"plan\" is only valid for agent robot positions");
+		return;
+	}
+	const robot = robots.get(executor.name);
+	if (robot === void 0 || robot.driver !== "agent") {
+		issues.add(`${ownerPath}.executor`, "mode \"plan\" requires an agent robot executor");
+		return;
+	}
+	return "plan";
+}
+/** 解析边列表。 */
+function readEdges(raw, positionById, typeById, issues) {
+	if (!Array.isArray(raw)) {
+		issues.add("edges", "must be an array");
+		return [];
+	}
+	const edges = [];
 	const seen = /* @__PURE__ */ new Set();
-	const queue = [start];
+	for (const [index, entry] of raw.entries()) {
+		const path = `edges[${index}]`;
+		if (!isPlainObject$1(entry)) {
+			issues.add(path, "must be an object");
+			continue;
+		}
+		const from = typeof entry.from === "string" ? entry.from.trim() : "";
+		const to = typeof entry.to === "string" ? entry.to.trim() : "";
+		if (!isKnownNode(from, positionById)) {
+			issues.add(`${path}.from`, `unknown node "${String(entry.from)}"`);
+			continue;
+		}
+		if (!isKnownNode(to, positionById)) {
+			issues.add(`${path}.to`, `unknown node "${String(entry.to)}"`);
+			continue;
+		}
+		if (from === END_ID) {
+			issues.add(`${path}.from`, "the built-in end node cannot dispatch tasks");
+			continue;
+		}
+		if (to === START_ID) {
+			issues.add(`${path}.to`, "the built-in start node cannot receive tasks");
+			continue;
+		}
+		if (from === to) {
+			issues.add(path, "an edge must connect two different nodes");
+			continue;
+		}
+		const key = `${from}->${to}`;
+		if (seen.has(key)) {
+			issues.add(path, `duplicate edge "${key}"`);
+			continue;
+		}
+		seen.add(key);
+		const types = readEdgeTypes(entry.types, `${path}.types`, to, positionById, typeById, issues);
+		if (entry.back !== void 0 && typeof entry.back !== "boolean") issues.add(`${path}.back`, "must be true or false");
+		edges.push({
+			from,
+			to,
+			...types === void 0 ? {} : { types },
+			...entry.back === true ? { back: true } : {}
+		});
+	}
+	return edges;
+}
+/** 判断节点是否存在（岗位或内建 start / end）。 */
+function isKnownNode(id, positionById) {
+	return id === START_ID || id === END_ID || positionById.has(id);
+}
+/** 解析边上的任务类型白名单。 */
+function readEdgeTypes(raw, path, to, positionById, typeById, issues) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (to === END_ID) {
+		issues.add(path, "the built-in end node has a single contract; an edge into it cannot whitelist types");
+		return;
+	}
+	const target = positionById.get(to);
+	if (target === void 0) return void 0;
+	if (!Array.isArray(raw) || raw.length === 0) {
+		issues.add(path, "must be a non-empty array of task type ids");
+		return;
+	}
+	const allowed = new Set(target.taskTypes.map((taskType) => taskType.id));
+	const types = [];
+	for (const [index, value] of raw.entries()) {
+		if (typeof value !== "string" || value.trim() === "") {
+			issues.add(`${path}[${index}]`, "must be a non-empty task type id");
+			continue;
+		}
+		const type = value.trim();
+		if (!allowed.has(type) || !typeById.has(type)) {
+			issues.add(`${path}[${index}]`, `"${type}" is not a task type of position "${to}"`);
+			continue;
+		}
+		if (!types.includes(type)) types.push(type);
+	}
+	return types.length > 0 ? types : void 0;
+}
+/** 解析开始节点。 */
+function readStart(raw, positionById, typeById, issues) {
+	if (!isPlainObject$1(raw)) {
+		issues.add("start", "must declare the built-in start node task contract");
+		return null;
+	}
+	const task = isPlainObject$1(raw.task) ? raw.task : null;
+	if (task === null) {
+		issues.add("start.task", "must declare payload and output schemas");
+		return null;
+	}
+	const payload = readSchema(task.payload, "start.task.payload", issues) ?? { type: "object" };
+	const output = readSchema(task.output, "start.task.output", issues);
+	if (output === null) {
+		issues.add("start.task.output", "is required: it is the structured input later tasks consume");
+		return null;
+	}
+	const routes = readStartRoutes(raw.next, "start.next", positionById, typeById, output, issues);
+	return {
+		task: {
+			payload,
+			output
+		},
+		next: routes
+	};
+}
+/** 解析 `start.next` 模板列表。 */
+function readStartRoutes(raw, path, positionById, typeById, startOutput, issues) {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		issues.add(path, "must be a non-empty array of initial task templates");
+		return [];
+	}
+	const routes = [];
+	for (const [index, entry] of raw.entries()) {
+		const at = `${path}[${index}]`;
+		if (!isPlainObject$1(entry)) {
+			issues.add(at, "must be an object");
+			continue;
+		}
+		const position = typeof entry.position === "string" ? entry.position.trim() : "";
+		const target = positionById.get(position);
+		if (target === void 0) {
+			issues.add(`${at}.position`, `unknown position "${String(entry.position)}"`);
+			continue;
+		}
+		const type = typeof entry.type === "string" ? entry.type.trim() : "";
+		const taskType = typeById.get(type);
+		if (taskType === void 0 || !target.taskTypes.some((candidate) => candidate.id === type)) {
+			issues.add(`${at}.type`, `"${String(entry.type)}" is not a task type of position "${position}"`);
+			continue;
+		}
+		if (!isPlainObject$1(entry.payload)) {
+			issues.add(`${at}.payload`, "must be an object");
+			continue;
+		}
+		const dependsOn = readStartDependsOn(entry.dependsOn, `${at}.dependsOn`, issues);
+		validateRoutePayload(entry.payload, `${at}.payload`, taskType, startOutput, issues);
+		routes.push({
+			position,
+			type,
+			payload: entry.payload,
+			...dependsOn === void 0 ? {} : { dependsOn }
+		});
+	}
+	return routes;
+}
+/** 解析初始任务的 `dependsOn`：目前只允许且必须包含 `$start`。 */
+function readStartDependsOn(raw, path, issues) {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		issues.add(path, "must be [\"$start\"]: initial tasks explicitly depend on the start task");
+		return;
+	}
+	let valid = true;
+	const deps = [];
+	for (const [index, value] of raw.entries()) {
+		if (value !== "$start") {
+			issues.add(`${path}[${index}]`, "initial tasks can only depend on \"$start\"; they are created after the start task completes");
+			valid = false;
+			continue;
+		}
+		if (deps.includes("$start")) {
+			issues.add(`${path}[${index}]`, "duplicate \"$start\" dependency");
+			valid = false;
+			continue;
+		}
+		deps.push("$start");
+	}
+	if (!deps.includes("$start")) {
+		issues.add(path, "must include \"$start\": initial tasks explicitly depend on the start task");
+		valid = false;
+	}
+	return valid ? deps : void 0;
+}
+/** 按任务类型的 payload schema 校验模板 payload（含模板的子树留给运行期）。 */
+function validateRoutePayload(payload, path, taskType, startOutput, issues) {
+	const inspection = inspectPayload(payload);
+	for (const error of inspection.syntaxErrors) issues.add(path, error);
+	for (const reference of inspection.references) {
+		if (reference.reference === null) {
+			issues.add(path, `template "{{${reference.path}}}" must reference start.output; initial tasks may only use {{start.output.<path>}}`);
+			continue;
+		}
+		if (reference.reference.kind !== "start") {
+			issues.add(path, `template "{{${reference.path}}}" must reference start.output: no other task exists yet`);
+			continue;
+		}
+		const reason = resolveOutputPath(startOutput, reference.reference.segments);
+		if (reason !== null) issues.add(path, `template "{{${reference.path}}}" ${reason}`);
+	}
+	checkTemplatedPayload(taskType.payload, payload, path, issues);
+}
+/**
+* 按 schema 校验可能含模板的值。
+*
+* 含模板的子树跳过类型 / 枚举检查（值要到执行时才有），但对象 / 数组的结构、
+* required 与 additionalProperties 仍然检查。
+*/
+function checkTemplatedPayload(schema, value, path, issues) {
+	if (Array.isArray(schema.oneOf)) {
+		if (!schema.oneOf.some((branch) => {
+			const probe = new Issues();
+			checkTemplatedPayload(branch, value, path, probe);
+			return !probe.failed;
+		})) issues.add(path, "does not match any oneOf variant");
+		return;
+	}
+	if (typeof value === "string" && containsTemplate(value)) return;
+	if (Array.isArray(schema.enum) || Object.hasOwn(schema, "const")) {
+		if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => candidate === value)) issues.add(path, `must be one of ${JSON.stringify(schema.enum)}`);
+		if (Object.hasOwn(schema, "const") && schema.const !== value) issues.add(path, `must equal ${JSON.stringify(schema.const)}`);
+		return;
+	}
+	const type = typeof schema.type === "string" ? schema.type : "";
+	if (type === "object") {
+		if (!isPlainObject$1(value)) {
+			issues.add(path, "must be an object");
+			return;
+		}
+		const properties = isPlainObject$1(schema.properties) ? schema.properties : {};
+		for (const name of Array.isArray(schema.required) ? schema.required : []) if (!Object.hasOwn(value, name)) issues.add(`${path}.${name}`, "missing required field");
+		if (schema.additionalProperties === false) {
+			for (const name of Object.keys(value)) if (!Object.hasOwn(properties, name)) issues.add(`${path}.${name}`, "unexpected field (additionalProperties is false)");
+		}
+		for (const [name, child] of Object.entries(properties)) {
+			if (!Object.hasOwn(value, name)) continue;
+			checkTemplatedPayload(child, value[name], `${path}.${name}`, issues);
+		}
+		return;
+	}
+	if (type === "array") {
+		if (!Array.isArray(value)) {
+			issues.add(path, "must be an array");
+			return;
+		}
+		if (isPlainObject$1(schema.items)) value.forEach((item, index) => {
+			checkTemplatedPayload(schema.items, item, `${path}[${index}]`, issues);
+		});
+		return;
+	}
+	if (type === "") return;
+	if (value === null ? type !== "null" : typeof value !== type) {
+		const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+		issues.add(path, `expected ${type}, got ${actual}`);
+	}
+}
+/** 解析结束节点。 */
+function readEnd(raw, issues) {
+	if (!isPlainObject$1(raw)) {
+		issues.add("end", "must declare the built-in end node task contract");
+		return null;
+	}
+	const task = isPlainObject$1(raw.task) ? raw.task : null;
+	if (task === null) {
+		issues.add("end.task", "must declare the payload schema of the final deliverable");
+		return null;
+	}
+	const payload = readSchema(task.payload, "end.task.payload", issues);
+	if (payload === null) {
+		issues.add("end.task.payload", "is required: it describes the final deliverable");
+		return null;
+	}
+	return { task: { payload } };
+}
+/**
+* 边与节点的结构检查：回边闭合、环上至少一条回边、start/end 关系。
+*
+* 规则按 spec：环上的边必须有显式标记，回边必须真的闭合一个环。一个环只需要
+* 一条 `back: true`（例：`qa -> dev` 标 back，`dev -> qa` 是环里向前的边，
+* 不必再标），所以按强连通分量检查：每个多节点分量至少有一条内部回边。
+*/
+function checkEdges(edges, positions, issues) {
+	const nodes = /* @__PURE__ */ new Set([
+		START_ID,
+		END_ID,
+		...positions.map((position) => position.id)
+	]);
+	const adjacency = /* @__PURE__ */ new Map();
+	for (const node of nodes) adjacency.set(node, /* @__PURE__ */ new Set());
+	for (const edge of edges) {
+		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+		adjacency.get(edge.from)?.add(edge.to);
+	}
+	const reach = (from) => {
+		const seen = /* @__PURE__ */ new Set();
+		const queue = [from];
+		while (queue.length > 0) {
+			const node = queue.pop();
+			for (const next of adjacency.get(node) ?? []) {
+				if (seen.has(next)) continue;
+				seen.add(next);
+				queue.push(next);
+			}
+		}
+		return seen;
+	};
+	const reachability = /* @__PURE__ */ new Map();
+	for (const node of nodes) reachability.set(node, reach(node));
+	for (const [index, edge] of edges.entries()) {
+		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+		if (edge.back !== true) continue;
+		if (reachability.get(edge.to)?.has(edge.from) === true) continue;
+		issues.add(`edges[${index}].back`, `edge "${edge.from} -> ${edge.to}" does not close a cycle and cannot be marked back`);
+	}
+	const grouped = /* @__PURE__ */ new Set();
+	for (const node of nodes) {
+		if (grouped.has(node)) continue;
+		const members = /* @__PURE__ */ new Set([node]);
+		for (const other of nodes) {
+			if (other === node || grouped.has(other)) continue;
+			if (reachability.get(node)?.has(other) !== true) continue;
+			if (reachability.get(other)?.has(node) !== true) continue;
+			members.add(other);
+		}
+		if (members.size < 2) continue;
+		for (const member of members) grouped.add(member);
+		if (edges.flatMap((edge, index) => edge.back === true && members.has(edge.from) && members.has(edge.to) ? [index] : []).length > 0) continue;
+		const first = edges.findIndex((edge) => members.has(edge.from) && members.has(edge.to));
+		const cycle = [...members].join(" -> ");
+		issues.add(`edges[${Math.max(first, 0)}].back`, `cycle "${cycle}" has no explicit back edge: mark the edge that closes it with "back": true`);
+	}
+}
+/** 可达性：每个岗位都能从 start 到达，也能到达 end。 */
+function checkReachability(edges, positions, issues) {
+	const nodes = /* @__PURE__ */ new Set([
+		START_ID,
+		END_ID,
+		...positions.map((position) => position.id)
+	]);
+	const forward = /* @__PURE__ */ new Map();
+	const reverse = /* @__PURE__ */ new Map();
+	for (const node of nodes) {
+		forward.set(node, /* @__PURE__ */ new Set());
+		reverse.set(node, /* @__PURE__ */ new Set());
+	}
+	for (const edge of edges) {
+		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+		forward.get(edge.from)?.add(edge.to);
+		reverse.get(edge.to)?.add(edge.from);
+	}
+	const fromStart = walkFrom(START_ID, forward);
+	const toEnd = walkFrom(END_ID, reverse);
+	for (const position of positions) {
+		if (!fromStart.has(position.id)) issues.add(`positions.${position.id}`, "is unreachable from the built-in start node: add an edge path from start");
+		if (!toEnd.has(position.id)) issues.add(`positions.${position.id}`, "cannot reach the built-in end node: add an edge path to end");
+	}
+}
+/** 从某个节点出发的可达集合。 */
+function walkFrom(from, adjacency) {
+	const seen = /* @__PURE__ */ new Set();
+	const queue = [from];
 	while (queue.length > 0) {
-		const id = queue.shift();
-		if (id === void 0) break;
-		if (seen.has(id)) continue;
-		seen.add(id);
-		const node = nodes.get(id);
-		if (node === void 0) continue;
-		queue.push(...allTargetsOf(node, inputJoins));
+		const node = queue.pop();
+		for (const next of adjacency.get(node) ?? []) {
+			if (seen.has(next) || next === from) continue;
+			seen.add(next);
+			queue.push(next);
+		}
 	}
 	return seen;
 }
-/**
-* 找出所有「在环上」的节点（从自己出发沿出边可以走回自己）。
-*
-* @param nodes 节点表
-* @param order 节点声明顺序
-* @param inputJoins 任务节点 id → 引用它的 join id 列表
-* @returns 在环上的节点 id
-*/
-function cyclicNodes(nodes, order, inputJoins) {
-	const cyclic = /* @__PURE__ */ new Set();
-	for (const id of order) {
-		const node = nodes.get(id);
-		if (node === void 0) continue;
-		const queue = [...allTargetsOf(node, inputJoins)];
-		const seen = /* @__PURE__ */ new Set();
-		while (queue.length > 0) {
-			const next = queue.shift();
-			if (next === void 0) break;
-			if (next === id) {
-				cyclic.add(id);
-				break;
-			}
-			if (seen.has(next)) continue;
-			seen.add(next);
-			const target = nodes.get(next);
-			if (target !== void 0) queue.push(...allTargetsOf(target, inputJoins));
-		}
-	}
-	return cyclic;
-}
-/**
-* 读取 goal：可选，默认空串。
-*
-* @param value 定义里的 goal
-* @param fail 记录错误的回调
-* @returns 规范化后的 goal
-*/
-function readGoal(value, fail) {
-	if (value === void 0 || value === null) return "";
-	if (typeof value !== "string") {
-		fail("goal", "must be a string");
-		return "";
-	}
-	const goal = value.trim();
-	if (goal.length > 4e3) fail("goal", "must be at most 4000 characters");
-	return goal;
-}
-/**
-* 读取并裁剪 maxSteps。
-*
-* @param value 定义里的 maxSteps
-* @param ceiling 部署侧上限
-* @param fail 记录错误的回调
-* @returns 裁剪后的步数上限
-*/
-function readMaxSteps(value, ceiling, fail) {
-	if (value === void 0 || value === null) return ceiling;
-	if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-		fail("maxSteps", "must be a positive integer");
-		return ceiling;
-	}
-	if (value > ceiling) fail("maxSteps", `must be at most ${ceiling}`);
-	return Math.min(value, ceiling);
-}
-/**
-* 部署侧上限的规范化。
-*
-* @param value 部署侧配置的上限
-* @returns 规范化后的上限
-*/
-function normalizeStepCeiling(value) {
-	if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return 64;
-	return Math.min(value, 256);
-}
-/**
-* 解析一个节点；无法构成节点时返回 null（错误已记录）。
-*
-* @param raw 原始节点
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的节点；不合法时是 `null`
-*/
-function parseNode(raw, path, fail) {
-	if (!isPlainObject(raw)) {
-		fail(path, "must be an object");
-		return null;
-	}
-	const id = typeof raw.id === "string" ? raw.id.trim() : "";
-	if (!NODE_ID_PATTERN.test(id)) fail(`${path}.id`, "must be 1-64 letters, digits, \".\", \"_\" or \"-\", starting with a letter or digit");
-	const type = typeof raw.type === "string" ? raw.type.trim() : "";
-	if (type === "gate") {
-		fail(`${path}.type`, GATE_REMOVED);
-		return null;
-	}
-	if (!NODE_TYPES$1.has(type)) {
-		fail(`${path}.type`, "must be \"start\", \"robot\", \"user\" or \"end\"");
-		return null;
-	}
-	if (!NODE_ID_PATTERN.test(id)) return null;
-	if (type === "start") return parseStartNode(raw, id, path, fail);
-	if (type === "robot") return parseRobotNode(raw, id, path, fail);
-	if (type === "user") return parseUserNode(raw, id, path, fail);
-	if (type === "join") return parseJoinNode(raw, id, path, fail);
-	return parseEndNode(raw, id, path, fail);
-}
-/**
-* @param raw 原始节点
-* @param id 节点 id
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的开始节点
-*/
-function parseStartNode(raw, id, path, fail) {
-	rejectOutputOnFixedNode(raw, path, fail);
-	rejectModeOnFixedNode(raw, path, fail);
-	return {
-		id,
-		type: "start",
-		next: parseEdgeList(raw.next, `${path}.next`, fail, { allowString: false })
-	};
-}
-/**
-* @param raw 原始节点
-* @param id 节点 id
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的机器人节点
-*/
-function parseRobotNode(raw, id, path, fail) {
-	const robot = typeof raw.robot === "string" ? raw.robot.trim() : "";
-	if (robot === "") fail(`${path}.robot`, "must be a non-empty robot name");
-	else if (robot.length > MAX_ROBOT_NAME_LENGTH) fail(`${path}.robot`, `must be at most ${MAX_ROBOT_NAME_LENGTH} characters`);
-	if (raw.prompt !== void 0 && raw.prompt !== null) fail(`${path}.prompt`, NODE_PROMPT_REMOVED);
-	if (raw.report !== void 0) fail(`${path}.report`, REPORT_REMOVED);
-	if (raw.summary !== void 0 && raw.summary !== null && typeof raw.summary !== "string") fail(`${path}.summary`, "must be a string");
-	const summary = typeof raw.summary === "string" ? raw.summary.trim() : "";
-	if (summary.length > 500) fail(`${path}.summary`, `must be at most 500 characters`);
-	const summaryText = summary.slice(0, 500);
-	let mode;
-	if (raw.mode !== void 0 && raw.mode !== null) {
-		const rawMode = typeof raw.mode === "string" ? raw.mode.trim() : "";
-		if (rawMode === "goal") fail(`${path}.mode`, "mode \"goal\" is not supported yet; only \"plan\" is available");
-		else if (!ROBOT_MODES.has(rawMode)) fail(`${path}.mode`, "must be \"plan\"");
-		else mode = "plan";
-	}
-	let output;
-	if (raw.output === void 0) fail(`${path}.output`, "is required: declare the JSON result schema for this robot node");
-	else {
-		const parsedOutput = parseOutputSchema(raw.output, `${path}.output`, fail);
-		if (parsedOutput !== null) output = parsedOutput;
-	}
-	const agentOptions = parseAgentOptions(raw.agentOptions, `${path}.agentOptions`, fail);
-	const timeoutMs = parsePositiveInteger(raw.timeoutMs, `${path}.timeoutMs`, fail, 864e5);
-	const maxVisits = parsePositiveInteger(raw.maxVisits, `${path}.maxVisits`, fail, 1e3);
-	const next = parseEdgeList(raw.next, `${path}.next`, fail, {
-		allowString: false,
-		requireNames: true
-	});
-	return {
-		id,
-		type: "robot",
-		robot,
-		summary: summaryText,
-		...mode === void 0 ? {} : { mode },
-		...output === void 0 ? {} : { output },
-		agentOptions,
-		timeoutMs,
-		maxVisits,
-		next
-	};
-}
-/**
-* 解析一个用户介入节点：说明 + 用户选项出边 + 可选的追加问题。
-*
-* 用户的选项就是出边：每条边都要有 `name`（路由键）与 `label`（显示给用户
-* 的文字），`description` 可选。`questions` 用来收集额外的反馈 / 信息，回答
-* 会按问题 id 落盘，后续 prompt 可以用模板引用。
-*
-* @param raw 原始节点
-* @param id 节点 id
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的用户介入节点
-*/
-function parseUserNode(raw, id, path, fail) {
-	rejectOutputOnFixedNode(raw, path, fail);
-	rejectModeOnFixedNode(raw, path, fail);
-	if (raw.onApprove !== void 0 || raw.onReject !== void 0) fail(`${path}.onApprove`, "onApprove / onReject were removed in workflow format 3; declare the choices as edges in \"next\" with a label");
-	let title;
-	if (typeof raw.title !== "string" || raw.title.trim() === "") {
-		fail(`${path}.title`, "must be a non-empty title");
-		title = "";
-	} else title = raw.title.trim().slice(0, 200);
-	if (raw.detail !== void 0 && raw.detail !== null && typeof raw.detail !== "string") fail(`${path}.detail`, "must be a string");
-	const detail = typeof raw.detail === "string" ? raw.detail.trim() : "";
-	if (detail.length > 4e3) fail(`${path}.detail`, `must be at most ${MAX_USER_DETAIL_LENGTH} characters`);
-	const detailText = detail.slice(0, MAX_USER_DETAIL_LENGTH);
-	const next = parseEdgeList(raw.next, `${path}.next`, fail, {
-		allowString: false,
-		requireNames: true,
-		userEdges: true
-	});
-	const questions = parseUserQuestions(raw.questions, `${path}.questions`, fail);
-	if (next.length === 0 && questions.length === 0) fail(path, "a user node needs at least one outgoing edge (a choice) or one extra question; otherwise there is nothing to wait for");
-	return {
-		id,
-		type: "user",
-		title,
-		detail: detailText,
-		next,
-		questions
-	};
-}
-/**
-* 解析用户节点追加的问题。
-*
-* @param raw 原始 questions
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的问题列表
-*/
-function parseUserQuestions(raw, path, fail) {
-	if (raw === void 0 || raw === null) return [];
-	if (!Array.isArray(raw)) {
-		fail(path, "must be an array of questions");
-		return [];
-	}
-	if (raw.length > 4) fail(path, `must contain at most 4 questions`);
-	const questions = [];
-	const ids = /* @__PURE__ */ new Set([ROUTE_QUESTION_ID]);
-	raw.slice(0, 4).forEach((question, index) => {
-		const questionPath = `${path}[${index}]`;
-		if (!isPlainObject(question)) {
-			fail(questionPath, "must be an object");
-			return;
-		}
-		const questionId = typeof question.id === "string" ? question.id.trim() : "";
-		if (!QUESTION_ID_PATTERN.test(questionId)) fail(`${questionPath}.id`, "must be 1-64 letters, digits, \"_\" or \"-\"");
-		else if (ids.has(questionId)) fail(`${questionPath}.id`, `duplicate question id "${questionId}"; ids must be unique and "route" is reserved`);
-		else ids.add(questionId);
-		const text = typeof question.question === "string" ? question.question.trim() : "";
-		if (text === "") fail(`${questionPath}.question`, "must be a non-empty question");
-		else if (text.length > MAX_QUESTION_TEXT_LENGTH) fail(`${questionPath}.question`, `must be at most ${MAX_QUESTION_TEXT_LENGTH} characters`);
-		if (question.header !== void 0 && question.header !== null && typeof question.header !== "string") fail(`${questionPath}.header`, "must be a string");
-		const header = typeof question.header === "string" ? question.header.trim() : "";
-		if (header.length > MAX_QUESTION_HEADER_LENGTH) fail(`${questionPath}.header`, `must be at most ${MAX_QUESTION_HEADER_LENGTH} characters`);
-		if (question.multiSelect !== void 0 && typeof question.multiSelect !== "boolean") fail(`${questionPath}.multiSelect`, "must be a boolean");
-		const options = [];
-		if (question.options !== void 0 && question.options !== null) {
-			if (!Array.isArray(question.options)) fail(`${questionPath}.options`, "must be an array of { label, description? }");
-			else {
-				if (question.options.length > MAX_QUESTION_OPTIONS) fail(`${questionPath}.options`, `must contain at most ${MAX_QUESTION_OPTIONS} options`);
-				const labels = /* @__PURE__ */ new Set();
-				question.options.slice(0, MAX_QUESTION_OPTIONS).forEach((option, optionIndex) => {
-					const optionPath = `${questionPath}.options[${optionIndex}]`;
-					if (!isPlainObject(option)) {
-						fail(optionPath, "must be an object");
-						return;
-					}
-					const label = typeof option.label === "string" ? option.label.trim() : "";
-					if (label === "") fail(`${optionPath}.label`, "must be a non-empty label");
-					else if (label.length > 120) fail(`${optionPath}.label`, `must be at most 120 characters`);
-					else if (labels.has(label)) fail(`${optionPath}.label`, `duplicate option label "${label}" on the same question`);
-					else labels.add(label);
-					if (option.description !== void 0 && option.description !== null && typeof option.description !== "string") fail(`${optionPath}.description`, "must be a string");
-					const description = typeof option.description === "string" ? option.description.trim().slice(0, 500) : "";
-					options.push(description === "" ? { label } : {
-						label,
-						description
-					});
-				});
-			}
-		}
-		questions.push({
-			id: questionId,
-			header: header.slice(0, MAX_QUESTION_HEADER_LENGTH),
-			question: text.slice(0, MAX_QUESTION_TEXT_LENGTH),
-			multiSelect: question.multiSelect === true,
-			options
-		});
-	});
-	return questions;
-}
-/**
-* 解析一个 join 节点（并发汇合屏障）：它本身不建会话、不产出结果，只等待
-* `inputs` 里列出的任务节点全部完成后放行一次，沿唯一一条出边继续。
-*
-* join 的入边不是节点图上的 `next`，而是 `inputs`（任务节点 id 列表），所以一个
-* 任务可以同时被多个 join 引用；出边恰好一条，`prompt` 是下游机器人进入时的
-* 指令（与 start 一致）。join 没有 output / robot / questions。
-*
-* @param raw 原始节点
-* @param id 节点 id
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的 join 节点
-*/
-function parseJoinNode(raw, id, path, fail) {
-	rejectOutputOnFixedNode(raw, path, fail);
-	rejectModeOnFixedNode(raw, path, fail);
-	if (raw.robot !== void 0) fail(`${path}.robot`, "is only supported on robot nodes");
-	if (raw.summary !== void 0) fail(`${path}.summary`, "is only supported on robot nodes");
-	if (raw.prompt !== void 0 && raw.prompt !== null) fail(`${path}.prompt`, "a join node does not carry a prompt; define it on the single outgoing edge");
-	if (raw.questions !== void 0) fail(`${path}.questions`, "is only supported on user nodes");
-	const inputs = [];
-	if (!Array.isArray(raw.inputs) || raw.inputs.length === 0) fail(`${path}.inputs`, "must be a non-empty array of node ids this join waits for");
-	else {
-		const seen = /* @__PURE__ */ new Set();
-		raw.inputs.forEach((input, index) => {
-			const inputPath = `${path}.inputs[${index}]`;
-			const name = typeof input === "string" ? input.trim() : "";
-			if (!NODE_ID_PATTERN.test(name)) fail(inputPath, "must be a valid node id");
-			else if (seen.has(name)) fail(inputPath, `duplicate input "${name}"; a join cannot wait for the same node twice`);
-			else {
-				seen.add(name);
-				inputs.push(name);
-			}
-		});
-	}
-	const next = parseEdgeList(raw.next, `${path}.next`, fail, { allowString: false });
-	if (next.length !== 1) fail(`${path}.next`, "a join node needs exactly one outgoing edge");
-	return {
-		id,
-		type: "join",
-		inputs,
-		next
-	};
-}
-/**
-* @param raw 原始节点
-* @param id 节点 id
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的终止节点
-*/
-function parseEndNode(raw, id, path, fail) {
-	rejectOutputOnFixedNode(raw, path, fail);
-	rejectModeOnFixedNode(raw, path, fail);
-	const status = typeof raw.status === "string" ? raw.status : void 0;
-	if (raw.status !== void 0 && (status === void 0 || !END_STATUSES$1.has(status))) fail(`${path}.status`, "must be \"completed\", \"failed\" or \"rejected\"");
-	return {
-		id,
-		type: "end",
-		status: status !== void 0 && END_STATUSES$1.has(status) ? status : "completed"
-	};
-}
-/**
-* 解析机器人节点可选使用的模型路由。
-*
-* @param raw 原始 agentOptions
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @returns 规范化后的模型路由；没有时是 `undefined`
-*/
-function parseAgentOptions(raw, path, fail) {
-	if (raw === void 0 || raw === null) return void 0;
-	if (!isPlainObject(raw)) {
-		fail(path, "must be an object");
-		return;
-	}
-	const allowed = /* @__PURE__ */ new Set([
-		"provider",
-		"model",
-		"reasoningEffort",
-		"maxTokens"
-	]);
-	const options = {};
-	for (const key of Object.keys(raw)) {
-		if (!allowed.has(key)) {
-			fail(`${path}.${key}`, "is not a supported agent option");
+/** `start.next` 的跨节点检查：直接后继、边白名单、模板只引用 start.output。 */
+function checkStartNext(start, positionById, typeById, edges, issues) {
+	if (start === null) return;
+	for (const [index, route] of start.next.entries()) {
+		if (positionById.get(route.position) === void 0) continue;
+		if (typeById.get(route.type) === void 0) continue;
+		const edge = edges.find((candidate) => candidate.from === START_ID && candidate.to === route.position);
+		if (edge === void 0) {
+			issues.add(`start.next[${index}].position`, `initial tasks must target a direct successor of the start node: no "start -> ${route.position}" edge`);
 			continue;
 		}
-		const value = raw[key];
-		if (key === "maxTokens") {
-			if (typeof value !== "number" || !Number.isInteger(value) || value < 1) fail(`${path}.${key}`, "must be a positive integer");
-			else options.maxTokens = value;
+		if (edge.types !== void 0 && !edge.types.includes(route.type)) issues.add(`start.next[${index}].type`, `edge "start -> ${route.position}" does not allow task type "${route.type}"`);
+	}
+}
+/** 结束节点检查：至少一条入边；能派发结束任务的岗位必须与 end 有边。 */
+function checkEnd(edges, positions, issues) {
+	const intoEnd = edges.filter((edge) => edge.to === END_ID);
+	if (intoEnd.length === 0) issues.add("edges", "at least one position must have an edge into the built-in end node");
+	for (const [index, edge] of intoEnd.entries()) {
+		if (edge.from === START_ID) {
+			issues.add(`edges.end[${index}]`, "the start node cannot dispatch the end task; only positions can");
 			continue;
 		}
-		if (typeof value !== "string" || value.trim() === "") {
-			fail(`${path}.${key}`, "must be a non-empty string");
-			continue;
-		}
-		if (key === "provider") options.provider = value.trim();
-		else if (key === "model") options.model = value.trim();
-		else options.reasoningEffort = value.trim();
-	}
-	return Object.keys(options).length > 0 ? options : void 0;
-}
-/**
-* 解析节点出口：边对象数组（省略表示没有出边）。
-*
-* 机器人节点、用户节点和 start 节点都不接受字符串简写；每条边上的 `name`
-* 是路由键，离开机器人 / 用户节点时必须唯一且非空。用户节点的边还额外要求
-* `label`（显示给用户的选项文字）唯一，并支持 `description`。
-*
-* @param raw 原始 next
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @param options 是否允许字符串简写、是否要求 name / label
-* @returns 规范化后的出边列表
-*/
-function parseEdgeList(raw, path, fail, { allowString, requireNames = false, userEdges = false }) {
-	if (raw === void 0 || raw === null) return [];
-	if (typeof raw === "string") {
-		if (!allowString) {
-			fail(path, "must be an array of edges { to, name, prompt }; the string shorthand was removed in workflow format 2");
-			return [];
-		}
-		const to = raw.trim();
-		if (to === "") {
-			fail(path, "must be a non-empty node id");
-			return [];
-		}
-		return [{ to }];
-	}
-	if (!Array.isArray(raw)) {
-		fail(path, allowString ? "must be a node id, an array of edges, or omitted" : "must be an array of edges { to, name, prompt }");
-		return [];
-	}
-	const rules = [];
-	const names = /* @__PURE__ */ new Set();
-	const labels = /* @__PURE__ */ new Set();
-	raw.forEach((rule, index) => {
-		const rulePath = `${path}[${index}]`;
-		if (!isPlainObject(rule)) {
-			fail(rulePath, "must be an object");
-			return;
-		}
-		if (rule.when !== void 0) fail(`${rulePath}.when`, WHEN_REMOVED);
-		const to = typeof rule.to === "string" ? rule.to.trim() : "";
-		if (to === "") fail(`${rulePath}.to`, "must be a non-empty node id");
-		const edge = { to };
-		parseEdgeExtras(edge, rule, rulePath, fail, userEdges);
-		if (requireNames) {
-			const rawName = rule.name;
-			const hasInvalidName = rawName !== void 0 && rawName !== null && typeof rawName !== "string";
-			if (edge.name === void 0 && !hasInvalidName) fail(`${rulePath}.name`, userEdges ? "every edge leaving a user node needs a unique non-empty name; it is the route key for this choice" : "every edge leaving a robot node needs a unique non-empty name; the robot returns it as the JSON \"next\" route");
-			else if (typeof edge.name === "string") {
-				if (names.has(edge.name)) fail(`${rulePath}.name`, `duplicate edge name "${edge.name}" on the same node; the JSON "next" route must be unambiguous`);
-				else names.add(edge.name);
-			}
-		}
-		if (userEdges) {
-			const rawLabel = rule.label;
-			const hasInvalidLabel = rawLabel !== void 0 && rawLabel !== null && typeof rawLabel !== "string";
-			if (edge.label === void 0 && !hasInvalidLabel) fail(`${rulePath}.label`, "every edge leaving a user node needs a non-empty label: the option text the user sees");
-			else if (typeof edge.label === "string") {
-				if (labels.has(edge.label)) fail(`${rulePath}.label`, `duplicate option label "${edge.label}" on the same node; the user choice must be unambiguous`);
-				else labels.add(edge.label);
-			}
-		}
-		rules.push(edge);
-	});
-	return rules;
-}
-/**
-* 解析边上的可选字段：`name`（路由键 / 悬停展示）、`prompt`（进入目标节点时的
-* 提示词）、`tone`（成功 / 失败的外观色，纯展示），以及用户节点出边专用的
-* `label` / `description`。
-*
-* @param edge 正在构建的边
-* @param raw 原始边对象
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @param userEdges 是否允许用户节点的选项字段
-* @returns 同一个边对象
-*/
-function parseEdgeExtras(edge, raw, path, fail, userEdges = false) {
-	if (raw.name !== void 0 && raw.name !== null && typeof raw.name !== "string") fail(`${path}.name`, "must be a string");
-	else if (typeof raw.name === "string") {
-		const name = raw.name.trim();
-		if (name.length > 120) fail(`${path}.name`, `must be at most 120 characters`);
-		if (name !== "") edge.name = name;
-	}
-	if (raw.prompt !== void 0 && raw.prompt !== null && typeof raw.prompt !== "string") fail(`${path}.prompt`, "must be a string");
-	else if (typeof raw.prompt === "string" && raw.prompt.trim() !== "") {
-		if (Buffer.byteLength(raw.prompt, "utf8") > 262144) fail(`${path}.prompt`, `must be at most ${Math.round(MAX_PROMPT_BYTES / 1024)} KiB`);
-		edge.prompt = raw.prompt;
-	}
-	if (raw.tone !== void 0 && raw.tone !== null) {
-		const tone = typeof raw.tone === "string" ? raw.tone.trim() : "";
-		if (!EDGE_TONES.has(tone)) fail(`${path}.tone`, "must be \"success\" or \"failure\"");
-		else edge.tone = "success" === tone ? "success" : "failure";
-	}
-	if (!userEdges && (raw.label !== void 0 || raw.description !== void 0)) {
-		fail(`${path}.label`, "label / description are only supported on edges leaving a user node");
-		return edge;
-	}
-	if (userEdges) {
-		if (raw.label !== void 0 && raw.label !== null && typeof raw.label !== "string") fail(`${path}.label`, "must be a string");
-		else if (typeof raw.label === "string") {
-			const label = raw.label.trim();
-			if (label === "") fail(`${path}.label`, "must be a non-empty label");
-			else if (label.length > 120) fail(`${path}.label`, `must be at most 120 characters`);
-			else edge.label = label;
-		}
-		if (raw.description !== void 0 && raw.description !== null && typeof raw.description !== "string") fail(`${path}.description`, "must be a string");
-		else if (typeof raw.description === "string" && raw.description.trim() !== "") {
-			const description = raw.description.trim();
-			if (description.length > 500) fail(`${path}.description`, `must be at most 500 characters`);
-			else edge.description = description;
-		}
-	}
-	return edge;
-}
-/**
-* start / user / end 节点的输出由引擎定义，不接受 `output`。
-*
-* @param raw 原始节点
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-*/
-function rejectOutputOnFixedNode(raw, path, fail) {
-	if (raw.output === void 0) return;
-	fail(`${path}.output`, "is only supported on robot nodes; start, user and end nodes have fixed outputs");
-}
-/**
-* 会话模式只属于机器人节点：其它节点的执行由引擎定义，不接受 `mode`。
-*
-* @param raw 原始节点
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-*/
-function rejectModeOnFixedNode(raw, path, fail) {
-	if (raw.mode === void 0) return;
-	fail(`${path}.mode`, "is only supported on robot nodes");
-}
-/**
-* 收集所有需要做模板引用校验的文本：边 prompt 与用户节点的 detail。
-*
-* @param nodes 节点表
-* @param order 节点声明顺序
-* @returns 需要校验的模板文本
-*/
-function promptTemplates(nodes, order) {
-	const templates = [];
-	for (const [index, id] of order.entries()) {
-		const node = nodes.get(id);
-		for (const [ruleIndex, rule] of (node?.next ?? []).entries()) {
-			if (typeof rule.prompt !== "string" || rule.prompt === "") continue;
-			templates.push({
-				template: rule.prompt,
-				path: `nodes[${index}].next[${ruleIndex}].prompt`
-			});
-		}
-		if (node?.type === "user" && typeof node.detail === "string" && node.detail !== "") templates.push({
-			template: node.detail,
-			path: `nodes[${index}].detail`
-		});
-	}
-	return templates;
-}
-/**
-* 校验边 prompt 与用户节点 detail 里的模板变量。
-*
-* 只检查「引用的节点存在、字段在目标节点的 output / 用户回答里、节点类型匹配」，
-* 不推断这个节点在这条边上是否已经执行过——那属于运行时。
-*
-* @param nodes 节点表
-* @param templates 需要校验的模板文本
-* @param fail 记录错误的回调
-*/
-function validatePromptReferences(nodes, templates, fail) {
-	for (const { template, path } of templates) {
-		const inspected = inspectTemplate(template);
-		if (inspected.errors.length > 0) {
-			for (const message of inspected.errors) fail(path, message);
-			continue;
-		}
-		for (const placeholder of inspected.paths) {
-			const problem = referenceProblem(nodes, placeholder);
-			if (problem !== null) fail(path, problem);
-		}
+		if (positions.every((position) => position.id !== edge.from)) issues.add(`edges.end[${index}].from`, `unknown position "${edge.from}"`);
 	}
 }
 /**
-* 单个模板路径的引用检查。
+* 判断一个任务类型是否允许某个派发（边白名单）。
 *
-* @param nodes 节点表
-* @param path 模板路径
-* @returns 没有问题时为 `null`，否则是可以拼进错误信息的原因片段
+* 引擎创建任务时复用这里的规则。
+*
+* @param edge 边
+* @param type 任务类型 id
+* @returns 允许时为 true
 */
-function referenceProblem(nodes, path) {
-	const segments = path.split(".");
-	const root = segments[0];
-	if (root === "goal" || root === "step" || root === "runId") {
-		if (segments.length === 1) return null;
-		return `template path "${path}" cannot be descended into: "${root}" is not an object`;
-	}
-	if (root !== "nodes") return `unknown template path "${path}"; available: {{goal}}, {{step}}, {{runId}}, {{nodes.<id>...}}`;
-	if (segments.length < 3) return `template path "${path}" is incomplete; use {{nodes.<id>.<field>}}`;
-	const id = segments[1];
-	const node = nodes.get(id);
-	if (node === void 0) return `template path "${path}" references unknown node "${id}"`;
-	if (node.type === "join") return `template path "${path}" references join node "${id}", which provides no output; a join is a pure barrier`;
-	const field = segments[2];
-	const rest = segments.slice(3);
-	const robotOnly = () => `template path "${path}" reads "${field}", which only robot nodes provide`;
-	const userOnly = () => `template path "${path}" reads "${field}", which only user nodes provide`;
-	if (field === "data") {
-		if (node.type !== "robot") return robotOnly();
-		if (rest.length === 0) return null;
-		if (rest[0] === "next") return `template path "${path}" uses reserved field "next"; use {{nodes.${id}.route}}`;
-		if (rest[0] === "attachments") return `template path "${path}" uses reserved field "attachments"; use {{nodes.${id}.attachments.<index>...}}`;
-		if (node.output === void 0 || node.output === null) return `template path "${path}" cannot be checked because node "${id}" has no declared output schema`;
-		const reason = resolveOutputPath(node.output, rest);
-		if (reason === null) return null;
-		return `template path "${path}" ${reason} in node "${id}".output`;
-	}
-	if (field === "attachments") return node.type === "robot" ? null : robotOnly();
-	if (field === "answers") {
-		if (node.type !== "user") return userOnly();
-		if (rest.length === 0) return null;
-		const questionId = rest[0];
-		const declared = new Set((Array.isArray(node.questions) ? node.questions : []).map((question) => question.id));
-		const hasRoute = Array.isArray(node.next) && node.next.length > 0;
-		if (questionId === "route") {
-			if (!hasRoute) return `template path "${path}" reads the reserved route answer, but node "${id}" has no choices`;
-		} else if (!declared.has(questionId)) return `template path "${path}" references unknown question id "${questionId}" on node "${id}"; available: ${[hasRoute ? ROUTE_QUESTION_ID : null, ...declared].filter(Boolean).join(", ")}`;
-		if (rest.length === 1) return null;
-		if (rest[1] !== "selected" && rest[1] !== "custom") return `template path "${path}" reads "${rest[1]}", which is not an answer field; use .selected or .custom`;
-		if (rest.length > 2) return `template path "${path}" descends into "${rest[1]}", which is not an object`;
-		return null;
-	}
-	if (field === "text" || field === "route") {
-		if (node.type !== "robot" && node.type !== "user") return `template path "${path}" reads "${field}", which only robot and user nodes provide`;
-		if (rest.length > 0) return `template path "${path}" descends into "${field}", which is not an object`;
-		return null;
-	}
-	if (field === "robot" || field === "sessionId") {
-		if (node.type !== "robot") return robotOnly();
-		if (rest.length > 0) return `template path "${path}" descends into "${field}", which is not an object`;
-		return null;
-	}
-	if (field === "decision") return "template path \"" + path + "\" reads \"decision\" from the removed gate node; use a user node and read {{nodes.<id>.route}} / {{nodes.<id>.answers.<questionId>...}}";
-	return `template path "${path}" uses unknown node output "${field}"; available: text, data, route, attachments, robot, sessionId (robot), text, route, answers (user)`;
+function edgeAllowsType(edge, type) {
+	return edge.types === void 0 || edge.types.includes(type);
 }
 /**
-* 读取可选正整数。
+* 在定义里找一条从 `from` 到 `to` 的边。
 *
-* @param raw 原始值
-* @param path 出错时使用的路径前缀
-* @param fail 记录错误的回调
-* @param max 上限
-* @returns 合法时是正整数，否则 `undefined`
+* @param definition 定义
+* @param from 创建者岗位
+* @param to 目标岗位
+* @returns 边；不存在时是 undefined
 */
-function parsePositiveInteger(raw, path, fail, max) {
-	if (raw === void 0 || raw === null) return void 0;
-	if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
-		fail(path, "must be a positive integer");
-		return;
-	}
-	if (raw > max) {
-		fail(path, `must be at most ${max}`);
-		return max;
-	}
-	return raw;
+function findEdge(definition, from, to) {
+	return definition.edges.find((edge) => edge.from === from && edge.to === to);
 }
-/** 节点中心之间的水平步长（px）。 */
-const PITCH = 300;
-/** 相邻两层节点中心之间的垂直步长（px）。 */
-const LAYER_PITCH = 84;
-/** 侧边 lane 与同层横穿线的圆角半径（px）。 */
-const CORNER = 12;
 /**
-* 保留两位小数，让坐标与 SVG 路径在测试里稳定可比。
+* 按岗位 id 取岗位。
 *
-* @param value 原始值
-* @returns 保留两位小数后的值
+* @param definition 定义
+* @param positionId 岗位 id
+* @returns 岗位；不存在时是 undefined
 */
-function round(value) {
-	return Math.round(value * 100) / 100;
+function findPosition(definition, positionId) {
+	return definition.positions.find((position) => position.id === positionId);
 }
-/** 终止节点允许的最终状态。 */
-const END_STATUSES = /* @__PURE__ */ new Set([
+/**
+* 按任务类型 id 取类型定义。
+*
+* @param definition 定义
+* @param typeId 任务类型 id
+* @returns 任务类型；不存在时是 undefined
+*/
+function findTaskType(definition, typeId) {
+	for (const position of definition.positions) for (const taskType of position.taskTypes) if (taskType.id === typeId) return taskType;
+}
+/**
+* 按 schema 校验一个可能含模板的值，返回带路径的问题列表。
+*
+* 引擎创建任务时复用：payload 里的模板子树只做结构检查，类型与枚举留给执行时。
+*
+* @param schema 任务类型的 payload schema
+* @param value 待校验的 payload
+* @returns 问题列表；空数组表示通过
+*/
+function templatedPayloadIssues(schema, value) {
+	const issues = new Issues();
+	checkTemplatedPayload(schema, value, "payload", issues);
+	return issues.list;
+}
+// .build/workflows/domain/status.js
+/**
+* 任务 / 作业状态机：合法的状态转换矩阵。
+*
+* 规则来自 `.tmp/workflow-v4-spec.md` §6.3 / §7.2 / §7.8：
+*
+* - 任务依赖完成才 `ready`；依赖被取消 / 阻塞时 `blocked`；
+* - 认领把 `ready` 变成 `running`；
+* - 技术失败进 `failed`，重试把同一个任务退回 `ready`（新增执行记录，历史保留）；
+* - 失败任务被用户放弃（取消）后，依赖它的任务 `blocked`；
+* - 业务「不通过」不是状态：结果里写 `result: "fail"`，由执行者再派新任务。
+*
+* 纯函数，不依赖任何服务，便于单测。
+*
+* @module @buka/dsh-plugin-workflows/domain/status
+*/
+/** 全部任务状态。 */
+const TASK_STATUSES = Object.freeze([
+	"pending",
+	"ready",
+	"running",
 	"completed",
 	"failed",
-	"rejected"
+	"blocked",
+	"cancelled"
 ]);
-/** 卡片上最终文本 / 任务预览的最大字符数。 */
-const PREVIEW_LIMIT = 160;
-/**
-* 把多行文本压成一行预览。
-*
-* @param value 原始值
-* @param limit 字符上限
-* @returns 单行预览
-*/
-function previewLine(value, limit) {
-	if (typeof value !== "string") return "";
-	const collapsed = value.replace(/\s+/gu, " ").trim();
-	if (collapsed === "") return "";
-	if (collapsed.length <= limit) return collapsed;
-	return `${collapsed.slice(0, Math.max(0, limit - 1))}…`;
-}
-/** 节点类型。 */
-const NODE_TYPES = /* @__PURE__ */ new Set([
-	"start",
-	"robot",
-	"user",
-	"join",
-	"end"
+/** 任务终态：不再变化，也不再阻塞作业结算。 */
+const TERMINAL_TASK_STATUSES = Object.freeze([
+	"completed",
+	"failed",
+	"blocked",
+	"cancelled"
 ]);
+Object.freeze([
+	"pending",
+	"ready",
+	"running"
+]);
+/** 合法任务状态转换矩阵；数组为空表示终态。 */
+const TASK_TRANSITIONS = Object.freeze({
+	pending: [
+		"ready",
+		"blocked",
+		"cancelled"
+	],
+	ready: [
+		"running",
+		"completed",
+		"blocked",
+		"cancelled"
+	],
+	running: [
+		"completed",
+		"failed",
+		"cancelled",
+		"ready"
+	],
+	completed: [],
+	failed: ["ready", "cancelled"],
+	blocked: ["cancelled"],
+	cancelled: []
+});
+Object.freeze([
+	"running",
+	"completed",
+	"failed",
+	"cancelled"
+]);
+/** 作业终态。 */
+const TERMINAL_JOB_STATUSES = Object.freeze([
+	"completed",
+	"failed",
+	"cancelled"
+]);
+/** 合法作业状态转换矩阵。 */
+const JOB_TRANSITIONS = Object.freeze({
+	running: [
+		"completed",
+		"failed",
+		"cancelled"
+	],
+	completed: [],
+	failed: [],
+	cancelled: []
+});
 /**
-* 读取定义快照里的节点表。
+* 判断任务状态是否终态。
 *
-* 优先用 `plan`（宿主校验后的规范化结果），退回原始 `definition`。
-* 两者都没有时返回 null，调用方会用 steps 兜底。
-*
-* @param definition 运行记录里的定义快照
-* @returns 起始节点与规范化后的节点表；没有可用定义时是 `null`
+* @param status 任务状态
+* @returns 是终态时为 true
 */
-function readDefinitionNodes(definition) {
-	if (!isPlainObject(definition)) return null;
-	const plan = isPlainObject(definition.plan) ? definition.plan : null;
-	if (plan !== null && isPlainObject(plan.nodes)) {
-		const planNodes = plan.nodes;
-		const ids = Array.isArray(plan.order) ? plan.order.filter((id) => typeof id === "string" && isPlainObject(planNodes[id])) : Object.keys(planNodes);
-		const nodes = [];
-		const seen = /* @__PURE__ */ new Set();
-		for (const id of ids) {
-			if (seen.has(id)) continue;
-			seen.add(id);
-			nodes.push(normalizeNode(id, planNodes[id]));
-		}
-		if (nodes.length > 0) return {
-			start: typeof plan.start === "string" && plan.start !== "" ? plan.start : nodes[0]?.id ?? null,
-			nodes
-		};
-	}
-	const raw = isPlainObject(definition.definition) ? definition.definition : null;
-	if (raw === null || !Array.isArray(raw.nodes)) return null;
-	const nodes = [];
-	const seen = /* @__PURE__ */ new Set();
-	for (const item of raw.nodes) {
-		if (!isPlainObject(item)) continue;
-		const id = typeof item.id === "string" ? item.id.trim() : "";
-		if (id === "" || seen.has(id)) continue;
-		seen.add(id);
-		nodes.push(normalizeNode(id, item));
-	}
-	if (nodes.length === 0) return null;
-	const startNode = nodes.find((node) => node.type === "start");
-	return {
-		start: typeof raw.start === "string" && raw.start !== "" ? raw.start : startNode?.id ?? nodes[0]?.id ?? null,
-		nodes
-	};
+function isTerminalTaskStatus(status) {
+	return TERMINAL_TASK_STATUSES.includes(status);
 }
 /**
-* 规范化一个节点，只保留展示与路由需要的信息（不含 prompt 正文）。
+* 判断任务状态是否非终态。
 *
-* @param id 节点 id
-* @param raw 原始节点
-* @returns 规范化后的节点配置
+* @param status 任务状态
+* @returns 非终态时为 true
 */
-function normalizeNode(id, raw) {
-	const type = typeof raw.type === "string" && NODE_TYPES.has(raw.type) ? raw.type : "robot";
-	const node = {
-		id,
-		type
-	};
-	if (type === "start") {
-		node.next = normalizeNext(raw.next);
-		return node;
-	}
-	if (type === "robot") {
-		node.robot = typeof raw.robot === "string" ? raw.robot : "";
-		node.summary = typeof raw.summary === "string" ? raw.summary : "";
-		if (raw.mode === "plan") node.mode = "plan";
-		node.task = previewLine(raw.prompt, 160);
-		node.next = normalizeNext(raw.next);
-		if (Number.isFinite(raw.timeoutMs)) node.timeoutMs = raw.timeoutMs;
-		if (Number.isFinite(raw.maxVisits)) node.maxVisits = raw.maxVisits;
-		return node;
-	}
-	if (type === "user") {
-		node.title = typeof raw.title === "string" ? raw.title : "";
-		node.detail = typeof raw.detail === "string" ? raw.detail : "";
-		node.next = normalizeNext(raw.next);
-		node.questions = Array.isArray(raw.questions) ? raw.questions : [];
-		return node;
-	}
-	if (type === "join") {
-		node.inputs = Array.isArray(raw.inputs) ? raw.inputs : [];
-		node.next = normalizeNext(raw.next);
-		return node;
-	}
-	node.endStatus = typeof raw.status === "string" && END_STATUSES.has(raw.status) ? raw.status : "completed";
-	return node;
+function isOpenTaskStatus(status) {
+	return !isTerminalTaskStatus(status);
 }
 /**
-* 规范化节点的 `next`：边对象数组（新格式）或字符串 / 字符串数组（旧记录）。
+* 判断作业状态是否终态。
 *
-* 图模型保留给观测者看的 `name`、用户选项的 `label`、边的 `prompt` 与外观色
-* `tone`；路由条件不在这里解析。`tone` 只有 `success` / `failure` 会被保留，
-* 旧记录 / 手工改动里的其它值归一成空串（不画颜色）。
-*
-* @param raw 原始 next
-* @returns 规范化后的出边列表
+* @param status 作业状态
+* @returns 是终态时为 true
 */
-function normalizeNext(raw) {
-	if (typeof raw === "string" && raw.trim() !== "") return [{
-		to: raw.trim(),
-		name: "",
-		label: "",
-		prompt: "",
-		tone: ""
-	}];
-	if (!Array.isArray(raw)) return [];
-	const rules = [];
-	for (const rule of raw) {
-		if (typeof rule === "string" && rule.trim() !== "") {
-			rules.push({
-				to: rule.trim(),
-				name: "",
-				label: "",
-				prompt: "",
-				tone: ""
-			});
-			continue;
-		}
-		if (!isPlainObject(rule)) continue;
-		const to = typeof rule.to === "string" ? rule.to.trim() : "";
-		if (to === "") continue;
-		const tone = typeof rule.tone === "string" ? rule.tone.trim() : "";
-		rules.push({
-			to,
-			name: typeof rule.name === "string" ? rule.name.trim() : "",
-			label: typeof rule.label === "string" ? rule.label.trim() : "",
-			prompt: typeof rule.prompt === "string" ? rule.prompt : "",
-			tone: tone === "success" || tone === "failure" ? tone : ""
-		});
-	}
-	return rules;
+function isTerminalJobStatus(status) {
+	return TERMINAL_JOB_STATUSES.includes(status);
 }
 /**
-* 构建图模型（不含坐标）。
+* 判断一次任务状态转换是否合法。
 *
-* @param input `run` / `definition` 是运行记录里的两份快照；`avatars` 是
-*   「机器人名 → 头像 id」表（由 robots 服务提供），有值的 robot 节点会带上
-*   `avatar`，没有这一项（robots 插件没装 / 机器人已删除）时是 null
-* @returns 图模型；没有可用运行记录时是 `null`
+* @param from 当前状态
+* @param to 目标状态
+* @returns 合法时为 true
 */
-function buildRunGraph(input) {
-	if (!isPlainObject(input)) return null;
-	const run = isPlainObject(input.run) ? input.run : null;
-	if (run === null || typeof run.runId !== "string") return null;
-	const avatars = isPlainObject(input.avatars) ? input.avatars : null;
-	const steps = Array.isArray(run.steps) ? run.steps.filter(isPlainObject) : [];
-	const source = readDefinitionNodes(input.definition);
-	const configs = /* @__PURE__ */ new Map();
-	const order = [];
-	let start = null;
-	if (source !== null) {
-		start = source.start;
-		for (const node of source.nodes) {
-			if (configs.has(node.id)) continue;
-			configs.set(node.id, node);
-			order.push(node.id);
-		}
-	}
-	const synthetic = configs.size === 0;
-	if (synthetic) {
-		for (const step of steps) {
-			const id = typeof step.nodeId === "string" ? step.nodeId : "";
-			if (id === "" || configs.has(id)) continue;
-			configs.set(id, {
-				id,
-				type: step.type === "user" ? "user" : "robot",
-				robot: typeof step.robot === "string" ? step.robot : "",
-				next: []
-			});
-			order.push(id);
-		}
-		start = order[0] ?? null;
-	}
-	if (configs.size === 0) return null;
-	const stepsByNode = /* @__PURE__ */ new Map();
-	for (const step of steps) {
-		const id = typeof step.nodeId === "string" ? step.nodeId : "";
-		if (id === "" || !configs.has(id)) continue;
-		const list = stepsByNode.get(id);
-		if (list === void 0) stepsByNode.set(id, [step]);
-		else list.push(step);
-	}
-	const result = isPlainObject(run.result) ? run.result : null;
-	const lastNode = typeof result?.lastNode === "string" ? result.lastNode : null;
-	const actives = Array.isArray(run.active) ? run.active.filter(isPlainObject) : isPlainObject(run.current) ? [run.current] : [];
-	const pendingUser = isPlainObject(run.pendingUser) ? run.pendingUser : null;
-	const inputJoins = /* @__PURE__ */ new Map();
-	for (const id of order) {
-		const config = configs.get(id);
-		if (config?.type !== "join") continue;
-		for (const input of Array.isArray(config.inputs) ? config.inputs : []) {
-			if (typeof input !== "string" || !configs.has(input)) continue;
-			const list = inputJoins.get(input);
-			if (list === void 0) inputJoins.set(input, [id]);
-			else list.push(id);
-		}
-	}
-	/**
-	* 节点的出边目标（含 join 的隐式入边：任务 → 引用它的 join）。
-	*
-	* @param config 节点配置
-	* @returns 出边目标 id
-	*/
-	function targetsOf(config) {
-		if (config.type === "start" || config.type === "robot" || config.type === "user" || config.type === "join") {
-			const targets = (config.next ?? []).map((rule) => rule.to);
-			if (config.type === "robot") targets.push(...inputJoins.get(config.id) ?? []);
-			return targets;
-		}
-		return [];
-	}
-	const adjacency = new Map(order.map((id) => [id, []]));
-	for (const id of order) {
-		const config = configs.get(id);
-		if (config === void 0) continue;
-		adjacency.set(id, targetsOf(config).filter((target) => configs.has(target)));
-	}
-	const reachable = /* @__PURE__ */ new Map();
-	for (const id of order) {
-		const seen = /* @__PURE__ */ new Set();
-		const queue = [...adjacency.get(id) ?? []];
-		while (queue.length > 0) {
-			const next = queue.shift();
-			if (typeof next !== "string" || seen.has(next)) continue;
-			seen.add(next);
-			queue.push(...adjacency.get(next) ?? []);
-		}
-		reachable.set(id, seen);
-	}
-	const orderIndex = new Map(order.map((id, index) => [id, index]));
-	const componentOf = /* @__PURE__ */ new Map();
-	const components = [];
-	for (const id of order) {
-		if (componentOf.has(id)) continue;
-		const members = order.filter((other) => !componentOf.has(other) && (other === id || reachable.get(id)?.has(other) === true && reachable.get(other)?.has(id) === true));
-		const index = components.length;
-		for (const member of members) componentOf.set(member, index);
-		components.push(members);
-	}
-	const componentEdges = components.map(() => /* @__PURE__ */ new Set());
-	const indegree = components.map(() => 0);
-	for (const id of order) {
-		const from = componentOf.get(id);
-		for (const target of adjacency.get(id) ?? []) {
-			const to = componentOf.get(target);
-			if (to === void 0 || to === from || from === void 0) continue;
-			if (componentEdges[from]?.has(to) === true) continue;
-			componentEdges[from]?.add(to);
-			indegree[to] = (indegree[to] ?? 0) + 1;
-		}
-	}
-	const priority = components.map((members) => members.reduce((min, member) => Math.min(min, orderIndex.get(member) ?? Infinity), Infinity));
-	const startComponent = start === null ? void 0 : componentOf.get(start);
-	if (startComponent !== void 0) priority[startComponent] = -1;
-	const ready = [];
-	for (let index = 0; index < components.length; index += 1) if (indegree[index] === 0) ready.push(index);
-	ready.sort((left, right) => (priority[left] ?? 0) - (priority[right] ?? 0));
-	const layoutOrder = [];
-	while (ready.length > 0) {
-		const index = ready.shift();
-		if (index === void 0) break;
-		const members = [...components[index] ?? []].sort((left, right) => (orderIndex.get(left) ?? 0) - (orderIndex.get(right) ?? 0));
-		layoutOrder.push(...members);
-		for (const next of componentEdges[index] ?? []) {
-			indegree[next] = (indegree[next] ?? 0) - 1;
-			if (indegree[next] !== 0) continue;
-			ready.push(next);
-			ready.sort((left, right) => (priority[left] ?? 0) - (priority[right] ?? 0));
-		}
-	}
-	for (const id of order) if (!layoutOrder.includes(id)) layoutOrder.push(id);
-	/**
-	* 一个节点在这次运行中的状态。
-	*
-	* @param config 节点配置
-	* @returns 节点状态
-	*/
-	function stateOf(config) {
-		if (config.type === "start") return "completed";
-		if (config.type === "join" && config.next?.length === 0) return "idle";
-		if (pendingUser !== null && pendingUser.nodeId === config.id) return "waiting";
-		if (actives.some((active) => active.nodeId === config.id)) return "running";
-		const nodeSteps = stepsByNode.get(config.id) ?? [];
-		if (nodeSteps.length > 0) {
-			const status = nodeSteps[nodeSteps.length - 1]?.status;
-			return typeof status === "string" && status !== "" ? status : "completed";
-		}
-		if (config.type === "end" && lastNode === config.id) return typeof result?.status === "string" ? result.status : "completed";
-		return "idle";
-	}
-	const nodes = layoutOrder.map((id) => {
-		const config = configs.get(id);
-		const nodeSteps = stepsByNode.get(id) ?? [];
-		const lastStep = nodeSteps.length > 0 ? nodeSteps[nodeSteps.length - 1] ?? null : null;
-		const unreachable = start !== null && id !== start && reachable.get(start)?.has(id) !== true;
-		let durationMs = 0;
-		for (const step of nodeSteps) {
-			const startedAt = typeof step.startedAt === "number" ? step.startedAt : null;
-			const finishedAt = typeof step.finishedAt === "number" ? step.finishedAt : null;
-			if (startedAt !== null && finishedAt !== null && finishedAt >= startedAt) durationMs += finishedAt - startedAt;
-		}
-		return {
-			id,
-			type: config.type,
-			state: stateOf(config),
-			unreachable,
-			visits: nodeSteps.length,
-			lastSeq: typeof lastStep?.seq === "number" ? lastStep.seq : null,
-			startedAt: typeof nodeSteps[0]?.startedAt === "number" ? nodeSteps[0].startedAt : null,
-			finishedAt: typeof lastStep?.finishedAt === "number" ? lastStep.finishedAt : null,
-			durationMs,
-			stopReason: typeof lastStep?.stopReason === "string" ? lastStep.stopReason : null,
-			sessionId: typeof lastStep?.sessionId === "string" && lastStep.sessionId !== "" ? lastStep.sessionId : null,
-			error: typeof lastStep?.error === "string" && lastStep.error !== "" ? lastStep.error : null,
-			task: config.type === "robot" ? config.task ?? "" : "",
-			summary: config.type === "robot" ? config.summary ?? "" : null,
-			outputText: previewLine(lastStep?.text, PREVIEW_LIMIT),
-			robot: config.type === "robot" ? config.robot ?? null : null,
-			avatar: config.type === "robot" && avatars !== null && typeof config.robot === "string" && typeof avatars[config.robot] === "string" ? avatars[config.robot] : null,
-			title: config.type === "user" ? config.title ?? null : null,
-			detail: config.type === "user" ? config.detail ?? null : null,
-			questions: config.type === "user" ? config.questions ?? [] : null,
-			endStatus: config.type === "end" ? config.endStatus ?? null : null,
-			timeoutMs: config.type === "robot" && Number.isFinite(config.timeoutMs) ? config.timeoutMs : null,
-			maxVisits: config.type === "robot" && Number.isFinite(config.maxVisits) ? config.maxVisits : null,
-			mode: config.type === "robot" && config.mode === "plan" ? "plan" : null,
-			inputs: config.type === "join" ? config.inputs ?? [] : null,
-			next: config.type === "robot" || config.type === "start" || config.type === "user" || config.type === "join" ? config.next : []
-		};
-	});
-	/** 这次运行实际走过的节点顺序（含正在执行的节点）。 */
-	const sequence = [];
-	const pushSequence = (id) => {
-		if (typeof id !== "string" || id === "") return;
-		if (sequence[sequence.length - 1] === id) return;
-		sequence.push(id);
-	};
-	for (const step of steps) pushSequence(step.nodeId);
-	for (const active of actives) pushSequence(active.nodeId);
-	if (pendingUser !== null) pushSequence(pendingUser.nodeId);
-	/** 每对相邻节点在这次运行里走了几次；循环会让同一对出现多次。 */
-	const pairCounts = /* @__PURE__ */ new Map();
-	/**
-	* @param from 来源节点 id
-	* @param to 目标节点 id
-	*/
-	function countPair(from, to) {
-		const key = `${from}->${to}`;
-		pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-	}
-	for (let index = 0; index + 1 < sequence.length; index += 1) countPair(sequence[index], sequence[index + 1]);
-	if (configs.get(start ?? "")?.type === "start" && sequence.length > 0 && sequence[0] !== start) countPair(start, sequence[0]);
-	const last = sequence.length > 0 ? sequence[sequence.length - 1] ?? null : null;
-	if (last !== null && lastNode !== null && lastNode !== last) countPair(last, lastNode);
-	/**
-	* @param from 来源节点 id
-	* @param to 目标节点 id
-	* @returns 这条边是否属于环
-	*/
-	function inCycle(from, to) {
-		if (from === to) return true;
-		return reachable.get(to)?.has(from) === true;
-	}
-	const edgesByKey = /* @__PURE__ */ new Map();
-	/**
-	* @param from 来源节点 id
-	* @param to 目标节点 id
-	* @param kind 边类型
-	* @param name 边上写的路由键
-	* @param prompt 进入目标节点时要发的提示词（只作诊断，不渲染）
-	* @param label 用户节点选项显示给用户的文字
-	* @param tone 边上可选的外观色：`success` / `failure`（只用于渲染）
-	*/
-	function pushEdge(from, to, kind, name, prompt, label, tone) {
-		if (from === void 0 || to === void 0) return;
-		if (!configs.has(from) || !configs.has(to)) return;
-		const key = `${from}->${to}#${kind}`;
-		const edgeName = typeof name === "string" ? name.trim() : "";
-		const edgePrompt = typeof prompt === "string" ? prompt : "";
-		const edgeLabel = typeof label === "string" ? label.trim() : "";
-		const edgeTone = tone === "success" || tone === "failure" ? tone : "";
-		const existing = edgesByKey.get(key);
-		if (existing !== void 0) {
-			if (edgeName !== "" && !existing.names.includes(edgeName)) existing.names.push(edgeName);
-			if (edgeLabel !== "" && !existing.labels.includes(edgeLabel)) existing.labels.push(edgeLabel);
-			if (existing.prompt === "" && edgePrompt !== "") existing.prompt = edgePrompt;
-			if (existing.tone === "" && edgeTone !== "") existing.tone = edgeTone;
+function canTransitionTask(from, to) {
+	return TASK_TRANSITIONS[from].includes(to);
+}
+/**
+* 判断一次作业状态转换是否合法。
+*
+* @param from 当前状态
+* @param to 目标状态
+* @returns 合法时为 true
+*/
+function canTransitionJob(from, to) {
+	return JOB_TRANSITIONS[from].includes(to);
+}
+/**
+* 断言一次任务状态转换合法，非法时抛出带任务 id 的错误。
+*
+* @param taskId 任务 id
+* @param from 当前状态
+* @param to 目标状态
+* @throws 转换非法时抛出
+*/
+function assertTaskTransition(taskId, from, to) {
+	if (canTransitionTask(from, to)) return;
+	throw new Error(`task ${taskId}: illegal status transition ${from} -> ${to}`);
+}
+/**
+* 断言一次作业状态转换合法，非法时抛出带作业 id 的错误。
+*
+* @param jobId 作业 id
+* @param from 当前状态
+* @param to 目标状态
+* @throws 转换非法时抛出
+*/
+function assertJobTransition(jobId, from, to) {
+	if (canTransitionJob(from, to)) return;
+	throw new Error(`job ${jobId}: illegal status transition ${from} -> ${to}`);
+}
+// .build/workflows/program/clock.js
+/**
+* program 型机器人驱动：v1 只有内建 `clock`。
+*
+* `clock` 任务在 payload 里带 `until`（ISO 时间）；到点完成，不建会话、不占
+* 机器人实例。重启时按 `until` 重新计时：已过则立即完成。
+*
+* @module @buka/dsh-plugin-workflows/program/clock
+*/
+/** 内建 `clock` 驱动 id；与 robots 登记表里的 program id 一致。 */
+const CLOCK_PROGRAM_ID = "clock";
+/** Node `setTimeout` 的最大延迟；超过时分段计时。 */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+/**
+* 解析 payload 里的 `until`。
+*
+* @param payload 任务 payload
+* @returns 时间戳（毫秒）；不合法时是 null
+*/
+function clockUntil(payload) {
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+	const raw = payload.until;
+	if (typeof raw !== "string" || raw.trim() === "") return null;
+	const parsed = Date.parse(raw);
+	return Number.isNaN(parsed) ? null : parsed;
+}
+/**
+* 等一段时间；`AbortSignal` 取消时 reject。
+*
+* @param delayMs 延迟毫秒
+* @param signal 取消信号
+* @returns 无返回值
+*/
+function sleep(delayMs, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) {
+			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
 			return;
 		}
-		const traversals = pairCounts.get(`${from}->${to}`) ?? 0;
-		edgesByKey.set(key, {
-			key,
-			from,
-			to,
-			kind,
-			names: edgeName === "" ? [] : [edgeName],
-			labels: edgeLabel === "" ? [] : [edgeLabel],
-			prompt: edgePrompt,
-			tone: edgeTone,
-			traversed: traversals > 0,
-			traversals,
-			loop: inCycle(from, to)
-		});
-	}
-	if (synthetic) for (let index = 0; index + 1 < order.length; index += 1) pushEdge(order[index], order[index + 1], "next");
-	else for (const id of order) {
-		const config = configs.get(id);
-		if (config === void 0) continue;
-		if (config.type === "robot" || config.type === "start" || config.type === "user" || config.type === "join") for (const rule of config.next ?? []) pushEdge(id, rule.to, "next", rule.name, rule.prompt, rule.label, rule.tone);
-		if (config.type === "join") {
-			for (const input of Array.isArray(config.inputs) ? config.inputs : []) if (typeof input === "string") pushEdge(input, id, "next", "", "", "");
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, Math.min(delayMs, MAX_TIMER_DELAY_MS));
+		timer.unref?.();
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
+		};
+		signal.addEventListener?.("abort", onAbort, { once: true });
+	});
+}
+/** v1 可用的 program 驱动表。 */
+const PROGRAM_DRIVERS = /* @__PURE__ */ new Map([[CLOCK_PROGRAM_ID, {
+	id: CLOCK_PROGRAM_ID,
+	async run({ payload, signal }) {
+		const until = clockUntil(payload);
+		if (until === null) throw new Error("clock task payload must contain an ISO timestamp \"until\"");
+		while (Date.now() < until) {
+			if (signal.aborted) throw new Error("clock task was cancelled");
+			await sleep(until - Date.now(), signal);
 		}
+		return { output: { completedAt: (/* @__PURE__ */ new Date()).toISOString() } };
 	}
-	return {
-		start,
-		order: layoutOrder,
-		nodes,
-		edges: [...edgesByKey.values()]
-	};
+}]]);
+/**
+* 取一个 program 驱动。
+*
+* @param programId 驱动 id
+* @returns 驱动；未知时是 undefined
+*/
+function programDriver(programId) {
+	return PROGRAM_DRIVERS.get(programId);
+}
+// .build/workflows/engine/prompt.js
+/**
+* 任务执行上下文组装（`.tmp/workflow-v4-spec.md` §7.6）。
+*
+* 一个任务 = 一条全新会话，上下文由引擎按依赖与任务契约组装：
+*
+* 1. 岗位说明；
+* 2. 任务类型说明；
+* 3. 渲染后的 payload；
+* 4. 依赖任务摘要与可见附件清单；
+* 5. 产出契约（output schema + `buka_task_complete` + 附件规则）；
+* 6. 可派发的直接后继岗位 / 类型白名单。
+*
+* 同时负责开始任务的「原始输入 → 结构化输入」提示与结束任务的投递文本。
+*
+* @module @buka/dsh-plugin-workflows/engine/prompt
+*/
+/** 依赖摘要里单段文本的上限。 */
+const PREVIEW_BYTES = 1200;
+/**
+* 按任务类型取岗位（任务的岗位在定义里唯一）。
+*
+* @param definition 定义
+* @param positionId 岗位 id
+* @returns 岗位；不存在时 undefined
+*/
+function positionOf(definition, positionId) {
+	return definition.positions.find((position) => position.id === positionId);
 }
 /**
-* 计算分层二维节点图的坐标与每条边的 SVG 路径。
+* 任务类型的展示名。
 *
-* 节点按深度分层：只统计「更早节点 → 更晚节点」的前向边做最长路径分层，所以并行
-* 分支的自然落在同一排，回边不参与分层。同一层内按父节点横坐标的均值排序并居中，
-* 再强制最小间距，得到确定性的横向坐标。连线从节点上 / 下端口进出：相邻层之间的边
-* 直接连成直线或贝塞尔曲线，跨多层 / 回边 / 自环按端点位置选择**左侧或右侧**的 lane；
-* 同一侧的 lane 按层区间分配，互不重叠。方向箭头画在竖段中点（跨层边）或目标端口
-* 前方（相邻层曲线）。
-*
-* @param graph 图模型
-* @returns 布局结果（尺寸、层、坐标与每条边的路径）
+* @param definition 定义
+* @param typeId 任务类型 id
+* @returns 展示名；未知时用 id
 */
-function layoutRunGraph(graph) {
-	const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
-	const allEdges = Array.isArray(graph?.edges) ? graph.edges : [];
-	const empty = {
-		width: 0,
-		height: 0,
-		nodeWidth: 260,
-		nodeHeight: 28,
-		layerGap: 56,
-		layers: [],
-		positions: [],
-		edges: []
-	};
-	if (nodes.length === 0) return empty;
-	const indexOf = new Map(nodes.map((node, index) => [node.id, index]));
-	const incoming = new Map(nodes.map((node) => [node.id, []]));
-	for (const edge of allEdges) {
-		if (edge.from === edge.to) continue;
-		const fromIndex = indexOf.get(edge.from);
-		const toIndex = indexOf.get(edge.to);
-		if (fromIndex === void 0 || toIndex === void 0 || fromIndex >= toIndex) continue;
-		const list = incoming.get(edge.to);
-		if (list !== void 0 && !list.includes(edge.from)) list.push(edge.from);
-	}
-	const layerOf = /* @__PURE__ */ new Map();
-	for (const node of nodes) {
-		let layer = 0;
-		for (const from of incoming.get(node.id) ?? []) {
-			const fromLayer = layerOf.get(from);
-			if (typeof fromLayer === "number") layer = Math.max(layer, fromLayer + 1);
-		}
-		layerOf.set(node.id, layer);
-	}
-	const byLayer = /* @__PURE__ */ new Map();
-	for (const node of nodes) {
-		const layer = layerOf.get(node.id) ?? 0;
-		const list = byLayer.get(layer);
-		if (list === void 0) byLayer.set(layer, [node]);
-		else list.push(node);
-	}
-	const layerIndexes = [...byLayer.keys()].sort((left, right) => left - right);
-	const xOf = /* @__PURE__ */ new Map();
-	for (const layer of layerIndexes) {
-		const desired = (byLayer.get(layer) ?? []).map((node) => {
-			const parents = (incoming.get(node.id) ?? []).filter((id) => (layerOf.get(id) ?? layer) < layer);
-			if (parents.length === 0) return {
-				node,
-				desired: (indexOf.get(node.id) ?? 0) * PITCH
-			};
-			let sum = 0;
-			for (const parent of parents) sum += xOf.get(parent) ?? 0;
-			return {
-				node,
-				desired: sum / parents.length
-			};
-		});
-		desired.sort((left, right) => left.desired - right.desired || (indexOf.get(left.node.id) ?? 0) - (indexOf.get(right.node.id) ?? 0));
-		let previous = -Infinity;
-		const xs = desired.map((item) => {
-			const x = Math.max(item.desired, previous + PITCH);
-			previous = x;
-			return x;
-		});
-		const shift = desired.reduce((sum, item) => sum + item.desired, 0) / desired.length - xs.reduce((sum, x) => sum + x, 0) / xs.length;
-		desired.forEach((item, position) => {
-			xOf.set(item.node.id, (xs[position] ?? 0) + shift);
-		});
-	}
-	const yOf = /* @__PURE__ */ new Map();
-	for (const layer of layerIndexes) yOf.set(layer, 32 + layer * LAYER_PITCH + 14);
-	const contentMinX = Math.min(...nodes.map((node) => (xOf.get(node.id) ?? 0) - 130));
-	const contentMaxX = Math.max(...nodes.map((node) => (xOf.get(node.id) ?? 0) + 130));
-	const contentCenter = (contentMinX + contentMaxX) / 2;
-	/**
-	* @param id 节点 id
-	* @returns 节点坐标
-	*/
-	function nodeAt(id) {
-		const layer = layerOf.get(id) ?? 0;
-		return {
-			id,
-			layer,
-			x: xOf.get(id) ?? 0,
-			y: yOf.get(layer) ?? 46
-		};
-	}
-	const sideOf = /* @__PURE__ */ new Map();
-	const laneEdges = [];
-	for (const edge of allEdges) {
-		if (indexOf.get(edge.from) === void 0 || indexOf.get(edge.to) === void 0) continue;
-		const from = nodeAt(edge.from);
-		const to = nodeAt(edge.to);
-		if (to.layer - from.layer === 1) {
-			sideOf.set(edge.key, "center");
+function taskTypeLabel(definition, typeId) {
+	if (typeId === "start") return "启动任务";
+	if (typeId === "end") return "结束任务";
+	return findTaskType(definition, typeId)?.label ?? typeId;
+}
+/**
+* 岗位的展示名。
+*
+* @param definition 定义
+* @param positionId 岗位 id
+* @returns 展示名；内建节点给中文名
+*/
+function positionLabel(definition, positionId) {
+	if (positionId === "start") return "开始";
+	if (positionId === "end") return "结束";
+	return positionOf(definition, positionId)?.label ?? positionId;
+}
+/**
+* 渲染一个任务的 payload 模板。
+*
+* @param payload 原始 payload（可能含模板）
+* @param tasks 作业里的全部任务
+* @returns 渲染后的 payload
+*/
+function renderTaskPayload(payload, tasks) {
+	const start = tasks.find((task) => task.id === "$start");
+	const values = /* @__PURE__ */ new Map();
+	for (const task of tasks) values.set(task.id, {
+		...task.result?.output === null || task.result?.output === void 0 ? {} : { output: task.result.output },
+		...task.result?.text === void 0 ? {} : { text: task.result.text }
+	});
+	return renderPayload(payload, buildTemplateContext({
+		startOutput: start?.result?.output ?? null,
+		tasks: values
+	}));
+}
+/**
+* 一段任务结果的摘要（id / 类型 / 状态 / 文本 / 结构化结果）。
+*
+* @param task 任务记录
+* @param definition 作业定义
+* @returns 可读摘要
+*/
+function summarizeTaskResult(task, definition) {
+	const lines = [`- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}`];
+	if (task.error !== null) lines.push(`  error: ${clipUtf8(task.error, PREVIEW_BYTES)}`);
+	const text = task.result?.text ?? "";
+	if (text.trim() !== "") lines.push(`  text: ${clipUtf8(text.trim(), PREVIEW_BYTES)}`);
+	if (task.result?.output !== null && task.result?.output !== void 0) lines.push(`  output: ${clipUtf8(JSON.stringify(task.result.output), PREVIEW_BYTES)}`);
+	return lines.join("\n");
+}
+/**
+* 可派发的直接后继：目标岗位 + 允许的任务类型。
+*
+* @param definition 定义
+* @param fromPosition 创建者岗位
+* @returns 后继说明
+*/
+function successorLines(definition, fromPosition) {
+	const lines = [];
+	for (const edge of definition.edges) {
+		if (edge.from !== fromPosition) continue;
+		if (edge.to === "end") {
+			lines.push("- end（结束任务：payload 为最终交付物，投递即完成）");
 			continue;
 		}
-		const side = (from.x + to.x) / 2 < contentCenter ? "left" : "right";
-		sideOf.set(edge.key, side);
-		const start = Math.min(from.layer, to.layer);
-		const end = from.layer === to.layer ? start + .5 : Math.max(from.layer, to.layer);
-		laneEdges.push({
-			edge,
-			from,
-			to,
-			side,
-			start,
-			end,
-			span: end - start
-		});
+		const position = positionOf(definition, edge.to);
+		if (position === void 0) continue;
+		const labels = (edge.types ? edge.types : position.taskTypes.map((taskType) => taskType.id)).map((type) => `${type}（${taskTypeLabel(definition, type)}）`).join("、");
+		lines.push(`- ${position.id}（${position.label}）: ${labels}`);
 	}
-	laneEdges.sort((left, right) => left.span - right.span || left.start - right.start || (indexOf.get(left.edge.from) ?? 0) - (indexOf.get(right.edge.from) ?? 0));
-	const occupied = {
-		left: [],
-		right: []
-	};
-	const laneOf = /* @__PURE__ */ new Map();
-	for (const item of laneEdges) {
-		const list = occupied[item.side];
-		let lane = 1;
-		while (list.some((other) => other.lane === lane && other.start < item.end && item.start < other.end)) lane += 1;
-		list.push({
-			lane,
-			start: item.start,
-			end: item.end
-		});
-		laneOf.set(item.edge.key, lane);
-	}
-	const maxLeft = occupied.left.reduce((max, item) => Math.max(max, item.lane), 0);
-	const maxRight = occupied.right.reduce((max, item) => Math.max(max, item.lane), 0);
-	const leftLaneX = (lane) => contentMinX - 32 - (lane - 1) * 14;
-	const rightLaneX = (lane) => contentMaxX + 32 + (lane - 1) * 14;
-	const leftEdge = contentMinX - 32 - Math.max(0, maxLeft - 1) * 14 - 32;
-	const rightEdge = contentMaxX + 32 + Math.max(0, maxRight - 1) * 14 + 32;
-	const shiftX = -leftEdge;
-	const width = rightEdge - leftEdge;
-	const height = (layerIndexes[layerIndexes.length - 1] ?? 0) * LAYER_PITCH + 28 + 64;
-	const positions = nodes.map((node) => {
-		const layer = layerOf.get(node.id) ?? 0;
-		return {
-			id: node.id,
-			layer,
-			x: round((xOf.get(node.id) ?? 0) + shiftX),
-			y: round(yOf.get(layer) ?? 46)
-		};
-	});
-	const positionById = new Map(positions.map((position) => [position.id, position]));
-	const layers = layerIndexes.map((index) => ({
-		index,
-		y: round(yOf.get(index) ?? 0)
-	}));
-	const edges = allEdges.map((edge) => {
-		const from = positionById.get(edge.from);
-		const to = positionById.get(edge.to);
-		if (from === void 0 || to === void 0) return {
-			...edge,
-			lane: 0,
-			side: "center",
-			d: "",
-			arrow: null
-		};
-		const side = sideOf.get(edge.key) ?? "center";
-		const lane = laneOf.get(edge.key) ?? 0;
-		let laneX = 0;
-		if (side === "left") laneX = round(leftLaneX(lane) + shiftX);
-		else if (side === "right") laneX = round(rightLaneX(lane) + shiftX);
-		return {
-			...edge,
-			lane,
-			side,
-			...edgeGeometry(from, to, side, laneX)
-		};
-	});
+	return lines;
+}
+/**
+* 组装一个 agent 任务的完整 prompt。
+*
+* @param input 任务、定义与依赖信息
+* @returns prompt 文本
+*/
+function buildExecutionPrompt(input) {
+	const { job, task, position, taskType } = input;
+	const definition = job.definition;
+	const payload = renderTaskPayload(task.payload, input.tasks);
+	const dependencies = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
+	const dependencyText = dependencies.length === 0 ? "（无依赖任务）" : dependencies.map((dependency) => summarizeTaskResult(dependency, definition)).join("\n");
+	const attachments = visibleAttachmentsForTask(input.tasks, task.id, input.attachments);
+	const attachmentLines = attachments.length === 0 ? "（依赖任务没有可见附件）" : attachments.map((attachment) => `- ${attachment.id} · ${attachment.name} (${attachment.bytes} bytes${attachment.mime === "" ? "" : `, ${attachment.mime}`})${attachment.description === "" ? "" : ` · ${attachment.description}`}`).join("\n");
+	const successors = successorLines(definition, position.id);
+	return [
+		`你正在执行工作流${`作业 #${job.seq}「${job.workflowName}」 · task ${task.id}`}。`,
+		"",
+		"## 岗位",
+		`- ${position.label}（${position.id}）${position.description === void 0 ? "" : `：${position.description}`}`,
+		"",
+		"## 任务类型",
+		`- ${taskType.label}（${taskType.id}）${taskType.description === void 0 ? "" : `：${taskType.description}`}`,
+		"",
+		"## 任务 payload",
+		"```json",
+		JSON.stringify(payload, null, 2),
+		"```",
+		"",
+		"## 依赖任务结果",
+		dependencyText,
+		"",
+		"## 可见附件",
+		attachmentLines,
+		input.workspace === void 0 ? "" : `附件源文件路径相对你的工作目录：${input.workspace}`,
+		"",
+		"## 产出契约",
+		"完成后必须调用 `buka_task_complete` 提交结果：",
+		"- `output`：一个 JSON 对象，匹配下面的 schema；",
+		"- `text`：可选，一段给人看的文本摘要；",
+		"- `attachments`：可选，需要归档的独立文件清单（`{ path, name?, description? }`，path 相对你的工作目录）；附件不是答案本身。",
+		"```json",
+		schemaJson(taskType.output),
+		"```",
+		"",
+		"## 你可以派发的任务",
+		"执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：position、type、payload、deps。",
+		"deps 只能引用本作业里已创建的任务 id（包括刚创建但未完成的任务）；依赖图不能成环。",
+		...successors.length === 0 ? ["- （本岗位没有后继岗位）"] : successors,
+		"",
+		"## 只读工具",
+		"`buka_job_board` 读取整个作业看板，`buka_task_get` 读取某个任务与依赖结果，`buka_job_attachments` 检索 / 读取可见附件。",
+		taskType.mode === "plan" ? "本次任务以 plan 模式开始：先探索并提交计划，用户批准后继续实施。" : ""
+	].filter((line) => line !== "").join("\n");
+}
+/**
+* 开始任务的执行提示：把原始输入转换成第一个结构化输入。
+*
+* @param job 作业
+* @returns prompt 文本
+*/
+function buildStartTaskPrompt(job) {
+	const start = job.definition.start;
+	return [
+		`工作流「${job.workflowName}」的启动任务（作业 #${job.seq}）由你执行：把原始输入转换成第一个结构化输入，后续任务只读这份结构化输入。`,
+		"",
+		"## 原始输入",
+		"```json",
+		JSON.stringify(job.input.raw, null, 2),
+		"```",
+		"",
+		"## 产出契约（启动任务）",
+		"完成后调用 `buka_task_complete` 提交 `output`，它是一个 JSON 对象，匹配下面的 schema：",
+		"```json",
+		schemaJson(start.task.output),
+		"```",
+		job.definition.description === void 0 ? "" : `工作流说明：${job.definition.description}`
+	].filter((line) => line !== "").join("\n");
+}
+/**
+* 结束任务的投递文本：把最终交付物交给启动者。
+*
+* @param job 作业
+* @param task 结束任务
+* @returns 投递文本
+*/
+function buildEndDeliveryText(job, task) {
+	return [
+		`工作流「${job.workflowName}」的作业 #${job.seq} 已完成，最终交付物如下：`,
+		"```json",
+		JSON.stringify(task.payload, null, 2),
+		"```"
+	].join("\n");
+}
+/**
+* 助理承办人任务的 prompt。
+*
+* @param input 任务与定义
+* @returns prompt 文本
+*/
+function buildAssistantPrompt(input) {
+	const { job, task, position, taskType } = input;
+	const payload = renderTaskPayload(task.payload, input.tasks);
+	const dependencies = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
+	const dependencyText = dependencies.length === 0 ? "（无依赖任务）" : dependencies.map((dependency) => summarizeTaskResult(dependency, job.definition)).join("\n");
+	return [
+		`你被指派为工作流「${job.workflowName}」作业 #${job.seq} 的人任务助理。执行者是人：${position.label}（${position.id}）。`,
+		"你的职责：代表这条任务与人沟通（按你自己的 skill 选择方式），拿到人给出的决定 / 结果后，调用 `buka_task_complete` 提交。",
+		"你只能读取并完成这条任务，不能往工作流派任务。",
+		"",
+		"## 任务类型",
+		`- ${taskType.label}（${taskType.id}）${taskType.description === void 0 ? "" : `：${taskType.description}`}`,
+		"",
+		"## 任务 payload",
+		"```json",
+		JSON.stringify(payload, null, 2),
+		"```",
+		"",
+		"## 依赖任务结果",
+		dependencyText,
+		"",
+		"## 产出契约",
+		"完成后调用 `buka_task_complete`，`output` 必须是匹配下面 schema 的 JSON 对象：",
+		"```json",
+		schemaJson(taskType.output),
+		"```",
+		"如果人迟迟不回复或你无法完成，直接结束本轮即可：任务会回到待认领，由人自己处理。"
+	].filter((line) => line !== "").join("\n");
+}
+// .build/workflows/engine/board.js
+/**
+* 页面 / 工具用的只读投影：任务摘要、任务详情、作业摘要、定义摘要与看板计数。
+*
+* 形状以 `.tmp/workflow-v4-api.md` 为准；`GET /job` 的 `definition` 带完整
+* positions[].taskTypes，客户端不需要再拉工作流兜底。
+*
+* @module @buka/dsh-plugin-workflows/engine/board
+*/
+/** 摘要文本上限。 */
+const SUMMARY_BYTES = 240;
+/** 把机器人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
+function executorView(executor, robots) {
+	if (executor.kind === "human" || robots === void 0) return executor;
+	const robot = robots.get(executor.name);
 	return {
-		width: round(width),
-		height: round(height),
-		nodeWidth: 260,
-		nodeHeight: 28,
-		layerGap: 56,
-		layers,
-		positions,
-		edges
+		...executor,
+		...robot === void 0 ? {} : { driver: robot.driver },
+		...robot?.avatar === void 0 ? {} : { avatar: robot.avatar }
+	};
+}
+/** 任务计数。 */
+function countTasks(tasks) {
+	const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0]));
+	for (const task of tasks) counts[task.status] += 1;
+	return counts;
+}
+/**
+* 任务摘要（看板 / 列表用）。
+*
+* @param task 任务
+* @param definition 作业定义
+* @returns 契约形状的任务摘要
+*/
+function taskSummary(task, definition) {
+	return {
+		id: task.id,
+		position: task.position,
+		type: task.type,
+		typeLabel: taskTypeLabel(definition, task.type),
+		status: task.status,
+		deps: [...task.deps],
+		createdAt: task.createdAt,
+		startedAt: task.startedAt,
+		finishedAt: task.finishedAt,
+		claimant: task.claimant,
+		attemptCount: task.attemptIds.length,
+		attachmentCount: task.result?.attachmentIds.length ?? 0,
+		resultSummary: task.result === null ? null : clipUtf8(task.result.text.trim(), SUMMARY_BYTES) || (task.result.output === null ? null : clipUtf8(JSON.stringify(task.result.output), SUMMARY_BYTES))
 	};
 }
 /**
-* 一条边的路径与方向箭头位置。
+* 一次执行记录投影。
 *
-* - 相邻层：同一横坐标直连；不同横坐标用贝塞尔曲线，从源节点底部进入目标顶部。
-* - 侧边 lane：从端口出发先圆角拐到 lane，再竖直到目标附近拐入端口；箭头在竖段中点。
-* - 自环：从节点顶部绕同侧 lane 回到节点底部。
-* - 同层非自环：从上方绕过整行。箭头方向由路径方向决定。
-*
-* @param from 来源节点坐标
-* @param to 目标节点坐标
-* @param side 走线位置
-* @param laneX lane 的横坐标
-* @returns SVG 路径与箭头位置
+* @param attempt 执行记录
+* @returns 契约形状
 */
-function edgeGeometry(from, to, side, laneX) {
-	const half = 14;
-	if (side === "center") {
-		const start = {
-			x: from.x,
-			y: from.y + half
-		};
-		const end = {
-			x: to.x,
-			y: to.y - half
-		};
-		if (start.x === end.x) return {
-			d: `M${round(start.x)},${round(start.y)} L${round(end.x)},${round(end.y)}`,
-			arrow: {
-				x: round(start.x),
-				y: round((start.y + end.y) / 2),
-				angle: 90
-			}
-		};
-		const middleY = (start.y + end.y) / 2;
-		return {
-			d: `M${round(start.x)},${round(start.y)} C${round(start.x)},${round(middleY)} ${round(end.x)},${round(middleY)} ${round(end.x)},${round(end.y)}`,
-			arrow: {
-				x: round(end.x),
-				y: round(end.y - Math.min(12, (end.y - start.y) / 2)),
-				angle: 90
-			}
-		};
-	}
-	const x = round(laneX);
-	if (from.id === to.id) {
-		const top = {
-			x: from.x,
-			y: from.y - half
-		};
-		const bottom = {
-			x: from.x,
-			y: from.y + half
-		};
-		return {
-			d: `M${round(top.x)},${round(top.y)} C${x},${round(top.y - 18)} ${x},${round(bottom.y + 18)} ${round(bottom.x)},${round(bottom.y)}`,
-			arrow: {
-				x,
-				y: round(from.y),
-				angle: 90
-			}
-		};
-	}
-	if (to.layer === from.layer) {
-		const above = round(from.y - half - 20);
-		const start = {
-			x: from.x,
-			y: from.y - half
-		};
-		const end = {
-			x: to.x,
-			y: to.y - half
-		};
-		return {
-			d: `M${round(start.x)},${round(start.y)} C${round(start.x)},${above} ${x},${above} ${x},${above} L${round(end.x)},${above} C${round(end.x)},${above} ${round(end.x)},${round(end.y)} ${round(end.x)},${round(end.y)}`,
-			arrow: {
-				x: round((start.x + end.x) / 2),
-				y: above,
-				angle: end.x > start.x ? 0 : 180
-			}
-		};
-	}
-	if (to.layer > from.layer) {
-		const start = {
-			x: from.x,
-			y: from.y + half
-		};
-		const end = {
-			x: to.x,
-			y: to.y - half
-		};
-		return {
-			d: `M${round(start.x)},${round(start.y)} C${round(start.x)},${round(start.y + CORNER)} ${x},${round(start.y + CORNER)} ${x},${round(start.y + 24)} L${x},${round(end.y - 24)} C${x},${round(end.y - CORNER)} ${round(end.x)},${round(end.y - CORNER)} ${round(end.x)},${round(end.y)}`,
-			arrow: {
-				x,
-				y: round((start.y + end.y) / 2),
-				angle: 90
-			}
-		};
-	}
-	const start = {
-		x: from.x,
-		y: from.y - half
-	};
-	const end = {
-		x: to.x,
-		y: to.y + half
-	};
+function attemptSummary(attempt) {
 	return {
-		d: `M${round(start.x)},${round(start.y)} C${round(start.x)},${round(start.y - CORNER)} ${x},${round(start.y - CORNER)} ${x},${round(start.y - 24)} L${x},${round(end.y + 24)} C${x},${round(end.y + CORNER)} ${round(end.x)},${round(end.y + CORNER)} ${round(end.x)},${round(end.y)}`,
-		arrow: {
-			x,
-			y: round((start.y + end.y) / 2),
-			angle: -90
+		id: attempt.id,
+		sessionId: attempt.sessionId,
+		status: attempt.status,
+		stopReason: attempt.stopReason,
+		startedAt: attempt.startedAt,
+		finishedAt: attempt.finishedAt,
+		error: attempt.error
+	};
+}
+/**
+* 判断一条任务在当前作业状态下允许哪些操作。
+*
+* @param job 作业
+* @param task 任务
+* @returns `cancel | retry | claim | complete` 的子集
+*/
+function allowedTaskActions(job, task) {
+	if (job.status !== "running") return [];
+	switch (task.status) {
+		case "pending": return ["cancel"];
+		case "ready": return task.assignee.kind === "human" ? ["claim", "cancel"] : ["cancel"];
+		case "running": return task.assignee.kind === "human" ? ["complete", "cancel"] : ["cancel"];
+		case "failed": return ["retry", "cancel"];
+		case "blocked": return ["cancel"];
+		default: return [];
+	}
+}
+/**
+* 任务详情投影。
+*
+* @param input 作业、任务、执行记录与附件
+* @returns 契约形状
+*/
+function taskDetail(input) {
+	const { job, task } = input;
+	const definition = job.definition;
+	const taskType = findTaskType(definition, task.type);
+	const dependencyTasks = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
+	const attachments = input.attachments.filter((attachment) => task.result?.attachmentIds.includes(attachment.id));
+	return {
+		id: task.id,
+		jobId: task.jobId,
+		position: task.position,
+		positionLabel: positionLabel(definition, task.position),
+		type: task.type,
+		typeLabel: taskTypeLabel(definition, task.type),
+		typeDescription: taskType?.description ?? "",
+		status: task.status,
+		payload: task.payload,
+		deps: dependencyTasks.map((dependency) => taskSummary(dependency, definition)),
+		createdAt: task.createdAt,
+		startedAt: task.startedAt,
+		finishedAt: task.finishedAt,
+		claimant: task.claimant,
+		attempts: input.attempts.map(attemptSummary),
+		result: task.result === null ? null : {
+			text: task.result.text,
+			output: task.result.output,
+			attachments: attachments.map((attachment) => ({
+				id: attachment.id,
+				name: attachment.name,
+				bytes: attachment.bytes,
+				mime: attachment.mime,
+				sha256: attachment.sha256,
+				description: attachment.description,
+				sourceTaskId: attachment.sourceTaskId,
+				sourcePositionId: attachment.sourcePositionId,
+				createdBy: attachment.createdBy,
+				createdAt: attachment.createdAt
+			}))
+		},
+		allowedActions: allowedTaskActions(job, task)
+	};
+}
+/**
+* 作业摘要（工作流详情里的作业列表）。
+*
+* @param job 作业
+* @param tasks 作业任务
+* @returns 契约形状
+*/
+function jobSummary(job, tasks) {
+	return {
+		id: job.id,
+		seq: job.seq,
+		status: job.status,
+		inputSummary: job.inputSummary,
+		taskCounts: countTasks(tasks),
+		createdAt: job.createdAt,
+		updatedAt: job.updatedAt
+	};
+}
+/**
+* 作业定义摘要：图 + 完整岗位 / 任务类型契约（客户端按钉住版本渲染表单）。
+*
+* @param definition 定义
+* @returns 契约形状
+*/
+function jobDefinition(definition, robots) {
+	return {
+		name: definition.name,
+		...definition.description === void 0 ? {} : { description: definition.description },
+		positions: definition.positions.map((position) => ({
+			id: position.id,
+			label: position.label,
+			...position.description === void 0 ? {} : { description: position.description },
+			executor: executorView(position.executor, robots),
+			taskTypes: position.taskTypes.map((taskType) => ({
+				id: taskType.id,
+				label: taskType.label,
+				...taskType.description === void 0 ? {} : { description: taskType.description },
+				payload: taskType.payload,
+				output: taskType.output,
+				...taskType.requires === void 0 ? {} : { requires: taskType.requires },
+				...taskType.assistant === void 0 ? {} : { assistant: taskType.assistant },
+				...taskType.mode === void 0 ? {} : { mode: taskType.mode }
+			}))
+		})),
+		edges: definition.edges,
+		start: { label: "开始" },
+		end: { label: "结束" }
+	};
+}
+/**
+* 工作流详情里的图（positions / edges / start / end）。
+*
+* @param definition 定义
+* @returns 契约形状
+*/
+function workflowGraph(definition, robots) {
+	return {
+		positions: jobDefinition(definition, robots).positions.map((position) => ({
+			id: position.id,
+			label: position.label,
+			executor: position.executor
+		})),
+		edges: definition.edges.map((edge) => ({
+			from: edge.from,
+			to: edge.to,
+			types: edge.types ?? [],
+			back: edge.back === true
+		})),
+		start: { label: "开始" },
+		end: { label: "结束" }
+	};
+}
+/**
+* 是否还存在待投递的结束任务（页面「重试交付」的判定条件）。
+*
+* @param tasks 作业任务
+* @returns 有待投递结束任务时为 true
+*/
+function canRetryDelivery(tasks) {
+	return tasks.some((task) => task.position === "end" && (task.status === "ready" || task.status === "failed"));
+}
+// .build/workflows/engine/events.js
+/**
+* 作业事件时间线：`<dataDir>/jobs/<jobId>/events.jsonl`。
+*
+* 只用于回看 / 排查，不是权威状态（权威状态在 storageDomain）。写失败只记日志，
+* 绝不影响作业推进。
+*
+* @module @buka/dsh-plugin-workflows/engine/events
+*/
+/**
+* 追加一条作业事件。
+*
+* @param store 存储（提供作业目录）
+* @param logger 日志
+* @param jobId 作业 id
+* @param type 事件类型（`job/created`、`task/claimed` 等）
+* @param data 事件数据
+* @returns 无返回值
+*/
+async function appendJobEvent(store, logger, jobId, type, data) {
+	try {
+		const paths = await store.ensureJobDirectories(jobId);
+		const line = `${JSON.stringify({
+			at: nowIso(),
+			type,
+			data
+		})}\n`;
+		await promises.appendFile(paths.events, line, "utf8");
+	} catch (error) {
+		logger?.warn?.(`buka-workflows: could not append job event ${type}: ${describeError$1(error)}`);
+	}
+}
+// .build/workflows/engine/session.js
+/**
+* 启动者会话投递与机器人句柄读取。
+*
+* 开始 / 结束任务的执行者是启动者。启动者可能是普通会话：插件通过宿主
+* `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
+* agent，构造一条用户消息 `followup` 进去，再用 `sessions.flush` 等持久化确认。
+* 这与官方 `@deepseek-ai/dsh-schedule` 的提醒投递是同一机制。
+*
+* 消息形状按 DSH 的 `UserMessage` 结构构造（id / role / content / source）；
+* 不 import `@deepseek-ai/dsh-llm`，避免插件多一个运行时依赖。
+*
+* @module @buka/dsh-plugin-workflows/engine/session
+*/
+/**
+* 构造一条用户消息。
+*
+* @param text 消息正文
+* @returns UserMessage 形状的对象
+*/
+function createUserMessage(text) {
+	return {
+		id: randomUUID(),
+		role: "user",
+		content: [{
+			type: "text",
+			text
+		}],
+		source: { kind: "user" }
+	};
+}
+/**
+* 取一个会话的 live agent：先问 web 的 sessionController（会 resume），
+* 再退回 agents 注册表里的 live 实例。
+*
+* @param ctx 插件上下文
+* @param sessionId 会话 id
+* @returns live agent
+* @throws 该组成里无法恢复会话时抛出
+*/
+async function resolveLiveAgent(ctx, sessionId) {
+	const controller = ctx.get("sessionController");
+	if (controller !== void 0 && controller !== null && typeof controller.resolveAgent === "function") {
+		const resolved = await controller.resolveAgent(sessionId);
+		if (resolved !== void 0 && resolved !== null) {
+			if ("error" in resolved && resolved.error !== void 0) throw new Error(`cannot resume starter session "${sessionId}": ${describeError$1(resolved.error)}`);
+			if (resolved.agent !== void 0) return resolved.agent;
 		}
+	}
+	const live = ctx.get("agents")?.get?.(sessionId);
+	if (live !== void 0) return live;
+	throw new Error(`cannot resume starter session "${sessionId}" in this composition (no live agent and no sessionController)`);
+}
+/**
+* 宿主会话投递实现。
+*
+* @param ctx 插件上下文
+* @returns 投递器
+*/
+function createHostSessionDelivery(ctx) {
+	return { async deliver(sessionId, text) {
+		const agent = await resolveLiveAgent(ctx, sessionId);
+		const sessions = ctx.get("sessions");
+		const before = sessions?.get?.(sessionId);
+		const startSeq = typeof before?.seq === "number" ? before.seq : null;
+		if (typeof agent.followup !== "function") throw new Error(`starter session "${sessionId}" cannot accept a follow-up message`);
+		agent.followup(createUserMessage(text));
+		if (typeof sessions?.flush === "function" && agent.session !== void 0) try {
+			await sessions.flush(agent.session);
+		} catch {}
+		return startSeq;
+	} };
+}
+/**
+* 读一次机器人句柄的观测结果。
+*
+* @param handle robots 句柄
+* @param sinceSeq 起点 seq
+* @returns 本轮快照
+*/
+function readHandleResult(handle, sinceSeq) {
+	let raw;
+	if (typeof handle.readResult === "function") {
+		const value = handle.readResult({ sinceSeq });
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) raw = value;
+	}
+	return {
+		text: typeof raw?.text === "string" ? raw.text : "",
+		stopReason: typeof raw?.stopReason === "string" ? raw.stopReason : null,
+		turnEnded: raw?.turnEnded === true,
+		startSeq: typeof raw?.startSeq === "number" && Number.isInteger(raw.startSeq) ? raw.startSeq : null
 	};
 }
 /**
-* 把一份抽象工作流模板画成图模型（不含坐标）。
+* 读句柄的起点 seq。
 *
-* 模板不是运行：没有 steps / current / pendingUser，所以复用 `buildRunGraph` 的
-* 拓扑排序、成环合并与边合并，用一个「空运行」喂进去。得到节点后统一改成
-* `idle` 状态（start 也不再标成 completed），让图读作「静态参考结构」而不是
-* 「执行进度」。调用方再把结果交给 `layoutRunGraph` 计算分层坐标与 SVG 路径。
-*
-* @param template 模板对象（含 `id` 与 `nodes`）
-* @returns 图模型；模板没有节点时是 `null`
+* @param handle robots 句柄
+* @returns 起点 seq；未知时是 null
 */
-function buildTemplateGraph(template) {
-	const nodes = isPlainObject(template) && Array.isArray(template.nodes) ? template.nodes : [];
-	if (nodes.length === 0) return null;
-	const model = buildRunGraph({
-		run: { runId: `template:${isPlainObject(template) && typeof template.id === "string" ? template.id : ""}` },
-		definition: { definition: { nodes } },
-		avatars: null
-	});
-	if (model === null) return null;
-	model.nodes = model.nodes.map((node) => ({
-		...node,
-		state: "idle",
-		visits: 0,
-		unreachable: false
-	}));
-	return model;
+function handleStartSeq(handle) {
+	return typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : null;
+}
+/**
+* 读句柄的会话 id。
+*
+* @param handle robots 句柄
+* @returns 会话 id；未知时是 null
+*/
+function handleSessionId(handle) {
+	return typeof handle.sessionId === "string" && handle.sessionId !== "" ? handle.sessionId : null;
+}
+/**
+* 等待一段会话轮次观测的定时器；返回取消函数。
+*
+* @param intervalMs 轮询间隔
+* @param check 每次轮询的回调；返回 true 时停止
+* @returns 取消函数
+*/
+function poll(intervalMs, check) {
+	let stopped = false;
+	let timer = null;
+	const tick = async () => {
+		if (stopped) return;
+		let done = false;
+		try {
+			done = await check();
+		} catch {
+			done = true;
+		}
+		if (stopped || done) return;
+		timer = setTimeout(tick, intervalMs);
+		timer.unref?.();
+	};
+	timer = setTimeout(tick, intervalMs);
+	timer.unref?.();
+	return () => {
+		stopped = true;
+		if (timer !== null) clearTimeout(timer);
+	};
+}
+// .build/workflows/engine/tasks.js
+/**
+* 任务创建校验与记录构造（`.tmp/workflow-v4-spec.md` §7.3 / §7.4）。
+*
+* 创建任务的入口只有两个：引擎按 `start.next` 生成初始任务；执行中的任务通过
+* `buka_task_create` 派生任务。这里实现两条路径共享的纯校验：
+*
+* 1. 目标岗位是创建者岗位的直接后继（边存在；`start` / `end` 同理）；
+* 2. 任务类型是目标岗位声明的类型（结束任务用 `end.task`）；
+* 3. 边写了类型白名单时，类型在白名单里；
+* 4. payload 符合类型 schema，模板只引用已存在的数据路径；
+* 5. 依赖 id 属于本作业、已存在、不是自己、依赖图不成环；`requires` 满足；
+* 6. 作业预算未超。
+*
+* @module @buka/dsh-plugin-workflows/engine/tasks
+*/
+/**
+* 解析岗位执行者，构造任务记录里钉住的执行者。
+*
+* @param definition 定义
+* @param positionId 岗位 id
+* @param job 作业
+* @param robots 机器人登记表
+* @returns 钉住的执行者
+*/
+function resolveExecutor(definition, positionId, job, robots) {
+	if (positionId === "start" || positionId === "end") return job.starter.kind === "human" ? { kind: "human" } : {
+		kind: "session",
+		sessionId: job.starter.sessionId
+	};
+	const position = findPosition(definition, positionId);
+	if (position === void 0) throw new WorkflowError("unknown-position", `unknown position "${positionId}"`);
+	if (position.executor.kind === "human") return { kind: "human" };
+	const robot = robots.get(position.executor.name);
+	if (robot === void 0) throw new WorkflowError("unknown-robot", `position "${positionId}" uses robot "${position.executor.name}", which is not registered`);
+	return {
+		kind: "robot",
+		name: robot.name,
+		driver: robot.driver,
+		...robot.program === void 0 ? {} : { program: robot.program },
+		...robot.avatar === void 0 ? {} : { avatar: robot.avatar }
+	};
+}
+/**
+* 校验模板引用：只允许 start.output 与已存在任务的 output / text。
+*
+* @param payload payload
+* @param tasks 作业里已创建的任务
+* @param definition 定义
+* @param startOutputSchema 启动任务 output schema
+* @returns 错误消息列表
+*/
+function templateReferenceIssues(payload, tasks, definition, startOutputSchema) {
+	const issues = [];
+	const byId = new Map(tasks.map((task) => [task.id, task]));
+	for (const reference of inspectPayload(payload).references) {
+		const parsed = reference.reference;
+		if (parsed === null) {
+			issues.push(`template "{{${reference.path}}}" must be start.output, task.<id>.output or task.<id>.text`);
+			continue;
+		}
+		if (parsed.kind === "start") {
+			const reason = resolveOutputPath(startOutputSchema, parsed.segments);
+			if (reason !== null) issues.push(`template "{{${reference.path}}}" ${reason}`);
+			continue;
+		}
+		const task = byId.get(parsed.taskId);
+		if (task === void 0) {
+			issues.push(`template "{{${reference.path}}}" references task "${parsed.taskId}", which does not exist in this job`);
+			continue;
+		}
+		if (parsed.field === "text") continue;
+		const type = findTaskType(definition, task.type);
+		if (type === void 0) continue;
+		const reason = resolveOutputPath(type.output, parsed.segments);
+		if (reason !== null) issues.push(`template "{{${reference.path}}}" ${reason}`);
+	}
+	return issues;
+}
+/**
+* 判断一个任务在加入新依赖后依赖图是否成环。
+*
+* 新任务的依赖只能指向已创建任务，所以只需检查已有任务的依赖闭包；但如果已有
+* 数据被外部改坏，仍在创建时报错而不是拖到调度。
+*
+* @param tasks 已有任务
+* @returns 依赖图里的环（任务 id）；无环时是 null
+*/
+function findDependencyCycle(tasks) {
+	const byId = new Map(tasks.map((task) => [task.id, task]));
+	const visiting = /* @__PURE__ */ new Set();
+	const visited = /* @__PURE__ */ new Set();
+	let cycle = null;
+	const visit = (taskId, path) => {
+		if (visiting.has(taskId)) {
+			cycle = [...path.slice(path.indexOf(taskId)), taskId];
+			return true;
+		}
+		if (visited.has(taskId)) return false;
+		visiting.add(taskId);
+		const task = byId.get(taskId);
+		for (const dependency of task?.deps ?? []) if (byId.has(dependency) && visit(dependency, [...path, taskId])) return true;
+		visiting.delete(taskId);
+		visited.add(taskId);
+		return false;
+	};
+	for (const task of tasks) if (visit(task.id, [])) break;
+	return cycle;
+}
+/**
+* 校验并构造一条派生任务。
+*
+* @param input 创建者、目标岗位、类型、payload 与依赖
+* @returns 新任务记录与初始状态
+* @throws `WorkflowError`（code 稳定）表示创建被拒绝
+*/
+function buildCreatedTask(input) {
+	const { job, creator, position, type, payload, deps, tasks, robots } = input;
+	const definition = job.definition;
+	if (job.status !== "running") throw new WorkflowError("job-not-running", `job ${job.id} is not running`);
+	if (creator.status !== "running") throw new WorkflowError("creator-not-running", `task ${creator.id} is not running; only an executing task can create tasks`);
+	if (position === "start") throw new WorkflowError("invalid-target", "tasks cannot be dispatched to the built-in start node");
+	const edge = findEdge(definition, creator.position, position);
+	if (edge === void 0) throw new WorkflowError("no-edge", `no edge "${creator.position} -> ${position}": the executing position cannot dispatch this target`);
+	const taskType = resolveTargetTaskType(definition, position, type);
+	if (!edgeAllowsType(edge, taskType.id)) throw new WorkflowError("type-not-allowed", `edge "${creator.position} -> ${position}" does not allow task type "${taskType.id}"`);
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new WorkflowError("invalid-payload", "payload must be a JSON object");
+	const schemaIssues = templatedPayloadIssues(taskType.payload, payload);
+	if (schemaIssues.length > 0) throw new WorkflowError("invalid-payload", `payload does not match task type "${taskType.id}": ${schemaIssues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
+	const startType = definition.start.task.output;
+	const templateIssues = templateReferenceIssues(payload, tasks, definition, startType);
+	if (templateIssues.length > 0) throw new WorkflowError("invalid-template", templateIssues.join("; "));
+	const taskId = newTaskId();
+	const dependencyIds = [];
+	for (const dependency of deps) {
+		if (typeof dependency !== "string" || dependency.trim() === "") throw new WorkflowError("invalid-dependency", "deps must be non-empty task ids");
+		if (dependency === taskId) throw new WorkflowError("invalid-dependency", "a task cannot depend on itself");
+		if (dependencyIds.includes(dependency)) throw new WorkflowError("invalid-dependency", `duplicate dependency "${dependency}"`);
+		if (tasks.find((task) => task.id === dependency) === void 0) throw new WorkflowError("unknown-dependency", `dependency "${dependency}" does not exist in this job (no future references)`);
+		dependencyIds.push(dependency);
+	}
+	if (findDependencyCycle(tasks) !== null) throw new WorkflowError("dependency-cycle", "the job task dependency graph already contains a cycle");
+	for (const requirement of taskType.requires ?? []) if (!tasks.some((task) => dependencyIds.includes(task.id) && requirement.types.includes(task.type))) throw new WorkflowError("requires-not-met", `task type "${taskType.id}" requires a dependency of type: ${requirement.types.join(" | ")}`);
+	const budget = definition.budgets.maxTasks;
+	if (tasks.length + 1 > budget) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${budget} would be exceeded (job ${job.id} already has ${tasks.length} tasks)`);
+	const now = nowIso();
+	const ready = dependencyIds.every((dependency) => tasks.find((task) => task.id === dependency)?.status === "completed");
+	return {
+		task: {
+			id: taskId,
+			jobId: job.id,
+			position,
+			type: taskType.id,
+			payload,
+			deps: dependencyIds,
+			status: ready ? "ready" : "pending",
+			createdBy: {
+				taskId: creator.id,
+				position: creator.position
+			},
+			assignee: resolveExecutor(definition, position, job, robots),
+			claimant: null,
+			attemptIds: [],
+			result: null,
+			error: null,
+			assistantBlocked: false,
+			createdAt: now,
+			startedAt: null,
+			finishedAt: null,
+			updatedAt: now
+		},
+		ready
+	};
+}
+/**
+* 解析目标任务类型；`end` 用内建契约，既不是岗位类型也不存在。
+*
+* @param definition 定义
+* @param position 目标岗位
+* @param type 请求的类型 id
+* @returns 任务类型（end 返回合成契约）
+*/
+function resolveTargetTaskType(definition, position, type) {
+	if (position === "end") {
+		if (type !== "end" && type !== "") throw new WorkflowError("invalid-type", `end tasks use the built-in end contract; "type" must be "end" (got "${type}")`);
+		return {
+			id: "end",
+			label: "结束任务",
+			description: "把最终交付物交给启动者，投递即完成。",
+			payload: definition.end.task.payload,
+			output: { type: "object" }
+		};
+	}
+	const taskType = findTaskType(definition, type);
+	const positionDef = definition.positions.find((candidate) => candidate.id === position);
+	if (taskType === void 0 || positionDef?.taskTypes.every((candidate) => candidate.id !== type)) throw new WorkflowError("invalid-type", `"${type}" is not a task type of position "${position}"`);
+	return taskType;
+}
+/**
+* 生成 `start.next` 发布的初始任务。
+*
+* 启动任务已完成：结构化输入是它们的唯一依赖 `$start`，所以初始状态都是
+* `ready`（除非模板里显式依赖了别的初始任务——本版不允许）。
+*
+* @param input 作业、启动任务、模板、已有任务与机器人表
+* @returns 新任务记录
+*/
+function buildInitialTasks(input) {
+	const { job, startTask, robots } = input;
+	const definition = job.definition;
+	const tasks = [...input.tasks];
+	const created = [];
+	for (const [index, route] of definition.start.next.entries()) {
+		if (tasks.length + 1 > definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${definition.budgets.maxTasks} would be exceeded by initial task ${index}`);
+		const task = buildInitialTask({
+			job,
+			route,
+			startTask,
+			tasks,
+			robots,
+			definition
+		});
+		tasks.push(task);
+		created.push(task);
+	}
+	return created;
+}
+/** 构造单条初始任务。 */
+function buildInitialTask(input) {
+	const { job, route, startTask, tasks, robots, definition } = input;
+	if (findPosition(definition, route.position) === void 0) throw new WorkflowError("unknown-position", `start.next targets unknown position "${route.position}"`);
+	const taskType = resolveTargetTaskType(definition, route.position, route.type);
+	const edge = findEdge(definition, "start", route.position);
+	if (edge === void 0 || !edgeAllowsType(edge, taskType.id)) throw new WorkflowError("no-edge", `start.next dispatches to "${route.position}" but no edge allows task type "${taskType.id}"`);
+	const templateIssues = templateReferenceIssues(route.payload, tasks, definition, definition.start.task.output);
+	if (templateIssues.length > 0) throw new WorkflowError("invalid-template", templateIssues.join("; "));
+	const now = nowIso();
+	return {
+		id: newTaskId(),
+		jobId: job.id,
+		position: route.position,
+		type: taskType.id,
+		payload: route.payload,
+		deps: route.dependsOn === void 0 ? [START_TASK_ID] : [...route.dependsOn],
+		status: "ready",
+		createdBy: {
+			taskId: startTask.id,
+			position: "start"
+		},
+		assignee: resolveExecutor(definition, route.position, job, robots),
+		claimant: null,
+		attemptIds: [],
+		result: null,
+		error: null,
+		assistantBlocked: false,
+		createdAt: now,
+		startedAt: null,
+		finishedAt: null,
+		updatedAt: now
+	};
+}
+// .build/workflows/engine/engine.js
+/**
+* 工作流引擎：作业创建、调度、执行、派发校验、结算、取消、重试与恢复。
+*
+* 设计要点（`.tmp/workflow-v4-spec.md` §6-§12、ADR 0006-0012）：
+*
+* - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
+* - 一个 agent 机器人岗位一次只跑一条任务（FIFO），program 机器人直接完成，
+*   人任务由被点名的助理承办或停在「待认领」；
+* - 记状态变更全部串行化到 per-job 队列；长等待的会话 / 定时器在队列外执行，
+*   完成时再回队列提交状态；
+* - 一个任务一条新会话，不复用、不压缩；重启时只续接同一条会话。
+*
+* @module @buka/dsh-plugin-workflows/engine
+*/
+/** 任务结果文本在记录里的预览上限。 */
+const RESULT_PREVIEW_BYTES = 4096;
+/** 机器人登记表缓存时间。 */
+const ROBOT_CACHE_MS = 5e3;
+/** 从 robots 服务读登记表，转成本插件关心的形状。 */
+function parseRobotCatalog(raw) {
+	const catalog = /* @__PURE__ */ new Map();
+	const entries = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" && Array.isArray(raw.robots) ? raw.robots ?? [] : [];
+	for (const entry of entries) {
+		if (entry === null || typeof entry !== "object") continue;
+		const record = entry;
+		const name = typeof record.name === "string" ? record.name.trim() : "";
+		if (name === "") continue;
+		const driver = record.driver === "program" ? "program" : "agent";
+		catalog.set(name, {
+			name,
+			driver,
+			...typeof record.program === "string" && record.program !== "" ? { program: record.program } : {},
+			assistant: record.assistant === true,
+			...typeof record.description === "string" ? { description: record.description } : {},
+			...typeof record.avatar === "string" ? { avatar: record.avatar } : {},
+			...typeof record.path === "string" && record.path !== "" ? { path: record.path } : {}
+		});
+	}
+	return catalog;
+}
+/** 一句话输入摘要。 */
+function summarizeInput(input) {
+	if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+		const request = input.request;
+		if (typeof request === "string" && request.trim() !== "") return clipUtf8(request.trim(), 240);
+	}
+	return clipUtf8(JSON.stringify(input), 240);
+}
+/** 引擎。 */
+var WorkflowEngine = class {
+	store;
+	options;
+	logger;
+	robotsOf;
+	delivery;
+	active = /* @__PURE__ */ new Map();
+	sessionTasks = /* @__PURE__ */ new Map();
+	busyAssistants = /* @__PURE__ */ new Set();
+	deliveryBlocked = /* @__PURE__ */ new Set();
+	catalog = /* @__PURE__ */ new Map();
+	catalogAt = 0;
+	started = false;
+	disposed = false;
+	constructor(deps) {
+		this.store = deps.store;
+		this.options = deps.options;
+		this.logger = deps.logger;
+		this.robotsOf = deps.robots;
+		this.delivery = deps.delivery;
+	}
+	/** 启动引擎：刷新机器人登记表并恢复未完成的作业。 */
+	async start() {
+		if (this.started || this.disposed) return;
+		this.started = true;
+		await this.refreshRobots(true);
+		await this.recover();
+	}
+	/** 停掉所有等待中的执行与定时器。 */
+	dispose() {
+		if (this.disposed) return;
+		this.disposed = true;
+		for (const execution of this.active.values()) {
+			execution.stopPoll?.();
+			if (execution.timeout !== null) clearTimeout(execution.timeout);
+			execution.controller.abort();
+			try {
+				if (execution.handle !== null && typeof execution.handle.cancel === "function") execution.handle.cancel("host is shutting down");
+			} catch {}
+			this.disposeHandle(execution.handle);
+		}
+		this.active.clear();
+		this.sessionTasks.clear();
+	}
+	/** 释放一个 robots 句柄。 */
+	disposeHandle(handle) {
+		if (handle === null) return;
+		try {
+			if (typeof handle.dispose === "function") handle.dispose();
+		} catch {}
+	}
+	/** 刷新机器人登记表（默认 5s 缓存）。 */
+	async refreshRobots(force = false) {
+		if (!force && Date.now() - this.catalogAt < ROBOT_CACHE_MS) return this.catalog;
+		const robots = this.robotsOf();
+		if (robots === null) {
+			this.catalog = /* @__PURE__ */ new Map();
+			this.catalogAt = Date.now();
+			return this.catalog;
+		}
+		try {
+			const listed = typeof robots.list === "function" ? await robots.list() : void 0;
+			this.catalog = parseRobotCatalog(listed ?? robots);
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not read the robots registry: ${describeError$1(error)}`);
+			this.catalog = /* @__PURE__ */ new Map();
+		}
+		this.catalogAt = Date.now();
+		return this.catalog;
+	}
+	/** 取机器人登记表（按名字）。 */
+	async robots() {
+		return await this.refreshRobots();
+	}
+	/**
+	* 校验并保存工作流定义：没有 id 时新建，有 id 时追加一个版本。
+	*
+	* @param input 定义与可选工作流 id
+	* @returns 保存后的工作流记录
+	*/
+	async saveWorkflow(input) {
+		const robots = await this.robots();
+		const validated = validateWorkflowDefinition(input.definition, { robots });
+		if (!validated.ok) throw new WorkflowError("invalid-definition", validated.issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"));
+		const definition = validated.definition;
+		if (input.workflowId !== void 0 && input.workflowId !== "") {
+			if (this.store.getWorkflow(input.workflowId) === void 0) throw new WorkflowError("not-found", `workflow not found: ${input.workflowId}`);
+			return await this.store.saveWorkflowVersion(input.workflowId, definition);
+		}
+		return await this.store.createWorkflow({
+			name: definition.name,
+			description: definition.description ?? "",
+			definition,
+			status: "draft"
+		});
+	}
+	/**
+	* 工作流列表投影。
+	*
+	* @returns 工作流摘要
+	*/
+	listWorkflowSummaries() {
+		return this.store.listWorkflows().map((workflow) => {
+			return {
+				id: workflow.id,
+				name: workflow.name,
+				description: workflow.description,
+				version: workflow.latestVersion,
+				status: workflow.status,
+				jobCount: this.store.countJobs(workflow.id),
+				updatedAt: workflow.updatedAt
+			};
+		});
+	}
+	/**
+	* 读工作流详情（含某个版本的完整定义）。
+	*
+	* @param workflowId 工作流 id
+	* @param version 版本；省略取最新
+	* @returns 工作流详情；不存在时 null
+	*/
+	readWorkflowDetail(workflowId, version) {
+		const found = this.store.readWorkflowVersion(workflowId, version);
+		if (found === null) return null;
+		const jobs = this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id)));
+		return {
+			workflow: {
+				id: found.record.id,
+				name: found.versionRecord.definition.name,
+				description: found.versionRecord.definition.description ?? "",
+				version: found.version,
+				status: found.record.status,
+				definition: found.versionRecord.definition
+			},
+			graph: workflowGraph(found.versionRecord.definition, this.catalog),
+			jobs
+		};
+	}
+	/**
+	* 激活 / 停用工作流。
+	*
+	* @param workflowId 工作流 id
+	* @param active 是否激活
+	* @returns 更新后的记录
+	*/
+	async setWorkflowActive(workflowId, active) {
+		if (this.store.getWorkflow(workflowId) === void 0) throw new WorkflowError("not-found", `workflow not found: ${workflowId}`);
+		return await this.store.activateWorkflow(workflowId, active);
+	}
+	/**
+	* 页面人启动作业：原始输入与结构化输入一起提交，启动任务即刻完成。
+	*
+	* @param input 工作流、原始输入与结构化输入
+	* @returns 新作业
+	*/
+	async createJobFromHuman(input) {
+		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
+		const robots = await this.robots();
+		const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput);
+		if (inputProblems.length > 0) throw new WorkflowError("invalid-input", `raw input: ${inputProblems.join("; ")}`);
+		const structuredProblems = schemaProblems(definition.start.task.output, input.structuredInput);
+		if (structuredProblems.length > 0) throw new WorkflowError("invalid-input", `structured input: ${structuredProblems.join("; ")}`);
+		const job = await this.insertJob({
+			workflow,
+			definition,
+			starter: { kind: "human" },
+			rawInput: input.rawInput,
+			structuredInput: input.structuredInput
+		});
+		try {
+			await this.store.runExclusive(job.id, async () => {
+				const now = nowIso();
+				const startTask = {
+					id: START_TASK_ID,
+					jobId: job.id,
+					position: "start",
+					type: "start",
+					payload: input.rawInput,
+					deps: [],
+					status: "completed",
+					createdBy: null,
+					assignee: { kind: "human" },
+					claimant: {
+						kind: "human",
+						name: "本地用户",
+						sessionId: null
+					},
+					attemptIds: [],
+					result: {
+						output: input.structuredInput,
+						text: "",
+						textBytes: 0,
+						textFile: null,
+						attachmentIds: []
+					},
+					error: null,
+					assistantBlocked: false,
+					createdAt: now,
+					startedAt: now,
+					finishedAt: now,
+					updatedAt: now
+				};
+				await this.store.insertTask(startTask);
+				await this.appendEvent(job.id, "job/created", {
+					seq: job.seq,
+					starter: "human"
+				});
+				await this.appendEvent(job.id, "task/completed", {
+					taskId: startTask.id,
+					type: "start"
+				});
+				const initial = buildInitialTasks({
+					job,
+					startTask,
+					tasks: [startTask],
+					robots
+				});
+				for (const task of initial) {
+					await this.store.insertTask(task);
+					await this.appendEvent(job.id, "task/created", {
+						taskId: task.id,
+						position: task.position,
+						type: task.type,
+						deps: task.deps
+					});
+				}
+				await this.recomputeLocked(job.id);
+			});
+		} catch (error) {
+			await this.store.updateJob(job.id, (current) => ({
+				...current,
+				status: "failed",
+				error: describeError$1(error),
+				finishedAt: nowIso(),
+				updatedAt: nowIso()
+			})).catch(() => void 0);
+			throw error;
+		}
+		return this.store.getJob(job.id) ?? job;
+	}
+	/**
+	* 会话启动作业：启动任务回到启动者会话执行（下一轮 agent 提交结构化输入）。
+	*
+	* @param input 工作流、原始输入与启动者会话
+	* @returns 新作业
+	*/
+	async createJobFromSession(input) {
+		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
+		const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput);
+		if (inputProblems.length > 0) throw new WorkflowError("invalid-input", `raw input: ${inputProblems.join("; ")}`);
+		const job = await this.insertJob({
+			workflow,
+			definition,
+			starter: {
+				kind: "session",
+				sessionId: input.sessionId
+			},
+			rawInput: input.rawInput
+		});
+		await this.store.runExclusive(job.id, async () => {
+			const now = nowIso();
+			const startTask = {
+				id: START_TASK_ID,
+				jobId: job.id,
+				position: "start",
+				type: "start",
+				payload: input.rawInput,
+				deps: [],
+				status: "pending",
+				createdBy: null,
+				assignee: {
+					kind: "session",
+					sessionId: input.sessionId
+				},
+				claimant: null,
+				attemptIds: [],
+				result: null,
+				error: null,
+				assistantBlocked: false,
+				createdAt: now,
+				startedAt: null,
+				finishedAt: null,
+				updatedAt: now
+			};
+			await this.store.insertTask(startTask);
+			await this.appendEvent(job.id, "job/created", {
+				seq: job.seq,
+				starter: "session"
+			});
+			await this.recomputeLocked(job.id);
+		});
+		return this.store.getJob(job.id) ?? job;
+	}
+	/** 取一个可启动的工作流：必须存在且已激活。 */
+	requireStartableWorkflow(workflowId) {
+		const found = this.store.readWorkflowVersion(workflowId);
+		if (found === null) throw new WorkflowError("not-found", `workflow not found: ${workflowId}`);
+		if (found.record.status !== "active") throw new WorkflowError("workflow-not-active", `workflow "${found.record.name}" is ${found.record.status}; activate it before starting a job`);
+		return {
+			workflow: found.record,
+			definition: found.versionRecord.definition
+		};
+	}
+	/** 插入作业记录。 */
+	async insertJob(input) {
+		const seq = await this.store.allocateJobSeq(input.workflow.id);
+		const now = nowIso();
+		const version = this.store.readWorkflowVersion(input.workflow.id)?.version ?? input.workflow.latestVersion;
+		const job = {
+			id: newJobId(),
+			seq,
+			workflowId: input.workflow.id,
+			workflowVersion: version,
+			workflowName: input.definition.name,
+			workflowDescription: input.definition.description ?? "",
+			definition: input.definition,
+			status: "running",
+			starter: input.starter,
+			input: {
+				raw: input.rawInput,
+				...input.structuredInput === void 0 ? {} : { structured: input.structuredInput }
+			},
+			inputSummary: summarizeInput(input.rawInput),
+			error: null,
+			createdAt: now,
+			updatedAt: now,
+			finishedAt: null
+		};
+		await this.store.ensureJobDirectories(job.id);
+		await this.store.insertJob(job);
+		return job;
+	}
+	/**
+	* 作业详情（契约形状）。
+	*
+	* @param jobId 作业 id
+	* @returns 作业详情；不存在时 null
+	*/
+	jobDetail(jobId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0) return null;
+		const tasks = this.store.listTasks(jobId);
+		return {
+			job: {
+				id: job.id,
+				seq: job.seq,
+				status: job.status,
+				workflowId: job.workflowId,
+				workflowName: job.workflowName,
+				workflowVersion: job.workflowVersion,
+				starter: job.starter,
+				input: job.input,
+				createdAt: job.createdAt,
+				updatedAt: job.updatedAt,
+				error: job.error
+			},
+			definition: jobDefinition(job.definition, this.catalog),
+			tasks: tasks.map((task) => taskSummary(task, job.definition)),
+			canRetryDelivery: canRetryDelivery(tasks)
+		};
+	}
+	/**
+	* 作业列表（某个工作流下）。
+	*
+	* @param workflowId 工作流 id
+	* @returns 作业摘要
+	*/
+	listJobSummaries(workflowId) {
+		return this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id)));
+	}
+	/**
+	* 任务详情（契约形状）。
+	*
+	* @param jobId 作业 id
+	* @param taskId 任务 id
+	* @returns 任务详情；不存在时 null
+	*/
+	taskDetail(jobId, taskId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0) return null;
+		const task = this.store.getTask(taskId);
+		if (task === void 0 || task.jobId !== jobId) return null;
+		return taskDetail({
+			job,
+			task,
+			tasks: this.store.listTasks(jobId),
+			attempts: this.store.listAttempts(taskId),
+			attachments: this.store.listAttachments(jobId)
+		});
+	}
+	/**
+	* 作业附件库（页面展示全部附件与来源任务）。
+	*
+	* @param jobId 作业 id
+	* @returns 附件元数据
+	*/
+	listJobAttachments(jobId) {
+		return this.store.listAttachments(jobId);
+	}
+	/**
+	* 取附件元数据（路由下载 / 预览用）。
+	*
+	* @param jobId 作业 id
+	* @param attachmentId 附件 id
+	* @returns 附件文件与元数据；不存在时 null
+	*/
+	openAttachment(jobId, attachmentId) {
+		const record = this.store.getAttachment(attachmentId);
+		if (record === void 0 || record.jobId !== jobId) return null;
+		try {
+			return {
+				record,
+				file: resolveAttachmentFile(this.store.paths(jobId).root, record.path)
+			};
+		} catch {
+			return null;
+		}
+	}
+	/**
+	* 执行会话可见的附件检索结果。
+	*
+	* @param sessionId 会话 id
+	* @param query 关键词
+	* @returns 可见附件
+	*/
+	searchAttachmentsForSession(sessionId, query) {
+		const reference = this.sessionTasks.get(sessionId);
+		if (reference === void 0) return [];
+		const visible = visibleTaskIds(this.store.listTasks(reference.jobId), reference.taskId);
+		const attachments = this.store.listAttachments(reference.jobId);
+		return searchAttachments(attachments, new Set(attachments.map((item) => item.id)), query).filter((attachment) => visible.has(attachment.sourceTaskId));
+	}
+	/**
+	* 执行会话按 id 读取一个可见附件（元数据 + 有界文本）。
+	*
+	* @param sessionId 会话 id
+	* @param attachmentId 附件 id
+	* @returns 附件信息；不可见 / 不存在时 null
+	*/
+	async readAttachmentForSession(sessionId, attachmentId) {
+		const reference = this.sessionTasks.get(sessionId);
+		if (reference === void 0) return null;
+		const visible = visibleTaskIds(this.store.listTasks(reference.jobId), reference.taskId);
+		const record = this.store.getAttachment(attachmentId);
+		if (record === void 0 || record.jobId !== reference.jobId) return null;
+		if (!visible.has(record.sourceTaskId)) return null;
+		const base = {
+			id: record.id,
+			name: record.name,
+			bytes: record.bytes,
+			mime: record.mime,
+			description: record.description,
+			sourceTaskId: record.sourceTaskId,
+			sourcePositionId: record.sourcePositionId,
+			createdAt: record.createdAt
+		};
+		try {
+			const inline = await readInlineText(resolveAttachmentFile(this.store.paths(record.jobId).root, record.path), this.options.maxInlineAttachmentBytes);
+			return {
+				...base,
+				...inline.available ? { text: inline.text } : { reason: inline.reason ?? "binary" }
+			};
+		} catch {
+			return {
+				...base,
+				reason: "unreadable"
+			};
+		}
+	}
+	/**
+	* 一个会话正在执行的任务（工具可见性 / 结果收口用）。
+	*
+	* @param sessionId 会话 id
+	* @returns 作业与任务 id；没有时 null
+	*/
+	taskForSession(sessionId) {
+		return this.sessionTasks.get(sessionId) ?? null;
+	}
+	/**
+	* 某个会话作为启动者的作业 id（最近创建的优先）。
+	*
+	* @param sessionId 会话 id
+	* @returns 作业 id；没有时 null
+	*/
+	jobIdForSession(sessionId) {
+		let found = null;
+		for (const job of this.store.allJobs()) {
+			if (job.starter.kind !== "session" || job.starter.sessionId !== sessionId) continue;
+			if (found === null || job.createdAt > found.createdAt) found = job;
+		}
+		return found?.id ?? null;
+	}
+	/**
+	* 会话能否查看某个作业（启动者或执行中的任务会话）。
+	*
+	* @param sessionId 会话 id
+	* @param jobId 作业 id
+	* @returns 可以查看时为 true
+	*/
+	canViewJob(sessionId, jobId) {
+		const reference = this.sessionTasks.get(sessionId);
+		if (reference !== void 0) return reference.jobId === jobId;
+		return this.jobIdForSession(sessionId) === jobId;
+	}
+	/**
+	* 执行中的任务创建派生任务。
+	*
+	* @param input 会话、目标岗位、类型、payload 与依赖
+	* @returns 新任务
+	*/
+	async createTaskFromSession(input) {
+		const reference = this.sessionTasks.get(input.sessionId);
+		if (reference === void 0) throw new WorkflowError("no-task", "this session is not executing a workflow task; only an executing task can create tasks");
+		const robots = await this.robots();
+		return await this.store.runExclusive(reference.jobId, async () => {
+			const job = this.store.getJob(reference.jobId);
+			if (job === void 0) throw new WorkflowError("not-found", "job not found");
+			const tasks = this.store.listTasks(job.id);
+			const creator = tasks.find((task) => task.id === reference.taskId);
+			if (creator === void 0) throw new WorkflowError("not-found", "task not found");
+			const created = buildCreatedTask({
+				job,
+				creator,
+				position: input.position,
+				type: input.type,
+				payload: input.payload,
+				deps: input.deps,
+				tasks,
+				robots
+			});
+			await this.store.insertTask(created.task);
+			await this.appendEvent(job.id, "task/created", {
+				taskId: created.task.id,
+				position: created.task.position,
+				type: created.task.type,
+				deps: created.task.deps,
+				createdBy: creator.id
+			});
+			await this.recomputeLocked(job.id);
+			return this.store.getTask(created.task.id) ?? created.task;
+		});
+	}
+	/**
+	* 执行中的任务 / 助理提交结果。
+	*
+	* @param input 会话、结构化结果、文本与附件
+	* @returns 任务与作业的最新状态
+	*/
+	async completeTaskFromSession(input) {
+		const reference = this.sessionTasks.get(input.sessionId);
+		if (reference === void 0) throw new WorkflowError("no-task", "this session is not executing a workflow task");
+		return await this.store.runExclusive(reference.jobId, async () => {
+			const job = this.store.getJob(reference.jobId);
+			if (job === void 0) throw new WorkflowError("not-found", "job not found");
+			const task = this.store.getTask(reference.taskId);
+			if (task === void 0) throw new WorkflowError("not-found", "task not found");
+			if (task.status !== "running") throw new WorkflowError("task-not-running", `task ${task.id} is ${task.status}; it cannot be completed again`);
+			if (task.id === "$start") {
+				if (this.store.listTasks(job.id).length + job.definition.start.next.length + 1 > job.definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${job.definition.budgets.maxTasks} would be exceeded by the initial tasks`);
+			}
+			const problems = this.outputProblemsFor(job, task, input.output);
+			if (problems.length > 0) throw new WorkflowError("invalid-output", `output does not match the task contract: ${problems.join("; ")}`);
+			const claimant = task.claimant;
+			const workspace = this.workspaceFor(task);
+			const updated = await this.completeTaskLocked(job, task, {
+				output: input.output,
+				text: input.text,
+				attachments: input.attachments,
+				workspace,
+				createdBy: claimant?.name ?? "执行者"
+			});
+			this.sessionTasks.delete(input.sessionId);
+			await this.recomputeLocked(job.id);
+			return {
+				task: updated,
+				job: this.store.getJob(job.id) ?? job
+			};
+		});
+	}
+	/**
+	* 页面：人认领一条待认领任务。
+	*
+	* @param jobId 作业 id
+	* @param taskId 任务 id
+	* @returns 更新后的任务
+	*/
+	async claimTaskAsHuman(jobId, taskId) {
+		return await this.store.runExclusive(jobId, async () => {
+			const job = this.requireRunningJob(jobId);
+			const task = this.requireTask(jobId, taskId);
+			if (task.assignee.kind !== "human") throw new WorkflowError("not-human-task", `task ${taskId} is not a human task`);
+			if (task.status !== "ready") throw new WorkflowError("not-ready", `task ${taskId} is ${task.status}; only ready tasks can be claimed`);
+			assertTaskTransition(taskId, task.status, "running");
+			const now = nowIso();
+			const attemptId = newAttemptId();
+			const attempt = {
+				id: attemptId,
+				jobId,
+				taskId,
+				sessionId: null,
+				startSeq: null,
+				status: "running",
+				stopReason: null,
+				error: null,
+				promptFile: null,
+				startedAt: now,
+				finishedAt: null
+			};
+			await this.store.insertAttempt(attempt);
+			const updated = await this.store.updateTask(taskId, (current) => ({
+				...current,
+				status: "running",
+				claimant: {
+					kind: "human",
+					name: "本地用户",
+					sessionId: null
+				},
+				attemptIds: [...current.attemptIds, attemptId],
+				startedAt: current.startedAt ?? now,
+				updatedAt: now
+			}));
+			await this.appendEvent(jobId, "task/claimed", {
+				taskId,
+				claimant: "human"
+			});
+			await this.recomputeLocked(job.id);
+			return updated;
+		});
+	}
+	/**
+	* 页面：人填表提交一条人任务。
+	*
+	* @param input 作业、任务、结构化结果、文本与附件
+	* @returns 更新后的任务
+	*/
+	async completeTaskAsHuman(input) {
+		return await this.store.runExclusive(input.jobId, async () => {
+			const job = this.requireRunningJob(input.jobId);
+			const task = this.requireTask(input.jobId, input.taskId);
+			if (task.assignee.kind !== "human") throw new WorkflowError("not-human-task", `task ${input.taskId} is not a human task`);
+			if (task.status !== "running" && task.status !== "ready") throw new WorkflowError("invalid-status", `task ${input.taskId} is ${task.status}; a human task can only be completed from ready/running`);
+			let prepared = task;
+			if (task.status === "ready") {
+				const now = nowIso();
+				const attempt = {
+					id: newAttemptId(),
+					jobId: job.id,
+					taskId: task.id,
+					sessionId: null,
+					startSeq: null,
+					status: "running",
+					stopReason: null,
+					error: null,
+					promptFile: null,
+					startedAt: now,
+					finishedAt: null
+				};
+				await this.store.insertAttempt(attempt);
+				prepared = await this.store.updateTask(task.id, (current) => ({
+					...current,
+					claimant: {
+						kind: "human",
+						name: "本地用户",
+						sessionId: null
+					},
+					attemptIds: [...current.attemptIds, attempt.id],
+					updatedAt: now
+				}));
+			}
+			const problems = this.outputProblemsFor(job, prepared, input.output);
+			if (problems.length > 0) throw new WorkflowError("invalid-output", `output does not match the task contract: ${problems.join("; ")}`);
+			const updated = await this.completeTaskLocked(job, prepared, {
+				output: input.output,
+				text: input.text,
+				attachments: input.attachments,
+				workspace: void 0,
+				createdBy: "本地用户"
+			});
+			await this.recomputeLocked(job.id);
+			return updated;
+		});
+	}
+	/**
+	* 取消一条任务。
+	*
+	* @param jobId 作业 id
+	* @param taskId 任务 id
+	* @returns 更新后的任务
+	*/
+	async cancelTask(jobId, taskId) {
+		return await this.store.runExclusive(jobId, async () => {
+			const job = this.requireRunningJob(jobId, true);
+			const task = this.requireTask(jobId, taskId);
+			if (task.status === "completed" || task.status === "cancelled") throw new WorkflowError("invalid-status", `task ${taskId} is already ${task.status}`);
+			assertTaskTransition(taskId, task.status, "cancelled");
+			const now = nowIso();
+			this.cancelActive(taskId, "task was cancelled");
+			const updated = await this.store.updateTask(taskId, (current) => ({
+				...current,
+				status: "cancelled",
+				finishedAt: now,
+				updatedAt: now
+			}));
+			await this.closeRunningAttempts(taskId, "cancelled", "task was cancelled");
+			this.dropSessionTask(taskId);
+			await this.appendEvent(jobId, "task/cancelled", { taskId });
+			await this.recomputeLocked(job.id);
+			return updated;
+		});
+	}
+	/**
+	* 重试一条技术失败的任务：新增一次执行记录。
+	*
+	* @param jobId 作业 id
+	* @param taskId 任务 id
+	* @returns 更新后的任务
+	*/
+	async retryTask(jobId, taskId) {
+		return await this.store.runExclusive(jobId, async () => {
+			const job = this.requireRunningJob(jobId);
+			const task = this.requireTask(jobId, taskId);
+			if (task.status !== "failed") throw new WorkflowError("not-failed", `task ${taskId} is ${task.status}; only failed tasks can be retried`);
+			assertTaskTransition(taskId, "failed", "ready");
+			const updated = await this.store.updateTask(taskId, (current) => ({
+				...current,
+				status: "ready",
+				error: null,
+				claimant: null,
+				assistantBlocked: false,
+				finishedAt: null,
+				updatedAt: nowIso()
+			}));
+			await this.appendEvent(jobId, "task/retried", { taskId });
+			await this.recomputeLocked(job.id);
+			return updated;
+		});
+	}
+	/**
+	* 取消作业：取消全部非终态任务。
+	*
+	* @param jobId 作业 id
+	* @returns 更新后的作业
+	*/
+	async cancelJob(jobId) {
+		return await this.store.runExclusive(jobId, async () => {
+			const job = this.store.getJob(jobId);
+			if (job === void 0) throw new WorkflowError("not-found", `job not found: ${jobId}`);
+			if (isTerminalJobStatus(job.status)) return job;
+			assertJobTransition(jobId, job.status, "cancelled");
+			const now = nowIso();
+			for (const task of this.store.listTasks(jobId)) {
+				if (!isOpenTaskStatus(task.status)) continue;
+				this.cancelActive(task.id, "job was cancelled");
+				if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
+				await this.store.updateTask(task.id, (current) => ({
+					...current,
+					status: "cancelled",
+					finishedAt: now,
+					updatedAt: now
+				}));
+				await this.closeRunningAttempts(task.id, "cancelled", "job was cancelled");
+				this.dropSessionTask(task.id);
+			}
+			const updated = await this.store.updateJob(jobId, (current) => ({
+				...current,
+				status: "cancelled",
+				error: null,
+				finishedAt: now,
+				updatedAt: now
+			}));
+			await this.appendEvent(jobId, "job/cancelled", {});
+			return updated;
+		});
+	}
+	/**
+	* 页面：重试结束任务投递。
+	*
+	* @param jobId 作业 id
+	* @returns 更新后的作业
+	*/
+	async retryDelivery(jobId) {
+		return await this.store.runExclusive(jobId, async () => {
+			const job = this.requireRunningJob(jobId);
+			const endTasks = this.store.listTasks(jobId).filter((task) => task.position === "end" && task.status === "ready");
+			if (endTasks.length === 0) throw new WorkflowError("no-pending-delivery", "this job has no end task waiting for delivery");
+			for (const task of endTasks) this.deliveryBlocked.delete(task.id);
+			await this.appendEvent(jobId, "delivery/retry", { taskIds: endTasks.map((task) => task.id) });
+			await this.recomputeLocked(job.id);
+			return this.store.getJob(job.id) ?? job;
+		});
+	}
+	/** 重启恢复：重建调度、续接 running 任务、补算 clock、重试交付。 */
+	async recover() {
+		const jobs = this.store.allJobs().filter((job) => job.status === "running");
+		for (const job of jobs) try {
+			await this.store.runExclusive(job.id, async () => {
+				await this.recoverJobLocked(job.id);
+			});
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not recover job ${job.id}: ${describeError$1(error)}`);
+		}
+	}
+	/** 恢复一个作业：running 任务续接 / 失败，然后重新调度。 */
+	async recoverJobLocked(jobId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0 || job.status !== "running") return;
+		for (const task of this.store.listTasks(jobId)) {
+			if (task.status !== "running") continue;
+			const attempt = this.store.listAttempts(task.id).find((entry) => entry.status === "running");
+			if (attempt !== void 0) await this.store.updateAttempt(attempt.id, (current) => ({
+				...current,
+				status: "failed",
+				error: "host restarted while this attempt was running",
+				finishedAt: nowIso()
+			}));
+			if (task.position === "start") {
+				if (job.starter.kind === "session" && attempt !== void 0) {
+					this.resumeStartTask(job, task, attempt);
+					continue;
+				}
+				await this.failTaskLocked(jobId, task.id, "host restarted before the start task finished");
+				continue;
+			}
+			if (task.position === "end") continue;
+			const executor = task.assignee;
+			if (executor.kind === "robot" && executor.driver === "program") {
+				if (attempt !== void 0) this.launchProgram(jobId, task.id, attempt.id, executor.program ?? "");
+				continue;
+			}
+			if (attempt === void 0) {
+				await this.failTaskLocked(jobId, task.id, "host restarted and the execution attempt was lost");
+				continue;
+			}
+			const sessionId = attempt.sessionId;
+			if (sessionId === null || executor.kind !== "robot") {
+				await this.failTaskLocked(jobId, task.id, "host restarted and the execution session was lost");
+				continue;
+			}
+			if (!await this.resumeAgentAttempt(jobId, task, attempt, executor.name, sessionId)) {
+				if (task.claimant?.kind === "assistant") await this.releaseAssistantLocked(jobId, task, "assistant session could not be resumed");
+				else await this.failTaskLocked(jobId, task.id, "host restarted and the execution session could not be resumed");
+			}
+		}
+		const tasks = this.store.listTasks(jobId);
+		const startTask = tasks.find((task) => task.id === START_TASK_ID);
+		if (startTask !== void 0 && startTask.status === "completed" && tasks.length === 1 && job.definition.start.next.length > 0) try {
+			await this.spawnInitialTasksLocked(job, startTask);
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not rebuild initial tasks for job ${jobId}: ${describeError$1(error)}`);
+		}
+		await this.recomputeLocked(jobId);
+	}
+	/** 重新投递启动任务提示词。 */
+	async resumeStartTask(job, task, attempt) {
+		const starter = job.starter;
+		if (starter.kind !== "session") return;
+		try {
+			const startSeq = await this.delivery.deliver(starter.sessionId, buildStartTaskPrompt(job));
+			await this.store.runExclusive(job.id, async () => {
+				await this.store.updateAttempt(attempt.id, (current) => ({
+					...current,
+					status: "running",
+					error: null,
+					finishedAt: null,
+					sessionId: starter.sessionId,
+					startSeq: startSeq ?? current.startSeq
+				}));
+				this.sessionTasks.set(starter.sessionId, {
+					jobId: job.id,
+					taskId: task.id
+				});
+			});
+		} catch (error) {
+			await this.store.runExclusive(job.id, async () => {
+				await this.failTaskLocked(job.id, task.id, `could not resume the start task: ${describeError$1(error)}`);
+				await this.recomputeLocked(job.id);
+			});
+		}
+	}
+	/** 续接一个 agent / 助理任务会话。 */
+	async resumeAgentAttempt(jobId, task, attempt, robot, sessionId) {
+		const robots = this.robotsOf();
+		if (robots === null || typeof robots.openSession !== "function") return false;
+		let handle;
+		try {
+			handle = await robots.openSession({
+				robot,
+				sessionId
+			});
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not resume session ${sessionId}: ${describeError$1(error)}`);
+			return false;
+		}
+		const startSeq = handleStartSeq(handle) ?? attempt.startSeq ?? 0;
+		await this.store.updateAttempt(attempt.id, (current) => ({
+			...current,
+			status: "running",
+			error: null,
+			finishedAt: null,
+			startSeq
+		}));
+		this.sessionTasks.set(sessionId, {
+			jobId,
+			taskId: task.id
+		});
+		this.trackExecution({
+			jobId,
+			taskId: task.id,
+			attemptId: attempt.id,
+			kind: task.claimant?.kind === "assistant" ? "assistant" : "agent",
+			sessionId,
+			handle,
+			startSeq,
+			robot
+		});
+		return true;
+	}
+	/** 重算就绪、调度可执行任务、检查预算与结算。 */
+	async recomputeLocked(jobId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0 || job.status !== "running") return;
+		if (this.overDurationBudget(job)) {
+			await this.failJobForBudget(job);
+			return;
+		}
+		const tasks = this.store.listTasks(jobId);
+		const byId = new Map(tasks.map((task) => [task.id, task]));
+		const now = nowIso();
+		for (const task of tasks) {
+			if (task.status !== "pending") continue;
+			let blocked = false;
+			let allCompleted = true;
+			for (const dependency of task.deps) {
+				const dep = byId.get(dependency);
+				if (dep === void 0) continue;
+				if (dep.status === "blocked" || dep.status === "cancelled") blocked = true;
+				if (dep.status !== "completed") allCompleted = false;
+			}
+			if (blocked) {
+				if (!canTransitionTask(task.status, "blocked")) continue;
+				await this.store.updateTask(task.id, (current) => ({
+					...current,
+					status: "blocked",
+					finishedAt: now,
+					updatedAt: now
+				}));
+				await this.appendEvent(jobId, "task/blocked", { taskId: task.id });
+				continue;
+			}
+			if (!allCompleted) continue;
+			await this.store.updateTask(task.id, (current) => ({
+				...current,
+				status: "ready",
+				updatedAt: now
+			}));
+			await this.appendEvent(jobId, "task/ready", { taskId: task.id });
+		}
+		const launches = await this.scheduleReadyLocked(jobId);
+		await this.settleLocked(jobId);
+		for (const launch of launches) this.launch(launch);
+	}
+	/** 生成可执行任务：结束任务投递、启动任务、agent / program / 助理任务。 */
+	async scheduleReadyLocked(jobId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0 || job.status !== "running") return [];
+		const tasks = this.store.listTasks(jobId);
+		const ready = tasks.filter((task) => task.status === "ready");
+		if (ready.length === 0) return [];
+		const robots = await this.robots();
+		const launches = [];
+		const busyPositions = /* @__PURE__ */ new Set();
+		for (const task of tasks) if (task.status === "running") busyPositions.add(task.position);
+		const sorted = [...ready].sort((left, right) => left.createdAt === right.createdAt ? left.id.localeCompare(right.id) : left.createdAt.localeCompare(right.createdAt));
+		for (const task of sorted) {
+			if (task.position === "end") {
+				if (this.deliveryBlocked.has(task.id)) continue;
+				const launch = await this.claimForDelivery(job, task);
+				if (launch !== null) launches.push(launch);
+				continue;
+			}
+			if (task.position === "start") {
+				if (job.starter.kind !== "session") continue;
+				if (busyPositions.has("start")) continue;
+				const launch = await this.claimStartTask(job, task);
+				if (launch !== null) {
+					busyPositions.add("start");
+					launches.push(launch);
+				}
+				continue;
+			}
+			const executor = task.assignee;
+			if (executor.kind === "human") {
+				const assistantName = this.assistantFor(job.definition, task.type);
+				if (assistantName === null || task.assistantBlocked) continue;
+				if (this.busyAssistants.has(assistantName)) continue;
+				const launch = await this.claimAssistantTask(job, task, assistantName, tasks);
+				if (launch !== null) {
+					this.busyAssistants.add(assistantName);
+					launches.push(launch);
+				}
+				continue;
+			}
+			if (executor.kind !== "robot") continue;
+			if (executor.driver === "program") {
+				const programId = executor.program ?? "";
+				const launch = await this.claimProgramTask(job, task, programId);
+				if (launch !== null) launches.push(launch);
+				continue;
+			}
+			if (busyPositions.has(task.position)) continue;
+			const launch = await this.claimAgentTask(job, task, tasks, robots);
+			if (launch !== null) {
+				busyPositions.add(task.position);
+				launches.push(launch);
+			}
+		}
+		return launches;
+	}
+	/** 取人任务类型点名的助理。 */
+	assistantFor(definition, typeId) {
+		for (const position of definition.positions) for (const taskType of position.taskTypes) if (taskType.id === typeId) return typeof taskType.assistant === "string" && taskType.assistant !== "" ? taskType.assistant : null;
+		return null;
+	}
+	/** 为一次执行准备 attempt 记录。 */
+	async createAttempt(input) {
+		const attempt = {
+			id: newAttemptId(),
+			jobId: input.jobId,
+			taskId: input.taskId,
+			sessionId: null,
+			startSeq: null,
+			status: "running",
+			stopReason: null,
+			error: null,
+			promptFile: input.promptFile,
+			startedAt: nowIso(),
+			finishedAt: null
+		};
+		await this.store.insertAttempt(attempt);
+		return attempt;
+	}
+	/** 认领任务为 running（写 attempt id 与认领者）。 */
+	async claimTaskRecord(job, task, claimant, attemptId) {
+		assertTaskTransition(task.id, task.status, "running");
+		const now = nowIso();
+		const updated = await this.store.updateTask(task.id, (current) => ({
+			...current,
+			status: "running",
+			claimant,
+			attemptIds: [...current.attemptIds, attemptId],
+			startedAt: current.startedAt ?? now,
+			updatedAt: now
+		}));
+		await this.appendEvent(job.id, "task/claimed", {
+			taskId: task.id,
+			claimant: claimant.kind,
+			name: claimant.name
+		});
+		return updated;
+	}
+	/** 认领 agent 任务并写 prompt。 */
+	async claimAgentTask(job, task, tasks, robots) {
+		const position = positionOf(job.definition, task.position);
+		if (position === void 0 || position.executor.kind !== "robot") return null;
+		const taskType = this.taskTypeOf(job.definition, task.type);
+		if (taskType === void 0) {
+			await this.failTaskLocked(job.id, task.id, `task type "${task.type}" is not declared in the workflow`);
+			return null;
+		}
+		const prompt = buildExecutionPrompt({
+			job,
+			task,
+			position,
+			taskType,
+			tasks,
+			attachments: this.store.listAttachments(job.id),
+			workspace: robots.get(position.executor.name)?.path
+		});
+		const attempt = await this.createAttempt({
+			jobId: job.id,
+			taskId: task.id,
+			promptFile: null
+		});
+		const promptFile = await this.store.writeText(job.id, "prompts", attempt.id, prompt).catch(() => null);
+		if (promptFile !== null) await this.store.updateAttempt(attempt.id, (current) => ({
+			...current,
+			promptFile
+		}));
+		await this.claimTaskRecord(job, task, {
+			kind: "robot",
+			name: position.executor.name,
+			sessionId: null
+		}, attempt.id);
+		return {
+			kind: "agent",
+			jobId: job.id,
+			taskId: task.id,
+			attemptId: attempt.id,
+			robot: position.executor.name,
+			prompt,
+			planMode: taskType.mode === "plan"
+		};
+	}
+	/** 认领助理承办的人任务。 */
+	async claimAssistantTask(job, task, assistantName, tasks) {
+		const position = positionOf(job.definition, task.position);
+		const taskType = this.taskTypeOf(job.definition, task.type);
+		if (position === void 0 || taskType === void 0) return null;
+		const prompt = buildAssistantPrompt({
+			job,
+			task,
+			position,
+			taskType,
+			tasks,
+			attachments: this.store.listAttachments(job.id),
+			workspace: void 0
+		});
+		const attempt = await this.createAttempt({
+			jobId: job.id,
+			taskId: task.id,
+			promptFile: null
+		});
+		const promptFile = await this.store.writeText(job.id, "prompts", attempt.id, prompt).catch(() => null);
+		if (promptFile !== null) await this.store.updateAttempt(attempt.id, (current) => ({
+			...current,
+			promptFile
+		}));
+		await this.claimTaskRecord(job, task, {
+			kind: "assistant",
+			name: assistantName,
+			sessionId: null
+		}, attempt.id);
+		return {
+			kind: "assistant",
+			jobId: job.id,
+			taskId: task.id,
+			attemptId: attempt.id,
+			robot: assistantName,
+			prompt,
+			planMode: false
+		};
+	}
+	/** 认领 program 任务。 */
+	async claimProgramTask(job, task, programId) {
+		const attempt = await this.createAttempt({
+			jobId: job.id,
+			taskId: task.id,
+			promptFile: null
+		});
+		await this.claimTaskRecord(job, task, {
+			kind: "robot",
+			name: task.assignee.kind === "robot" ? task.assignee.name : programId,
+			sessionId: null
+		}, attempt.id);
+		return {
+			kind: "program",
+			jobId: job.id,
+			taskId: task.id,
+			attemptId: attempt.id,
+			programId
+		};
+	}
+	/** 认领启动任务（会话启动者）。 */
+	async claimStartTask(job, task) {
+		if (job.starter.kind !== "session") return null;
+		const attempt = await this.createAttempt({
+			jobId: job.id,
+			taskId: task.id,
+			promptFile: null
+		});
+		await this.claimTaskRecord(job, task, {
+			kind: "robot",
+			name: "starter",
+			sessionId: job.starter.sessionId
+		}, attempt.id);
+		return {
+			kind: "start",
+			jobId: job.id,
+			taskId: task.id,
+			attemptId: attempt.id,
+			sessionId: job.starter.sessionId,
+			prompt: buildStartTaskPrompt(job)
+		};
+	}
+	/** 为结束任务准备一次投递。 */
+	async claimForDelivery(job, task) {
+		const attempt = await this.createAttempt({
+			jobId: job.id,
+			taskId: task.id,
+			promptFile: null
+		});
+		await this.appendEvent(job.id, "delivery/attempt", {
+			taskId: task.id,
+			attemptId: attempt.id
+		});
+		return {
+			kind: "delivery",
+			jobId: job.id,
+			taskId: task.id,
+			attemptId: attempt.id
+		};
+	}
+	/** 在队列外启动一次执行。 */
+	launch(launch) {
+		if (this.disposed) return;
+		switch (launch.kind) {
+			case "agent":
+			case "assistant":
+				this.launchAgent(launch);
+				return;
+			case "program":
+				this.launchProgram(launch.jobId, launch.taskId, launch.attemptId, launch.programId);
+				return;
+			case "start":
+				this.launchStart(launch);
+				return;
+			case "delivery": this.runDelivery(launch.jobId, launch.taskId, launch.attemptId);
+		}
+	}
+	/** 启动一个 agent / 助理会话。 */
+	async launchAgent(launch) {
+		const robots = this.robotsOf();
+		if (robots === null || typeof robots.dispatchSession !== "function") {
+			await this.failOutside(launch.jobId, launch.taskId, "the Buka Robots service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-robots");
+			return;
+		}
+		const task = this.store.getTask(launch.taskId);
+		if (task === void 0 || task.status !== "running") return;
+		let handle;
+		try {
+			handle = await robots.dispatchSession({
+				robot: launch.robot,
+				prompt: launch.prompt,
+				title: `工作流任务 ${task.id}`,
+				agentPreset: this.options.robotPreset,
+				approval: "ask",
+				planMode: launch.planMode,
+				newSessionId: randomUUID()
+			});
+		} catch (error) {
+			await this.failOutside(launch.jobId, launch.taskId, `could not start the task session: ${describeError$1(error)}`);
+			return;
+		}
+		const sessionId = handleSessionId(handle);
+		const startSeq = handleStartSeq(handle) ?? 0;
+		await this.store.runExclusive(launch.jobId, async () => {
+			const current = this.store.getTask(launch.taskId);
+			if (current === void 0 || current.status !== "running") {
+				this.disposeHandle(handle);
+				return;
+			}
+			await this.store.updateAttempt(launch.attemptId, (attempt) => ({
+				...attempt,
+				sessionId,
+				startSeq
+			}));
+			if (sessionId !== null) {
+				this.sessionTasks.set(sessionId, {
+					jobId: launch.jobId,
+					taskId: launch.taskId
+				});
+				await this.store.updateTask(launch.taskId, (record) => ({
+					...record,
+					claimant: record.claimant === null ? record.claimant : {
+						...record.claimant,
+						sessionId
+					},
+					updatedAt: nowIso()
+				}));
+			}
+		});
+		this.trackExecution({
+			jobId: launch.jobId,
+			taskId: launch.taskId,
+			attemptId: launch.attemptId,
+			kind: launch.kind,
+			sessionId,
+			handle,
+			startSeq,
+			robot: launch.robot
+		});
+	}
+	/** 注册一个等待中的执行（轮询会话轮次、硬超时）。 */
+	trackExecution(input) {
+		const controller = new AbortController();
+		const execution = {
+			jobId: input.jobId,
+			taskId: input.taskId,
+			attemptId: input.attemptId,
+			kind: input.kind,
+			sessionId: input.sessionId,
+			handle: input.handle,
+			stopPoll: null,
+			controller,
+			timeout: null
+		};
+		const finish = () => {
+			execution.stopPoll?.();
+			if (execution.timeout !== null) clearTimeout(execution.timeout);
+			this.active.delete(input.taskId);
+			this.disposeHandle(input.handle);
+			if (input.sessionId !== null) {
+				if (this.sessionTasks.get(input.sessionId)?.taskId === input.taskId) this.sessionTasks.delete(input.sessionId);
+			}
+		};
+		execution.stopPoll = poll(this.options.pollIntervalMs, async () => {
+			const task = this.store.getTask(input.taskId);
+			if (task === void 0 || task.status !== "running") {
+				finish();
+				return true;
+			}
+			const snapshot = readHandleResult(input.handle, input.startSeq);
+			if (!snapshot.turnEnded) return false;
+			finish();
+			if (input.kind === "assistant") await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.robot);
+			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
+			return true;
+		});
+		this.active.set(input.taskId, execution);
+		if (this.options.taskTimeoutMs > 0) {
+			execution.timeout = setTimeout(() => {
+				this.timeoutOutside(input.jobId, input.taskId, input.robot);
+			}, this.options.taskTimeoutMs);
+			execution.timeout.unref?.();
+		}
+	}
+	/** 启动 program 任务。 */
+	async launchProgram(jobId, taskId, attemptId, programId) {
+		const task = this.store.getTask(taskId);
+		if (task === void 0 || task.status !== "running") return;
+		const driver = programDriver(programId === "" ? "clock" : programId);
+		if (driver === void 0) {
+			await this.failOutside(jobId, taskId, `unknown program robot driver "${programId}"`);
+			return;
+		}
+		const job = this.store.getJob(jobId);
+		if (job === void 0) return;
+		const controller = new AbortController();
+		this.active.set(taskId, {
+			jobId,
+			taskId,
+			attemptId,
+			kind: "program",
+			sessionId: null,
+			handle: null,
+			stopPoll: null,
+			controller,
+			timeout: null
+		});
+		try {
+			const tasks = this.store.listTasks(jobId);
+			const payload = renderTaskPayload(task.payload, tasks);
+			const result = await driver.run({
+				payload,
+				signal: controller.signal
+			});
+			await this.store.runExclusive(jobId, async () => {
+				this.active.delete(taskId);
+				const current = this.store.getTask(taskId);
+				if (current === void 0 || current.status !== "running") return;
+				const outputProblems = this.outputProblemsFor(job, current, result.output);
+				if (outputProblems.length > 0) await this.failTaskLocked(jobId, taskId, `program output is invalid: ${outputProblems.join("; ")}`);
+				else await this.completeTaskLocked(job, current, {
+					output: result.output,
+					text: "",
+					attachments: [],
+					workspace: void 0,
+					createdBy: current.claimant?.name ?? programId
+				});
+				await this.recomputeLocked(jobId);
+			});
+		} catch (error) {
+			await this.failOutside(jobId, taskId, `program task failed: ${describeError$1(error)}`);
+		}
+	}
+	/** 投递启动任务提示词到启动者会话。 */
+	async launchStart(launch) {
+		try {
+			const startSeq = await this.delivery.deliver(launch.sessionId, launch.prompt);
+			await this.store.runExclusive(launch.jobId, async () => {
+				const task = this.store.getTask(launch.taskId);
+				if (task === void 0 || task.status !== "running") return;
+				await this.store.updateAttempt(launch.attemptId, (attempt) => ({
+					...attempt,
+					sessionId: launch.sessionId,
+					startSeq
+				}));
+				this.sessionTasks.set(launch.sessionId, {
+					jobId: launch.jobId,
+					taskId: launch.taskId
+				});
+				await this.store.updateTask(launch.taskId, (record) => ({
+					...record,
+					claimant: {
+						kind: "robot",
+						name: "starter",
+						sessionId: launch.sessionId
+					},
+					updatedAt: nowIso()
+				}));
+			});
+			if (this.options.taskTimeoutMs > 0) setTimeout(() => {
+				this.timeoutOutside(launch.jobId, launch.taskId, "starter");
+			}, this.options.taskTimeoutMs).unref?.();
+		} catch (error) {
+			await this.failOutside(launch.jobId, launch.taskId, `could not deliver the start task prompt to the starter session: ${describeError$1(error)}`);
+		}
+	}
+	/** 结束任务投递。 */
+	async runDelivery(jobId, taskId, attemptId) {
+		const job = this.store.getJob(jobId);
+		const task = this.store.getTask(taskId);
+		if (job === void 0 || task === void 0 || task.status !== "ready") {
+			await this.finishAttemptOutside(attemptId, "cancelled", "cancelled before delivery");
+			return;
+		}
+		let delivered = true;
+		let error = null;
+		if (job.starter.kind === "session") try {
+			await this.delivery.deliver(job.starter.sessionId, buildEndDeliveryText(job, task));
+		} catch (caught) {
+			delivered = false;
+			error = describeError$1(caught);
+		}
+		await this.store.runExclusive(jobId, async () => {
+			const current = this.store.getTask(taskId);
+			if (current === void 0) return;
+			if (!delivered) {
+				this.deliveryBlocked.add(taskId);
+				await this.store.updateAttempt(attemptId, (attempt) => ({
+					...attempt,
+					status: "failed",
+					error,
+					finishedAt: nowIso()
+				}));
+				await this.appendEvent(jobId, "delivery/failed", {
+					taskId,
+					error
+				});
+				return;
+			}
+			await this.store.updateAttempt(attemptId, (attempt) => ({
+				...attempt,
+				status: "completed",
+				stopReason: "delivered",
+				finishedAt: nowIso()
+			}));
+			const text = JSON.stringify(current.payload);
+			await this.completeRecordNoRecompute(job, current, {
+				output: null,
+				text,
+				attachmentIds: [],
+				createdBy: job.starter.kind === "human" ? "本地用户" : "starter"
+			});
+			await this.appendEvent(jobId, "delivery/completed", { taskId });
+			await this.recomputeLocked(jobId);
+		});
+	}
+	/** 尝试结束任务之外的其它任务在超时后失败。 */
+	async timeoutOutside(jobId, taskId, robot) {
+		await this.store.runExclusive(jobId, async () => {
+			const task = this.store.getTask(taskId);
+			if (task === void 0 || task.status !== "running") return;
+			const execution = this.active.get(taskId);
+			execution?.controller.abort();
+			if (execution?.handle != null && typeof execution.handle.cancel === "function") try {
+				execution.handle.cancel("task timed out");
+			} catch {}
+			this.active.delete(taskId);
+			if (execution?.stopPoll != null) execution.stopPoll();
+			await this.failTaskLocked(jobId, taskId, `task timed out after ${this.options.taskTimeoutMs}ms (robot: ${robot})`);
+			await this.recomputeLocked(jobId);
+		});
+	}
+	/** 队列外失败：重新进队列提交。 */
+	async failOutside(jobId, taskId, reason) {
+		try {
+			await this.store.runExclusive(jobId, async () => {
+				await this.failTaskLocked(jobId, taskId, reason);
+				await this.recomputeLocked(jobId);
+			});
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not mark task ${taskId} failed: ${describeError$1(error)}`);
+		}
+	}
+	/** 助理失败（会话结束但未提交）：回到待认领。 */
+	async releaseAssistantOutside(jobId, taskId, snapshot, robot) {
+		try {
+			await this.store.runExclusive(jobId, async () => {
+				this.busyAssistants.delete(robot);
+				await this.releaseAssistantLocked(jobId, this.requireTask(jobId, taskId), `assistant session ended without completing the task (stopReason: ${snapshot.stopReason ?? "unknown"})`);
+				await this.recomputeLocked(jobId);
+			});
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not release assistant task ${taskId}: ${describeError$1(error)}`);
+		}
+	}
+	/** 助理失败后把任务放回「待认领」。 */
+	async releaseAssistantLocked(jobId, task, reason) {
+		const now = nowIso();
+		const current = this.store.getTask(task.id);
+		if (current === void 0 || current.status !== "running") return;
+		this.dropSessionTask(task.id);
+		await this.store.updateTask(task.id, (record) => ({
+			...record,
+			status: "ready",
+			claimant: null,
+			assistantBlocked: true,
+			updatedAt: now
+		}));
+		await this.closeRunningAttempts(task.id, "failed", reason);
+		await this.appendEvent(jobId, "task/assistant-failed", {
+			taskId: task.id,
+			reason
+		});
+	}
+	/** 标记任务技术失败。 */
+	async failTaskLocked(jobId, taskId, reason) {
+		const task = this.store.getTask(taskId);
+		if (task === void 0) return;
+		if (task.status !== "running" && task.status !== "ready") return;
+		const now = nowIso();
+		this.dropSessionTask(taskId);
+		this.active.delete(taskId);
+		if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
+		const nextStatus = "failed";
+		if (canTransitionTask(task.status, nextStatus)) await this.store.updateTask(taskId, (current) => ({
+			...current,
+			status: nextStatus,
+			error: reason,
+			finishedAt: now,
+			updatedAt: now
+		}));
+		await this.closeRunningAttempts(taskId, "failed", reason);
+		await this.appendEvent(jobId, "task/failed", {
+			taskId,
+			error: reason
+		});
+	}
+	/** 关闭任务下所有 running 执行记录。 */
+	async closeRunningAttempts(taskId, status, error) {
+		for (const attempt of this.store.listAttempts(taskId)) {
+			if (attempt.status !== "running") continue;
+			await this.store.updateAttempt(attempt.id, (current) => ({
+				...current,
+				status,
+				error,
+				finishedAt: nowIso()
+			}));
+		}
+	}
+	/** 完成一条任务并写入结果 / 附件。 */
+	async completeTaskLocked(job, task, input) {
+		const jobDirectory = this.store.paths(job.id).root;
+		const attachmentRecords = await ingestAttachments({
+			raw: input.attachments,
+			jobId: job.id,
+			jobDirectory,
+			taskId: task.id,
+			position: task.position,
+			createdBy: input.createdBy,
+			workspace: input.workspace,
+			limits: {
+				maxBytes: this.options.maxAttachmentBytes,
+				maxTotalBytes: this.options.maxTaskAttachmentsBytes,
+				maxCount: this.options.maxAttachmentsPerTask
+			}
+		});
+		for (const attachment of attachmentRecords) await this.store.insertAttachment(attachment);
+		const attemptId = task.attemptIds.at(-1) ?? newAttemptId();
+		const text = clipUtf8(input.text, this.options.maxResultTextBytes);
+		const textFile = text.trim() === "" ? null : await this.store.writeText(job.id, "results", attemptId, text).catch(() => null);
+		const result = {
+			output: input.output,
+			text: clipUtf8(text, RESULT_PREVIEW_BYTES),
+			textBytes: Buffer.byteLength(text, "utf8"),
+			textFile,
+			attachmentIds: attachmentRecords.map((attachment) => attachment.id)
+		};
+		if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
+		const now = nowIso();
+		if (task.id === "$start") await this.store.updateJob(job.id, (current) => ({
+			...current,
+			input: {
+				...current.input,
+				structured: input.output
+			},
+			updatedAt: now
+		}));
+		if (!canTransitionTask(task.status, "completed")) throw new WorkflowError("invalid-status", `task ${task.id} is ${task.status}, cannot complete`);
+		const updated = await this.store.updateTask(task.id, (current) => ({
+			...current,
+			status: "completed",
+			result,
+			error: null,
+			finishedAt: now,
+			updatedAt: now
+		}));
+		if (this.store.getAttempt(attemptId) !== void 0) await this.store.updateAttempt(attemptId, (current) => ({
+			...current,
+			status: current.status === "running" ? "completed" : current.status,
+			stopReason: current.status === "running" ? "completed" : current.stopReason,
+			finishedAt: current.finishedAt ?? now
+		}));
+		this.active.delete(task.id);
+		this.dropSessionTask(task.id);
+		await this.appendEvent(job.id, "task/completed", {
+			taskId: task.id,
+			type: task.type
+		});
+		if (task.id === "$start") await this.spawnInitialTasksLocked(job, updated);
+		return updated;
+	}
+	/** 完成结束任务（无 recompute，由调用方继续）。 */
+	async completeRecordNoRecompute(job, task, result) {
+		const now = nowIso();
+		const text = clipUtf8(result.text, this.options.maxResultTextBytes);
+		const resultRecord = {
+			output: result.output,
+			text: clipUtf8(text, RESULT_PREVIEW_BYTES),
+			textBytes: Buffer.byteLength(text, "utf8"),
+			textFile: null,
+			attachmentIds: [...result.attachmentIds]
+		};
+		if (!canTransitionTask(task.status, "completed")) return;
+		await this.store.updateTask(task.id, (current) => ({
+			...current,
+			status: "completed",
+			result: resultRecord,
+			claimant: current.claimant ?? {
+				kind: job.starter.kind === "human" ? "human" : "robot",
+				name: result.createdBy,
+				sessionId: job.starter.kind === "session" ? job.starter.sessionId : null
+			},
+			error: null,
+			finishedAt: now,
+			updatedAt: now
+		}));
+	}
+	/** 启动任务完成后创建初始任务。 */
+	async spawnInitialTasksLocked(job, startTask) {
+		const robots = await this.robots();
+		const initial = buildInitialTasks({
+			job,
+			startTask,
+			tasks: this.store.listTasks(job.id),
+			robots
+		});
+		for (const task of initial) {
+			await this.store.insertTask(task);
+			await this.appendEvent(job.id, "task/created", {
+				taskId: task.id,
+				position: task.position,
+				type: task.type,
+				deps: task.deps
+			});
+		}
+	}
+	/** 结算：没有非终态任务时决定作业最终状态。 */
+	async settleLocked(jobId) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0 || job.status !== "running") return;
+		if (this.overDurationBudget(job)) {
+			await this.failJobForBudget(job);
+			return;
+		}
+		const tasks = this.store.listTasks(jobId);
+		if (tasks.some((task) => task.status === "failed")) return;
+		if (tasks.some((task) => isOpenTaskStatus(task.status))) return;
+		const hasEndCompleted = tasks.some((task) => task.position === "end" && task.status === "completed");
+		const hasFailure = tasks.some((task) => task.status === "blocked" || task.status === "failed" || task.status === "cancelled" && task.error !== null);
+		const now = nowIso();
+		if (hasEndCompleted && !hasFailure) {
+			assertJobTransition(jobId, job.status, "completed");
+			await this.store.updateJob(jobId, (current) => ({
+				...current,
+				status: "completed",
+				error: null,
+				finishedAt: now,
+				updatedAt: now
+			}));
+			await this.appendEvent(jobId, "job/completed", {});
+			return;
+		}
+		const reason = hasEndCompleted ? "a task failed or was blocked, so the job ended as failed" : "no end task was completed, so the job ended as failed";
+		assertJobTransition(jobId, job.status, "failed");
+		await this.store.updateJob(jobId, (current) => ({
+			...current,
+			status: "failed",
+			error: reason,
+			finishedAt: now,
+			updatedAt: now
+		}));
+		await this.appendEvent(jobId, "job/failed", { error: reason });
+	}
+	/** 是否超过最长时长预算。 */
+	overDurationBudget(job) {
+		return Date.now() - Date.parse(job.createdAt) > job.definition.budgets.maxDurationHours * 3600 * 1e3;
+	}
+	/** 超预算：取消非终态任务，作业 failed。 */
+	async failJobForBudget(job) {
+		const now = nowIso();
+		for (const task of this.store.listTasks(job.id)) {
+			if (!isOpenTaskStatus(task.status)) continue;
+			this.cancelActive(task.id, "workflow budget exceeded");
+			await this.store.updateTask(task.id, (current) => ({
+				...current,
+				status: "cancelled",
+				finishedAt: now,
+				updatedAt: now
+			}));
+			await this.closeRunningAttempts(task.id, "cancelled", "workflow budget exceeded");
+			this.dropSessionTask(task.id);
+		}
+		const reason = `workflow exceeded its maxDurationHours budget (${job.definition.budgets.maxDurationHours}h)`;
+		await this.store.updateJob(job.id, (current) => ({
+			...current,
+			status: "failed",
+			error: reason,
+			finishedAt: now,
+			updatedAt: now
+		}));
+		await this.appendEvent(job.id, "job/budget-exceeded", { error: reason });
+	}
+	/** 取一个运行中的作业，否则抛错。 */
+	requireRunningJob(jobId, allowTerminal = false) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0) throw new WorkflowError("not-found", `job not found: ${jobId}`);
+		if (!allowTerminal && job.status !== "running") throw new WorkflowError("job-not-running", `job ${jobId} is ${job.status}`);
+		return job;
+	}
+	/** 取一条属于该作业的任务。 */
+	requireTask(jobId, taskId) {
+		const task = this.store.getTask(taskId);
+		if (task === void 0 || task.jobId !== jobId) throw new WorkflowError("not-found", `task not found: ${taskId}`);
+		return task;
+	}
+	/** 按 id 取任务类型。 */
+	taskTypeOf(definition, typeId) {
+		for (const position of definition.positions) for (const taskType of position.taskTypes) if (taskType.id === typeId) return taskType;
+	}
+	/** 按任务契约校验结构化结果。 */
+	outputProblemsFor(job, task, output) {
+		const definition = job.definition;
+		if (task.position === "end") return [];
+		if (task.id === "$start") return schemaProblems(definition.start.task.output, output);
+		const taskType = this.taskTypeOf(definition, task.type);
+		if (taskType === void 0) return [`unknown task type "${task.type}"`];
+		return schemaProblems(taskType.output, output);
+	}
+	/** 任务执行者的工作区（机器人目录）。 */
+	workspaceFor(task) {
+		if (task.assignee.kind === "robot") return this.catalog.get(task.assignee.name)?.path;
+		if (task.claimant !== null && task.claimant.kind === "assistant") return this.catalog.get(task.claimant.name)?.path;
+	}
+	/** 取消一条任务的等待中执行。 */
+	cancelActive(taskId, reason) {
+		const execution = this.active.get(taskId);
+		if (execution === void 0) return;
+		execution.stopPoll?.();
+		if (execution.timeout !== null) clearTimeout(execution.timeout);
+		execution.controller.abort();
+		try {
+			if (execution.handle !== null && typeof execution.handle.cancel === "function") execution.handle.cancel(reason);
+		} catch {}
+		this.disposeHandle(execution.handle);
+		this.active.delete(taskId);
+		if (execution.sessionId !== null) this.sessionTasks.delete(execution.sessionId);
+	}
+	/** 从 session→task 索引里删掉某条任务。 */
+	dropSessionTask(taskId) {
+		for (const [sessionId, reference] of this.sessionTasks) if (reference.taskId === taskId) this.sessionTasks.delete(sessionId);
+	}
+	/** 关闭 attempt（投递取消等）。 */
+	async finishAttemptOutside(attemptId, status, error) {
+		try {
+			await this.store.updateAttempt(attemptId, (current) => ({
+				...current,
+				status,
+				error,
+				finishedAt: nowIso()
+			}));
+		} catch {}
+	}
+	/** 追加作业事件。 */
+	async appendEvent(jobId, type, data) {
+		await appendJobEvent(this.store, this.logger, jobId, type, data);
+	}
+};
+// .build/workflows/migration.js
+/**
+* v4 硬切换迁移：一次性删除旧工作流数据，之后不再按格式版本清空用户资产。
+*
+* 旧版把运行记录写在 `<dataDir>/runs/`、归档设置写在 `<dataDir>/settings.json`；
+* v4 的作业 / 任务进 `ctx.storageDomain`，大文本与附件进 `<dataDir>/jobs/`。
+* 首次启动删除旧目录，并写一个标记；标记存在时不再触碰数据目录。
+*
+* @module @buka/dsh-plugin-workflows/migration
+*/
+/** 迁移标记文件名。 */
+const MIGRATION_MARKER = ".v4-migrated";
+/** 旧版本遗留在数据目录下的路径。 */
+const LEGACY_PATHS = ["runs", "settings.json"];
+/**
+* 执行硬切换迁移；幂等。
+*
+* @param options 数据目录与日志
+* @returns 无返回值
+*/
+async function runMigrations(options) {
+	const { dataDir, logger } = options;
+	await promises.mkdir(dataDir, { recursive: true });
+	const marker = path.join(dataDir, MIGRATION_MARKER);
+	try {
+		await promises.access(marker);
+		return;
+	} catch {}
+	const removed = [];
+	for (const name of LEGACY_PATHS) {
+		const target = path.join(dataDir, name);
+		try {
+			await promises.rm(target, {
+				recursive: true,
+				force: true
+			});
+			removed.push(name);
+		} catch (error) {
+			logger?.warn?.(`buka-workflows: could not remove legacy path ${target}`, error);
+		}
+	}
+	await promises.mkdir(path.join(dataDir, "jobs"), { recursive: true });
+	await promises.writeFile(marker, `${(/* @__PURE__ */ new Date()).toISOString()}\n`, "utf8");
+	if (removed.length > 0) logger?.info?.(`buka-workflows: migrated to v4, removed legacy data: ${removed.join(", ")}`);
+}
+// .build/workflows/options.js
+/**
+* 插件配置与数据目录解析。
+*
+* v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
+* 轮询间隔、附件限额、编排 preset 与机器人会话 preset。作业 / 任务元数据
+* 进 `ctx.storageDomain`，不在这里配置。
+*
+* @module @buka/dsh-plugin-workflows/options
+*/
+/** 插件全局目录名。 */
+const PLUGIN_CACHE_DIR = "dsh-plugin-workflows";
+/** 默认数据目录名。 */
+const DEFAULTS = {
+	/** 不设默认超时：任务耗时取决于模型速度与任务大小，硬截止容易误杀。 */
+	taskTimeoutMs: 0,
+	pollIntervalMs: 1500,
+	maxAttachmentBytes: 8388608,
+	maxAttachmentsPerTask: 20,
+	maxTaskAttachmentsBytes: 67108864,
+	maxInlineAttachmentBytes: 32768,
+	maxResultTextBytes: 2097152,
+	orchestratorPresets: ["workflow-orchestrator"],
+	robotPreset: "standard"
+};
+/** 插件配置。 */
+const Config = z.object({
+	dataDir: z.string().default(defaultDataDir()).description("插件数据目录：渲染后的 prompt、结果全文、作业附件与迁移标记。作业 / 任务元数据在 storageDomain 里。支持 ~ 前缀。"),
+	taskTimeoutMs: z.number().step(1).min(0).default(DEFAULTS.taskTimeoutMs).description("单个任务的默认硬超时（毫秒）；0 表示不超时。"),
+	pollIntervalMs: z.number().step(1).min(100).default(DEFAULTS.pollIntervalMs).description("观察任务会话是否结束轮的轮询间隔（毫秒）。"),
+	maxAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentBytes).description("单个附件的字节上限。"),
+	maxAttachmentsPerTask: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentsPerTask).description("一次任务完成最多提交的附件数量。"),
+	maxTaskAttachmentsBytes: z.number().step(1).min(1).default(DEFAULTS.maxTaskAttachmentsBytes).description("一次任务完成的附件总量字节上限。"),
+	maxInlineAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxInlineAttachmentBytes).description("可在 prompt 里内联的单个文本附件字节上限。"),
+	maxResultTextBytes: z.number().step(1).min(1).default(DEFAULTS.maxResultTextBytes).description("写入作业目录的结果全文上限；超出部分截断并在记录里标注。"),
+	orchestratorPresets: z.array(z.string()).default(DEFAULTS.orchestratorPresets).description("能保存 / 读取工作流定义的 agent preset 名单。留空表示不做收窄（所有会话可见）。推荐只保留随插件发布的 `workflow-orchestrator`。"),
+	robotPreset: z.string().default(DEFAULTS.robotPreset).description("机器人任务会话使用的 agent preset。")
+});
+/**
+* 合并配置与默认值。
+*
+* @param config 插件配置（可能缺省）
+* @returns 合并后的配置
+*/
+function resolveOptions(config) {
+	const orchestratorPresets = Array.isArray(config?.orchestratorPresets) ? config.orchestratorPresets.map((preset) => String(preset).trim()).filter((preset) => preset !== "") : DEFAULTS.orchestratorPresets;
+	const robotPreset = typeof config?.robotPreset === "string" ? config.robotPreset.trim() : "";
+	return {
+		dataDir: resolveDataDir(config?.dataDir),
+		taskTimeoutMs: nonNegative(config?.taskTimeoutMs) ?? DEFAULTS.taskTimeoutMs,
+		pollIntervalMs: positive(config?.pollIntervalMs) ?? DEFAULTS.pollIntervalMs,
+		maxAttachmentBytes: positive(config?.maxAttachmentBytes) ?? DEFAULTS.maxAttachmentBytes,
+		maxAttachmentsPerTask: positive(config?.maxAttachmentsPerTask) ?? DEFAULTS.maxAttachmentsPerTask,
+		maxTaskAttachmentsBytes: positive(config?.maxTaskAttachmentsBytes) ?? DEFAULTS.maxTaskAttachmentsBytes,
+		maxInlineAttachmentBytes: positive(config?.maxInlineAttachmentBytes) ?? DEFAULTS.maxInlineAttachmentBytes,
+		maxResultTextBytes: positive(config?.maxResultTextBytes) ?? DEFAULTS.maxResultTextBytes,
+		orchestratorPresets,
+		robotPreset: robotPreset === "" ? DEFAULTS.robotPreset : robotPreset
+	};
+}
+/**
+* 解析数据目录：默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workflows`。
+*
+* @param value 配置里的目录（支持 ~ 前缀）
+* @param env 环境变量
+* @returns 绝对路径
+*/
+function resolveDataDir(value, env = process.env) {
+	const text = typeof value === "string" ? value.trim() : "";
+	if (text === "") return defaultDataDir(env);
+	if (text === "~") return path.join(homeDir(env), ".cache", PLUGIN_CACHE_DIR);
+	if (text.startsWith("~/") || text.startsWith("~\\")) return path.resolve(homeDir(env), text.slice(2));
+	return path.resolve(text);
+}
+/**
+* 默认数据目录。
+*
+* @param env 环境变量
+* @returns 默认数据目录
+*/
+function defaultDataDir(env = process.env) {
+	const cacheHome = typeof env.XDG_CACHE_HOME === "string" && env.XDG_CACHE_HOME.trim() !== "" ? env.XDG_CACHE_HOME.trim() : path.join(homeDir(env), ".cache");
+	return path.join(cacheHome, PLUGIN_CACHE_DIR);
+}
+/**
+* 用户主目录。
+*
+* @param env 环境变量
+* @returns 主目录
+*/
+function homeDir(env) {
+	const home = typeof env.HOME === "string" ? env.HOME.trim() : "";
+	return home === "" ? os.homedir() : home;
+}
+/**
+* 正整数字段或默认值。
+*
+* @param value 待校验的值
+* @returns 正整数或 undefined
+*/
+function positive(value) {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
+}
+/**
+* 非负整数字段或默认值。
+*
+* @param value 待校验的值
+* @returns 非负整数或 undefined
+*/
+function nonNegative(value) {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : void 0;
 }
 // .build/workflows/http.js
 /**
 * HTTP 小工具：响应写出、请求体读取与附件流式下载。
+*
+* @module @buka/dsh-plugin-workflows/http
 */
-/** 设置请求体上限：只有几个字段。 */
-const MAX_BODY_BYTES = 8192;
+/** 设置请求体上限：工作流定义可能较大，但仍要防止无界读取。 */
+const MAX_BODY_BYTES = 262144;
 /**
 * 把附件文件写进响应：默认下载，`inline` 时按给定 MIME 内联并附带安全头。
 *
 * @param res HTTP 响应
-* @param attachment 清单里的附件
+* @param attachment 附件文件
 * @param options 内联 / MIME / 日志
 */
 function pipeAttachment(res, attachment, options = {}) {
@@ -3813,19 +5331,6 @@ function attachmentDisposition(name, inline = false) {
 	const ascii = name.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/gu, "_");
 	const encoded = encodeURIComponent(name).replace(/'/gu, "%27");
 	return `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
-/**
-* 设置对象 → 浏览器用的平铺字段。页面不关心 `version` 与内部包装。
-*
-* @param settings 设置
-* @returns 平铺字段
-*/
-function settingsPayload(settings) {
-	return {
-		enabled: settings.archive.enabled,
-		archiveAfterHours: settings.archive.archiveAfterHours,
-		deleteAfterHours: settings.archive.deleteAfterHours
-	};
 }
 /**
 * 读取 JSON 请求体；content-type 不对、太大或不是合法 JSON 时已经写好响应，
@@ -3927,277 +5432,67 @@ function sendMethodNotAllowed(res, allow) {
 		message: `only ${allow} is supported`
 	}));
 }
-process.platform;
-// packages/plugin-kit/lib/store.js
+// .build/workflows/routes/index.js
 /**
-* 插件的落盘小工具：原子写 JSON 与安全读取。
+* 浏览器一半的 HTTP 路由（`.tmp/workflow-v4-api.md`）：
+* 工作流 / 作业 / 任务 / 附件与动作。
 *
-* 四个插件各自维护过一份「临时文件 + rename」的写法：临时文件名有三种方案，
-* 权限 0600 只有一部分地方显式收紧。这里统一成「同目录临时文件 → rename、文件
-* 权限 0600」，调用方只保留自己的业务语义（写什么、何时写、损坏怎么处理）。
+* 所有路由沿用 web 组合的信任栅栏（`ctx.connection.requestRejection`），只接受
+* 本机同源请求；失败统一 `{ ok: false, code, message }`。
 *
-* 目录权限不在统一之列：有的调用方需要把新建目录收紧到 0700（收藏与缓存
-* 目录），有的保持默认，所以 `writeJsonAtomic` 用 `dirMode` 显式接收。
-*
-* 本模块只依赖 Node 内置模块，便于单独测试。
+* @module @buka/dsh-plugin-workflows/routes
 */
-/**
-* 原子写 JSON：先写同目录临时文件，再 rename；失败时清理临时文件。
-*
-* 文件权限固定 0600：写入时带上 mode，再显式 chmod 一次（umask 可能削弱创建
-* 权限；Windows 上 chmod 基本是空操作）。内容格式是两空格缩进 + 末尾换行，
-* 与插件里原有的落盘格式一致。
-*
-* @param file 目标文件（目录不存在时会先创建）
-* @param value 要写入的值
-* @param options 目录权限等可选项
-*/
-async function writeJsonAtomic(file, value, options = {}) {
-	const dir = path.dirname(file);
-	if (options.dirMode === void 0) await promises.mkdir(dir, { recursive: true });
-	else await promises.mkdir(dir, {
-		recursive: true,
-		mode: options.dirMode
-	});
-	const temporary = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-	try {
-		await promises.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-			encoding: "utf8",
-			mode: 384
-		});
-		try {
-			await promises.chmod(temporary, 384);
-		} catch {}
-		await promises.rename(temporary, file);
-	} catch (error) {
-		try {
-			await promises.rm(temporary, { force: true });
-		} catch {}
-		throw error;
+/** 路由路径。 */
+const ROUTES = {
+	workflows: "/buka-workflows/workflows",
+	workflow: "/buka-workflows/workflow",
+	workflowActivate: "/buka-workflows/workflow/activate",
+	jobs: "/buka-workflows/jobs",
+	jobStart: "/buka-workflows/job/start",
+	job: "/buka-workflows/job",
+	jobAction: "/buka-workflows/job/action",
+	task: "/buka-workflows/task",
+	taskAction: "/buka-workflows/task/action",
+	attachments: "/buka-workflows/attachments",
+	attachment: "/buka-workflows/attachment"
+};
+/** 错误码 → HTTP 状态码。 */
+function statusForError(error) {
+	if (error instanceof WorkflowError) switch (error.code) {
+		case "not-found": return 404;
+		case "workflow-not-active": return 409;
+		case "job-not-running":
+		case "task-not-running":
+		case "invalid-status":
+		case "not-ready":
+		case "not-failed":
+		case "no-pending-delivery": return 409;
+		default: return 400;
 	}
+	return 500;
+}
+/** 统一错误响应。 */
+function sendRouteError(res, error, logger, fallbackCode = "internal") {
+	const status = statusForError(error);
+	const code = error instanceof WorkflowError ? error.code : fallbackCode;
+	const message = describeError$1(error);
+	if (status >= 500) logger?.warn?.(`buka-workflows: request failed: ${message}`);
+	if (!res.headersSent) sendError(res, status, code, message);
+	else res.destroy(error instanceof Error ? error : void 0);
+}
+/** 查询参数。 */
+function query(req) {
+	return new URL(req.url ?? "/", "http://localhost").searchParams;
 }
 /**
-* 读一个 JSON 文件；文件缺失、不可读、不是合法 JSON 或内容不是对象时返回 null。
+* 注册全部浏览器路由。
 *
-* 只接受「普通对象」：数组、`null` 与标量都按读不到处理，调用方据此回落到
-* 默认值。需要区分「文件缺失」与「文件损坏」的调用方保留自己的读取逻辑。
-*
-* @param file 目标文件
-* @returns 解析后的 JSON 对象；缺失 / 损坏时是 `null`
+* @param deps 上下文与引擎 getter
 */
-async function readJsonFile(file) {
-	try {
-		const text = await promises.readFile(file, "utf8");
-		const value = JSON.parse(text);
-		return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
-	} catch {
-		return null;
-	}
-}
-// .build/workflows/settings.js
-/**
-* 工作流插件的设置：运行记录的自动归档策略。
-*
-* 设置文件放在运行目录的父目录：默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workflows/settings.json`，
-* 即 `runs/` 的同级。它和运行记录分开：删运行不会碰设置，换 `runsDir`
-* （Config）时设置跟着新的运行目录走。原子写、权限 0600；文件缺失或损坏时
-* 按默认值处理，页面照常可用，下一次保存会把文件重建成合法内容。
-*
-* 默认策略：结束超过 24 小时（1 天）的运行归档，超过 168 小时（7 天）的
-* 运行连同目录一起删除。时间按整小时填写；删除必须晚于归档，否则删除会
-* 先于归档发生，归档就没有意义。
-*
-* 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
-*
-* @module @buka/dsh-plugin-workflows/settings
-*/
-/** 设置文件名；与 `runs/` 同级。 */
-const SETTINGS_FILE = "settings.json";
-/** 删除时间上限（小时）：365 天。 */
-const MAX_DELETE_HOURS = 8760;
-/**
-* 由运行目录得到设置文件路径：设置放在 `runs/` 的父目录。
-*
-* @param runsDir 运行记录根目录
-* @returns 设置文件绝对路径
-*/
-function resolveSettingsFile(runsDir) {
-	if (typeof runsDir !== "string" || runsDir.trim() === "") throw new Error("缺少工作流运行目录");
-	return path.join(path.dirname(path.resolve(runsDir)), SETTINGS_FILE);
-}
-/**
-* 默认设置；文件缺失 / 损坏时也返回它。
-*
-* @returns 默认设置
-*/
-function defaultSettings() {
-	return {
-		version: 1,
-		archive: {
-			enabled: true,
-			archiveAfterHours: 24,
-			deleteAfterHours: 168
-		}
-	};
-}
-/**
-* 把任意读到的值规范成设置对象。字段不合法时按默认值处理（手改坏了不影响
-* 页面）；删除时间回落到不晚于归档时间时，两项一起回落默认值，避免出现
-* 「先删除、再归档」的策略。
-*
-* @param value 任意读到的值
-* @returns 规范后的设置
-*/
-function normalizeSettings(value) {
-	const settings = defaultSettings();
-	if (value === null || typeof value !== "object" || Array.isArray(value)) return settings;
-	const archive = value.archive;
-	if (archive === null || typeof archive !== "object" || Array.isArray(archive)) return settings;
-	const archiveRecord = archive;
-	if (typeof archiveRecord.enabled === "boolean") settings.archive.enabled = archiveRecord.enabled;
-	const archiveAfterHours = integerInRange(archiveRecord.archiveAfterHours, 1, 720);
-	if (archiveAfterHours !== null) settings.archive.archiveAfterHours = archiveAfterHours;
-	const deleteAfterHours = integerInRange(archiveRecord.deleteAfterHours, 2, MAX_DELETE_HOURS);
-	if (deleteAfterHours !== null) settings.archive.deleteAfterHours = deleteAfterHours;
-	if (settings.archive.deleteAfterHours <= settings.archive.archiveAfterHours) {
-		settings.archive.archiveAfterHours = 24;
-		settings.archive.deleteAfterHours = 168;
-	}
-	return settings;
-}
-/**
-* 只规范化归档部分（运行存储直接用它，避免每次再包一层）。
-*
-* @param value 任意读到的值
-* @returns 规范后的归档策略
-*/
-function normalizeRetention(value) {
-	return normalizeSettings({ archive: value }).archive;
-}
-/**
-* 校验页面 / API 传来的归档设置（平铺字段），返回可写盘的设置对象或一条
-* 中文错误。只认整小时：归档 1–720、删除 2–8760，且删除必须晚于归档。
-*
-* @param input 页面 / API 传来的值
-* @returns 校验通过时带可写盘的设置，否则带一条中文错误
-*/
-function validateSettingsInput(input) {
-	if (input === null || typeof input !== "object" || Array.isArray(input)) return {
-		ok: false,
-		message: "设置必须是 JSON 对象"
-	};
-	const record = input;
-	const enabled = record.enabled;
-	if (typeof enabled !== "boolean") return {
-		ok: false,
-		message: "enabled 必须是布尔值"
-	};
-	const archiveAfterHours = integerInRange(record.archiveAfterHours, 1, 720);
-	if (archiveAfterHours === null) return {
-		ok: false,
-		message: `archiveAfterHours 必须是 1–720 之间的整数小时`
-	};
-	const deleteAfterHours = integerInRange(record.deleteAfterHours, 2, MAX_DELETE_HOURS);
-	if (deleteAfterHours === null) return {
-		ok: false,
-		message: `deleteAfterHours 必须是 2–${MAX_DELETE_HOURS} 之间的整数小时`
-	};
-	if (deleteAfterHours <= archiveAfterHours) return {
-		ok: false,
-		message: "deleteAfterHours 必须大于 archiveAfterHours"
-	};
-	return {
-		ok: true,
-		archive: {
-			enabled,
-			archiveAfterHours,
-			deleteAfterHours
-		}
-	};
-}
-/**
-* 读设置。文件不存在、读不了、不是合法 JSON 或字段不合法都回落到默认值，
-* 不抛错：设置是锦上添花，不能因为一个坏文件让页面打不开。
-*
-* @param options 设置文件绝对路径
-* @returns 设置内容与来源文件
-*/
-async function readSettings({ file } = {}) {
-	const target = requireSettingsFile(file);
-	return {
-		...normalizeSettings(await readJsonFile(target)),
-		file: target
-	};
-}
-/**
-* 原子写设置（临时文件 + rename，权限 0600）。目录不存在会先建好；失败时
-* 清理临时文件，原文件保持不变。
-*
-* @param options 设置文件路径与要写入的值
-* @returns 写入后的设置与来源文件
-*/
-async function writeSettings({ file, settings } = {}) {
-	const target = requireSettingsFile(file);
-	const normalized = normalizeSettings(settings);
-	await writeJsonAtomic(target, normalized);
-	return {
-		file: target,
-		settings: normalized
-	};
-}
-/**
-* @param value 待校验的值
-* @param min 下限（含）
-* @param max 上限（含）
-* @returns 合法时是整数，否则 `null`
-*/
-function integerInRange(value, min, max) {
-	if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) return null;
-	return value;
-}
-/**
-* 校验设置文件路径。
-*
-* @param file 传入的路径
-* @returns 绝对路径
-*/
-function requireSettingsFile(file) {
-	if (typeof file !== "string" || file.trim() === "") throw new Error("缺少工作流设置文件路径");
-	return path.resolve(file);
-}
-// .build/workflows/routes.js
-/**
-* 浏览器一半的只读路由：运行列表 / 详情 / 附件读取 / 自动归档设置 / 模板目录。
-*
-* 页面只读取落盘的运行记录，不提供“运行工作流”：workflow 由 agent 在会话里
-* 现场创建；唯一的写入口是自动归档设置（settings 文件）。路由沿用 web 组合
-* 的信任栅栏，只接受本机、已认证的浏览器请求。
-*/
-/** 浏览器一半读取运行列表的路由。 */
-const RUNS_ROUTE = "/buka-workflows/runs";
-/** 浏览器一半读取单次运行详情的路由。 */
-const RUN_ROUTE = "/buka-workflows/run";
-/** 浏览器一半读取 / 预览节点附件的路由。 */
-const ATTACHMENT_ROUTE = "/buka-workflows/attachment";
-/** 浏览器一半读 / 写自动归档设置的路由。 */
-const SETTINGS_ROUTE = "/buka-workflows/settings";
-/** 浏览器一半读取工作流模板目录的路由。 */
-const TEMPLATES_ROUTE = "/buka-workflows/templates";
-/**
-* 注册浏览器一半的所有只读路由。
-*
-* @param deps 上下文、存储、设置文件路径与初始化函数
-*/
-function registerWorkflowRoutes({ ctx, store, settingsFile, ensureReady }) {
+function registerWorkflowRoutes({ ctx, ready }) {
 	ctx.inject(["webServer", "connection"], (webCtx) => {
-		/**
-		* 复用 web 组合的信任栅栏；被拒绝时已经写好响应。
-		*
-		* @param req
-		* @param res
-		* @returns
-		*/
-		function rejected(req, res) {
+		/** 信任栅栏；被拒绝时响应已写出。 */
+		const rejected = (req, res) => {
 			let rejection;
 			try {
 				rejection = webCtx.connection.requestRejection(req);
@@ -4208,5855 +5503,6000 @@ function registerWorkflowRoutes({ ctx, store, settingsFile, ensureReady }) {
 			res.statusCode = rejection;
 			res.end();
 			return true;
-		}
-		/**
-		* 读取查询参数。
-		*
-		* @param req
-		* @returns
-		*/
-		function requestUrl(req) {
-			return new URL(req.url ?? "/", "http://localhost");
-		}
-		webCtx.effect(() => webCtx.webServer.register({
-			kind: "exact",
-			path: RUNS_ROUTE,
-			handler: async (req, res) => {
-				if (rejected(req, res)) return;
-				if (req.method !== "GET") {
-					sendMethodNotAllowed(res, "GET");
-					return;
-				}
-				try {
-					await ensureReady();
-					const params = requestUrl(req).searchParams;
-					const limit = parseLimit(params.get("limit"));
-					const archived = params.get("archived") === "1";
-					const [runs, archivedCount] = await Promise.all([store.listRuns(limit, { archived }), store.countArchived()]);
-					sendJson(res, 200, {
-						ok: true,
-						runs,
-						archivedCount
-					});
-				} catch (error) {
-					webCtx.logger?.warn?.("buka-workflows: 读取运行列表失败：%s", describeError$3(error));
-					sendError(res, 500, "list-failed", `读取运行列表失败：${describeError$3(error)}`);
-				}
-			}
-		}), `buka-workflows: GET ${RUNS_ROUTE}`);
-		webCtx.effect(() => webCtx.webServer.register({
-			kind: "exact",
-			path: SETTINGS_ROUTE,
-			handler: async (req, res) => {
-				if (rejected(req, res)) return;
-				if (req.method === "GET") {
+		};
+		/** 注册一条精确路由。 */
+		const route = (path, handler) => {
+			webCtx.effect(() => webCtx.webServer.register({
+				kind: "exact",
+				path,
+				handler: async (req, res) => {
+					if (rejected(req, res)) return;
 					try {
-						sendJson(res, 200, {
-							ok: true,
-							settings: settingsPayload(await readSettings({ file: settingsFile }))
-						});
+						await handler(req, res);
 					} catch (error) {
-						webCtx.logger?.warn?.("buka-workflows: 读取归档设置失败：%s", describeError$3(error));
-						sendError(res, 500, "settings-failed", `读取归档设置失败：${describeError$3(error)}`);
+						sendRouteError(res, error, webCtx.logger);
 					}
-					return;
 				}
-				if (req.method !== "POST") {
-					sendMethodNotAllowed(res, "GET, POST");
-					return;
-				}
-				const body = await readJsonBody(req, res);
-				if (body === void 0) return;
-				const parsed = validateSettingsInput(body);
-				if (!parsed.ok) {
-					sendError(res, 400, "invalid-settings", parsed.message);
-					return;
-				}
-				try {
-					await ensureReady();
-					const saved = await writeSettings({
-						file: settingsFile,
-						settings: {
-							version: 1,
-							archive: parsed.archive
-						}
-					});
-					store.setRetention(saved.settings.archive);
-					await store.sweep();
-					webCtx.logger?.info?.("buka-workflows: 自动归档设置已更新（%s，归档 %s 小时，删除 %s 小时）", saved.settings.archive.enabled ? "启用" : "停用", saved.settings.archive.archiveAfterHours, saved.settings.archive.deleteAfterHours);
-					sendJson(res, 200, {
-						ok: true,
-						settings: settingsPayload(saved.settings),
-						archivedCount: await store.countArchived()
-					});
-				} catch (error) {
-					webCtx.logger?.warn?.("buka-workflows: 保存归档设置失败：%s", describeError$3(error));
-					sendError(res, 500, "settings-failed", `保存归档设置失败：${describeError$3(error)}`);
-				}
-			}
-		}), `buka-workflows: GET/POST ${SETTINGS_ROUTE}`);
-		webCtx.effect(() => webCtx.webServer.register({
-			kind: "exact",
-			path: TEMPLATES_ROUTE,
-			handler: async (req, res) => {
-				if (rejected(req, res)) return;
-				if (req.method !== "GET") {
-					sendMethodNotAllowed(res, "GET");
-					return;
-				}
-				try {
-					sendJson(res, 200, {
-						ok: true,
-						templates: listTemplates().map((template) => {
-							const model = buildTemplateGraph(template);
-							return {
-								...template,
-								graph: model === null ? null : {
-									...model,
-									...layoutRunGraph(model)
-								}
-							};
-						})
-					});
-				} catch (error) {
-					webCtx.logger?.warn?.("buka-workflows: 读取工作流模板失败：%s", describeError$3(error));
-					sendError(res, 500, "templates-failed", `读取工作流模板失败：${describeError$3(error)}`);
-				}
-			}
-		}), `buka-workflows: GET ${TEMPLATES_ROUTE}`);
-		webCtx.effect(() => webCtx.webServer.register({
-			kind: "exact",
-			path: RUN_ROUTE,
-			handler: async (req, res) => {
-				if (rejected(req, res)) return;
-				if (req.method !== "GET") {
-					sendMethodNotAllowed(res, "GET");
-					return;
-				}
-				const runId = requestUrl(req).searchParams.get("runId") ?? "";
-				if (runId.trim() === "") {
-					sendError(res, 400, "invalid-run-id", "runId is required");
-					return;
-				}
-				try {
-					await ensureReady();
-					const run = await store.readRun(runId.trim());
-					if (run === null) {
-						sendError(res, 404, "not-found", `workflow run not found: ${runId}`);
-						return;
-					}
-					const [definition, nodeResults] = await Promise.all([store.readDefinition(run.runId), store.readNodeResults(run.runId)]);
-					const model = buildRunGraph({
-						run,
-						definition,
-						avatars: await robotAvatars(ctx)
-					});
-					sendJson(res, 200, {
-						ok: true,
-						run,
-						definition,
-						nodeResults,
-						graph: model === null ? null : {
-							...model,
-							...layoutRunGraph(model)
-						}
-					});
-				} catch (error) {
-					webCtx.logger?.warn?.("buka-workflows: 读取运行详情失败：%s", describeError$3(error));
-					sendError(res, 500, "read-failed", `读取运行详情失败：${describeError$3(error)}`);
-				}
-			}
-		}), `buka-workflows: GET ${RUN_ROUTE}`);
-		webCtx.effect(() => webCtx.webServer.register({
-			kind: "exact",
-			path: ATTACHMENT_ROUTE,
-			handler: async (req, res) => {
-				if (rejected(req, res)) return;
-				if (req.method !== "GET") {
-					sendMethodNotAllowed(res, "GET");
-					return;
-				}
-				const params = requestUrl(req).searchParams;
-				const runId = (params.get("runId") ?? "").trim();
-				const nodeId = (params.get("nodeId") ?? "").trim();
-				const name = params.get("name") ?? "";
-				const seq = Number.parseInt(params.get("seq") ?? "", 10);
-				const mode = params.get("mode") ?? "download";
-				if (mode !== "download" && mode !== "preview" && mode !== "inline") {
-					sendError(res, 400, "invalid-mode", "mode must be download, preview or inline");
-					return;
-				}
-				if (runId === "" || nodeId === "" || name === "") {
-					sendError(res, 400, "invalid-attachment", "runId, seq, nodeId and name are required");
-					return;
-				}
-				if (!Number.isInteger(seq) || seq <= 0) {
-					sendError(res, 400, "invalid-seq", "seq must be a positive integer");
-					return;
-				}
-				if (runId === "." || runId === ".." || runId.includes("/") || runId.includes("\\")) {
-					sendError(res, 400, "invalid-run-id", "runId must be a single path segment");
-					return;
-				}
-				try {
-					await ensureReady();
-					let attachment = null;
-					try {
-						attachment = await store.openAttachment(runId, seq, nodeId, name);
-					} catch {
-						attachment = null;
-					}
-					if (attachment === null) {
-						sendError(res, 404, "not-found", "attachment not found");
-						return;
-					}
-					const preview = attachmentPreviewInfo(attachment.name);
-					if (mode === "download") {
-						pipeAttachment(res, attachment, { log: (error) => webCtx.logger?.warn?.("buka-workflows: 读取附件失败：%s", describeError$3(error)) });
-						return;
-					}
-					if (mode === "inline") {
-						if (preview.kind !== "image" && preview.kind !== "pdf") {
-							sendError(res, 415, "unsupported-preview", "this attachment type cannot be previewed inline");
-							return;
-						}
-						pipeAttachment(res, attachment, {
-							inline: true,
-							mime: preview.mime,
-							log: (error) => webCtx.logger?.warn?.("buka-workflows: 读取附件失败：%s", describeError$3(error))
-						});
-						return;
-					}
-					if (preview.kind !== "text") {
-						sendJson(res, 200, {
-							ok: true,
-							attachment: {
-								name: attachment.name,
-								bytes: attachment.bytes,
-								kind: preview.kind,
-								mime: preview.mime
-							}
-						});
-						return;
-					}
-					const range = await readAttachmentRange(attachment.path, { maxBytes: DEFAULT_PREVIEW_TEXT_BYTES });
-					if (range.text === null) {
-						sendJson(res, 200, {
-							ok: true,
-							attachment: {
-								name: attachment.name,
-								bytes: attachment.bytes,
-								kind: "binary",
-								mime: null
-							}
-						});
-						return;
-					}
-					sendJson(res, 200, {
-						ok: true,
-						attachment: {
-							name: attachment.name,
-							bytes: attachment.bytes,
-							kind: "text",
-							mime: "text/plain",
-							text: range.text,
-							truncated: range.truncated,
-							read: range.read,
-							offset: range.offset
-						}
-					});
-				} catch (error) {
-					webCtx.logger?.warn?.("buka-workflows: 读取附件失败：%s", describeError$3(error));
-					if (!res.headersSent) sendError(res, 500, "read-failed", `attachment could not be read: ${describeError$3(error)}`);
-					else res.destroy(error);
-				}
-			}
-		}), `buka-workflows: GET ${ATTACHMENT_ROUTE}`);
-	});
-}
-/**
-* 取「机器人名 → 头像 id」表，给运行页的节点图用。
-*
-* robots 插件没装、服务没有 `avatarMap()` 或登记表损坏时返回 null；这只是展示
-* 细节，绝不能因为它让运行详情接口失败。
-*
-* @param ctx 插件上下文
-* @returns 机器人名 → 头像 id；不可用时是 null
-*/
-async function robotAvatars(ctx) {
-	try {
-		const robots = ctx.get("bukaRobots");
-		if (robots === null || robots === void 0 || typeof robots.avatarMap !== "function") return null;
-		const map = await robots.avatarMap();
-		if (map === null || typeof map !== "object" || Array.isArray(map)) return null;
-		return map;
-	} catch {
-		return null;
-	}
-}
-// .build/workflows/run-attachments.js
-/**
-* 运行目录里的附件：把节点交回的附件复制进本次执行的节点目录，并按清单读取 /
-* 打开。
-*
-* 低层的文件复制与读取在 attachments.ts；这里只负责运行目录布局
-* （`nodes/<seq>-<id>/attachments`）、清单查找与路径安全校验。
-*/
-/** 每次执行的节点目录里附件目录名。 */
-const ATTACHMENTS_DIR = "attachments";
-/**
-* 把任意错误转成一句话。
-*
-* @param error 任意错误
-* @returns 一句话错误
-*/
-function describeError$2(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* 清单里的附件名必须是一段安全路径；Unicode 文件名允许，分隔符与控制字符
-* 不允许。
-*
-* @param name 清单里的附件名
-* @returns 是安全的一段路径时为 true
-*/
-function isSafeAttachmentName(name) {
-	if (typeof name !== "string" || name === "" || name === "." || name === "..") return false;
-	if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
-	return !/[\u0000-\u001f\u007f]/u.test(name);
-}
-/**
-* @param root 根目录
-* @param candidate 待判断的路径
-* @returns 在根目录内时为 true
-*/
-function isInsideDirectory(root, candidate) {
-	const relative = path.relative(root, candidate);
-	return relative === "" || !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
-}
-/**
-* 把节点返回的附件复制到该次执行的节点目录，返回稳定清单。
-*
-* @param options 节点目录、运行目录、原始清单与限额
-* @returns 稳定清单
-*/
-async function writeNodeAttachmentsToRun(options) {
-	return await writeAttachments({
-		raw: options.raw,
-		workspace: options.workspace ?? "",
-		runDirectory: options.runDirectory,
-		destination: path.join(options.nodeDirectory, ATTACHMENTS_DIR),
-		maxBytes: options.maxBytes,
-		maxTotalBytes: options.maxTotalBytes,
-		maxCount: options.maxCount
-	});
-}
-/**
-* 把附件清单转成模板上下文：每个附件带绝对路径；文本附件在大小上限内
-* 额外带 `text` 供 prompt 内联。
-*
-* @param options 附件目录、清单与内联上限
-* @returns 模板上下文里的附件值
-*/
-async function attachmentTemplateValues(options) {
-	if (!Array.isArray(options.manifest)) return [];
-	const directory = options.attachmentsDirectory;
-	const values = [];
-	for (const [fallbackIndex, rawEntry] of options.manifest.entries()) {
-		if (rawEntry === null || typeof rawEntry !== "object" || Array.isArray(rawEntry)) continue;
-		const entry = rawEntry;
-		const name = typeof entry.name === "string" ? entry.name : "";
-		if (!isSafeAttachmentName(name)) continue;
-		const index = typeof entry.index === "number" && Number.isInteger(entry.index) ? entry.index : fallbackIndex;
-		const file = path.join(directory, name);
-		const value = {
-			index,
-			name,
-			bytes: typeof entry.bytes === "number" && Number.isFinite(entry.bytes) ? entry.bytes : 0,
-			path: file
+			}), `buka-workflows: ${path}`);
 		};
-		if (typeof entry.description === "string" && entry.description !== "") value.description = entry.description;
-		try {
-			const inline = await readInlineText(file, options.maxInlineTextBytes);
-			if (inline.available) value.text = inline.text;
-			else value.text = { __bukaTemplateError: `attachment "${name}" is ${inline.reason === "binary" ? "binary" : "larger than the inline attachment limit"}; use .path or buka_workflow_execution_attachment instead` };
-		} catch (error) {
-			value.text = { __bukaTemplateError: `attachment "${name}" could not be read: ${describeError$2(error)}` };
-		}
-		values.push(value);
-	}
-	return values;
-}
-/**
-* 读取一个附件的一段内容。`name` 必须出现在该次执行的清单里。
-*
-* @param options 节点结果、节点目录、附件名与读取范围
-* @returns 附件的一段内容；找不到时是 `null`
-*/
-async function readRunAttachment(options) {
-	const entry = findAttachmentEntry(options.nodeResult, options.name);
-	if (entry === null) return null;
-	const entryName = typeof entry.name === "string" ? entry.name : "";
-	const file = await attachmentFilePath(options.nodeDirectory, entryName);
-	const range = await readAttachmentRange(file, {
-		offset: options.offset,
-		maxBytes: options.maxBytes
-	});
-	return {
-		index: typeof entry.index === "number" && Number.isInteger(entry.index) ? entry.index : 0,
-		name: entryName,
-		description: typeof entry.description === "string" ? entry.description : null,
-		bytes: range.bytes,
-		path: file,
-		text: range.text,
-		binary: range.binary,
-		truncated: range.truncated,
-		offset: range.offset,
-		read: range.read
-	};
-}
-/**
-* 打开一个附件用于下载：只返回清单里的文件，并确认它仍在附件目录内。
-*
-* @param options 节点结果、节点目录与附件名
-* @returns 可下载附件；找不到时是 `null`
-*/
-async function openRunAttachment(options) {
-	const entry = findAttachmentEntry(options.nodeResult, options.name);
-	if (entry === null) return null;
-	const entryName = typeof entry.name === "string" ? entry.name : "";
-	const file = await attachmentFilePath(options.nodeDirectory, entryName);
-	return {
-		path: file,
-		name: entryName,
-		bytes: (await promises.stat(file)).size,
-		description: typeof entry.description === "string" ? entry.description : null,
-		index: typeof entry.index === "number" && Number.isInteger(entry.index) ? entry.index : 0
-	};
-}
-/**
-* 在节点结果的附件清单里按名字找一个附件。
-*
-* @param nodeResult 节点结果
-* @param name 附件名
-* @returns 清单里的附件项；找不到时是 `null`
-*/
-function findAttachmentEntry(nodeResult, name) {
-	if (typeof name !== "string" || !isSafeAttachmentName(name)) return null;
-	const entry = (Array.isArray(nodeResult?.attachments) ? nodeResult.attachments : []).find((item) => item !== null && typeof item === "object" && item.name === name);
-	return entry === void 0 ? null : entry;
-}
-/**
-* 附件文件的真实路径；符号链接解析后必须仍在 attachments 目录内。
-*
-* @param nodeDirectory 该次执行的节点目录
-* @param name 附件名
-* @returns 真实文件路径
-*/
-async function attachmentFilePath(nodeDirectory, name) {
-	if (!isSafeAttachmentName(name)) throw new Error("invalid attachment name");
-	const directory = path.join(nodeDirectory, ATTACHMENTS_DIR);
-	const realDirectory = await promises.realpath(directory);
-	const realFile = await promises.realpath(path.join(directory, name));
-	if (!isInsideDirectory(realDirectory, realFile)) throw new Error(`attachment "${name}" is outside the node attachment directory`);
-	if (!(await promises.stat(realFile)).isFile()) throw new Error(`attachment "${name}" is not a regular file`);
-	return realFile;
-}
-// .build/workflows/run-store.js
-/**
-* 工作流运行的落盘存储。
-*
-* 每次运行占一个目录，内容如下：
-*
-* ```text
-* runs/sequence.json  运行序号计数器（不是运行目录，只记录下一个序号）
-* runs/<runId>/
-*   definition.json  本次一次性定义的快照（goal、节点、创建者、时间）
-*   run.json         权威状态快照：原子写（临时文件 + rename）
-*   events.jsonl     追加事件：node/start、node/end、user/answered、run/end …
-*   nodes/<seq>-<id>/
-*     result.json       节点结果全文（run.json 里只留预览；机器人会话的只读
-*                       工具从这里读某次执行的 prompt / 输出）
-*     attachments/      该次执行的附件文件
-* ```
-*
-* 旧记录的 `nodes/<seq>-<id>.json` 仍然可以读取（新执行只写目录布局），
-* 所以格式 2 的已有运行不需要迁移或删除。
-*
-* 每次运行有一个持久递增的序号 `seq`（从 1 开始，写在 run.json 里）：删除旧
-* 运行不会让编号回退；启动时会给没有序号的旧记录按创建时间回填，再把计数器
-* 推到最大值之后。序号只用于展示与引用，不影响执行。
-*
-* 运行数据带格式版本（`WORKFLOW_FORMAT_VERSION`）：启动时版本不符、或
-* `run.json` / `definition.json` 缺失损坏的运行目录会被整个删除（旧格式没有
-* 迁移路径）；全部删光时序号计数器也一起丢掉，下次从 #1 开始。
-*
-* 未完成的运行由 `WorkflowSupervisor` 在启动时尝试恢复（只续接同一会话，不新开
-* 会话）；确实无法恢复时才调用 `markInterrupted`，保留记录供回看。结束的
-* 运行按自动归档设置处理：超过归档时间的运行写上 `archivedAt` 并从默认列表
-* 隐藏；超过删除时间的运行目录直接删除。仍在运行的记录永远不会被归档或删除；
-* `maxRuns` 只限制已归档记录的数量（从最旧的已归档运行开始删）。
-*
-* @module @buka/dsh-plugin-workflows/run-store
-*/
-/** 状态快照文件名。 */
-const RUN_FILE = "run.json";
-/** 定义快照文件名。 */
-const DEFINITION_FILE = "definition.json";
-/** 事件流文件名。 */
-const EVENTS_FILE = "events.jsonl";
-/** 节点结果目录名。 */
-const NODES_DIR = "nodes";
-/** 每次执行的节点目录里结果文件名。 */
-const NODE_RESULT_FILE = "result.json";
-/** 运行序号计数器文件名；放在 runs 目录里，但不是运行目录。 */
-const SEQUENCE_FILE = "sequence.json";
-/** 一个小时的毫秒数：归档设置的时间单位。 */
-const HOUR_MS = 36e5;
-/**
-* 把任意错误转成一句话。
-*
-* @param error 任意错误
-* @returns 一句话错误
-*/
-function describeError$1(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* 判断一条运行记录是否与当前格式不兼容；兼容时返回 null，否则返回原因。
-*
-* @param run 运行记录
-* @param definition 定义快照
-* @returns 不兼容时是原因，否则 `null`
-*/
-function incompatibleReason(run, definition) {
-	if (run === null) return "run.json 缺失或损坏";
-	if (run.version !== 3) return `run.json 版本为 ${String(run.version)}`;
-	if (definition === null) return "definition.json 缺失或损坏";
-	if (definition.version !== 3) return `definition.json 版本为 ${String(definition.version)}`;
-	return null;
-}
-/**
-* 按 UTF-8 字节数截断文本，避免把一个多字节字符切成两半。
-*
-* @param text 原文
-* @param maxBytes 字节上限
-* @returns 截断后的文本与是否截断
-*/
-function truncateUtf8(text, maxBytes) {
-	if (typeof text !== "string") return {
-		text: "",
-		truncated: false
-	};
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return {
-		text,
-		truncated: false
-	};
-	let clipped = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
-	clipped = clipped.replace(/\uFFFD$/u, "");
-	return {
-		text: clipped,
-		truncated: true
-	};
-}
-/**
-* 计龄基准：优先结束时间，其次最后更新时间，再次创建时间；读不到记录时用
-* 目录的 mtime 兜底。归档 / 删除都按这个时间算，运行中的记录不会被处理。
-*
-* @param run 运行记录
-* @param fallback 记录缺失时使用的计龄时间
-* @returns 计龄基准时间
-*/
-function ageAnchor(run, fallback) {
-	for (const value of [
-		run?.finishedAt,
-		run?.updatedAt,
-		run?.createdAt
-	]) if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
-	return fallback;
-}
-/**
-* 正整数选项或默认值。
-*
-* @param value 待校验的值
-* @param fallback 不合法时使用的默认值
-* @returns 正整数或默认值
-*/
-function positiveOption(value, fallback) {
-	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
-}
-/**
-* 运行记录存储。
-*/
-var WorkflowRunStore = class {
-	constructor(options) {
-		if (typeof options?.dir !== "string" || options.dir.trim() === "") throw new Error("WorkflowRunStore requires a runs directory");
-		this.dir = path.resolve(options.dir);
-		this.maxRuns = typeof options.maxRuns === "number" && Number.isInteger(options.maxRuns) && options.maxRuns > 0 ? options.maxRuns : 200;
-		this.maxAttachmentBytes = positiveOption(options.maxAttachmentBytes, DEFAULT_MAX_ATTACHMENT_BYTES);
-		this.maxAttachmentsPerNode = positiveOption(options.maxAttachmentsPerNode, 20);
-		this.maxNodeAttachmentsBytes = positiveOption(options.maxNodeAttachmentsBytes, DEFAULT_MAX_NODE_ATTACHMENTS_BYTES);
-		this.maxInlineAttachmentBytes = positiveOption(options.maxInlineAttachmentBytes, DEFAULT_MAX_INLINE_ATTACHMENT_BYTES);
-		this.retention = normalizeRetention(options.retention);
-		this.logger = options.logger;
-		this.sequenceQueue = Promise.resolve();
-		this.sweepQueue = Promise.resolve();
-	}
-	/**
-	* 建目录、删掉格式不兼容的旧运行、回填序号、按自动归档设置清理；未完成
-	* 运行交给观察者恢复。
-	*
-	* @returns 初始化完成的 promise
-	*/
-	async init() {
-		this.ready ??= this.#initialize();
-		return await this.ready;
-	}
-	/** @returns 初始化完成的 promise */
-	async #initialize() {
-		await promises.mkdir(this.dir, { recursive: true });
-		await this.#purgeIncompatibleRuns();
-		await this.backfillSeq();
-		await this.sweep();
-	}
-	/**
-	* 删除格式版本不兼容（或 run.json / definition.json 缺失、损坏）的运行目录。
-	* 运行时文件（settings.json）在 runs 目录之外，永远不会被这里碰到。
-	*
-	* 如果所有运行目录都被删掉，一并删除序号计数器，让下一次运行从 #1 重新
-	* 开始；只要还有当前版本的运行留着，就保持计数器原样。
-	*
-	* @returns 无返回值
-	*/
-	async #purgeIncompatibleRuns() {
-		const runIds = await this.listRunIds();
-		if (runIds.length === 0) return;
-		let removed = 0;
-		for (const runId of runIds) {
-			const directory = this.runDirectory(runId);
-			if (!this.#isOwnRunDirectory(directory)) continue;
-			const reason = incompatibleReason(await readJsonFile(path.join(directory, RUN_FILE)), await readJsonFile(path.join(directory, DEFINITION_FILE)));
-			if (reason === null) continue;
-			try {
-				await promises.rm(directory, {
-					recursive: true,
-					force: true
+		route(ROUTES.workflows, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			sendJson(res, 200, {
+				ok: true,
+				workflows: (await ready()).listWorkflowSummaries()
+			});
+		});
+		route(ROUTES.workflow, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const params = query(req);
+			const workflowId = (params.get("id") ?? "").trim();
+			const versionRaw = params.get("version");
+			const version = versionRaw === null || versionRaw === "" ? void 0 : Number.parseInt(versionRaw, 10);
+			if (workflowId === "") return sendError(res, 400, "invalid-id", "id is required");
+			if (version !== void 0 && (!Number.isInteger(version) || version < 1)) return sendError(res, 400, "invalid-version", "version must be a positive integer");
+			const detail = (await ready()).readWorkflowDetail(workflowId, version);
+			if (detail === null) return sendError(res, 404, "not-found", `workflow not found: ${workflowId}`);
+			sendJson(res, 200, {
+				ok: true,
+				...detail
+			});
+		});
+		route(ROUTES.workflowActivate, async (req, res) => {
+			if (req.method !== "POST") return sendMethodNotAllowed(res, "POST");
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const record = body;
+			const id = typeof record.id === "string" ? record.id.trim() : "";
+			if (id === "") return sendError(res, 400, "invalid-id", "id is required");
+			if (typeof record.active !== "boolean") return sendError(res, 400, "invalid-active", "active must be a boolean");
+			const workflow = await (await ready()).setWorkflowActive(id, record.active);
+			sendJson(res, 200, {
+				ok: true,
+				workflow: {
+					id: workflow.id,
+					status: workflow.status
+				}
+			});
+		});
+		route(ROUTES.jobs, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const workflowId = (query(req).get("workflowId") ?? "").trim();
+			if (workflowId === "") return sendError(res, 400, "invalid-id", "workflowId is required");
+			sendJson(res, 200, {
+				ok: true,
+				jobs: (await ready()).listJobSummaries(workflowId)
+			});
+		});
+		route(ROUTES.jobStart, async (req, res) => {
+			if (req.method !== "POST") return sendMethodNotAllowed(res, "POST");
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const record = body;
+			const workflowId = typeof record.workflowId === "string" ? record.workflowId.trim() : "";
+			if (workflowId === "") return sendError(res, 400, "invalid-id", "workflowId is required");
+			const job = await (await ready()).createJobFromHuman({
+				workflowId,
+				rawInput: record.rawInput ?? {},
+				structuredInput: record.structuredInput ?? {}
+			});
+			sendJson(res, 200, {
+				ok: true,
+				jobId: job.id,
+				seq: job.seq
+			});
+		});
+		route(ROUTES.job, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const jobId = (query(req).get("id") ?? "").trim();
+			if (jobId === "") return sendError(res, 400, "invalid-id", "id is required");
+			const detail = (await ready()).jobDetail(jobId);
+			if (detail === null) return sendError(res, 404, "not-found", `job not found: ${jobId}`);
+			sendJson(res, 200, {
+				ok: true,
+				...detail
+			});
+		});
+		route(ROUTES.jobAction, async (req, res) => {
+			if (req.method !== "POST") return sendMethodNotAllowed(res, "POST");
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const record = body;
+			const jobId = typeof record.jobId === "string" ? record.jobId.trim() : "";
+			if (jobId === "") return sendError(res, 400, "invalid-id", "jobId is required");
+			const engine = await ready();
+			if (record.action === "cancel") {
+				const job = await engine.cancelJob(jobId);
+				sendJson(res, 200, {
+					ok: true,
+					job: {
+						id: job.id,
+						status: job.status
+					}
 				});
-				removed += 1;
-				this.logger?.info?.(`buka-workflows: 删除格式不兼容的运行记录（${runId}：${reason}）`);
-			} catch (error) {
-				this.logger?.warn?.(`buka-workflows: 删除格式不兼容的运行记录失败（${runId}）：${describeError$1(error)}`);
-			}
-		}
-		if (removed === 0) return;
-		this.logger?.info?.(`buka-workflows: 共删除 ${removed} 条格式不兼容的运行记录`);
-		if ((await this.listRunIds()).length === 0) try {
-			await promises.rm(this.sequenceFile(), { force: true });
-		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: 重置运行序号失败：${describeError$1(error)}`);
-		}
-	}
-	/**
-	* 更新自动归档策略（页面保存设置后调用）。
-	*
-	* @param retention 新的归档策略
-	*/
-	setRetention(retention) {
-		this.retention = normalizeRetention(retention);
-	}
-	/**
-	* 一次运行的目录。
-	*
-	* @param runId 运行 id
-	* @returns 运行目录
-	*/
-	runDirectory(runId) {
-		return path.join(this.dir, runId);
-	}
-	/**
-	* 序号计数器文件。
-	*
-	* @returns 序号计数器文件
-	*/
-	sequenceFile() {
-		return path.join(this.dir, SEQUENCE_FILE);
-	}
-	/**
-	* 分配下一个运行序号（从 1 开始）。计数器缺失时按现有运行的最大序号 +
-	* 1 初始化；分配串行执行，避免并发创建拿到同一个号。
-	*
-	* @returns 下一个运行序号
-	*/
-	allocateSeq() {
-		const job = this.sequenceQueue.then(() => this.#allocateSeqOnce());
-		this.sequenceQueue = job.catch(() => void 0);
-		return job;
-	}
-	/** @returns 下一个运行序号 */
-	async #allocateSeqOnce() {
-		await promises.mkdir(this.dir, { recursive: true });
-		const state = await this.#readSequence();
-		const next = state === null ? await this.#nextSeqFromRuns() : state.next;
-		await this.#writeSequence(next + 1);
-		return next;
-	}
-	/**
-	* 新建一次运行：写定义快照、状态快照与首条事件。
-	*
-	* @param input 运行记录、定义快照与可选计划
-	*/
-	async create({ run, definition, plan }) {
-		run.version = 3;
-		const directory = this.runDirectory(run.runId);
-		await promises.mkdir(directory, { recursive: true });
-		await writeJsonAtomic(path.join(directory, DEFINITION_FILE), {
-			version: 3,
-			runId: run.runId,
-			createdAt: run.createdAt,
-			createdBy: run.createdBy,
-			goal: run.goal,
-			definition,
-			...plan === void 0 ? {} : { plan }
-		});
-		await writeJsonAtomic(path.join(directory, RUN_FILE), run);
-		await this.appendEvent(run.runId, "run/created", {
-			goal: run.goal,
-			...Number.isInteger(run.seq) ? { seq: run.seq } : {},
-			...run.createdBy === void 0 ? {} : { createdBy: run.createdBy }
-		});
-	}
-	/**
-	* 写状态快照。
-	*
-	* @param run 运行记录
-	*/
-	async save(run) {
-		await writeJsonAtomic(path.join(this.runDirectory(run.runId), RUN_FILE), run);
-	}
-	/**
-	* 追加一条事件。
-	*
-	* @param runId 运行 id
-	* @param type 事件类型
-	* @param data 事件数据
-	*/
-	async appendEvent(runId, type, data = {}) {
-		const directory = this.runDirectory(runId);
-		await promises.mkdir(directory, { recursive: true });
-		const line = `${JSON.stringify({
-			time: Date.now(),
-			type,
-			data
-		})}\n`;
-		await promises.appendFile(path.join(directory, EVENTS_FILE), line, {
-			encoding: "utf8",
-			mode: 384
-		});
-	}
-	/**
-	* 一次执行的节点目录：`nodes/<seq>-<nodeId>/`。
-	*
-	* `runId` / `nodeId` 必须是单段路径，`seq` 必须是正整数；调用方不能用路径
-	* 片段逃出 `nodes/`。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @returns 节点目录
-	*/
-	nodeDirectory(runId, seq, nodeId) {
-		if (typeof runId !== "string" || runId === "") throw new Error("runId is required");
-		if (runId === "." || runId === ".." || runId.includes("/") || runId.includes("\\")) throw new Error("runId must be a single path segment");
-		if (!Number.isInteger(seq) || seq <= 0) throw new Error("seq must be a positive integer");
-		if (typeof nodeId !== "string" || nodeId === "") throw new Error("nodeId is required");
-		if (nodeId === "." || nodeId === ".." || nodeId.includes("/") || nodeId.includes("\\")) throw new Error("nodeId must be a single path segment");
-		return path.join(this.runDirectory(runId), NODES_DIR, `${seq}-${nodeId}`);
-	}
-	/**
-	* 保存一个节点结果全文。新记录写到节点目录的 `result.json`；旧记录中的
-	* `nodes/<seq>-<nodeId>.json` 只读不删。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @param payload 节点结果
-	*/
-	async saveNodeResult(runId, seq, nodeId, payload) {
-		const directory = this.nodeDirectory(runId, seq, nodeId);
-		await promises.mkdir(directory, { recursive: true });
-		await writeJsonAtomic(path.join(directory, NODE_RESULT_FILE), {
-			version: 3,
-			runId,
-			seq,
-			nodeId,
-			savedAt: Date.now(),
-			...payload
-		});
-	}
-	/**
-	* 读取一次运行的状态快照。
-	*
-	* @param runId 运行 id
-	* @returns 运行记录；缺失 / 损坏时是 `null`
-	*/
-	async readRun(runId) {
-		if (typeof runId !== "string" || runId === "") return null;
-		if (runId === "sequence.json") return null;
-		try {
-			const text = await promises.readFile(path.join(this.runDirectory(runId), RUN_FILE), "utf8");
-			const run = JSON.parse(text);
-			if (typeof run?.runId !== "string" || typeof run?.status !== "string") return null;
-			return run;
-		} catch {
-			return null;
-		}
-	}
-	/**
-	* 读取一次运行的定义快照。
-	*
-	* @param runId 运行 id
-	* @returns 定义快照；缺失 / 损坏时是 `null`
-	*/
-	async readDefinition(runId) {
-		if (typeof runId !== "string" || runId === "") return null;
-		try {
-			const text = await promises.readFile(path.join(this.runDirectory(runId), DEFINITION_FILE), "utf8");
-			const value = JSON.parse(text);
-			return value !== null && typeof value === "object" ? value : null;
-		} catch {
-			return null;
-		}
-	}
-	/**
-	* 读取一次运行的全部节点结果，按 seq 升序。新目录布局与旧 JSON 文件同时
-	* 扫描；同一 `seq:nodeId` 以新目录为准。
-	*
-	* @param runId 运行 id
-	* @returns 全部节点结果，按 seq 升序
-	*/
-	async readNodeResults(runId) {
-		if (typeof runId !== "string" || runId === "") return [];
-		const directory = path.join(this.runDirectory(runId), NODES_DIR);
-		let entries;
-		try {
-			entries = await promises.readdir(directory, { withFileTypes: true });
-		} catch {
-			return [];
-		}
-		const byKey = /* @__PURE__ */ new Map();
-		/** @param value 一条节点结果 */
-		const remember = (value) => {
-			const key = `${String(value.seq ?? "")}:${String(value.nodeId ?? "")}`;
-			if (!byKey.has(key)) byKey.set(key, value);
-		};
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			const value = await readJsonFile(path.join(directory, entry.name, NODE_RESULT_FILE));
-			if (value !== null) remember(value);
-		}
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-			const value = await readJsonFile(path.join(directory, entry.name));
-			if (value !== null) remember(value);
-		}
-		return [...byKey.values()].sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
-	}
-	/**
-	* 读取某一次执行的节点结果全文。优先新目录 `result.json`，找不到时回退
-	* 旧版 `nodes/<seq>-<nodeId>.json`。文件缺失、损坏或参数不合法时返回 null。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @returns 节点结果；缺失 / 参数不合法时是 `null`
-	*/
-	async readNodeResult(runId, seq, nodeId) {
-		let directory;
-		try {
-			directory = this.nodeDirectory(runId, seq, nodeId);
-		} catch {
-			return null;
-		}
-		const fresh = await readJsonFile(path.join(directory, NODE_RESULT_FILE));
-		if (fresh !== null) return fresh;
-		return await readJsonFile(path.join(this.runDirectory(runId), NODES_DIR, `${seq}-${nodeId}.json`));
-	}
-	/**
-	* 把节点返回的附件复制到该次执行的节点目录，返回稳定清单。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @param raw `structured_output.attachments`
-	* @param options 机器人工作区
-	* @returns 稳定清单
-	*/
-	async writeNodeAttachments(runId, seq, nodeId, raw, options = {}) {
-		return await writeNodeAttachmentsToRun({
-			runDirectory: this.runDirectory(runId),
-			nodeDirectory: this.nodeDirectory(runId, seq, nodeId),
-			raw,
-			workspace: typeof options.workspace === "string" ? options.workspace : "",
-			maxBytes: this.maxAttachmentBytes,
-			maxTotalBytes: this.maxNodeAttachmentsBytes,
-			maxCount: this.maxAttachmentsPerNode
-		});
-	}
-	/**
-	* 把附件清单转成模板上下文：每个附件带绝对路径；文本附件在大小上限内
-	* 额外带 `text` 供 prompt 内联。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @param manifest 附件清单
-	* @returns 模板上下文里的附件值
-	*/
-	async attachmentValues(runId, seq, nodeId, manifest) {
-		return await attachmentTemplateValues({
-			attachmentsDirectory: path.join(this.nodeDirectory(runId, seq, nodeId), ATTACHMENTS_DIR),
-			manifest,
-			maxInlineTextBytes: this.maxInlineAttachmentBytes
-		});
-	}
-	/**
-	* 读取一个附件的一段内容。`name` 必须出现在该次执行的清单里。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @param name 附件名
-	* @param options 起始偏移与读取字节数
-	* @returns 附件的一段内容；找不到时是 `null`
-	*/
-	async readAttachment(runId, seq, nodeId, name, options = {}) {
-		return await readRunAttachment({
-			nodeResult: await this.readNodeResult(runId, seq, nodeId),
-			nodeDirectory: this.nodeDirectory(runId, seq, nodeId),
-			name,
-			offset: options.offset,
-			maxBytes: options.maxBytes
-		});
-	}
-	/**
-	* 打开一个附件用于下载：只返回清单里的文件，并确认它仍在附件目录内。
-	*
-	* @param runId 运行 id
-	* @param seq 执行序号
-	* @param nodeId 节点 id
-	* @param name 附件名
-	* @returns 可下载附件；找不到时是 `null`
-	*/
-	async openAttachment(runId, seq, nodeId, name) {
-		return await openRunAttachment({
-			nodeResult: await this.readNodeResult(runId, seq, nodeId),
-			nodeDirectory: this.nodeDirectory(runId, seq, nodeId),
-			name
-		});
-	}
-	/**
-	* 列出运行目录名（忽略序号计数器文件）。
-	*
-	* @returns 运行目录名
-	*/
-	async listRunIds() {
-		let entries;
-		try {
-			entries = await promises.readdir(this.dir, { withFileTypes: true });
-		} catch {
-			return [];
-		}
-		return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).filter((name) => name !== SEQUENCE_FILE);
-	}
-	/**
-	* 最近的运行摘要，按创建时间倒序。默认只列未归档的运行；`archived: true`
-	* 时只列已归档的运行（供页面的「查看已归档」用）。
-	*
-	* @param limit 最多返回多少条
-	* @param options 是否只看已归档
-	* @returns 运行摘要
-	*/
-	async listRuns(limit = 20, options = {}) {
-		const max = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const archivedOnly = options.archived === true;
-		const runs = [];
-		for (const runId of await this.listRunIds()) {
-			const run = await this.readRun(runId);
-			if (run === null) continue;
-			const archived = typeof run.archivedAt === "number";
-			if (archived !== archivedOnly) continue;
-			runs.push({
-				runId: run.runId,
-				seq: typeof run.seq === "number" && Number.isInteger(run.seq) && run.seq > 0 ? run.seq : null,
-				goal: run.goal ?? "",
-				status: run.status,
-				createdAt: run.createdAt ?? null,
-				finishedAt: run.finishedAt ?? null,
-				archivedAt: archived ? run.archivedAt : null,
-				lastNode: run.active?.[0]?.nodeId ?? run.current?.nodeId ?? run.result?.lastNode ?? null,
-				error: run.error ?? null,
-				waitingForUser: Boolean(run.pendingInteraction || run.pendingUser)
-			});
-		}
-		runs.sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0));
-		return runs.slice(0, max);
-	}
-	/**
-	* 已归档运行的条数：页面用它决定是否显示「查看已归档」入口。
-	*
-	* @returns 已归档运行条数
-	*/
-	async countArchived() {
-		let count = 0;
-		for (const runId of await this.listRunIds()) {
-			const run = await this.readRun(runId);
-			if (run !== null && typeof run.archivedAt === "number") count += 1;
-		}
-		return count;
-	}
-	/**
-	* 所有仍在进行（running / waiting）的运行，按创建时间升序。观察者启动恢复
-	* 先用它，能恢复就继续跑，不能恢复再调用 `markInterrupted`。
-	*
-	* @returns 未完成的运行，按创建时间升序
-	*/
-	async listUnfinished() {
-		const runs = [];
-		for (const runId of await this.listRunIds()) {
-			const run = await this.readRun(runId);
-			if (run === null) continue;
-			if (run.status !== "running" && run.status !== "waiting") continue;
-			runs.push(run);
-		}
-		runs.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
-		return runs;
-	}
-	/**
-	* 把一个无法恢复的进行中运行标成 interrupted，保留记录供回看。
-	*
-	* @param runId 运行 id
-	* @param reason 中断原因
-	* @returns 是否确实改了状态
-	*/
-	async markInterrupted(runId, reason) {
-		const run = await this.readRun(runId);
-		if (run === null) return false;
-		if (run.status !== "running" && run.status !== "waiting") return false;
-		const now = Date.now();
-		run.status = "interrupted";
-		run.updatedAt = now;
-		run.finishedAt = now;
-		run.current = null;
-		run.active = [];
-		run.pendingUser = null;
-		run.pendingInteraction = null;
-		run.error = typeof reason === "string" && reason !== "" ? reason : "host restarted before this workflow finished";
-		run.result = {
-			status: "interrupted",
-			lastNode: run.result?.lastNode ?? null
-		};
-		try {
-			await this.save(run);
-			await this.appendEvent(runId, "run/interrupted", { reason: run.error });
-			return true;
-		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: 标记中断运行失败（${runId}）：${describeError$1(error)}`);
-			return false;
-		}
-	}
-	/**
-	* 把所有无法恢复的进行中运行标成 interrupted。观察者不可用（例如 robots
-	* 服务缺失）时用它兜底。
-	*
-	* @param reason 中断原因
-	* @returns 标成 interrupted 的运行数
-	*/
-	async markAllInterrupted(reason) {
-		let count = 0;
-		for (const run of await this.listUnfinished()) if (await this.markInterrupted(run.runId, reason)) count += 1;
-		return count;
-	}
-	/**
-	* 给没有序号的历史运行按创建时间回填编号，并把计数器推到最大值之后。
-	* 只在启动时执行一次；已经有序号的记录保持原样。
-	*
-	* @returns 无返回值
-	*/
-	async backfillSeq() {
-		const unnumbered = [];
-		let maxSeq = 0;
-		for (const runId of await this.listRunIds()) {
-			const run = await this.readRun(runId);
-			if (run === null) continue;
-			if (typeof run.seq === "number" && Number.isInteger(run.seq) && run.seq > 0) {
-				maxSeq = Math.max(maxSeq, run.seq);
-				continue;
-			}
-			unnumbered.push(run);
-		}
-		if (unnumbered.length === 0) {
-			if (maxSeq > 0 && await this.#readSequence() === null) await this.#writeSequence(maxSeq + 1);
-			return;
-		}
-		const state = await this.#readSequence();
-		let next = Math.max(maxSeq + 1, state?.next ?? 1);
-		unnumbered.sort((left, right) => {
-			const diff = ageAnchor(left, 0) - ageAnchor(right, 0);
-			return diff !== 0 ? diff : String(left.runId).localeCompare(String(right.runId));
-		});
-		for (const run of unnumbered) {
-			run.seq = next;
-			next += 1;
-			try {
-				await this.save(run);
-			} catch (error) {
-				this.logger?.warn?.(`buka-workflows: 回填运行序号失败（${run.runId}）：${describeError$1(error)}`);
-			}
-		}
-		await this.#writeSequence(next);
-	}
-	/**
-	* 按自动归档设置处理所有运行：超删除时间的删目录，超归档时间的写
-	* `archivedAt`；运行中（running / waiting）的记录永远跳过。关闭自动归档
-	* 后不做按时间的归档 / 删除，但 `maxRuns` 上限仍然生效（只删已归档记录）。
-	*
-	* @param options 测试注入的当前时间
-	* @returns 清扫完成的 promise
-	*/
-	sweep(options = {}) {
-		const job = this.sweepQueue.then(() => this.#sweepOnce(options));
-		this.sweepQueue = job.catch(() => void 0);
-		return job;
-	}
-	/**
-	* 一次清扫的实际逻辑；只由 `sweep` 串行调用。
-	*
-	* @param options 测试注入的当前时间
-	* @returns 无返回值
-	*/
-	async #sweepOnce({ now = Date.now() } = {}) {
-		const retention = this.retention;
-		const entries = [];
-		for (const runId of await this.listRunIds()) {
-			const directory = this.runDirectory(runId);
-			let stat;
-			try {
-				stat = await promises.stat(directory);
-			} catch {
-				continue;
-			}
-			const run = await this.readRun(runId);
-			const active = run !== null && (run.status === "running" || run.status === "waiting");
-			entries.push({
-				runId,
-				directory,
-				run,
-				anchor: ageAnchor(run, stat.mtimeMs),
-				active,
-				deleted: false
-			});
-		}
-		if (retention.enabled) {
-			const archiveCutoff = now - retention.archiveAfterHours * HOUR_MS;
-			const deleteCutoff = now - retention.deleteAfterHours * HOUR_MS;
-			for (const entry of entries) {
-				if (entry.active) continue;
-				if (entry.anchor <= deleteCutoff) {
-					await this.#removeRun(entry);
-					continue;
-				}
-				if (entry.run === null || typeof entry.run.archivedAt === "number") continue;
-				if (entry.anchor > archiveCutoff) continue;
-				entry.run.archivedAt = now;
-				try {
-					await this.save(entry.run);
-					await this.appendEvent(entry.runId, "run/archived", { archivedAt: now });
-				} catch (error) {
-					this.logger?.warn?.(`buka-workflows: 归档运行失败（${entry.runId}）：${describeError$1(error)}`);
-				}
-			}
-		}
-		await this.#pruneArchivedOverflow(entries);
-	}
-	/**
-	* `maxRuns` 只限制已归档记录：超出时从最旧的已归档运行开始删除。未归档的
-	* 运行（还在保留期内）不会被这个上限删掉。
-	*
-	* @param entries 本次清扫的运行快照
-	* @returns 无返回值
-	*/
-	async #pruneArchivedOverflow(entries) {
-		const remaining = entries.filter((entry) => !entry.deleted);
-		const overflow = remaining.length - this.maxRuns;
-		if (overflow <= 0) return;
-		const archived = remaining.filter((entry) => !entry.active && entry.run !== null && typeof entry.run.archivedAt === "number").sort((left, right) => left.anchor - right.anchor);
-		for (const entry of archived.slice(0, overflow)) await this.#removeRun(entry);
-	}
-	/**
-	* 删除一个运行目录；只允许删 runs 目录下的直接子目录，避免误删用户文件。
-	*
-	* @param entry 要删除的运行快照
-	* @returns 无返回值
-	*/
-	async #removeRun(entry) {
-		if (entry.deleted) return;
-		if (!this.#isOwnRunDirectory(entry.directory)) return;
-		try {
-			await promises.rm(entry.directory, {
-				recursive: true,
-				force: true
-			});
-			entry.deleted = true;
-		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: 清理旧运行失败（${entry.directory}）：${describeError$1(error)}`);
-		}
-	}
-	/**
-	* 读序号计数器；文件缺失 / 损坏 / 值不合法时返回 null，由调用方按现有运行
-	* 推导下一个序号。
-	*
-	* @returns 计数器内容；缺失 / 损坏时是 `null`
-	*/
-	async #readSequence() {
-		try {
-			const text = await promises.readFile(this.sequenceFile(), "utf8");
-			const value = JSON.parse(text);
-			if (!Number.isInteger(value?.next) || value.next < 1) return null;
-			return { next: value.next };
-		} catch {
-			return null;
-		}
-	}
-	/**
-	* 写序号计数器。
-	*
-	* @param next 下一个序号
-	* @returns 无返回值
-	*/
-	async #writeSequence(next) {
-		await writeJsonAtomic(this.sequenceFile(), {
-			version: 3,
-			next
-		});
-	}
-	/**
-	* 从现有运行推导下一个序号：最大 seq + 1（没有记录时从 1 开始）。
-	*
-	* @returns 下一个序号
-	*/
-	async #nextSeqFromRuns() {
-		let maxSeq = 0;
-		for (const runId of await this.listRunIds()) {
-			const run = await this.readRun(runId);
-			if (run !== null && typeof run.seq === "number" && Number.isInteger(run.seq) && run.seq > maxSeq) maxSeq = run.seq;
-		}
-		return maxSeq + 1;
-	}
-	/**
-	* 只允许删除 runsDir 下的直接子目录，避免误删用户文件。
-	*
-	* @param directory 目录路径
-	* @returns 是 runsDir 的直接子目录时为 true
-	*/
-	#isOwnRunDirectory(directory) {
-		const resolved = path.resolve(directory);
-		return resolved.startsWith(`${this.dir}${path.sep}`) && resolved !== this.dir;
-	}
-};
-// .build/workflows/session-tools.js
-/**
-* 机器人节点会话里的四个只读工作流工具。
-*
-* 这些工具注册在 workflows 插件上，但只对「运行记录里出现过的机器人会话」可见
-* （可见性由 supervisor 维护的 sessionId → runId 索引决定）。工具不写运行记录，
-* 也不允许切换运行：每个工具都从调用者会话反查它所属的那一次运行。
-*
-* - `buka_workflow_overview`：紧凑的节点图 + 节点概要/状态 + 执行序号列表；
-* - `buka_workflow_execution_input`：某次执行实际收到的输入；
-* - `buka_workflow_execution_output`：某次执行的输出与附件清单；
-* - `buka_workflow_execution_attachment`：列出附件，或分段读取一个附件。
-*
-* 总览刻意不返回 prompt / 最终文本 / 附件内容 / 边的 prompt，避免把整份运行记录塞进
-* 上下文；需要细节时按执行序号单独取。本模块不 import DSH 包，`defineTool`
-* 由入口注入，便于用假 store 单测。
-*
-* @module @buka/dsh-plugin-workflows/session-tools
-*/
-/** 判断普通对象。 */
-function isRecord$1(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-/** 总览里目标 / 节点概要 / 错误的最大字符数。 */
-const GOAL_LIMIT = 240;
-const SUMMARY_LIMIT = 160;
-const ERROR_LIMIT = 300;
-const EDGE_NAME_LIMIT = 80;
-/** 附件工具一次读取的默认 / 最大字节数。 */
-const DEFAULT_ATTACHMENT_READ_BYTES = 65536;
-const MAX_ATTACHMENT_READ_BYTES = 262144;
-/**
-* 压成一行并截断。
-*
-* @param value 原始值
-* @param max 字符上限
-* @returns 单行文本
-*/
-function clipText$1(value, max) {
-	if (typeof value !== "string") return "";
-	const text = value.replace(/\s+/gu, " ").trim();
-	if (text === "") return "";
-	return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
-}
-/**
-* 字节数 → 简短大小。
-*
-* @param value 字节数
-* @returns 简短大小
-*/
-function formatBytes(value) {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "?";
-	if (value < 1024) return `${value} B`;
-	if (value < 1048576) return `${(value / 1024).toFixed(1)} KiB`;
-	if (value < 1073741824) return `${(value / 1048576).toFixed(1)} MiB`;
-	return `${(value / 1073741824).toFixed(1)} GiB`;
-}
-/**
-* 节点结果里的附件清单，只保留展示需要的字段。
-*
-* @param value 节点结果里的 `attachments`
-* @returns 展示用的附件清单
-*/
-function attachmentManifest(value) {
-	if (!Array.isArray(value)) return [];
-	return value.filter((entry) => entry !== null && typeof entry === "object" && typeof entry.name === "string").map((entry, fallbackIndex) => ({
-		index: typeof entry.index === "number" && Number.isInteger(entry.index) ? entry.index : fallbackIndex,
-		name: entry.name,
-		bytes: typeof entry.bytes === "number" && Number.isFinite(entry.bytes) ? entry.bytes : 0,
-		description: typeof entry.description === "string" && entry.description !== "" ? entry.description : null
-	}));
-}
-/**
-* 附件清单的展示文本。
-*
-* @param attachments 附件清单
-* @returns 展示文本行
-*/
-function attachmentLines(attachments) {
-	return attachments.map((entry) => {
-		const description = entry.description === null ? "" : ` — ${entry.description}`;
-		return `- #${entry.index} ${entry.name} (${formatBytes(entry.bytes)})${description}`;
-	});
-}
-/**
-* 时间戳 → ISO 字符串。
-*
-* @param value 时间戳
-* @returns ISO 字符串；非法时是 `null`
-*/
-function isoTime(value) {
-	if (typeof value !== "number" || !Number.isFinite(value)) return null;
-	try {
-		return new Date(value).toISOString();
-	} catch {
-		return null;
-	}
-}
-/**
-* 按 id 从定义快照里取节点；优先用规范化后的 plan。
-*
-* @param definition 定义快照
-* @param nodeId 节点 id
-* @returns 节点；找不到时是 `null`
-*/
-function definitionNode(definition, nodeId) {
-	if (typeof nodeId !== "string" || nodeId === "") return null;
-	const plan = isRecord$1(definition) ? definition.plan : void 0;
-	const planned = isRecord$1(plan) && isRecord$1(plan.nodes) ? plan.nodes[nodeId] : void 0;
-	if (planned !== null && typeof planned === "object") return planned;
-	const raw = isRecord$1(definition) ? definition.definition : void 0;
-	return (isRecord$1(raw) && Array.isArray(raw.nodes) ? raw.nodes : []).find((node) => node !== null && typeof node === "object" && node.id === nodeId) ?? null;
-}
-/**
-* 读取运行；不存在时给出明确错误。
-*
-* @param store 运行存储
-* @param runId 运行 id
-* @returns 运行记录
-*/
-async function readRunOrThrow(store, runId) {
-	const run = await store.readRun(runId);
-	if (run === null || run === void 0) throw new Error(`workflow run "${runId}" is no longer available; it may have been archived or deleted`);
-	return run;
-}
-/**
-* 校验执行序号。
-*
-* @param value 执行序号
-* @returns 合法的执行序号
-*/
-function requireSeq(value) {
-	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new Error("seq must be a positive integer execution number from the buka_workflow_overview execution list");
-	return value;
-}
-/**
-* 一次执行的当前状态：正在跑的节点还没进 run.steps。
-*
-* @param run 运行记录
-* @param current 活跃节点
-* @returns 执行状态
-*/
-function currentStatus(run, current) {
-	if (current?.type === "user") return run.pendingUser?.nodeId === current.nodeId ? "waiting" : "running";
-	return "running";
-}
-/**
-* 运行中的活跃节点列表：并发用 run.active，旧记录退回单值 run.current。
-*
-* @param run 运行记录
-* @returns 活跃节点列表
-*/
-function activesOf(run) {
-	if (Array.isArray(run.active)) return run.active.filter((entry) => entry !== null && typeof entry === "object");
-	if (run.current !== null && typeof run.current === "object") return [run.current];
-	return [];
-}
-/**
-* 执行列表，按 seq 升序；包含正在执行的 current。
-*
-* @param run 运行记录
-* @returns 执行列表
-*/
-function executionList(run) {
-	const steps = Array.isArray(run.steps) ? run.steps : [];
-	const list = [];
-	for (const step of steps) {
-		if (step === null || typeof step !== "object") continue;
-		list.push({
-			seq: typeof step.seq === "number" && Number.isInteger(step.seq) ? step.seq : null,
-			nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-			visit: typeof step.visit === "number" && Number.isInteger(step.visit) ? step.visit : null,
-			type: typeof step.type === "string" ? step.type : null,
-			robot: typeof step.robot === "string" && step.robot !== "" ? step.robot : null,
-			status: typeof step.status === "string" && step.status !== "" ? step.status : "unknown",
-			route: typeof step.route === "string" && step.route !== "" ? step.route : null,
-			routeTo: typeof step.routeTo === "string" && step.routeTo !== "" ? step.routeTo : null,
-			attachments: Array.isArray(step.attachments) ? step.attachments.length : 0,
-			startedAt: isoTime(step.startedAt),
-			finishedAt: isoTime(step.finishedAt)
-		});
-	}
-	for (const current of activesOf(run)) {
-		if (list.some((item) => item.seq === current.seq)) continue;
-		list.push({
-			seq: typeof current.seq === "number" && Number.isInteger(current.seq) ? current.seq : null,
-			nodeId: typeof current.nodeId === "string" ? current.nodeId : "",
-			visit: typeof current.visit === "number" && Number.isInteger(current.visit) ? current.visit : null,
-			type: typeof current.type === "string" ? current.type : null,
-			robot: typeof current.robot === "string" && current.robot !== "" ? current.robot : null,
-			status: currentStatus(run, current),
-			route: null,
-			routeTo: null,
-			attachments: 0,
-			startedAt: isoTime(current.startedAt),
-			finishedAt: null
-		});
-	}
-	list.sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
-	return list;
-}
-/**
-* 按 seq 找一次执行；优先 run.steps，其次 current。
-*
-* @param run 运行记录
-* @param seq 执行序号
-* @returns 命中的执行；找不到时是 `null`
-*/
-function findExecution(run, seq) {
-	const step = (Array.isArray(run.steps) ? run.steps : []).find((item) => item !== null && typeof item === "object" && item.seq === seq);
-	if (step !== void 0) return {
-		step,
-		running: false
-	};
-	const current = activesOf(run).find((item) => item.seq === seq);
-	if (current !== void 0) return {
-		step: {
-			...current,
-			status: currentStatus(run, current),
-			stopReason: null
-		},
-		running: true
-	};
-	return null;
-}
-/**
-* 总览的返回值：只保留图结构与状态，不夹带执行内容。
-*
-* @param run 运行记录
-* @param definition 定义快照
-* @returns 总览返回值
-*/
-function overviewValue(run, definition) {
-	const model = buildRunGraph({
-		run,
-		definition
-	});
-	const actives = activesOf(run);
-	const current = actives[0] ?? null;
-	const pendingUser = run.pendingUser;
-	const pendingInteraction = run.pendingInteraction;
-	const nodes = (Array.isArray(model?.nodes) ? model.nodes : []).map((node) => ({
-		id: typeof node.id === "string" ? node.id : "",
-		type: typeof node.type === "string" ? node.type : null,
-		state: typeof node.state === "string" ? node.state : "idle",
-		visits: Number.isInteger(node.visits) ? node.visits : 0,
-		lastSeq: Number.isInteger(node.lastSeq) ? node.lastSeq : null,
-		summary: node.type === "robot" ? clipText$1(node.summary, SUMMARY_LIMIT) : node.type === "user" ? clipText$1(node.title, SUMMARY_LIMIT) : null,
-		robot: node.type === "robot" && typeof node.robot === "string" && node.robot !== "" ? node.robot : null,
-		unreachable: node.unreachable === true
-	}));
-	const edges = (Array.isArray(model?.edges) ? model.edges : []).map((edge) => ({
-		from: typeof edge.from === "string" ? edge.from : "",
-		to: typeof edge.to === "string" ? edge.to : "",
-		kind: typeof edge.kind === "string" ? edge.kind : "next",
-		names: (Array.isArray(edge.names) ? edge.names : []).map((name) => clipText$1(name, EDGE_NAME_LIMIT)).filter((name) => name !== ""),
-		traversed: edge.traversed === true,
-		traversals: Number.isInteger(edge.traversals) ? edge.traversals : 0,
-		loop: edge.loop === true
-	}));
-	return {
-		run: {
-			runId: typeof run.runId === "string" ? run.runId : "",
-			seq: Number.isInteger(run.seq) ? run.seq : null,
-			status: typeof run.status === "string" ? run.status : "unknown",
-			goal: clipText$1(run.goal, GOAL_LIMIT),
-			createdAt: isoTime(run.createdAt),
-			finishedAt: isoTime(run.finishedAt),
-			current: current !== null ? {
-				nodeId: typeof current.nodeId === "string" ? current.nodeId : "",
-				seq: Number.isInteger(current.seq) ? current.seq : null,
-				type: typeof current.type === "string" ? current.type : null,
-				visit: Number.isInteger(current.visit) ? current.visit : null,
-				robot: typeof current.robot === "string" && current.robot !== "" ? current.robot : null
-			} : null,
-			active: actives.map((active) => ({
-				nodeId: typeof active.nodeId === "string" ? active.nodeId : "",
-				seq: Number.isInteger(active.seq) ? active.seq : null,
-				type: typeof active.type === "string" ? active.type : null,
-				visit: Number.isInteger(active.visit) ? active.visit : null,
-				robot: typeof active.robot === "string" && active.robot !== "" ? active.robot : null
-			})),
-			pendingUser: pendingUser !== null && pendingUser !== void 0 ? {
-				nodeId: typeof pendingUser.nodeId === "string" ? pendingUser.nodeId : "",
-				title: clipText$1(pendingUser.title, SUMMARY_LIMIT)
-			} : null,
-			pendingInteraction: pendingInteraction !== null && pendingInteraction !== void 0 ? {
-				kind: typeof pendingInteraction.kind === "string" ? pendingInteraction.kind : null,
-				nodeId: typeof pendingInteraction.nodeId === "string" ? pendingInteraction.nodeId : "",
-				seq: Number.isInteger(pendingInteraction.seq) ? pendingInteraction.seq : null
-			} : null,
-			error: clipText$1(run.error, ERROR_LIMIT) || null
-		},
-		nodes,
-		edges,
-		executions: executionList(run)
-	};
-}
-/**
-* 总览的紧凑文本。
-*
-* @param value 总览返回值
-* @returns 展示文本
-*/
-function renderOverview(value) {
-	const valueRecord = isRecord$1(value) ? value : {};
-	const run = isRecord$1(valueRecord.run) ? valueRecord.run : {};
-	const seq = run.seq;
-	const lines = [`workflow ${typeof seq === "number" && Number.isInteger(seq) ? `#${seq} ` : ""}${run.runId ?? ""} — ${run.status ?? "unknown"}`];
-	if (typeof run.goal === "string" && run.goal !== "") lines.push(`goal: ${run.goal}`);
-	if (typeof run.createdAt === "string" && run.createdAt !== "") lines.push(`created: ${run.createdAt}`);
-	if (typeof run.finishedAt === "string" && run.finishedAt !== "") lines.push(`finished: ${run.finishedAt}`);
-	const actives = Array.isArray(run.active) ? run.active : [];
-	const currentList = actives.length > 0 ? actives : run.current ? [run.current] : [];
-	for (const current of currentList) {
-		const item = isRecord$1(current) ? current : {};
-		const currentSeq = item.seq;
-		const suffix = typeof currentSeq === "number" && Number.isInteger(currentSeq) ? ` (execution #${currentSeq})` : "";
-		lines.push(`current: ${String(item.nodeId)}${suffix}`);
-	}
-	if (run.pendingUser !== null && run.pendingUser !== void 0) {
-		const pending = isRecord$1(run.pendingUser) ? run.pendingUser : {};
-		lines.push(`waiting at user node: ${String(pending.title || pending.nodeId)}`);
-	}
-	if (run.pendingInteraction !== null && run.pendingInteraction !== void 0) {
-		const pending = isRecord$1(run.pendingInteraction) ? run.pendingInteraction : {};
-		lines.push(`waiting for user: ${String(pending.kind ?? "interaction")} at ${String(pending.nodeId)}`);
-	}
-	if (typeof run.error === "string" && run.error !== "") lines.push(`error: ${run.error}`);
-	const nodes = Array.isArray(valueRecord.nodes) ? valueRecord.nodes : [];
-	lines.push("nodes:");
-	if (nodes.length === 0) lines.push("- (none)");
-	for (const rawNode of nodes) {
-		const node = isRecord$1(rawNode) ? rawNode : {};
-		const state = node.state === "idle" ? "not reached" : String(node.state);
-		const markers = [];
-		if (node.unreachable === true) markers.push("unreachable");
-		const visits = node.visits;
-		if (typeof visits === "number" && visits > 1) markers.push(`×${visits}`);
-		const lastSeq = node.lastSeq;
-		if (typeof lastSeq === "number" && Number.isInteger(lastSeq)) markers.push(`last=#${lastSeq}`);
-		const robot = node.robot === null || node.robot === void 0 ? "" : ` ${String(node.robot)}`;
-		const summary = node.summary === null || node.summary === void 0 || node.summary === "" ? "" : ` — ${String(node.summary)}`;
-		lines.push(`- ${String(node.id)} [${String(node.type ?? "unknown")}${robot}] ${state}${markers.length > 0 ? ` ${markers.join(" ")}` : ""}${summary}`);
-	}
-	const edges = Array.isArray(valueRecord.edges) ? valueRecord.edges : [];
-	lines.push("edges:");
-	if (edges.length === 0) lines.push("- (none)");
-	for (const rawEdge of edges) {
-		const edge = isRecord$1(rawEdge) ? rawEdge : {};
-		const names = Array.isArray(edge.names) ? edge.names : [];
-		const nameText = names.length > 0 ? ` ${names.map((name) => String(name)).join(" / ")}` : "";
-		const markers = [];
-		if (edge.loop === true) markers.push("loop");
-		const traversals = edge.traversals;
-		if (edge.traversed === true) markers.push(`×${String(traversals)}`);
-		lines.push(`- ${String(edge.from)} -> ${String(edge.to)} [${String(edge.kind)}${nameText}]${markers.length > 0 ? ` ${markers.join(" ")}` : ""}`);
-	}
-	const executions = Array.isArray(valueRecord.executions) ? valueRecord.executions : [];
-	lines.push("executions:");
-	if (executions.length === 0) lines.push("- (none)");
-	for (const rawExecution of executions) {
-		const execution = isRecord$1(rawExecution) ? rawExecution : {};
-		const robot = execution.robot === null || execution.robot === void 0 ? "" : ` ${String(execution.robot)}`;
-		const route = execution.route === null || execution.route === void 0 ? "" : ` route=${String(execution.route)}`;
-		const time = execution.finishedAt ?? execution.startedAt;
-		const stamp = typeof time === "string" && time !== "" ? ` ${time}` : "";
-		const attachmentsCount = execution.attachments;
-		const attachments = typeof attachmentsCount === "number" && attachmentsCount > 0 ? ` attachments=${attachmentsCount}` : "";
-		lines.push(`- #${String(execution.seq ?? "?")} ${String(execution.nodeId)} [${String(execution.type ?? "unknown")}${robot}] ${String(execution.status)}${route}${attachments}${stamp}`);
-	}
-	return lines.join("\n");
-}
-/**
-* 输入工具的展示文本。
-*
-* @param value 输入工具返回值
-* @returns 展示文本
-*/
-function renderExecutionInput(value) {
-	const record = isRecord$1(value) ? value : {};
-	const robot = record.robot === null || record.robot === void 0 ? "" : ` · robot "${String(record.robot)}"`;
-	const lines = [
-		`execution #${String(record.seq ?? "?")} · ${String(record.type ?? "unknown")} "${String(record.nodeId ?? "")}"${robot} · ${String(record.status ?? "unknown")}`,
-		"",
-		typeof record.input === "string" && record.input !== "" ? record.input : "(empty input)"
-	];
-	if (record.truncated === true) lines.push("", "(input was truncated when it was recorded)");
-	return lines.join("\n");
-}
-/**
-* 输出工具的展示文本。正文优先；正文为空时才展示结构化 JSON，避免重复。
-*
-* @param value 输出工具返回值
-* @returns 展示文本
-*/
-function renderExecutionOutput(value) {
-	const record = isRecord$1(value) ? value : {};
-	const robot = record.robot === null || record.robot === void 0 ? "" : ` · robot "${String(record.robot)}"`;
-	const stop = typeof record.stopReason === "string" && record.stopReason !== "" ? ` (${record.stopReason})` : "";
-	const route = typeof record.route === "string" && record.route !== "" ? ` route=${record.route}` : "";
-	const lines = [`execution #${String(record.seq ?? "?")} · ${String(record.type ?? "unknown")} "${String(record.nodeId ?? "")}"${robot} · ${String(record.status ?? "unknown")}${stop}${route}`, ""];
-	if (typeof record.output === "string" && record.output !== "") lines.push(record.output);
-	else if (record.structured !== null && record.structured !== void 0) lines.push(JSON.stringify(record.structured, null, 2));
-	else lines.push("(no output text)");
-	if (typeof record.error === "string" && record.error !== "") lines.push("", `error: ${record.error}`);
-	if (record.truncated === true) lines.push("", "(output was truncated when it was recorded)");
-	const attachments = Array.isArray(record.attachments) ? record.attachments : [];
-	if (attachments.length > 0) {
-		lines.push("", "attachments:");
-		lines.push(...attachmentLines(attachmentManifest(attachments)));
-		lines.push(`use buka_workflow_execution_attachment with seq=${String(record.seq ?? "?")} and name to read one; binary/large files stay on disk`);
-	}
-	return lines.join("\n");
-}
-/**
-* 附件工具的展示文本：列表或单文件内容。
-*
-* @param value 附件工具返回值
-* @returns 展示文本
-*/
-function renderExecutionAttachment(value) {
-	const record = isRecord$1(value) ? value : {};
-	const robot = record.robot === null || record.robot === void 0 ? "" : ` · robot "${String(record.robot)}"`;
-	const lines = [`execution #${String(record.seq ?? "?")} · ${String(record.type ?? "unknown")} "${String(record.nodeId ?? "")}"${robot} · ${String(record.status ?? "unknown")}`, ""];
-	const attachment = record.attachment;
-	if (attachment === null || attachment === void 0) {
-		const attachments = Array.isArray(record.attachments) ? record.attachments : [];
-		if (attachments.length === 0) lines.push("(no attachments)");
-		else {
-			lines.push("attachments:");
-			lines.push(...attachmentLines(attachmentManifest(attachments)));
-			lines.push("");
-			lines.push("pass name to read one attachment");
-		}
-		return lines.join("\n");
-	}
-	const attachmentRecord = isRecord$1(attachment) ? attachment : {};
-	const description = typeof attachmentRecord.description === "string" && attachmentRecord.description !== "" ? ` — ${attachmentRecord.description}` : "";
-	lines.push(`attachment #${String(attachmentRecord.index ?? "?")} ${String(attachmentRecord.name ?? "")} (${formatBytes(attachmentRecord.bytes)})${description}`);
-	if (typeof attachmentRecord.path === "string" && attachmentRecord.path !== "") lines.push(`path: ${attachmentRecord.path}`);
-	lines.push("");
-	if (attachmentRecord.binary === true) lines.push("(binary file; read it from the path instead of embedding it in a prompt)");
-	else if (typeof attachmentRecord.text === "string" && attachmentRecord.text !== "") lines.push(attachmentRecord.text);
-	else lines.push("(empty text)");
-	if (attachmentRecord.truncated === true) {
-		const offset = attachmentRecord.offset;
-		const read = attachmentRecord.read;
-		const next = (typeof offset === "number" && Number.isInteger(offset) ? offset : 0) + (typeof read === "number" && Number.isInteger(read) ? read : 0);
-		lines.push("", `(truncated; continue with offset=${next})`);
-	}
-	return lines.join("\n");
-}
-/**
-* 四个工具共用的可见性条件：只对工作流机器人会话可见。
-*
-* 条件在每一步都会执行；`ensureIndex` 只建一次索引。任何索引构建失败都按
-* “不可见”处理，不能让一个坏运行记录让会话的 step preparation 失败。
-*
-* @param input 索引构建与运行反查
-* @returns 工具可见性条件
-*/
-function createSessionToolVisibility({ ensureIndex, resolveSession } = {
-	ensureIndex: async () => void 0,
-	resolveSession: () => null
-}) {
-	if (typeof ensureIndex !== "function") throw new TypeError("createSessionToolVisibility: ensureIndex is required");
-	if (typeof resolveSession !== "function") throw new TypeError("createSessionToolVisibility: resolveSession is required");
-	return async (context) => {
-		if (context?.signal?.aborted) return false;
-		try {
-			await ensureIndex();
-		} catch {
-			return false;
-		}
-		if (context?.signal?.aborted) return false;
-		const binding = resolveSession(context?.agent?.id ?? "");
-		return binding !== null && binding !== void 0;
-	};
-}
-/**
-* 创建四个只读工具。
-*
-* @param input 工具工厂、运行存储与会话反查
-* @returns 注册用的四个工具定义
-*/
-function createWorkflowSessionTools({ defineTool, store, resolveSession }) {
-	if (typeof defineTool !== "function") throw new TypeError("createWorkflowSessionTools: defineTool is required");
-	if (store === null || typeof store !== "object") throw new TypeError("createWorkflowSessionTools: store is required");
-	if (typeof resolveSession !== "function") throw new TypeError("createWorkflowSessionTools: resolveSession is required");
-	/**
-	* 官方 `defineTool` 的泛型会从 schema 反推精确返回值；这里的工具定义按运行时
-	* 形状书写，统一在这个边界收口（运行时仍由 DSH 按其 schema 校验）。
-	*/
-	function tool(definition) {
-		return defineTool(definition);
-	}
-	/**
-	* 从调用者会话反查运行；解析不到时说明这些工具只属于工作流机器人会话。
-	*
-	* @param exec 工具执行上下文
-	* @returns 运行 id
-	*/
-	function runIdOf(exec) {
-		const agent = isRecord$1(exec) && isRecord$1(exec.agent) ? exec.agent : null;
-		const sessionId = agent !== null && typeof agent.id === "string" ? agent.id : "";
-		const binding = sessionId === "" ? null : resolveSession(sessionId);
-		const runId = typeof binding?.runId === "string" ? binding.runId : "";
-		if (runId === "") throw new Error("workflow inspection tools are only available to robot sessions that belong to a workflow run");
-		return runId;
-	}
-	return [
-		tool({
-			name: "buka_workflow_overview",
-			description: "Inspect the workflow run this robot session belongs to. Returns a compact node graph (node ids, types, summaries, states, edges), the current status, and the numbered execution list in execution order. It never returns prompts, final texts, edge prompts or other execution details: use buka_workflow_execution_input / buka_workflow_execution_output with an execution number from this list when you need the details of one execution.",
-			parameters: {},
-			output: {
-				schema: {
-					type: "object",
-					additionalProperties: false,
-					properties: {
-						run: {
-							type: "json",
-							required: true,
-							description: "Compact run status and pointers."
-						},
-						nodes: {
-							type: "json",
-							required: true,
-							description: "Workflow nodes with state and summary."
-						},
-						edges: {
-							type: "json",
-							required: true,
-							description: "Workflow edges without prompts."
-						},
-						executions: {
-							type: "json",
-							required: true,
-							description: "Executions in sequence order."
-						}
-					}
-				},
-				render: (_args, value) => [{
-					type: "text",
-					text: renderOverview(value)
-				}]
-			},
-			async execute(_args, exec) {
-				const runId = runIdOf(exec);
-				return overviewValue(await readRunOrThrow(store, runId), await store.readDefinition(runId));
-			}
-		}),
-		tool({
-			name: "buka_workflow_execution_input",
-			description: "Read the exact input recorded for one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns the rendered prompt that was sent to that robot session; a user execution returns the title, rendered instruction and choices that were shown to the user. Read-only.",
-			parameters: { seq: {
-				type: "number",
-				required: true,
-				description: "Execution number (seq) from the buka_workflow_overview execution list."
-			} },
-			output: {
-				schema: {
-					type: "object",
-					additionalProperties: false,
-					properties: {
-						seq: {
-							type: "number",
-							required: true
-						},
-						nodeId: {
-							type: "string",
-							required: true
-						},
-						visit: {
-							oneOf: [{ type: "number" }, { type: "null" }],
-							required: true
-						},
-						type: {
-							type: "string",
-							required: true
-						},
-						robot: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						status: {
-							type: "string",
-							required: true
-						},
-						input: {
-							type: "string",
-							required: true
-						},
-						truncated: {
-							type: "boolean",
-							required: true
-						}
-					}
-				},
-				render: (_args, value) => [{
-					type: "text",
-					text: renderExecutionInput(value)
-				}]
-			},
-			async execute(args, exec) {
-				const runId = runIdOf(exec);
-				const seq = requireSeq(args?.seq);
-				const run = await readRunOrThrow(store, runId);
-				const found = findExecution(run, seq);
-				if (found === null) throw new Error(`execution #${seq} was not found in workflow run "${runId}"; use the execution list from buka_workflow_overview`);
-				const step = found.step;
-				if (step.type === "user") {
-					const node = definitionNode(await store.readDefinition(runId), typeof step.nodeId === "string" ? step.nodeId : "");
-					const pending = found.running && run.pendingUser?.nodeId === step.nodeId ? run.pendingUser : null;
-					const title = pending?.title ?? (typeof node?.title === "string" ? node.title : "");
-					const detail = typeof pending?.detail === "string" && pending.detail !== "" ? pending.detail : typeof step.input === "string" && step.input !== "" ? step.input : typeof node?.detail === "string" ? node.detail : "";
-					const optionLines = (Array.isArray(pending?.options) ? pending.options : Array.isArray(node?.next) ? node.next : []).filter((option) => option !== null && typeof option === "object" && typeof option.label === "string").map((option) => `- ${String(option.label)}${typeof option.description === "string" && option.description !== "" ? `: ${option.description}` : ""}`);
-					const parts = [title, detail];
-					if (optionLines.length > 0) parts.push(`choices:\n${optionLines.join("\n")}`);
-					return {
-						seq,
-						nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-						visit: Number.isInteger(step.visit) ? step.visit : null,
-						type: "user",
-						robot: null,
-						status: found.running ? "waiting" : typeof step.status === "string" ? step.status : "unknown",
-						input: parts.filter((part) => typeof part === "string" && part !== "").join("\n"),
-						truncated: false
-					};
-				}
-				const result = await store.readNodeResult(runId, seq, typeof step.nodeId === "string" ? step.nodeId : "");
-				let input = typeof result?.prompt === "string" ? result.prompt : "";
-				const runningActive = found.running ? activesOf(run).find((item) => item.seq === seq) : void 0;
-				if (input === "" && runningActive !== void 0 && typeof runningActive.prompt === "string") input = runningActive.prompt;
-				if (input === "") throw new Error(`execution #${seq} (node "${step.nodeId}") has no recorded input in workflow run "${runId}"`);
-				return {
-					seq,
-					nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-					visit: Number.isInteger(step.visit) ? step.visit : null,
-					type: typeof step.type === "string" ? step.type : "robot",
-					robot: typeof step.robot === "string" && step.robot !== "" ? step.robot : null,
-					status: typeof step.status === "string" ? step.status : "unknown",
-					input,
-					truncated: result?.promptTruncated === true
-				};
-			}
-		}),
-		tool({
-			name: "buka_workflow_execution_output",
-			description: "Read the recorded output of one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. A robot execution returns its final text, structured JSON result, attachment manifest, route, stop reason and error; a node that aborted the workflow reports stopReason \"aborted\" with its reason in error. A user execution returns the readable answer transcript plus the chosen route and recorded answers. A running execution has no output yet. Use buka_workflow_execution_attachment to read an attachment. Read-only.",
-			parameters: { seq: {
-				type: "number",
-				required: true,
-				description: "Execution number (seq) from the buka_workflow_overview execution list."
-			} },
-			output: {
-				schema: {
-					type: "object",
-					additionalProperties: false,
-					properties: {
-						seq: {
-							type: "number",
-							required: true
-						},
-						nodeId: {
-							type: "string",
-							required: true
-						},
-						visit: {
-							oneOf: [{ type: "number" }, { type: "null" }],
-							required: true
-						},
-						type: {
-							type: "string",
-							required: true
-						},
-						robot: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						status: {
-							type: "string",
-							required: true
-						},
-						stopReason: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						output: {
-							type: "string",
-							required: true
-						},
-						structured: {
-							type: "json",
-							required: true
-						},
-						attachments: {
-							type: "array",
-							required: true,
-							description: "Attachment manifest for this execution; use buka_workflow_execution_attachment to read one.",
-							items: {
-								type: "object",
-								additionalProperties: false,
-								properties: {
-									index: {
-										type: "number",
-										required: true
-									},
-									name: {
-										type: "string",
-										required: true
-									},
-									bytes: {
-										type: "number",
-										required: true
-									},
-									description: {
-										oneOf: [{ type: "string" }, { type: "null" }],
-										required: true
-									}
-								}
-							}
-						},
-						route: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						routeTo: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						error: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						truncated: {
-							type: "boolean",
-							required: true
-						},
-						finishedAt: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						}
-					}
-				},
-				render: (_args, value) => [{
-					type: "text",
-					text: renderExecutionOutput(value)
-				}]
-			},
-			async execute(args, exec) {
-				const runId = runIdOf(exec);
-				const seq = requireSeq(args?.seq);
-				const found = findExecution(await readRunOrThrow(store, runId), seq);
-				if (found === null) throw new Error(`execution #${seq} was not found in workflow run "${runId}"; use the execution list from buka_workflow_overview`);
-				const step = found.step;
-				if (step.type === "user") {
-					if (found.running) throw new Error(`execution #${seq} (user "${step.nodeId}") is still waiting for the user and has no output yet`);
-					const answers = Array.isArray(step.answers) ? step.answers : [];
-					return {
-						seq,
-						nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-						visit: Number.isInteger(step.visit) ? step.visit : null,
-						type: "user",
-						robot: null,
-						status: typeof step.status === "string" ? step.status : "unknown",
-						stopReason: null,
-						output: typeof step.text === "string" ? step.text : "",
-						structured: {
-							route: typeof step.route === "string" && step.route !== "" ? step.route : null,
-							routeTo: typeof step.routeTo === "string" && step.routeTo !== "" ? step.routeTo : null,
-							answers
-						},
-						attachments: [],
-						route: typeof step.route === "string" && step.route !== "" ? step.route : null,
-						routeTo: typeof step.routeTo === "string" && step.routeTo !== "" ? step.routeTo : null,
-						error: typeof step.error === "string" && step.error !== "" ? step.error : null,
-						truncated: false,
-						finishedAt: isoTime(step.finishedAt)
-					};
-				}
-				if (found.running) throw new Error(`execution #${seq} (node "${step.nodeId}") is still running and has no output yet`);
-				const result = await store.readNodeResult(runId, seq, typeof step.nodeId === "string" ? step.nodeId : "");
-				if (result === null) throw new Error(`execution #${seq} (node "${step.nodeId}") has no recorded output in workflow run "${runId}"`);
-				return {
-					seq,
-					nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-					visit: Number.isInteger(step.visit) ? step.visit : null,
-					type: typeof step.type === "string" ? step.type : "robot",
-					robot: typeof step.robot === "string" && step.robot !== "" ? step.robot : null,
-					status: typeof step.status === "string" ? step.status : "unknown",
-					stopReason: typeof result.stopReason === "string" ? result.stopReason : typeof step.stopReason === "string" ? step.stopReason : null,
-					output: typeof result.text === "string" ? result.text : "",
-					structured: result.structured ?? step.data ?? null,
-					attachments: attachmentManifest(result.attachments),
-					route: typeof step.route === "string" && step.route !== "" ? step.route : null,
-					routeTo: typeof step.routeTo === "string" && step.routeTo !== "" ? step.routeTo : null,
-					error: typeof result.error === "string" && result.error !== "" ? result.error : typeof step.error === "string" && step.error !== "" ? step.error : null,
-					truncated: result.textTruncated === true,
-					finishedAt: isoTime(step.finishedAt ?? result.finishedAt)
-				};
-			}
-		}),
-		tool({
-			name: "buka_workflow_execution_attachment",
-			description: "List or read the attachment files recorded for one execution of the workflow run this robot session belongs to. Use the execution number (seq) from the buka_workflow_overview execution list. Omit name to list the attachment manifest; pass name to read one file. Text is returned up to maxBytes (default 64 KiB) and can be continued with offset; binary files return metadata and an absolute path instead of text. Read-only: only attachments recorded for this run are accessible.",
-			parameters: {
-				seq: {
-					type: "number",
-					required: true,
-					description: "Execution number (seq) from the buka_workflow_overview execution list."
-				},
-				name: {
-					type: "string",
-					description: "Attachment name from the manifest. Omit to list all attachments."
-				},
-				offset: {
-					type: "number",
-					description: "Byte offset for reading a text attachment. Defaults to 0."
-				},
-				maxBytes: {
-					type: "number",
-					description: "Maximum bytes to read (default 64 KiB, capped at 256 KiB)."
-				}
-			},
-			output: {
-				schema: {
-					type: "object",
-					additionalProperties: false,
-					properties: {
-						seq: {
-							type: "number",
-							required: true
-						},
-						nodeId: {
-							type: "string",
-							required: true
-						},
-						type: {
-							type: "string",
-							required: true
-						},
-						robot: {
-							oneOf: [{ type: "string" }, { type: "null" }],
-							required: true
-						},
-						status: {
-							type: "string",
-							required: true
-						},
-						attachments: {
-							type: "array",
-							required: true,
-							items: {
-								type: "object",
-								additionalProperties: false,
-								properties: {
-									index: {
-										type: "number",
-										required: true
-									},
-									name: {
-										type: "string",
-										required: true
-									},
-									bytes: {
-										type: "number",
-										required: true
-									},
-									description: {
-										oneOf: [{ type: "string" }, { type: "null" }],
-										required: true
-									}
-								}
-							}
-						},
-						attachment: {
-							oneOf: [{
-								type: "object",
-								additionalProperties: false,
-								properties: {
-									index: {
-										type: "number",
-										required: true
-									},
-									name: {
-										type: "string",
-										required: true
-									},
-									description: {
-										oneOf: [{ type: "string" }, { type: "null" }],
-										required: true
-									},
-									bytes: {
-										type: "number",
-										required: true
-									},
-									path: {
-										type: "string",
-										required: true
-									},
-									text: {
-										oneOf: [{ type: "string" }, { type: "null" }],
-										required: true
-									},
-									binary: {
-										type: "boolean",
-										required: true
-									},
-									truncated: {
-										type: "boolean",
-										required: true
-									},
-									offset: {
-										type: "number",
-										required: true
-									},
-									read: {
-										type: "number",
-										required: true
-									}
-								}
-							}, { type: "null" }],
-							required: true
-						}
-					}
-				},
-				render: (_args, value) => [{
-					type: "text",
-					text: renderExecutionAttachment(value)
-				}]
-			},
-			async execute(args, exec) {
-				const runId = runIdOf(exec);
-				const seq = requireSeq(args?.seq);
-				const found = findExecution(await readRunOrThrow(store, runId), seq);
-				if (found === null) throw new Error(`execution #${seq} was not found in workflow run "${runId}"; use the execution list from buka_workflow_overview`);
-				const step = found.step;
-				if (found.running) throw new Error(`execution #${seq} (node "${step.nodeId}") is still running and has no attachments yet`);
-				if (step.type === "user") {
-					if (typeof args?.name === "string" && args.name.trim() !== "") throw new Error(`execution #${seq} (user "${step.nodeId}") has no attachments`);
-					return {
-						seq,
-						nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-						type: "user",
-						robot: null,
-						status: found.running ? "waiting" : typeof step.status === "string" ? step.status : "unknown",
-						attachments: [],
-						attachment: null
-					};
-				}
-				const result = await store.readNodeResult(runId, seq, typeof step.nodeId === "string" ? step.nodeId : "");
-				if (result === null) throw new Error(`execution #${seq} (node "${step.nodeId}") has no recorded output in workflow run "${runId}"`);
-				const attachments = attachmentManifest(result.attachments);
-				const name = typeof args?.name === "string" ? args.name.trim() : "";
-				if (name === "") return {
-					seq,
-					nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-					type: typeof step.type === "string" ? step.type : "robot",
-					robot: typeof step.robot === "string" && step.robot !== "" ? step.robot : null,
-					status: typeof step.status === "string" ? step.status : "unknown",
-					attachments,
-					attachment: null
-				};
-				const rawOffset = args?.offset;
-				if (rawOffset !== void 0 && (typeof rawOffset !== "number" || !Number.isInteger(rawOffset) || rawOffset < 0)) throw new Error("offset must be a non-negative integer");
-				const rawMaxBytes = args?.maxBytes;
-				if (rawMaxBytes !== void 0 && (typeof rawMaxBytes !== "number" || !Number.isInteger(rawMaxBytes) || rawMaxBytes <= 0)) throw new Error("maxBytes must be a positive integer");
-				const maxBytes = typeof rawMaxBytes === "number" && Number.isInteger(rawMaxBytes) ? Math.min(rawMaxBytes, MAX_ATTACHMENT_READ_BYTES) : DEFAULT_ATTACHMENT_READ_BYTES;
-				const attachment = await store.readAttachment(runId, seq, step.nodeId, name, {
-					offset: typeof rawOffset === "number" && Number.isInteger(rawOffset) ? rawOffset : 0,
-					maxBytes
-				});
-				if (attachment === null) {
-					const available = attachments.map((entry) => entry.name).join(", ");
-					throw new Error(`attachment "${name}" was not found for execution #${seq}; available: ${available === "" ? "(none)" : available}`);
-				}
-				return {
-					seq,
-					nodeId: typeof step.nodeId === "string" ? step.nodeId : "",
-					type: typeof step.type === "string" ? step.type : "robot",
-					robot: typeof step.robot === "string" && step.robot !== "" ? step.robot : null,
-					status: typeof step.status === "string" ? step.status : "unknown",
-					attachments,
-					attachment
-				};
-			}
-		})
-	];
-}
-// .build/workflows/run.js
-/**
-* 工作流运行期的纯函数与错误类型（workflow format 3）。
-*
-* 这些工具从旧的阻塞执行器 `engine.js` 里搬出来，供 Host 侧观察者
-* `supervisor.js` 复用：渲染机器人节点的提示词、给机器人会话起标题、构造用户
-* 介入节点的提问批次与解析回答、把运行记录转成工具返回值等。本模块不 import
-* 任何 DSH 包，也不读写磁盘，便于单测。
-*
-* format 3 里机器人节点没有自己的 prompt：每次进入都渲染「进入它的那条边」上的
-* prompt，所以 `renderNodePrompt` 只接受 edgePrompt 一个来源；用户节点则把
-* `detail` 渲染后交给原生提问卡，用户的选项就是出边。
-*
-* @module @buka/dsh-plugin-workflows/run
-*/
-/** 运行级错误：节点失败、超出步数、缺少服务等。 */
-var WorkflowRunError = class extends Error {
-	/**
-	* @param message 错误信息
-	* @param options 可选原因
-	*/
-	constructor(message, options) {
-		super(message);
-		this.name = "WorkflowRunError";
-		if (options?.cause !== void 0) this.cause = options.cause;
-	}
-};
-/** 运行被取消。 */
-var WorkflowCancelledError = class extends Error {
-	/**
-	* @param message 错误信息
-	*/
-	constructor(message) {
-		super(message);
-		this.name = "WorkflowCancelledError";
-	}
-};
-/**
-* 渲染一个机器人节点的最终提示词。
-*
-* format 2 只在进入节点的边上定义 prompt：`edgePrompt` 必须存在，渲染后也不能为
-* 空；不存在节点自身 prompt 的兼容回退。渲染完成后追加节点声明的结果契约
-* （`output` 合并 `next` 与附件能力后的 schema）；升级前没有 `output` 的快照
-* 不追加，保持旧提示词。
-*
-* @param node 已规范化的机器人节点
-* @param edgePrompt 走到进入这条边时携带的 prompt 模板
-* @param values 已完成节点的结果，供 `{{nodes.<id>...}}` 引用
-* @param plan 运行计划
-* @param step 当前步数
-* @param runId 运行 id
-* @returns 渲染后的提示词
-*/
-function renderNodePrompt(node, edgePrompt, values, plan, step, runId) {
-	if (typeof edgePrompt !== "string" || edgePrompt === "") throw new WorkflowRunError(`robot node "${node.id}" has no prompt on its incoming edge`);
-	const prompt = renderTemplate(edgePrompt, {
-		goal: plan.goal,
-		nodes: values,
-		step,
-		runId
-	});
-	if (prompt.trim() === "") throw new WorkflowRunError(`robot node "${node.id}" has no prompt on its incoming edge`);
-	const contract = renderOutputContract(node);
-	return contract === "" ? prompt : `${prompt}\n\n${contract}`;
-}
-/**
-* 渲染用户节点的说明（`detail`）。说明可以引用前面节点的文本 / 结构化结果 /
-* 用户回答；为空时返回空串，调用方在提问卡里退回 `title`。
-*
-* @param node 已规范化的用户节点
-* @param values 已完成节点的结果，供 `{{nodes.<id>...}}` 引用
-* @param plan 运行计划
-* @param step 当前步数
-* @param runId 运行 id
-* @returns 渲染后的说明；为空时是空串
-*/
-function renderUserDetail(node, values, plan, step, runId) {
-	const template = typeof node.detail === "string" ? node.detail : "";
-	if (template.trim() === "") return "";
-	return renderTemplate(template, {
-		goal: plan.goal,
-		nodes: values,
-		step,
-		runId
-	});
-}
-/**
-* 机器人会话的标题：`运行目标 · 机器人`。
-*
-* 机器人会话的第一条用户消息来源是 `buka-robot`，DSH 的自动标题只看 `user`
-* 来源的消息，所以不会给这类会话生成标题。工作流在进入节点时显式命名，
-* 侧边栏里才能一眼看出这段对话属于哪次运行、哪个机器人。
-*
-* 标题按 UTF-8 字节裁剪：机器人名优先保留，运行目标裁到剩余预算里；运行没有
-* goal 时退回 `工作流 <runId>`。
-*
-* @param run 运行记录（只用到 goal / runId）
-* @param node 机器人节点（只用到 robot）
-* @returns 会话标题
-*/
-function robotSessionTitle(run, node) {
-	const robot = typeof node?.robot === "string" ? node.robot.trim() : "";
-	const goal = typeof run?.goal === "string" ? run.goal.replace(/\s+/gu, " ").trim() : "";
-	const runId = typeof run?.runId === "string" ? run.runId.trim() : "";
-	const base = goal !== "" ? goal : runId !== "" ? `工作流 ${runId}` : "工作流";
-	if (robot === "") return clipUtf8(base, 80);
-	const suffix = ` · ${robot}`;
-	const suffixBytes = Buffer.byteLength(suffix, "utf8");
-	if (suffixBytes >= 80) return clipUtf8(robot, 80);
-	const clipped = clipUtf8(base, 80 - suffixBytes).trimEnd();
-	return clipped === "" ? clipUtf8(robot, 80) : `${clipped}${suffix}`;
-}
-/**
-* 按 UTF-8 字节裁剪，不切断码点。
-*
-* @param text 原文
-* @param maxBytes 字节上限
-* @returns 截断后的文本
-*/
-function clipUtf8(text, maxBytes) {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-	let used = 0;
-	let output = "";
-	for (const character of text) {
-		const bytes = Buffer.byteLength(character, "utf8");
-		if (used + bytes > maxBytes) break;
-		output += character;
-		used += bytes;
-	}
-	return output;
-}
-/**
-* 用户节点问题批次里的 route 问题 id：用户的选项就是节点的出边。
-*
-* @param node 已规范化的用户节点
-* @param detail 已渲染的说明（为空时用 title 作为问题正文）
-* @returns 传给 ctx.userQuestions.ask() 的问题数组
-*/
-function buildUserQuestions(node, detail) {
-	const questions = [];
-	const edges = Array.isArray(node.next) ? node.next : [];
-	const title = typeof node.title === "string" ? node.title : "";
-	if (edges.length > 0) questions.push({
-		id: ROUTE_QUESTION_ID,
-		header: title,
-		question: typeof detail === "string" && detail.trim() !== "" ? detail.trim() : title,
-		options: edges.map((edge) => typeof edge.description === "string" && edge.description !== "" ? {
-			label: edge.label ?? "",
-			description: edge.description
-		} : { label: edge.label ?? "" })
-	});
-	for (const question of Array.isArray(node.questions) ? node.questions : []) {
-		const item = {
-			id: question.id,
-			question: question.question
-		};
-		if (typeof question.header === "string" && question.header !== "") item.header = question.header;
-		if (Array.isArray(question.options) && question.options.length > 0) item.options = question.options.map((option) => typeof option.description === "string" && option.description !== "" ? {
-			label: option.label,
-			description: option.description
-		} : { label: option.label });
-		if (question.multiSelect === true) item.multiSelect = true;
-		questions.push(item);
-	}
-	return questions;
-}
-/**
-* 解析用户节点的回答。
-*
-* 返回 `{ ok: true, route, answers, text }`；`route` 是选中的出边（没有出边时为
-* null）。用户没有做出选择（跳过 / 只写了自定义文本）时返回
-* `{ cancelled: true, answers, text }`，让运行以 cancelled 结束。答案是
-* `{ id, selected, custom }` 数组，`custom` 缺省补空串，方便模板直接取值。
-*
-* @param node 已规范化的用户节点
-* @param answer 原生提问卡的原始回答
-* @returns 解析结果
-*/
-function resolveUserAnswer(node, answer) {
-	const received = /* @__PURE__ */ new Map();
-	for (const item of Array.isArray(answer?.answers) ? answer.answers : []) {
-		if (typeof item?.id !== "string") continue;
-		const selected = Array.isArray(item.selected) ? item.selected.filter((label) => typeof label === "string" && label !== "") : [];
-		const custom = typeof item.custom === "string" ? item.custom.trim() : "";
-		received.set(item.id, {
-			selected,
-			custom
-		});
-	}
-	const answers = [];
-	const edges = Array.isArray(node.next) ? node.next : [];
-	let route = null;
-	let cancelled = false;
-	const lines = [];
-	if (edges.length > 0) {
-		const raw = received.get("route") ?? {
-			selected: [],
-			custom: ""
-		};
-		answers.push({
-			id: ROUTE_QUESTION_ID,
-			selected: [...raw.selected],
-			custom: ""
-		});
-		if (raw.selected.length === 0) cancelled = true;
-		else if (raw.selected.length > 1) return {
-			ok: false,
-			error: `the route choice must be a single option, received ${raw.selected.length}`,
-			answers,
-			text: ""
-		};
-		else {
-			const label = raw.selected[0];
-			const edge = edges.find((item) => item.label === label);
-			if (edge === void 0) return {
-				ok: false,
-				error: `received an unknown choice "${label}"`,
-				answers,
-				text: ""
-			};
-			route = edge;
-			lines.push(`选择：${label}`);
-		}
-	}
-	for (const question of Array.isArray(node.questions) ? node.questions : []) {
-		const raw = received.get(question.id) ?? {
-			selected: [],
-			custom: ""
-		};
-		answers.push({
-			id: question.id,
-			selected: [...raw.selected],
-			custom: raw.custom
-		});
-		const heading = question.header !== "" ? question.header : question.question;
-		const parts = [];
-		if (raw.selected.length > 0) parts.push(raw.selected.join("、"));
-		if (raw.custom !== "") parts.push(`（${raw.custom}）`);
-		if (parts.length > 0) lines.push(`${heading}：${parts.join("")}`);
-	}
-	return {
-		ok: true,
-		cancelled,
-		route,
-		answers,
-		text: cancelled && edges.length > 0 ? "" : lines.join("\n")
-	};
-}
-/**
-* 把规范化后的答案数组转成按问题 id 索引的对象（模板 / 运行记录用）。
-*
-* @param answers 规范化后的回答数组
-* @returns 按问题 id 索引的对象
-*/
-function answersValue(answers) {
-	const value = {};
-	for (const answer of answers) value[answer.id] = {
-		selected: [...answer.selected],
-		custom: answer.custom
-	};
-	return value;
-}
-/**
-* 把运行记录转成工具返回值（不携带完整节点文本）。
-*
-* @param run 运行记录
-* @returns 工具返回值
-*/
-function toToolRun(run) {
-	return {
-		runId: run.runId,
-		seq: Number.isInteger(run.seq) ? run.seq : null,
-		status: run.status,
-		goal: run.goal,
-		createdAt: run.createdAt,
-		finishedAt: run.finishedAt ?? null,
-		current: run.current ?? null,
-		active: Array.isArray(run.active) ? run.active.map((entry) => ({ ...entry })) : [],
-		pendingUser: run.pendingUser ?? null,
-		pendingInteraction: run.pendingInteraction ?? null,
-		sessions: Array.isArray(run.sessions) ? run.sessions.map((session) => ({ ...session })) : [],
-		steps: Array.isArray(run.steps) ? run.steps.map((step) => ({ ...step })) : [],
-		result: run.result ?? null,
-		error: run.error ?? null
-	};
-}
-// .build/workflows/engine/supervisor-types.js
-/**
-* 观察者的类型、常量与构造原语。
-*
-* 运行上下文、会话句柄、dispatch 登记项等内部形状都在这里；上层模块只通过
-* `WorkflowSupervisor` 的字段与方法协作。
-*/
-/** 判断普通对象。 */
-function isRecord(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-/** 启动恢复等待 robots 服务出现的上限。 */
-const ROBOTS_WAIT_MS = 5e3;
-/** 这些结束原因视为“会话中断”，可以尝试续跑；`max-tokens` / `blocked` 直接失败。 */
-const RECOVERABLE_STOP_REASONS = /* @__PURE__ */ new Set([
-	"aborted",
-	"interrupted",
-	"error"
-]);
-/**
-* plan 节点的一轮结束时仍停在计划阶段、又没有弹出审阅卡时，发出的唯一一次
-* 协议提示。它不是行为提示词，只把节点拉回 plan 模式的正常收尾路径。
-*/
-const PLAN_REVIEW_NUDGE = "You are still in plan mode. Present your finished plan through the exit_plan_mode tool so the user can approve it; do not submit this node's structured result before the plan is approved.";
-/**
-* @param error
-* @returns
-*/
-function describeError(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* @param value
-* @returns
-*/
-function positive(value) {
-	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
-}
-/**
-* @returns
-*/
-function createRunId() {
-	return `wf-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
-}
-/**
-* @returns
-*/
-function deferred() {
-	let resolve;
-	let reject;
-	return {
-		promise: new Promise((res, rej) => {
-			resolve = res;
-			reject = rej;
-		}),
-		resolve(value) {
-			this.settled = true;
-			resolve(value);
-		},
-		reject(error) {
-			this.settled = true;
-			reject(error);
-		},
-		settled: false
-	};
-}
-// .build/workflows/engine/supervisor-advance.js
-/**
-* 运行推进：按边路由到下一个节点，并在全部结束时收尾。
-*/
-/**
-* @param ctx
-* @returns
-*/
-function advance(host, ctx) {
-	return host.enqueue(ctx.runId, () => host.advanceInner(ctx));
-}
-/**
-* 消费 frontier 里的待处理 next-hop：robot 节点 dispatch 后继续（非阻塞），
-* user 节点在前台模式等用户作答，end 收尾一个分支；join 不进入 frontier（由
-* 屏障激活）。frontier 与活跃任务都为空时结束运行。
-*
-* @param ctx
-* @returns
-*/
-async function advanceInner(host, ctx) {
-	while (!ctx.closed && !ctx.cancelled && ctx.frontier.length > 0) {
-		const next = ctx.frontier.shift();
-		if (next === void 0) break;
-		const node = ctx.plan.nodes[next.nodeId];
-		if (node === void 0) {
-			await host.fail(ctx, new WorkflowRunError(`workflow node "${next.nodeId}" is missing`));
-			return;
-		}
-		if (node.type === "end") {
-			await host.arriveEnd(ctx, node);
-			continue;
-		}
-		if (node.type === "user") {
-			await host.runUser(ctx, node);
-			continue;
-		}
-		if (node.type === "robot") {
-			await host.startRobotNode(ctx, node, next.edgePrompt);
-			continue;
-		}
-		if (node.type === "join") {
-			await host.fail(ctx, new WorkflowRunError(`join node "${node.id}" must not be reached directly`));
-			return;
-		}
-		await host.fail(ctx, new WorkflowRunError(`unsupported node type "${String(node.type)}"`));
-		return;
-	}
-	await host.maybeFinish(ctx);
-}
-/**
-* 一个分支到达 end：记录该分支终止。所有活跃任务与待处理 next-hop 都清空、
-* 且没有 pending join 时才结束整个运行。
-*
-* @param ctx
-* @param node
-* @returns
-*/
-async function arriveEnd(host, ctx, node) {
-	if (ctx.closed || ctx.cancelled) return;
-	ctx.lastEnd = node;
-	await host.maybeFinish(ctx);
-}
-/**
-* 没有任何活跃任务 / 待处理 next-hop / pending join 时收尾。
-*
-* @param ctx
-* @returns
-*/
-async function maybeFinish(host, ctx) {
-	if (ctx.closed || ctx.cancelled) return;
-	if (ctx.frontier.length > 0) return;
-	if (Array.isArray(ctx.run.active) && ctx.run.active.length > 0) return;
-	if (ctx.run.pendingUser !== null && ctx.run.pendingUser !== void 0) return;
-	if (ctx.joins.size > 0) return;
-	const lastEnd = ctx.lastEnd ?? null;
-	const nodeId = lastEnd !== null && typeof lastEnd.id === "string" ? lastEnd.id : null;
-	const status = lastEnd !== null && typeof lastEnd.status === "string" ? lastEnd.status : "completed";
-	await host.finish(ctx, status, { nodeId });
-}
-/**
-* @param ctx
-* @param status
-* @param [extra]
-* @returns
-*/
-async function finish(host, ctx, status, extra = {}) {
-	if (ctx.closed) return ctx.run;
-	ctx.closed = true;
-	const run = ctx.run;
-	run.status = status;
-	run.updatedAt = Date.now();
-	run.finishedAt = run.updatedAt;
-	run.current = null;
-	run.active = [];
-	run.pendingUser = null;
-	run.pendingInteraction = null;
-	run.result = {
-		status,
-		lastNode: extra.nodeId ?? null,
-		...extra.message === void 0 ? {} : { message: extra.message },
-		...extra.aborted === true ? { aborted: true } : {},
-		...status === "failed" && run.error !== null ? { error: run.error } : {}
-	};
-	for (const entry of host.dispatchEntriesForRun(ctx.runId)) {
-		host.clearEntryPlanMode(entry);
-		host.removeEntry(entry);
-		try {
-			await entry.handle?.dispose?.();
-		} catch {}
-	}
-	try {
-		await host.save(ctx);
-		await host.store.appendEvent(ctx.runId, "run/end", {
-			status,
-			result: run.result
-		});
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 写入运行结束状态失败（${ctx.runId}）：${describeError(error)}`);
-	}
-	host.runs.delete(ctx.runId);
-	if (!ctx.done.settled) ctx.done.resolve(toToolRun(run));
-	return run;
-}
-/**
-* @param ctx
-* @param error
-* @returns
-*/
-async function fail(host, ctx, error) {
-	if (ctx.closed) return ctx.run;
-	const activeNodeId = host.activeNodeId(ctx);
-	if (error instanceof WorkflowCancelledError || ctx.cancelled === true) return await host.finish(ctx, "cancelled", {
-		nodeId: activeNodeId,
-		message: describeError(error)
-	});
-	ctx.run.error = describeError(error);
-	host.logger?.warn?.(`buka-workflows: run ${ctx.runId} failed: ${ctx.run.error}`);
-	return await host.finish(ctx, "failed", { nodeId: activeNodeId });
-}
-// .build/workflows/engine/supervisor-sessions.js
-/**
-* 运行记录里的机器人会话台账：节点进入 / 结果摘要与会话索引的读写工具。
-*/
-/**
-* 只保留运行页展示需要的问题字段，并限制体积。
-*
-* @param questions
-* @returns
-*/
-function normalizeQuestions(questions) {
-	if (!Array.isArray(questions)) return [];
-	return questions.slice(0, 5).map((rawQuestion) => {
-		const question = isRecord(rawQuestion) ? rawQuestion : {};
-		return {
-			id: clipText(question.id, 64),
-			header: clipText(question.header, 200),
-			question: clipText(question.question, 1e3),
-			multiSelect: question.multiSelect === true,
-			options: Array.isArray(question.options) ? question.options.slice(0, 20).map((rawOption) => {
-				return { label: clipText((isRecord(rawOption) ? rawOption : {}).label, 200) };
-			}) : []
-		};
-	}).filter((question) => question.question !== "" || question.header !== "");
-}
-/**
-* @param value
-* @param max
-* @returns
-*/
-function clipText(value, max) {
-	if (typeof value !== "string") return "";
-	const text = value.trim();
-	return text.length > max ? text.slice(0, max) : text;
-}
-/**
-* @param run
-* @param robot
-* @returns
-*/
-function findRobotSession(run, robot) {
-	if (!Array.isArray(run?.sessions) || typeof robot !== "string" || robot === "") return void 0;
-	return run.sessions.find((entry) => entry?.robot === robot);
-}
-/**
-* 记录一次进入：每个 robot 一个会话条目，entries 里保留每次进入的节点 / 序号。
-*
-* @param run
-* @param robot
-* @param input
-* @returns
-*/
-function rememberSessionEntry(run, robot, { nodeId, visit, seq, sessionId, at, resumed, compacted }) {
-	if (typeof robot !== "string" || robot === "") return;
-	if (!Array.isArray(run.sessions)) run.sessions = [];
-	let existing = findRobotSession(run, robot);
-	if (existing === void 0) {
-		existing = {
-			robot,
-			sessionId: sessionId ?? "",
-			firstNodeId: nodeId,
-			lastNodeId: nodeId,
-			visits: 0,
-			createdAt: at,
-			entries: []
-		};
-		run.sessions.push(existing);
-	}
-	if (typeof sessionId === "string" && sessionId !== "") {
-		if (existing.sessionId !== sessionId && existing.sessionId !== "") existing.resets = (existing.resets ?? 0) + 1;
-		existing.sessionId = sessionId;
-	}
-	existing.lastNodeId = nodeId;
-	existing.lastVisit = visit;
-	if (!Array.isArray(existing.entries)) existing.entries = [];
-	if (existing.entries.some((entry) => entry?.nodeId === nodeId && entry?.seq === seq && entry?.sessionId === (sessionId ?? null))) return;
-	existing.visits = (typeof existing.visits === "number" && Number.isInteger(existing.visits) ? existing.visits : 0) + 1;
-	existing.entries.push({
-		nodeId,
-		visit,
-		seq,
-		sessionId: sessionId ?? null,
-		at,
-		resumed,
-		compacted
-	});
-	if (existing.entries.length > 500) existing.entries.splice(0, existing.entries.length - 500);
-}
-/**
-* 完成一次进入后更新会话摘要。
-*
-* @param run
-* @param robot
-* @param input
-* @returns
-*/
-function updateRobotSession(run, robot, { nodeId, visit, sessionId, at }) {
-	const existing = findRobotSession(run, robot);
-	if (existing === void 0) return;
-	existing.lastNodeId = nodeId;
-	existing.lastVisit = visit;
-	existing.updatedAt = at;
-	if (typeof sessionId === "string" && sessionId !== "" && existing.sessionId === "") existing.sessionId = sessionId;
-}
-// .build/workflows/engine/supervisor-dispatch.js
-/**
-* 机器人节点的 dispatch：创建 / 复用会话、登记句柄、超时与句柄校验。
-*/
-/**
-* 进入一个 robot 节点：落盘 current + 运行中的节点结果，再非阻塞 dispatch。
-*
-* @param ctx
-* @param node
-* @param edgePrompt
-* @returns
-*/
-async function startRobotNode(host, ctx, node, edgePrompt) {
-	const run = ctx.run;
-	const nodeId = node.id ?? "";
-	const seq = ctx.seq + 1;
-	if (seq > ctx.plan.maxSteps) {
-		await host.fail(ctx, new WorkflowRunError(`workflow exceeded its ${ctx.plan.maxSteps}-step limit`));
-		return;
-	}
-	const visit = (ctx.visits.get(nodeId) ?? 0) + 1;
-	if (node.type === "robot" && node.maxVisits !== void 0 && visit > node.maxVisits) {
-		await host.fail(ctx, new WorkflowRunError(`robot node "${nodeId}" exceeded its ${node.maxVisits}-visit limit`));
-		return;
-	}
-	let prompt;
-	try {
-		prompt = renderNodePrompt(node, edgePrompt, ctx.values, ctx.plan, seq, run.runId);
-	} catch (error) {
-		await host.fail(ctx, error);
-		return;
-	}
-	const timeoutMs = positive(node.timeoutMs) ?? positive(host.options.nodeTimeoutMs) ?? 0;
-	const startedAt = Date.now();
-	ctx.seq = seq;
-	ctx.stepCount = seq;
-	ctx.visits.set(nodeId, visit);
-	run.pendingInteraction = null;
-	const current = {
-		nodeId,
-		visit,
-		seq,
-		type: "robot",
-		robot: node.robot,
-		prompt,
-		sessionId: null,
-		startSeq: null,
-		startedAt,
-		attempt: 1,
-		recoveryAttempts: 0,
-		...node.mode === "plan" ? { mode: "plan" } : {},
-		...timeoutMs > 0 ? { timeoutMs } : {}
-	};
-	if (!Array.isArray(run.active)) run.active = [];
-	run.active.push(current);
-	run.status = "running";
-	await host.save(ctx);
-	await host.store.appendEvent(run.runId, "node/start", {
-		nodeId,
-		visit,
-		type: "robot",
-		...node.robot === void 0 ? {} : { robot: node.robot },
-		...node.mode === "plan" ? { mode: "plan" } : {}
-	});
-	await host.saveRunningNodeResult(ctx, current, node, prompt, startedAt);
-	const robots = host.robots ?? host.ctx?.get?.("bukaRobots") ?? null;
-	if (robots === null || !host.canDispatch(robots)) {
-		await host.completeNode(ctx, current, node, {
-			sessionId: null,
-			text: "",
-			stopReason: "error",
-			error: "robot node needs a Buka Robots service with dispatchSession(); install or update @buka/dsh-plugin-robots"
-		}, {});
-		return;
-	}
-	if (node.mode === "plan" && robots.supportsPlanMode !== true) {
-		await host.completeNode(ctx, current, node, {
-			sessionId: null,
-			text: "",
-			stopReason: "error",
-			error: "plan mode robot nodes need @buka/dsh-plugin-robots 0.9.0 or newer (supportsPlanMode is missing); update the Buka Robots plugin"
-		}, {});
-		return;
-	}
-	const previous = findRobotSession(run, node.robot);
-	const previousSessionId = typeof previous?.sessionId === "string" && previous.sessionId !== "" ? previous.sessionId : "";
-	const newSessionId = previousSessionId === "" ? randomUUID() : "";
-	const dispatchKey = previousSessionId !== "" ? previousSessionId : newSessionId;
-	current.sessionId = dispatchKey;
-	current.startSeq = null;
-	host.rememberSession(run.runId, dispatchKey);
-	await host.save(ctx);
-	const entry = {
-		runId: run.runId,
-		seq,
-		startSeq: null,
-		handle: null,
-		early: [],
-		claimed: false,
-		recoveryRequested: false,
-		disposedEarly: false,
-		resultExhausted: false,
-		timer: null,
-		timeoutMs,
-		planMode: node.mode === "plan",
-		planReviewAsked: false,
-		planNudged: false
-	};
-	host.dispatchBySession.set(dispatchKey, entry);
-	let handle;
-	try {
-		const creator = host.creatorAgent(ctx);
-		handle = await host.dispatchRobot(robots, {
-			robot: node.robot,
-			prompt,
-			...creator === void 0 ? {} : { agent: creator },
-			...host.options.robotPreset === "" ? {} : { agentPreset: host.options.robotPreset },
-			outputSchema: buildResultSchema(node),
-			routes: routeNamesOf(node),
-			abortable: true,
-			title: robotSessionTitle(run, node),
-			...node.agentOptions === void 0 ? {} : { agentOptions: node.agentOptions },
-			approval: "ask",
-			signal: ctx.controller.signal,
-			planMode: node.mode === "plan",
-			...previousSessionId !== "" ? { sessionId: previousSessionId } : { newSessionId }
-		});
-	} catch (error) {
-		host.dispatchBySession.delete(dispatchKey);
-		current.sessionId = null;
-		await host.completeNode(ctx, current, node, {
-			sessionId: null,
-			text: "",
-			stopReason: "error",
-			error: describeError(error)
-		}, {});
-		return;
-	}
-	current.sessionId = typeof handle.sessionId === "string" ? handle.sessionId : null;
-	current.startSeq = typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : null;
-	if (current.sessionId !== null) host.rememberSession(run.runId, current.sessionId);
-	current.resumed = handle.resumed === true;
-	current.compacted = handle.compacted === true;
-	current.timeoutStartedAt = Date.now();
-	if (typeof handle.resumeError === "string" && handle.resumeError !== "") current.sessionResetReason = handle.resumeError;
-	if (typeof handle.compactionError === "string" && handle.compactionError !== "") current.compactionError = handle.compactionError;
-	entry.handle = handle;
-	entry.startSeq = typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : null;
-	if (typeof current.sessionId === "string" && current.sessionId !== dispatchKey) {
-		host.dispatchBySession.delete(dispatchKey);
-		host.dispatchBySession.set(current.sessionId, entry);
-	}
-	rememberSessionEntry(run, node.robot, {
-		nodeId,
-		visit,
-		seq,
-		sessionId: current.sessionId,
-		at: Date.now(),
-		resumed: handle.resumed === true,
-		compacted: handle.compacted === true
-	});
-	await host.save(ctx);
-	await host.store.appendEvent(run.runId, "node/session", {
-		nodeId,
-		visit,
-		sessionId: current.sessionId,
-		resumed: handle.resumed === true
-	});
-	await host.store.appendEvent(run.runId, "node/dispatch", {
-		nodeId,
-		visit,
-		seq,
-		sessionId: current.sessionId,
-		resumed: handle.resumed === true,
-		compacted: handle.compacted === true
-	});
-	host.armTimeout(ctx, entry);
-	const early = entry.early.splice(0);
-	if (entry.disposedEarly === true) {
-		entry.recoveryRequested = true;
-		host.enqueue(ctx.runId, () => host.recoverNode(entry, "the robot session was disposed"));
-		return;
-	}
-	for (const item of early) if (item.kind === "turn") {
-		if (typeof item.event?.seq === "number" && entry.startSeq !== null && item.event.seq >= entry.startSeq) host.enqueue(ctx.runId, () => host.processTurn(entry, item.session, item.event));
-	}
-}
-/**
-* @param robots
-* @param request
-* @returns
-*/
-async function dispatchRobot(host, robots, request) {
-	const dispatch = robots.dispatchSession;
-	if (dispatch === void 0) throw new WorkflowRunError("the Buka Robots service cannot dispatch sessions");
-	const handle = await host.requireVisibleHandle(await dispatch(request));
-	if (typeof handle?.resumeError === "string" && handle.resumeError !== "") await host.rejectHandle(handle, `the Buka Robots service replaced an unresumable robot session with a new one (${handle.resumeError}); workflow stopped without opening a new session. Upgrade @buka/dsh-plugin-robots.`);
-	if (typeof request.sessionId === "string" && request.sessionId !== "") await host.requireSameSession(handle, request.sessionId);
-	return handle;
-}
-/**
-* 只有显式配置了 timeoutMs 才计时；默认不设 timer。
-*
-* @param ctx
-* @param entry
-* @returns
-*/
-function armTimeout(host, ctx, entry) {
-	const current = host.findActive(ctx, entry.seq);
-	const timeoutMs = positive(entry.timeoutMs);
-	if (timeoutMs === void 0 || current === null) return;
-	const startedAt = typeof current.timeoutStartedAt === "number" ? current.timeoutStartedAt : typeof current.startedAt === "number" ? current.startedAt : Date.now();
-	const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
-	entry.timer = setTimeout(() => {
-		entry.timer = null;
-		host.enqueue(ctx.runId, () => host.onTimeout(ctx, entry, timeoutMs));
-	}, remaining);
-	entry.timer.unref?.();
-}
-/**
-* 显式超时：取消当前轮，把节点记成超时失败；不进入恢复重试。
-*
-* @param ctx
-* @param entry
-* @param timeoutMs
-* @returns
-*/
-async function onTimeout(host, ctx, entry, timeoutMs) {
-	if (ctx.closed || ctx.cancelled || entry.claimed === true) return;
-	const current = host.findActive(ctx, entry.seq);
-	if (current === null) return;
-	entry.claimed = true;
-	host.removeEntry(entry);
-	let result = { text: "" };
-	try {
-		result = await entry.handle?.cancel?.("timeout") ?? { text: "" };
-	} catch {}
-	host.clearEntryPlanMode(entry);
-	try {
-		await entry.handle?.dispose?.();
-	} catch {}
-	const node = ctx.plan.nodes[current.nodeId ?? ""];
-	if (node === void 0) {
-		await host.fail(ctx, new WorkflowRunError(`workflow node "${current.nodeId}" is missing`));
-		return;
-	}
-	await host.store.appendEvent(ctx.runId, "node/timeout", {
-		nodeId: node.id,
-		visit: current.visit,
-		timeoutMs
-	});
-	await host.completeNode(ctx, current, node, {
-		...result,
-		sessionId: current.sessionId ?? null,
-		stopReason: "timeout",
-		error: `robot node "${node.id}" timed out after ${timeoutMs}ms`
-	}, { timedOut: true });
-}
-/**
-* 工作流只接受可见的普通会话。旧版 robots 插件在创建失败时可能返回
-* `mode: 'subagent'` 的隐藏句柄；这里先释放它，再让节点按失败结束，
-* 绝不把它当成节点会话继续调度。
-*
-* @param handle
-* @returns
-*/
-async function requireVisibleHandle(host, handle) {
-	if (handle?.mode !== "subagent") return handle;
-	return await host.rejectHandle(handle, "the Buka Robots service returned a hidden subagent session; workflow robot sessions must be visible top-level sessions. Upgrade @buka/dsh-plugin-robots.");
-}
-/**
-* 旧版 robots 服务在续接失败时可能换一个新会话：`resumeError` 非空，或
-* 返回的 sessionId 与请求的不一致。工作流不接受替代会话。
-*
-* @param handle
-* @param sessionId
-* @returns
-*/
-async function requireSameSession(host, handle, sessionId) {
-	if (typeof handle?.resumeError === "string" && handle.resumeError !== "") await host.rejectHandle(handle, `the Buka Robots service replaced an unresumable robot session with a new one (${handle.resumeError}); workflow stopped without opening a new session. Upgrade @buka/dsh-plugin-robots.`);
-	if (handle?.sessionId !== sessionId) await host.rejectHandle(handle, `the Buka Robots service returned robot session "${String(handle?.sessionId)}" instead of the requested "${sessionId}"; workflow stopped without opening a new session. Upgrade @buka/dsh-plugin-robots.`);
-}
-/**
-* 释放一个不可接受的句柄，并让调用方以明确的错误终止节点。
-*
-* @param handle
-* @param message
-* @returns
-*/
-async function rejectHandle(_host, handle, message) {
-	try {
-		await handle?.dispose?.();
-	} catch {}
-	throw new WorkflowRunError(message);
-}
-// .build/workflows/engine/supervisor-events.js
-/**
-* 观察者的事件订阅：会话事件、人类交互旁听与会话释放清理。
-*/
-/** 注册全局事件订阅。 */
-function subscribe(host) {
-	if (typeof host.ctx?.on !== "function") return;
-	const offs = [];
-	try {
-		offs.push(host.ctx.on("session/event", (session, event) => host.onSessionEvent(session, event), { global: true }));
-	} catch {
-		offs.push(host.ctx.on("session/event", (session, event) => host.onSessionEvent(session, event)));
-	}
-	offs.push(host.ctx.on("session/disposed", (session) => host.onSessionDisposed(session)));
-	offs.push(host.ctx.on("agent/disposed", (payload) => host.onAgentDisposed(payload)));
-	for (const event of ["user-questions/request", "approval/request"]) try {
-		offs.push(host.ctx.on(event, (request, next) => host.onHumanRequest(event, request, next), { prepend: true }));
-	} catch {}
-	host.unsubscribes = offs;
-}
-/**
-* 旁听机器人会话里的提问 / 审批，记录成 run.pendingInteraction，供运行页展示。
-*
-* 不截胡：先调用 `next()` 让真正的 answerer（Web UI / 自动审批）处理，再异步
-* 记录/清除；返回值原样交回 waterfall。
-*
-* @param event
-* @param request
-* @param next
-* @returns
-*/
-function onHumanRequest(host, event, request, next) {
-	const answer = next();
-	if (host.disposed) return answer;
-	const requestRecord = isRecord(request) ? request : {};
-	const agent = isRecord(requestRecord.agent) ? requestRecord.agent : null;
-	const agentId = agent !== null ? agent.id : void 0;
-	const entry = typeof agentId === "string" ? host.dispatchBySession.get(agentId) : void 0;
-	if (entry === void 0) return answer;
-	const ctx = host.runs.get(entry.runId);
-	if (ctx === void 0 || ctx.closed || ctx.cancelled) return answer;
-	const interactionId = randomUUID();
-	const kind = event === "approval/request" ? "approval" : "question";
-	const planReview = event === "user-questions/request" && Array.isArray(requestRecord.questions) && requestRecord.questions.some((question) => isRecord(question) && isRecord(question.intent) && question.intent.kind === "plan-review");
-	if (planReview) entry.planReviewAsked = true;
-	host.enqueue(entry.runId, () => host.recordInteraction(ctx, entry, kind, request, interactionId, planReview));
-	const settle = () => {
-		host.enqueue(entry.runId, () => host.clearInteraction(ctx, interactionId));
-	};
-	Promise.resolve(answer).then(settle, settle);
-	return answer;
-}
-/**
-* 把一次提问 / 审批写进运行记录。
-*
-* @param ctx
-* @param entry
-* @param kind
-* @param request
-* @param interactionId
-* @param [planReview]
-* @returns
-*/
-async function recordInteraction(host, ctx, entry, kind, request, interactionId, planReview = false) {
-	if (ctx.closed || ctx.cancelled) return;
-	const current = host.findActive(ctx, entry.seq);
-	if (current === null) return;
-	const requestRecord = isRecord(request) ? request : {};
-	const questions = kind === "question" ? normalizeQuestions(requestRecord.questions) : void 0;
-	if (kind === "question" && (questions === void 0 || questions.length === 0)) return;
-	ctx.run.pendingInteraction = {
-		id: interactionId,
-		kind,
-		nodeId: current.nodeId,
-		visit: current.visit,
-		seq: current.seq,
-		robot: current.robot ?? null,
-		sessionId: current.sessionId ?? null,
-		askedAt: Date.now(),
-		...planReview ? { planReview: true } : {},
-		...questions === void 0 ? {} : { questions },
-		...kind === "approval" ? {
-			toolName: clipText(requestRecord.toolName, 120),
-			reason: clipText(requestRecord.reason, 2e3),
-			displayReason: clipText(requestRecord.displayReason, 1e3) || void 0,
-			callId: typeof requestRecord.callId === "string" ? requestRecord.callId : void 0
-		} : {}
-	};
-	try {
-		await host.save(ctx);
-		await host.store.appendEvent(ctx.runId, "interaction/asked", {
-			kind,
-			nodeId: current.nodeId,
-			visit: current.visit,
-			sessionId: current.sessionId ?? null
-		});
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 保存等待中的交互失败：${describeError(error)}`);
-	}
-}
-/**
-* 清除一次提问 / 审批；id 不匹配时说明已经有新的交互，不能误清。
-*
-* @param ctx
-* @param interactionId
-* @returns
-*/
-async function clearInteraction(host, ctx, interactionId) {
-	if (ctx.closed) return;
-	if (ctx.run.pendingInteraction?.id !== interactionId) return;
-	ctx.run.pendingInteraction = null;
-	try {
-		await host.save(ctx);
-		await host.store.appendEvent(ctx.runId, "interaction/settled", { id: interactionId });
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 清除等待中的交互失败：${describeError(error)}`);
-	}
-}
-/**
-* @param session
-* @param event
-* @returns
-*/
-function onSessionEvent(host, session, event) {
-	if (host.disposed || event?.type !== "turn/end") return;
-	const sessionId = typeof session?.id === "string" ? session.id : "";
-	if (sessionId === "") return;
-	const entry = host.dispatchBySession.get(sessionId);
-	if (entry === void 0) return;
-	if (entry.startSeq === null) {
-		if (entry.early.length < 40) entry.early.push({
-			kind: "turn",
-			session,
-			event
-		});
-		return;
-	}
-	if (typeof event.seq !== "number" || event.seq < entry.startSeq) return;
-	host.enqueue(entry.runId, () => host.processTurn(entry, session, event));
-}
-/**
-* @param session
-* @returns
-*/
-function onSessionDisposed(host, session) {
-	if (host.disposed) return;
-	const sessionId = typeof session?.id === "string" ? session.id : "";
-	const entry = sessionId === "" ? void 0 : host.dispatchBySession.get(sessionId);
-	if (entry === void 0 || entry.claimed === true || entry.recoveryRequested === true) return;
-	if (entry.startSeq === null) {
-		entry.disposedEarly = true;
-		return;
-	}
-	entry.recoveryRequested = true;
-	host.enqueue(entry.runId, () => host.recoverNode(entry, "the robot session was disposed"));
-}
-/**
-* @param payload
-* @returns
-*/
-function onAgentDisposed(host, payload) {
-	const payloadRecord = isRecord(payload) ? payload : {};
-	const session = (isRecord(payloadRecord.agent) ? payloadRecord.agent : null)?.session ?? payloadRecord.session ?? null;
-	if (session === null || session === void 0) return;
-	host.onSessionDisposed(session);
-}
-/**
-* 从 dispatch 表里移除并释放这一轮的句柄。
-*
-* @param ctx
-* @param sessionId
-* @returns
-*/
-function disposeEntry(host, ctx, sessionId) {
-	if (typeof sessionId !== "string" || sessionId === "") return;
-	const entry = host.dispatchBySession.get(sessionId);
-	if (entry === void 0 || entry.runId !== ctx.runId) return;
-	host.clearEntryPlanMode(entry);
-	host.removeEntry(entry);
-	try {
-		Promise.resolve(entry.handle?.dispose?.()).catch(() => void 0);
-	} catch {}
-}
-// .build/workflows/engine/supervisor-lifecycle.js
-/**
-* 观察者的生命周期：启动 / 取消 / 释放运行，以及机器人服务接入。
-*/
-/**
-* 注入 robots 服务；晚到时会唤醒等待启动恢复的调用方。
-*
-* @param robots
-* @returns
-*/
-function attachRobots(host, robots) {
-	if (host.disposed || robots === void 0 || robots === null) return;
-	host.robots = robots;
-	const waiters = host.robotsWaiters.splice(0);
-	for (const waiter of waiters) waiter(robots);
-}
-/**
-* 确保「机器人会话 → 运行」索引已从落盘运行记录构建。
-*
-* 工具可见性条件在每一步都会调用它；构建只做一次，失败只记警告并保留已有
-* 映射，避免一个坏运行记录让整个会话的 step preparation 失败。
-*
-* @returns
-*/
-async function ensureSessionIndex(host) {
-	if (host.store.ready !== null && host.store.ready !== void 0) try {
-		await host.store.ready;
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 运行存储初始化失败，跳过机器人会话索引：${describeError(error)}`);
-		host.sessionIndexPromise = Promise.resolve();
-		return;
-	}
-	if (host.sessionIndexPromise === null) host.sessionIndexPromise = host.buildSessionIndex().catch((error) => {
-		host.logger?.warn?.(`buka-workflows: 构建机器人会话索引失败：${describeError(error)}`);
-	});
-	await host.sessionIndexPromise;
-}
-/**
-* 查一个机器人会话属于哪次运行；不属于任何运行（例如手动机器人会话）时返回
-* null。
-*
-* @param sessionId
-* @returns
-*/
-function sessionRun(host, sessionId) {
-	if (typeof sessionId !== "string" || sessionId === "") return null;
-	return host.sessionRuns.get(sessionId) ?? null;
-}
-/**
-* 记录一个机器人会话所属运行。运行结束后仍保留：用户从侧边栏重新打开会话时，
-* 四个只读工具仍然可用。
-*
-* @param runId
-* @param sessionId
-* @returns
-*/
-function rememberSession(host, runId, sessionId) {
-	if (typeof runId !== "string" || runId === "") return;
-	if (typeof sessionId !== "string" || sessionId === "") return;
-	host.sessionRuns.set(sessionId, { runId });
-}
-/**
-* 启动一次运行。
-*
-* 后台模式在第一个节点 dispatch 后返回；前台模式（含 user 节点）返回 `done`
-* promise，调用方 await 到终止状态。
-*
-* @param input 计划、定义快照、创建者 agent 与可选信号 / 回调
-* @returns 终态运行记录，或后台运行的 { run, runId, seq }
-*/
-async function start(host, input) {
-	const { plan, definition, agent, mode = "background", signal, onRunCreated } = input;
-	if (typeof agent?.id !== "string" || agent.id === "") throw new WorkflowRunError("a workflow run needs the creating agent");
-	if (mode === "background" && plan.order.some((id) => plan.nodes[id]?.type === "user")) throw new WorkflowRunError("user nodes require a foreground run with an active caller turn");
-	const runId = createRunId();
-	const seq = await host.store.allocateSeq();
-	const now = Date.now();
-	/** @type {Record<string, any>} */
-	const run = {
-		version: 3,
-		runId,
-		seq,
-		goal: plan.goal,
-		status: "running",
-		createdAt: now,
-		updatedAt: now,
-		finishedAt: null,
-		createdBy: { sessionId: agent.id },
-		active: [],
-		pendingUser: null,
-		pendingInteraction: null,
-		steps: [],
-		sessions: [],
-		result: null,
-		error: null
-	};
-	await host.store.create({
-		run,
-		definition,
-		plan
-	});
-	onRunCreated?.(runId);
-	const ctx = host.createContext({
-		run,
-		plan,
-		definition,
-		mode,
-		agent,
-		signal
-	});
-	host.runs.set(runId, ctx);
-	if (ctx.cancelled) {
-		await host.enqueue(runId, () => host.finish(ctx, "cancelled", { message: "workflow caller aborted" }));
-		return mode === "foreground" ? await ctx.done.promise : {
-			run,
-			runId,
-			seq
-		};
-	}
-	const startNode = plan.nodes[plan.start];
-	if (startNode === void 0) {
-		await host.enqueue(runId, () => host.fail(ctx, new WorkflowRunError("workflow start node is missing")));
-		return mode === "foreground" ? await ctx.done.promise : {
-			run,
-			runId,
-			seq
-		};
-	}
-	if (startNode.type !== "start") {
-		await host.enqueue(runId, () => host.fail(ctx, new WorkflowRunError("workflow start node is not a start node")));
-		return mode === "foreground" ? await ctx.done.promise : {
-			run,
-			runId,
-			seq
-		};
-	}
-	const startEdges = Array.isArray(startNode.next) ? startNode.next : [];
-	if (startEdges.length === 0) {
-		await host.enqueue(runId, () => host.fail(ctx, new WorkflowRunError("start node has no outgoing edge")));
-		return mode === "foreground" ? await ctx.done.promise : {
-			run,
-			runId,
-			seq
-		};
-	}
-	ctx.frontier = startEdges.map((rule) => ({
-		nodeId: rule.to,
-		edgePrompt: typeof rule.prompt === "string" && rule.prompt !== "" ? rule.prompt : null
-	}));
-	if (startEdges.length > 1) host.activateJoins(ctx, startEdges.map((rule) => rule.to));
-	await host.enqueue(runId, () => host.advanceInner(ctx));
-	if (mode === "foreground") return await ctx.done.promise;
-	return {
-		run,
-		runId,
-		seq
-	};
-}
-/**
-* 取消一次仍在观察中的运行。
-*
-* @param runId
-* @param [reason]
-* @returns
-*/
-async function cancel(host, runId, reason = "cancelled by the workflow orchestrator") {
-	const ctx = host.runs.get(runId);
-	if (ctx === void 0) {
-		const run = await host.store.readRun(runId);
-		if (run !== null && (run.status === "running" || run.status === "waiting")) return await host.store.markInterrupted(runId, reason);
-		return false;
-	}
-	ctx.cancelled = true;
-	try {
-		ctx.controller.abort(reason);
-	} catch {}
-	await host.enqueue(runId, async () => {
-		if (!ctx.closed) await host.finish(ctx, "cancelled", { message: reason });
-	});
-	return true;
-}
-/**
-* 插件卸载：取消活动轮次、清定时器，但保留 running 记录供下次加载恢复。
-*
-* @returns
-*/
-async function dispose(host) {
-	if (host.disposed) return;
-	host.disposed = true;
-	for (const off of host.unsubscribes ?? []) try {
-		off();
-	} catch {}
-	host.unsubscribes = null;
-	for (const ctx of host.runs.values()) {
-		for (const entry of host.dispatchEntriesForRun(ctx.runId)) {
-			if (entry.timer !== null) clearTimeout(entry.timer);
-			try {
-				await entry.handle?.cancel?.("workflow plugin disposed");
-			} catch {}
-			try {
-				await entry.handle?.dispose?.();
-			} catch {}
-		}
-		ctx.controller.abort("workflow plugin disposed");
-		if (ctx.mode === "foreground" && !ctx.done.settled) ctx.done.resolve(toToolRun(ctx.run));
-	}
-	host.runs.clear();
-	host.dispatchBySession.clear();
-	host.sessionRuns.clear();
-	host.queues.clear();
-}
-// .build/workflows/routing.js
-/**
-* 机器人节点结果的解析与路由（workflow format 2）。
-*
-* 机器人节点总是交回一个 JSON 对象，结果有两条出口：
-*
-* - `next` 必须精确匹配某一条出边的 `name`，执行器就沿着那条边走，并渲染该边上
-*   的 prompt；没有出边的终止机器人节点不需要 `next`，此时 `resolveRoute` 返回
-*   `{ rule: null }`，流程正常结束；
-* - `abort` 是主动终止：节点用非空字符串说明自己无法完成，执行器直接结束运行，
-*   不选任何边。`resolveAbort` 必须先于 `resolveRoute` 调用；两者同时出现时按
-*   无效结果处理，供观察者要求机器人在同一会话里重新交回结果。
-*
-* @module @buka/dsh-plugin-workflows/routing
-*/
-/** 主动终止原因的最大字符数；超出部分截断，避免把 run.json 撑大。 */
-const MAX_ABORT_REASON_LENGTH = 2e3;
-/**
-* 解析机器人结果里的 `abort` 主动终止字段。
-*
-* 返回：
-* - `null`：结果没有 `abort`，按 `next` 处理；
-* - `{ abort: { reason } }`：合法的主动终止；
-* - `{ error: { kind, message } }`：`next` / `abort` 同时出现，或 `abort` 不是
-*   非空字符串，`kind` 直接作为结果追问的 reason。
-*
-* @param data 机器人交回的 JSON 对象
-* @returns 没有 abort 时是 `null`，否则是合法 abort 或无效结果
-*/
-function resolveAbort(data) {
-	if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
-	if (!Object.hasOwn(data, "abort")) return null;
-	if (Object.hasOwn(data, "next")) return { error: {
-		kind: "ambiguous-result",
-		message: "the result carries both \"next\" and \"abort\"; submit exactly one of them"
-	} };
-	const raw = data.abort;
-	if (typeof raw !== "string") return { error: {
-		kind: "invalid-abort",
-		message: "\"abort\" must be a string containing the reason this node cannot complete its task"
-	} };
-	const reason = raw.trim();
-	if (reason === "") return { error: {
-		kind: "invalid-abort",
-		message: "\"abort\" must be a non-empty reason"
-	} };
-	return { abort: { reason: reason.length > 2e3 ? reason.slice(0, MAX_ABORT_REASON_LENGTH) : reason } };
-}
-/**
-* 按机器人结果里的 `next` 选择出边（format 2 起，format 3 支持并发 fan-out）。
-*
-* 结果里的 `next` 可以是一个路由键（单线，向后兼容），也可以是一个路由键数组
-* （fan-out：同时沿所有列出的出边并发执行）。调用方必须先处理 `resolveAbort`：
-* 合法 abort 不进入路由。
-*
-* 返回：
-* - `{ rules }`：命中一条或多条出边（数组，按定义顺序）；
-* - `{ rules: [] }`：节点没有出边，流程到此结束；
-* - `{ error, routes }`：缺少 / 未知 / 重复 `next`，`routes` 是允许的名字列表。
-*
-* @param node 已规范化的节点
-* @param data 机器人交回的 JSON 对象
-* @returns 命中的出边数组，或路由错误
-*/
-function resolveRoutes(node, data) {
-	const rules = Array.isArray(node?.next) ? node.next : [];
-	if (rules.length === 0) return { rules: [] };
-	const routes = [];
-	for (const rule of rules) if (typeof rule?.name === "string" && rule.name !== "") routes.push(rule.name);
-	const rawNext = typeof data === "object" && data !== null ? data.next : void 0;
-	if (typeof rawNext === "string") {
-		const name = rawNext.trim();
-		if (name === "") return {
-			error: `the result has no "next" route; set "next" to one of: ${formatRoutes(routes)}`,
-			routes
-		};
-		const matches = rules.filter((rule) => rule?.name === name);
-		if (matches.length !== 1) return {
-			error: matches.length === 0 ? `unknown route "${name}"; "next" must be one of: ${formatRoutes(routes)}` : `route "${name}" is ambiguous; "next" must be one of: ${formatRoutes(routes)}`,
-			routes
-		};
-		return { rules: matches };
-	}
-	if (Array.isArray(rawNext)) {
-		if (rawNext.length === 0) return {
-			error: `the result has an empty "next" route list; set "next" to one or more of: ${formatRoutes(routes)}`,
-			routes
-		};
-		const selected = [];
-		const seen = /* @__PURE__ */ new Set();
-		for (const raw of rawNext) {
-			if (typeof raw !== "string") return {
-				error: `the "next" route list must contain only route names; set it to one or more of: ${formatRoutes(routes)}`,
-				routes
-			};
-			const name = raw.trim();
-			if (name === "") return {
-				error: `the "next" route list contains an empty name; use one or more of: ${formatRoutes(routes)}`,
-				routes
-			};
-			if (seen.has(name)) return {
-				error: `the "next" route list repeats "${name}"; each route can only be selected once`,
-				routes
-			};
-			seen.add(name);
-			const matches = rules.filter((rule) => rule?.name === name);
-			if (matches.length !== 1) return {
-				error: matches.length === 0 ? `unknown route "${name}"; "next" must be one of: ${formatRoutes(routes)}` : `route "${name}" is ambiguous; "next" must be one of: ${formatRoutes(routes)}`,
-				routes
-			};
-			selected.push(matches[0]);
-		}
-		return { rules: selected };
-	}
-	return {
-		error: `the result has no "next" route; set "next" to one of: ${formatRoutes(routes)}`,
-		routes
-	};
-}
-/**
-* 把可选路由名拼成给模型看的列表。
-*
-* @param routes 可选路由名
-* @returns 给模型看的列表
-*/
-function formatRoutes(routes) {
-	return routes.length === 0 ? "(none)" : routes.map((route) => JSON.stringify(route)).join(", ");
-}
-// .build/workflows/engine/supervisor-node.js
-/**
-* 机器人节点的完成：写 step / 附件 / 结果，并按路由决定下一步。
-*/
-/**
-* 正常 / 失败地落一条 robot step，并把它的出口（单线或 fan-out）推进 frontier，
-* 同时更新 join 屏障：并发 fan-out 激活 join、任务完成喂给引用它的 join。
-*
-* @param ctx
-* @param current 要终结的活跃节点
-* @param node
-* @param result
-* @param extra
-* @returns
-*/
-async function completeNode(host, ctx, current, node, result, extra) {
-	if (ctx.closed || ctx.cancelled) return;
-	const run = ctx.run;
-	const sessionId = typeof result.sessionId === "string" ? result.sessionId : current.sessionId ?? null;
-	const finishedAt = Date.now();
-	const startedAt = typeof current.startedAt === "number" ? current.startedAt : finishedAt;
-	const preview = truncateUtf8(result.text ?? "", host.options.previewBytes);
-	let aborted = extra.aborted === true;
-	let stopReason = aborted ? "aborted" : typeof result.stopReason === "string" ? result.stopReason : "error";
-	const recovered = extra.recovered === true || current.recovered === true;
-	const recoveryAttempts = Number.isInteger(extra.recoveryAttempts) ? extra.recoveryAttempts : Number.isInteger(current.recoveryAttempts) ? current.recoveryAttempts : 0;
-	let routes = aborted ? null : extra.routes;
-	if (routes === void 0 && stopReason === "completed") {
-		const resolvedAbort = resolveAbort(result.structured);
-		if (resolvedAbort?.abort !== void 0) {
-			aborted = true;
-			stopReason = "aborted";
-			routes = null;
-			result = {
-				...result,
-				stopReason: "aborted",
-				error: resolvedAbort.abort.reason
-			};
-		} else if (resolvedAbort?.error !== void 0) {
-			await host.fail(ctx, new WorkflowRunError(`invalid workflow result: ${resolvedAbort.error.message}`));
-			return;
-		} else {
-			const resolved = resolveRoutes(node, result.structured);
-			if (resolved.error !== void 0) {
-				await host.fail(ctx, new WorkflowRunError(`invalid workflow route: ${resolved.error}`));
 				return;
 			}
-			routes = resolved.rules ?? null;
-		}
-	}
-	let nodeAttachments = [];
-	let attachmentValues = [];
-	const structured = isRecord(result.structured) ? result.structured : null;
-	if (stopReason === "completed" && structured !== null && structured.attachments !== void 0) try {
-		nodeAttachments = await host.store.writeNodeAttachments(run.runId, current.seq ?? 0, node.id ?? "", structured.attachments, { workspace: extra.workspace });
-		attachmentValues = await host.store.attachmentValues(run.runId, current.seq ?? 0, node.id ?? "", nodeAttachments);
-		result = {
-			...result,
-			structured: {
-				...structured,
-				attachments: nodeAttachments
-			}
-		};
-	} catch (error) {
-		stopReason = "error";
-		routes = null;
-		result = {
-			...result,
-			stopReason: "error",
-			error: `could not store node attachments: ${describeError(error)}`
-		};
-	}
-	const routeList = Array.isArray(routes) ? routes : [];
-	const routeName = routeList.length === 1 && typeof routeList[0]?.name === "string" ? routeList[0].name : null;
-	const routeTo = routeList.length === 1 && typeof routeList[0]?.to === "string" ? routeList[0].to : null;
-	const step = {
-		seq: current.seq,
-		nodeId: node.id ?? "",
-		visit: current.visit,
-		type: "robot",
-		robot: node.robot,
-		sessionId,
-		...node.mode === "plan" ? { mode: "plan" } : {},
-		status: stopReason === "completed" ? "completed" : "failed",
-		stopReason,
-		...aborted ? { aborted: true } : {},
-		route: routeName,
-		routeTo,
-		routes: routeList.map((rule) => ({
-			name: typeof rule?.name === "string" ? rule.name : null,
-			to: typeof rule?.to === "string" ? rule.to : null
-		})),
-		startedAt,
-		finishedAt,
-		text: preview.text,
-		textTruncated: preview.truncated,
-		data: result.structured ?? null,
-		error: result.error ?? null,
-		attachments: nodeAttachments,
-		resumed: current.resumed === true || result.resumed === true,
-		compacted: current.compacted === true || result.compacted === true,
-		...typeof current.compactionError === "string" && current.compactionError !== "" ? { compactionError: current.compactionError } : {},
-		...typeof result.compactionError === "string" && result.compactionError !== "" ? { compactionError: result.compactionError } : {},
-		...typeof current.sessionResetReason === "string" && current.sessionResetReason !== "" ? { sessionResetReason: current.sessionResetReason } : {},
-		...recovered ? {
-			recovered: true,
-			recoveryAttempts
-		} : {},
-		...extra.timedOut === true ? { timedOut: true } : {}
-	};
-	run.steps.push(step);
-	host.removeActive(ctx, current);
-	run.pendingInteraction = null;
-	run.updatedAt = finishedAt;
-	ctx.stepCount = run.steps.length;
-	ctx.values[node.id ?? ""] = {
-		text: typeof result.text === "string" ? result.text : "",
-		data: result.structured ?? null,
-		robot: node.robot,
-		sessionId: sessionId ?? "",
-		route: routeName,
-		attachments: attachmentValues
-	};
-	updateRobotSession(run, node.robot, {
-		nodeId: node.id ?? "",
-		visit: current.visit ?? 0,
-		sessionId,
-		at: finishedAt
-	});
-	const fullText = truncateUtf8(result.text ?? "", host.options.maxNodeTextBytes);
-	const promptText = truncateUtf8(current.prompt ?? "", host.options.maxNodeTextBytes);
-	try {
-		await host.store.saveNodeResult(run.runId, current.seq ?? 0, node.id ?? "", {
-			nodeId: node.id,
-			visit: current.visit,
-			robot: node.robot,
-			sessionId,
-			...node.mode === "plan" ? { mode: "plan" } : {},
-			status: step.status,
-			stopReason,
-			...aborted ? { aborted: true } : {},
-			error: result.error ?? null,
-			structured: result.structured ?? null,
-			attachments: nodeAttachments,
-			resumed: step.resumed,
-			compacted: step.compacted,
-			...step.compactionError === void 0 ? {} : { compactionError: step.compactionError },
-			...step.sessionResetReason === void 0 ? {} : { sessionResetReason: step.sessionResetReason },
-			...step.recovered === true ? {
-				recovered: true,
-				recoveryAttempts: step.recoveryAttempts
-			} : {},
-			...step.timedOut === true ? { timedOut: true } : {},
-			prompt: promptText.text,
-			promptTruncated: promptText.truncated,
-			text: fullText.text,
-			textTruncated: fullText.truncated,
-			startedAt,
-			finishedAt
-		});
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 保存节点结果失败（${run.runId}/${node.id}）：${describeError(error)}`);
-	}
-	host.disposeEntry(ctx, sessionId);
-	await host.save(ctx);
-	await host.store.appendEvent(run.runId, "node/end", {
-		nodeId: node.id,
-		visit: current.visit,
-		stopReason,
-		...aborted ? { aborted: true } : {},
-		...node.mode === "plan" ? { mode: "plan" } : {},
-		sessionId,
-		resumed: step.resumed,
-		compacted: step.compacted,
-		...step.recovered === true ? { recovered: true } : {},
-		...step.timedOut === true ? { timedOut: true } : {}
-	});
-	if (stopReason !== "completed") {
-		const detail = typeof result.error === "string" && result.error !== "" ? result.error : `robot node "${node.id}" ended with ${stopReason}`;
-		const message = aborted ? `workflow node "${node.id}" aborted the run: ${detail}` : detail;
-		run.error = message;
-		await host.finish(ctx, "failed", {
-			nodeId: node.id,
-			message,
-			aborted
-		});
-		return;
-	}
-	if (routeList.length > 0) {
-		const targets = routeList.map((rule) => rule.to);
-		if (routeList.length > 1) host.activateJoins(ctx, targets);
-		for (const rule of routeList) {
-			await host.store.appendEvent(run.runId, "route", {
-				nodeId: node.id,
-				route: typeof rule?.name === "string" ? rule.name : null,
-				to: typeof rule?.to === "string" ? rule.to : null
-			});
-			ctx.frontier.push({
-				nodeId: rule.to,
-				edgePrompt: typeof rule.prompt === "string" && rule.prompt !== "" ? rule.prompt : null
-			});
-		}
-	}
-	await host.contributeJoins(ctx, node.id);
-	await host.advanceInner(ctx);
-}
-// .build/workflows/engine/supervisor-resume.js
-/**
-* 中断节点的续跑：在原会话里发续跑提示，续接失败则终止节点。
-*/
-async function resumeActive(host, ctx, current) {
-	const runId = ctx.runId;
-	const run = ctx.run;
-	if (current.type !== "robot") {
-		await host.store.markInterrupted(runId, `cannot recover a ${String(current.type)} node after a restart`);
-		return "interrupted";
-	}
-	if (typeof current.prompt !== "string" || current.prompt === "") {
-		await host.store.markInterrupted(runId, "this run predates observer recovery data and cannot be resumed safely");
-		return "interrupted";
-	}
-	const node = ctx.plan.nodes[current.nodeId ?? ""];
-	if (node === void 0) {
-		await host.store.markInterrupted(runId, `workflow node "${current.nodeId ?? ""}" is missing from the definition`);
-		return "interrupted";
-	}
-	const robots = host.robots ?? host.ctx?.get?.("bukaRobots") ?? null;
-	const sessionId = typeof current.sessionId === "string" ? current.sessionId : "";
-	const interrupt = async (message) => {
-		await host.store.markInterrupted(runId, message);
-		return "interrupted";
-	};
-	if (sessionId === "") return await interrupt(`workflow node "${node.id}" has no robot session id; workflow stopped without opening a new session`);
-	host.rememberSession(runId, sessionId);
-	if (robots === null || typeof robots.openSession !== "function") return await interrupt(`workflow node "${node.id}" cannot resume robot session "${sessionId}": the Buka Robots service cannot open robot sessions; workflow stopped without opening a new session`);
-	let handle = null;
-	try {
-		handle = await host.requireVisibleHandle(await robots.openSession(host.sessionRequest(ctx, node, sessionId)));
-		await host.requireSameSession(handle, sessionId);
-		const check = handle.readResult({ sinceSeq: current.startSeq ?? 0 });
-		if (Number.isInteger(current.startSeq) && check.turnEnded === true && (typeof check.stopReason !== "string" || !RECOVERABLE_STOP_REASONS.has(check.stopReason))) {
-			current.recovering = false;
-			const recoveredEntry = {
-				runId,
-				seq: current.seq ?? 0,
-				startSeq: current.startSeq ?? null,
-				handle,
-				early: [],
-				claimed: true,
-				recoveryRequested: false,
-				disposedEarly: false,
-				resultExhausted: false,
-				timer: null,
-				timeoutMs: current.timeoutMs ?? 0,
-				planMode: node.mode === "plan",
-				planReviewAsked: false,
-				planNudged: false
-			};
-			host.dispatchBySession.set(sessionId, recoveredEntry);
-			let result = check;
-			let routes = null;
-			if (check.structured === void 0) result = {
-				...check,
-				stopReason: "error",
-				error: "the robot session did not submit a structured JSON result"
-			};
-			else {
-				const abort = resolveAbort(check.structured);
-				if (abort?.abort !== void 0) {
-					await host.abortNode(ctx, current, node, check, abort.abort.reason, {
-						recovered: true,
-						recoveryAttempts: 1,
-						workspace: typeof handle.cwd === "string" ? handle.cwd : void 0
-					});
-					return "recovered";
-				}
-				if (abort?.error !== void 0) result = {
-					...check,
-					stopReason: "error",
-					error: `invalid workflow result for node "${node.id}": ${abort.error.message}`
-				};
-				else {
-					const problems = outputProblems(node, check.structured);
-					if (problems.length > 0) result = {
-						...check,
-						stopReason: "error",
-						error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join("; ")}`
-					};
-					else {
-						const resolved = resolveRoutes(node, check.structured);
-						if (resolved.error !== void 0) result = {
-							...check,
-							stopReason: "error",
-							error: `invalid workflow route: ${resolved.error}`
-						};
-						else routes = resolved.rules ?? null;
+			if (record.action === "retry-delivery") {
+				const job = await engine.retryDelivery(jobId);
+				sendJson(res, 200, {
+					ok: true,
+					job: {
+						id: job.id,
+						status: job.status
 					}
-				}
+				});
+				return;
 			}
-			if (await host.handlePlanGate(ctx, recoveredEntry, current, node, result)) return "recovered";
-			host.clearEntryPlanMode(recoveredEntry);
-			host.removeEntry(recoveredEntry);
-			try {
-				await handle.dispose?.();
-			} catch {}
-			await host.completeNode(ctx, current, node, result, {
-				recovered: true,
-				recoveryAttempts: 1,
-				routes,
-				workspace: typeof handle.cwd === "string" ? handle.cwd : void 0
+			sendError(res, 400, "invalid-action", "action must be cancel or retry-delivery");
+		});
+		route(ROUTES.task, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const params = query(req);
+			const jobId = (params.get("jobId") ?? "").trim();
+			const taskId = (params.get("taskId") ?? "").trim();
+			if (jobId === "" || taskId === "") return sendError(res, 400, "invalid-id", "jobId and taskId are required");
+			const detail = (await ready()).taskDetail(jobId, taskId);
+			if (detail === null) return sendError(res, 404, "not-found", "task not found");
+			sendJson(res, 200, {
+				ok: true,
+				task: detail
 			});
-			return "recovered";
-		}
-		await handle.send(recoveryPrompt(node, "the host restarted before this node finished"), { compactFirst: true });
-		current.startSeq = typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : current.startSeq;
-		current.recovering = false;
-		current.recovered = true;
-		current.resumed = true;
-		current.recoveryAttempts = 1;
-		const entry = {
-			runId,
-			seq: current.seq ?? 0,
-			recoveryRequested: false,
-			startSeq: current.startSeq ?? null,
-			handle,
-			early: [],
-			claimed: false,
-			disposedEarly: false,
-			resultExhausted: false,
-			timer: null,
-			timeoutMs: current.timeoutMs ?? 0,
-			planMode: node.mode === "plan",
-			planReviewAsked: false,
-			planNudged: false
-		};
-		rememberSessionEntry(run, node.robot, {
-			nodeId: node.id ?? "",
-			visit: current.visit ?? 0,
-			seq: current.seq ?? 0,
-			sessionId: current.sessionId ?? null,
-			at: Date.now(),
-			resumed: true,
-			compacted: current.compacted === true
 		});
-		host.dispatchBySession.set(sessionId, entry);
-		await host.save(ctx);
-		await host.store.appendEvent(runId, "node/resume", {
-			nodeId: node.id,
-			visit: current.visit,
-			sessionId: current.sessionId,
-			attempt: 1,
-			reason: "host restart"
-		});
-		host.armTimeout(ctx, entry);
-		return "recovered";
-	} catch (error) {
-		if (node.mode === "plan") host.clearEntryPlanMode({
-			planMode: true,
-			handle
-		});
-		try {
-			await handle?.dispose?.();
-		} catch {}
-		host.dispatchBySession.delete(sessionId);
-		host.logger?.warn?.(`buka-workflows: 恢复运行 ${runId} 的会话 ${sessionId} 失败，终止运行：${describeError(error)}`);
-		return await interrupt(`workflow node "${node.id}" could not resume robot session "${sessionId}" after restart: ${describeError(error)}; workflow stopped without opening a new session`);
-	}
-}
-/**
-* 会话中断后发进同一会话的续跑提示。
-*
-* @param node
-* @param reason
-* @returns
-*/
-function recoveryPrompt(node, reason) {
-	const routes = routeNamesOf(node);
-	const routeText = routes.length > 0 ? ` The final JSON object must include exactly one of "next" (one of: ${routes.join(", ")}) and "abort".` : " The final JSON object may include \"abort\" if you cannot complete the task.";
-	return `Your previous execution of workflow node "${node.id}" was interrupted before it delivered a result (${reason}). Continue from the work already done in this session and finish the assigned task now. When you are done, submit the final JSON object by calling the structured_output tool; it must match this node's declared output schema.${routeText} If you cannot complete this task, submit "abort" with a short non-empty reason instead of choosing a route. Put the actual answer in the final text; do not put it only in an attachment.`;
-}
-// .build/workflows/engine/supervisor-recovery.js
-/**
-* 宿主重启后的运行恢复：未完成运行逐个尝试续接，无法续接的节点终止运行。
-*/
-/**
-* 启动恢复：把上次进程留下的 running / waiting 运行接回来。等待用户作答的
-* user 运行没有调用者 turn，无法重建原生提问，直接标 interrupted。
-*
-* @returns
-*/
-async function resumeAll(host) {
-	if (host.disposed) return {
-		recovered: 0,
-		interrupted: 0
-	};
-	if (!host.recovered && host.store.ready !== null && host.store.ready !== void 0) {
-		await host.store.ready;
-		host.sessionIndexPromise = null;
-		host.sessionRuns.clear();
-	}
-	await host.ensureSessionIndex();
-	if (host.recovered) return {
-		recovered: 0,
-		interrupted: 0
-	};
-	host.recovered = true;
-	const robots = await host.waitForRobots();
-	if (robots === null || typeof robots.dispatchSession !== "function") return {
-		recovered: 0,
-		interrupted: await host.store.markAllInterrupted("the Buka Robots service is unavailable or too old (dispatchSession is missing), so unfinished workflow runs cannot be resumed")
-	};
-	const runs = await host.store.listUnfinished();
-	let recovered = 0;
-	let interrupted = 0;
-	let next = 0;
-	const worker = async () => {
-		while (next < runs.length) {
-			const run = runs[next];
-			next += 1;
-			if (run === void 0) continue;
-			try {
-				const result = await host.recoverRun(run);
-				if (result === "recovered") recovered += 1;
-				else if (result === "interrupted") interrupted += 1;
-			} catch (error) {
-				host.logger?.warn?.(`buka-workflows: 恢复运行 ${run.runId} 失败：${describeError(error)}`);
-			}
-		}
-	};
-	const workers = Array.from({ length: Math.min(4, runs.length) }, () => worker());
-	await Promise.all(workers);
-	return {
-		recovered,
-		interrupted
-	};
-}
-/**
-* @param run
-* @returns
-*/
-async function recoverRun(host, run) {
-	const runId = typeof run?.runId === "string" ? run.runId : "";
-	if (runId === "" || host.runs.has(runId)) return "skipped";
-	if (run.status === "waiting" || run.pendingUser !== null && run.pendingUser !== void 0 || run.current?.type === "user") {
-		await host.store.markInterrupted(runId, "the run was waiting for the user when the host restarted; a user-question prompt cannot be recreated");
-		return "interrupted";
-	}
-	const definition = await host.store.readDefinition(runId);
-	const planValue = definition?.plan;
-	if (!isRecord(planValue) || !isRecord(planValue.nodes)) {
-		await host.store.markInterrupted(runId, "the workflow definition snapshot is missing or corrupt");
-		return "interrupted";
-	}
-	const plan = planValue;
-	const planOrder = Array.isArray(plan.order) ? plan.order : Object.keys(plan.nodes);
-	if (run.status === "waiting" || planOrder.some((id) => plan.nodes[id]?.type === "user")) {
-		await host.store.markInterrupted(runId, "this run contains user nodes; their questions need an active caller turn and cannot be recreated after a restart");
-		return "interrupted";
-	}
-	const ctx = host.createContext({
-		run,
-		plan,
-		definition,
-		mode: "background"
-	});
-	try {
-		const nodeResults = await host.store.readNodeResults(runId);
-		const byKey = new Map(nodeResults.map((result) => [`${String(result.seq)}:${String(result.nodeId)}`, result]));
-		for (const step of Array.isArray(run.steps) ? run.steps : []) {
-			const full = byKey.get(`${String(step.seq)}:${String(step.nodeId)}`);
-			if (full === void 0) continue;
-			const stepNodeId = step.nodeId ?? "";
-			const current = ctx.values[stepNodeId];
-			if (current === void 0) continue;
-			if (typeof full.text === "string" && full.text !== "") current.text = full.text;
-			if (current.data === null && full.structured !== void 0) current.data = full.structured;
-			if (Array.isArray(full.attachments)) current.attachments = await host.store.attachmentValues(runId, typeof step.seq === "number" && Number.isInteger(step.seq) ? step.seq : 0, stepNodeId, full.attachments);
-		}
-	} catch {}
-	host.runs.set(runId, ctx);
-	run.status = "running";
-	run.pendingInteraction = null;
-	await host.save(ctx);
-	await host.store.appendEvent(runId, "run/recover", {
-		status: run.status,
-		activeCount: Array.isArray(run.active) ? run.active.length : 0
-	});
-	const actives = Array.isArray(run.active) ? run.active.filter((entry) => entry?.type === "robot") : [];
-	if (actives.length === 0) {
-		const frontier = host.deriveFrontier(ctx);
-		if (frontier.length === 0) {
-			await host.finish(ctx, "completed");
-			return "recovered";
-		}
-		ctx.frontier = frontier;
-		await host.advance(ctx);
-		return "recovered";
-	}
-	for (const current of actives) if (await host.resumeActive(ctx, current) !== "recovered") {
-		host.runs.delete(runId);
-		return "interrupted";
-	}
-	return "recovered";
-}
-/**
-* 会话中断 / 异常：只续接同一会话继续；续接失败直接终止节点和运行，不新开会话。
-*
-* @param entry
-* @param reason
-* @returns
-*/
-async function recoverNode(host, entry, reason) {
-	const ctx = host.runs.get(entry.runId);
-	if (ctx === void 0 || ctx.closed || ctx.cancelled) return;
-	const current = host.findActive(ctx, entry.seq);
-	if (current === null) return;
-	const node = ctx.plan.nodes[current.nodeId ?? ""];
-	if (node === void 0) {
-		await host.fail(ctx, new WorkflowRunError(`workflow node "${current.nodeId}" is missing`));
-		return;
-	}
-	ctx.run.pendingInteraction = null;
-	entry.claimed = true;
-	host.removeEntry(entry);
-	try {
-		await entry.handle?.dispose?.();
-	} catch {}
-	const sessionId = typeof current.sessionId === "string" ? current.sessionId : "";
-	const robots = host.robots ?? host.ctx?.get?.("bukaRobots") ?? null;
-	const stop = async (message, session = sessionId === "" ? null : sessionId) => {
-		await host.completeNode(ctx, current, node, {
-			sessionId: session,
-			text: "",
-			stopReason: "error",
-			error: message
-		}, {});
-	};
-	if (sessionId === "") {
-		await stop(`workflow node "${node.id}" has no robot session id; workflow stopped without opening a new session`);
-		return;
-	}
-	host.rememberSession(ctx.runId, sessionId);
-	if (robots === null || typeof robots.openSession !== "function") {
-		await stop(`workflow node "${node.id}" cannot resume robot session "${sessionId}": the Buka Robots service cannot open robot sessions; workflow stopped without opening a new session`);
-		return;
-	}
-	current.recoveryAttempts = 1;
-	current.recovering = true;
-	await host.save(ctx);
-	await host.store.appendEvent(ctx.runId, "node/recover", {
-		nodeId: node.id,
-		visit: current.visit,
-		attempt: 1,
-		reason
-	});
-	let handle = null;
-	try {
-		handle = await host.requireVisibleHandle(await robots.openSession(host.sessionRequest(ctx, node, sessionId)));
-		await host.requireSameSession(handle, sessionId);
-		const check = handle.readResult({ sinceSeq: current.startSeq ?? 0 });
-		if (Number.isInteger(current.startSeq) && check.turnEnded === true && (typeof check.stopReason !== "string" || !RECOVERABLE_STOP_REASONS.has(check.stopReason))) {
-			current.recovering = false;
-			const recoveredEntry = {
-				runId: ctx.runId,
-				seq: current.seq ?? 0,
-				startSeq: current.startSeq ?? null,
-				handle,
-				early: [],
-				claimed: true,
-				recoveryRequested: false,
-				disposedEarly: false,
-				resultExhausted: false,
-				timer: null,
-				timeoutMs: current.timeoutMs ?? 0,
-				planMode: node.mode === "plan",
-				planReviewAsked: false,
-				planNudged: false
-			};
-			host.dispatchBySession.set(sessionId, recoveredEntry);
-			let result = check;
-			let routes = null;
-			if (check.structured === void 0) result = {
-				...check,
-				stopReason: "error",
-				error: "the robot session did not submit a structured JSON result"
-			};
-			else {
-				const abort = resolveAbort(check.structured);
-				if (abort?.abort !== void 0) {
-					await host.abortNode(ctx, current, node, check, abort.abort.reason, {
-						recovered: true,
-						recoveryAttempts: 1,
-						workspace: typeof handle.cwd === "string" ? handle.cwd : void 0
+		route(ROUTES.taskAction, async (req, res) => {
+			if (req.method !== "POST") return sendMethodNotAllowed(res, "POST");
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const record = body;
+			const jobId = typeof record.jobId === "string" ? record.jobId.trim() : "";
+			const taskId = typeof record.taskId === "string" ? record.taskId.trim() : "";
+			if (jobId === "" || taskId === "") return sendError(res, 400, "invalid-id", "jobId and taskId are required");
+			const engine = await ready();
+			switch (record.action) {
+				case "cancel": {
+					const task = await engine.cancelTask(jobId, taskId);
+					sendJson(res, 200, {
+						ok: true,
+						task: {
+							id: task.id,
+							status: task.status
+						}
 					});
 					return;
 				}
-				if (abort?.error !== void 0) result = {
-					...check,
-					stopReason: "error",
-					error: `invalid workflow result for node "${node.id}": ${abort.error.message}`
-				};
-				else {
-					const problems = outputProblems(node, check.structured);
-					if (problems.length > 0) result = {
-						...check,
-						stopReason: "error",
-						error: `invalid workflow output for node "${node.id}": ${problems.slice(0, 3).join("; ")}`
-					};
-					else {
-						const resolved = resolveRoutes(node, check.structured);
-						if (resolved.error !== void 0) result = {
-							...check,
-							stopReason: "error",
-							error: `invalid workflow route: ${resolved.error}`
-						};
-						else routes = resolved.rules ?? null;
-					}
+				case "retry": {
+					const task = await engine.retryTask(jobId, taskId);
+					sendJson(res, 200, {
+						ok: true,
+						task: {
+							id: task.id,
+							status: task.status
+						}
+					});
+					return;
 				}
+				case "claim": {
+					const task = await engine.claimTaskAsHuman(jobId, taskId);
+					sendJson(res, 200, {
+						ok: true,
+						task: {
+							id: task.id,
+							status: task.status
+						}
+					});
+					return;
+				}
+				case "complete": {
+					const task = await engine.completeTaskAsHuman({
+						jobId,
+						taskId,
+						output: record.output ?? {},
+						text: typeof record.text === "string" ? record.text : "",
+						attachments: record.attachments
+					});
+					sendJson(res, 200, {
+						ok: true,
+						task: {
+							id: task.id,
+							status: task.status
+						}
+					});
+					return;
+				}
+				default: sendError(res, 400, "invalid-action", "action must be cancel, retry, claim or complete");
 			}
-			if (await host.handlePlanGate(ctx, recoveredEntry, current, node, result)) return;
-			host.clearEntryPlanMode(recoveredEntry);
-			host.removeEntry(recoveredEntry);
-			try {
-				await handle.dispose?.();
-			} catch {}
-			await host.completeNode(ctx, current, node, result, {
-				recovered: true,
-				recoveryAttempts: 1,
-				routes,
-				workspace: typeof handle.cwd === "string" ? handle.cwd : void 0
+		});
+		route(ROUTES.attachments, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const params = query(req);
+			const jobId = (params.get("jobId") ?? "").trim();
+			if (jobId === "") return sendError(res, 400, "invalid-id", "jobId is required");
+			const limit = parseLimit(params.get("limit"));
+			sendJson(res, 200, {
+				ok: true,
+				attachments: (await ready()).listJobAttachments(jobId).slice(0, limit)
 			});
-			return;
-		}
-		await handle.send(recoveryPrompt(node, reason), { compactFirst: true });
-		current.startSeq = typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : current.startSeq;
-		current.recovering = false;
-		current.recovered = true;
-		current.resumed = true;
-		current.compacted = handle.compacted === true || current.compacted === true;
-		if (typeof handle.compactionError === "string" && handle.compactionError !== "") current.compactionError = handle.compactionError;
-		const recoveredEntry = {
-			runId: ctx.runId,
-			seq: current.seq ?? 0,
-			startSeq: current.startSeq ?? null,
-			handle,
-			early: [],
-			claimed: false,
-			recoveryRequested: false,
-			disposedEarly: false,
-			resultExhausted: false,
-			timer: null,
-			timeoutMs: current.timeoutMs ?? 0,
-			planMode: node.mode === "plan",
-			planReviewAsked: false,
-			planNudged: false
-		};
-		rememberSessionEntry(ctx.run, node.robot, {
-			nodeId: node.id ?? "",
-			visit: current.visit ?? 0,
-			seq: current.seq ?? 0,
-			sessionId: current.sessionId ?? null,
-			at: Date.now(),
-			resumed: true,
-			compacted: current.compacted === true
 		});
-		host.dispatchBySession.set(sessionId, recoveredEntry);
-		await host.save(ctx);
-		await host.store.appendEvent(ctx.runId, "node/resume", {
-			nodeId: node.id,
-			visit: current.visit,
-			sessionId: current.sessionId,
-			attempt: 1
+		route(ROUTES.attachment, async (req, res) => {
+			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
+			const params = query(req);
+			const jobId = (params.get("jobId") ?? "").trim();
+			const attachmentId = (params.get("attachmentId") ?? "").trim();
+			const mode = params.get("mode") ?? "download";
+			if (jobId === "" || attachmentId === "") return sendError(res, 400, "invalid-id", "jobId and attachmentId are required");
+			if (mode !== "download" && mode !== "preview" && mode !== "inline") return sendError(res, 400, "invalid-mode", "mode must be download, preview or inline");
+			const opened = (await ready()).openAttachment(jobId, attachmentId);
+			if (opened === null) return sendError(res, 404, "not-found", "attachment not found");
+			const preview = attachmentPreviewInfo(opened.record.name);
+			if (mode === "download") {
+				pipeAttachment(res, {
+					path: opened.file,
+					name: opened.record.name,
+					bytes: opened.record.bytes
+				}, { log: (error) => webCtx.logger?.warn?.(`buka-workflows: attachment read failed: ${describeError$1(error)}`) });
+				return;
+			}
+			if (mode === "inline") {
+				if (preview.kind !== "image" && preview.kind !== "pdf") {
+					sendError(res, 415, "unsupported-preview", "this attachment type cannot be previewed inline");
+					return;
+				}
+				pipeAttachment(res, {
+					path: opened.file,
+					name: opened.record.name,
+					bytes: opened.record.bytes
+				}, {
+					inline: true,
+					mime: preview.mime,
+					log: (error) => webCtx.logger?.warn?.(`buka-workflows: attachment read failed: ${describeError$1(error)}`)
+				});
+				return;
+			}
+			if (preview.kind !== "text") {
+				sendJson(res, 200, {
+					ok: true,
+					attachment: {
+						name: opened.record.name,
+						bytes: opened.record.bytes,
+						kind: preview.kind,
+						mime: preview.mime
+					}
+				});
+				return;
+			}
+			const range = await readAttachmentRange(opened.file, { maxBytes: DEFAULT_PREVIEW_TEXT_BYTES });
+			if (range.text === null) {
+				sendJson(res, 200, {
+					ok: true,
+					attachment: {
+						name: opened.record.name,
+						bytes: opened.record.bytes,
+						kind: "binary",
+						mime: null
+					}
+				});
+				return;
+			}
+			sendJson(res, 200, {
+				ok: true,
+				attachment: {
+					name: opened.record.name,
+					bytes: opened.record.bytes,
+					kind: "text",
+					mime: "text/plain",
+					text: range.text,
+					truncated: range.truncated,
+					read: range.read,
+					offset: range.offset
+				}
+			});
 		});
-		host.armTimeout(ctx, recoveredEntry);
-		return;
-	} catch (error) {
-		if (node.mode === "plan") host.clearEntryPlanMode({
-			planMode: true,
-			handle
-		});
-		try {
-			await handle?.dispose?.();
-		} catch {}
-		current.recovering = false;
-		await stop(`workflow node "${node.id}" could not resume robot session "${sessionId}": ${describeError(error)}; workflow stopped without opening a new session`);
-	}
-}
-// .build/workflows/engine/supervisor-state.js
-/**
-* 观察者的共享状态操作：运行上下文、dispatch 台账、步骤落盘与 join 推进的
-* 底层读写。
-*/
-/**
-* @param input 运行记录、计划、定义快照、模式、agent 与可选信号
-* @returns 本次运行的观察上下文
-*/
-function createContext(host, input) {
-	const { run, plan, definition, mode, agent, signal } = input;
-	const ctx = {
-		runId: run.runId,
-		run,
-		plan,
-		definition,
-		mode,
-		agent,
-		controller: new AbortController(),
-		frontier: [],
-		joins: /* @__PURE__ */ new Map(),
-		lastEnd: null,
-		values: {},
-		visits: /* @__PURE__ */ new Map(),
-		seq: 0,
-		stepCount: 0,
-		done: deferred(),
-		cancelled: false,
-		closed: false
-	};
-	if (!Array.isArray(ctx.run.active)) {
-		ctx.run.active = ctx.run.current !== null && ctx.run.current !== void 0 ? [ctx.run.current] : [];
-		ctx.run.current = null;
-	}
-	host.rebuildFromSteps(ctx);
-	if (signal !== void 0) {
-		if (signal.aborted === true) {
-			ctx.cancelled = true;
-			ctx.controller.abort("workflow caller aborted");
-		} else signal.addEventListener("abort", () => {
-			host.cancel(ctx.runId, "cancelled by the workflow caller");
-		}, { once: true });
-	}
-	return ctx;
-}
-/**
-* 从已落盘的 steps / 节点结果重建模板上下文、访问次数与序号。
-*
-* @param ctx
-* @returns
-*/
-function rebuildFromSteps(_host, ctx) {
-	const steps = Array.isArray(ctx.run.steps) ? ctx.run.steps : [];
-	ctx.stepCount = steps.length;
-	ctx.seq = 0;
-	ctx.visits = /* @__PURE__ */ new Map();
-	ctx.values = {};
-	for (const step of steps) {
-		const seq = typeof step?.seq === "number" ? step.seq : 0;
-		if (seq > ctx.seq) ctx.seq = seq;
-		const nodeId = typeof step?.nodeId === "string" ? step.nodeId : "";
-		if (nodeId === "") continue;
-		ctx.visits.set(nodeId, (ctx.visits.get(nodeId) ?? 0) + 1);
-		if (step.type === "user") {
-			ctx.values[nodeId] = {
-				route: typeof step.route === "string" ? step.route : null,
-				routeTo: typeof step.routeTo === "string" ? step.routeTo : null,
-				answers: answersValue(Array.isArray(step.answers) ? step.answers : []),
-				text: typeof step.text === "string" ? step.text : ""
-			};
-			continue;
-		}
-		ctx.values[nodeId] = {
-			text: typeof step.text === "string" ? step.text : "",
-			data: step.data ?? null,
-			robot: step.robot ?? null,
-			sessionId: typeof step.sessionId === "string" ? step.sessionId : "",
-			route: typeof step.route === "string" ? step.route : null,
-			attachments: Array.isArray(step.attachments) ? step.attachments : []
-		};
-	}
-}
-/**
-* 每个 run 的推进串行化。
-*
-* @param runId
-* @param task
-* @returns
-*/
-function enqueue(host, runId, task) {
-	const next = (host.queues.get(runId) ?? Promise.resolve()).then(task, task).catch((error) => {
-		const ctx = host.runs.get(runId);
-		host.logger?.warn?.(`buka-workflows: run ${runId} 推进失败：${describeError(error)}`);
-		if (ctx !== void 0 && !ctx.closed) return host.fail(ctx, error);
 	});
-	host.queues.set(runId, next);
-	const cleanup = () => {
-		if (host.queues.get(runId) === next) host.queues.delete(runId);
-	};
-	next.then(cleanup, cleanup);
-	return next;
 }
+// .build/workflows/store/dirs.js
 /**
-* 从已落盘的 step 推导恢复后的 frontier（没有 step 时从 start 的全部出边开始）。
+* 作业目录布局与路径安全。
 *
-* @param ctx
-* @returns
-*/
-function deriveFrontier(_host, ctx) {
-	const steps = Array.isArray(ctx.run.steps) ? ctx.run.steps : [];
-	if (steps.length === 0) {
-		const startNode = ctx.plan.nodes[ctx.plan.start];
-		if (startNode === void 0 || startNode.type !== "start") return [];
-		return (Array.isArray(startNode.next) ? startNode.next : []).map((rule) => ({
-			nodeId: rule.to,
-			edgePrompt: typeof rule.prompt === "string" && rule.prompt !== "" ? rule.prompt : null
-		}));
-	}
-	const last = steps[steps.length - 1];
-	if (last === void 0) return [];
-	const node = ctx.plan.nodes[last.nodeId ?? ""];
-	if (node === void 0) return [];
-	const routes = Array.isArray(last.routes) && last.routes.length > 0 ? last.routes : typeof last.route === "string" && last.route !== "" ? [{
-		name: last.route,
-		to: typeof last.routeTo === "string" ? last.routeTo : null
-	}] : [];
-	const edges = Array.isArray(node.next) ? node.next : [];
-	return routes.map((route) => edges.find((rule) => rule.name === route.name)).filter((edge) => edge !== void 0).map((edge) => ({
-		nodeId: edge.to,
-		edgePrompt: typeof edge.prompt === "string" && edge.prompt !== "" ? edge.prompt : null
-	}));
-}
-/**
-* 当前（第一个）活跃节点的 id，用于失败 / 取消记录里的 lastNode。
+* 元数据进 `ctx.storageDomain`；大文本（渲染后的 prompt、结果全文）与附件文件
+* 放插件数据目录下的作业目录：
 *
-* @param ctx
-* @returns
-*/
-function activeNodeId(_host, ctx) {
-	const first = (Array.isArray(ctx.run.active) ? ctx.run.active : []).find((entry) => typeof entry?.nodeId === "string");
-	return first !== void 0 ? first.nodeId ?? null : null;
-}
-/**
-* 按序号在 run.active 里找活跃的机器人节点。
+* ```text
+* <dataDir>/jobs/<jobId>/
+*   prompts/<attemptId>.md
+*   results/<attemptId>.txt
+*   attachments/<attachmentId>-<name>
+*   events.jsonl
+* ```
 *
-* @param ctx
-* @param seq
-* @returns
-*/
-function findActive(_host, ctx, seq) {
-	return (Array.isArray(ctx.run.active) ? ctx.run.active : []).find((entry) => entry?.seq === seq) ?? null;
-}
-/**
-* 从 run.active 里移除一个已终结的活跃节点。
+* 记录里只存相对路径，避免宿主机迁移目录后引用失效。所有 id 先校验成单个路径
+* 段再拼路径，防止 `../` 越界。
 *
-* @param ctx
-* @param current
-* @returns
+* @module @buka/dsh-plugin-workflows/store/dirs
 */
-function removeActive(_host, ctx, current) {
-	if (!Array.isArray(ctx.run.active)) return;
-	const index = ctx.run.active.findIndex((entry) => entry === current || entry?.seq === current.seq);
-	if (index >= 0) ctx.run.active.splice(index, 1);
-}
+/** 单个 id 允许的字符；记录 id 都是 `[a-z]+-...` 或 `$start`。 */
+const SAFE_SEGMENT = /^[A-Za-z0-9$][A-Za-z0-9._-]*$/u;
 /**
-* 并发 fan-out 激活 join：把每个 join 的「本次启动子集」（inputs ∩ 已启动任务）
-* 记为待完成集合。join 放行条件就是这些任务全部完成；没被启动的 input 不计入。
+* 校验一个 id / 文件名是单个安全的路径段。
 *
-* @param ctx
-* @param startedIds 本次 fan-out 启动的任务节点 id
-* @returns
+* @param value 待校验的 id
+* @param label 出错信息里用的名称
+* @returns 原值
+* @throws id 不合法时抛出
 */
-function activateJoins(_host, ctx, startedIds) {
-	const started = new Set(startedIds);
-	for (const id of ctx.plan.order) {
-		const node = ctx.plan.nodes[id];
-		if (node === void 0 || node.type !== "join") continue;
-		const awaiting = new Set((node.inputs ?? []).filter((input) => started.has(input)));
-		if (awaiting.size > 0) ctx.joins.set(id, awaiting);
-	}
+function assertSafeSegment(value, label = "id") {
+	if (!SAFE_SEGMENT.test(value) || value === "." || value === "..") throw new Error(`invalid ${label}: ${JSON.stringify(value)}`);
+	return value;
 }
 /**
-* 一个任务完成：喂给引用它的所有 join，等待集合清空的 join 放行一次（沿唯一出边
-* 推进 frontier）。不在这里调用 #advanceInner，由 #completeNode 收尾统一推进。
+* 计算一个作业的目录布局。
 *
-* @param ctx
-* @param nodeId 完成的任务节点 id
-* @returns
+* @param dataDir 插件数据目录
+* @param jobId 作业 id
+* @returns 目录布局
 */
-async function contributeJoins(host, ctx, nodeId) {
-	for (const [joinId, awaiting] of ctx.joins) {
-		if (!awaiting.has(nodeId)) continue;
-		awaiting.delete(nodeId);
-		if (awaiting.size !== 0) continue;
-		ctx.joins.delete(joinId);
-		const join = ctx.plan.nodes[joinId];
-		const edge = Array.isArray(join?.next) ? join.next[0] : null;
-		if (edge !== void 0 && edge !== null && typeof edge.to === "string") ctx.frontier.push({
-			nodeId: edge.to,
-			edgePrompt: typeof edge.prompt === "string" && edge.prompt !== "" ? edge.prompt : null
-		});
-		await host.store.appendEvent(ctx.runId, "join/fire", { joinId });
-	}
-}
-/**
-* @param ctx
-* @returns
-*/
-async function save(host, ctx) {
-	ctx.run.updatedAt = Date.now();
-	await host.store.save(ctx.run);
-}
-/**
-* @param ctx
-* @param current 活跃节点
-* @param node
-* @param prompt
-* @param startedAt
-* @returns
-*/
-async function saveRunningNodeResult(host, ctx, current, node, prompt, startedAt) {
-	const promptText = truncateUtf8(prompt, host.options.maxNodeTextBytes);
-	try {
-		await host.store.saveNodeResult(ctx.runId, current.seq ?? 0, node.id ?? "", {
-			nodeId: node.id,
-			visit: current.visit,
-			robot: node.robot,
-			status: "running",
-			prompt: promptText.text,
-			promptTruncated: promptText.truncated,
-			attachments: [],
-			startedAt
-		});
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 保存运行中节点结果失败（${ctx.runId}/${node.id}）：${describeError(error)}`);
-	}
-}
-/**
-* @param ctx
-* @param node
-* @param sessionId
-* @returns
-*/
-function sessionRequest(host, ctx, node, sessionId) {
-	const creator = host.creatorAgent(ctx);
+function jobPaths(dataDir, jobId) {
+	const root = path.join(dataDir, "jobs", assertSafeSegment(jobId, "job id"));
 	return {
-		robot: node.robot,
-		sessionId,
-		outputSchema: buildResultSchema(node),
-		routes: routeNamesOf(node),
-		abortable: true,
-		title: robotSessionTitle(ctx.run, node),
-		...node.agentOptions === void 0 ? {} : { agentOptions: node.agentOptions },
-		approval: "ask",
-		signal: ctx.controller.signal,
-		...creator === void 0 ? {} : { agent: creator },
-		...host.options.robotPreset === "" ? {} : { agentPreset: host.options.robotPreset },
-		...node.mode === "plan" ? {} : { planMode: false }
+		root,
+		prompts: path.join(root, "prompts"),
+		results: path.join(root, "results"),
+		attachments: path.join(root, "attachments"),
+		events: path.join(root, "events.jsonl")
 	};
 }
 /**
-* @param ctx
-* @returns
+* 建好一个作业的目录。
+*
+* @param paths 目录布局
+* @returns 无返回值
 */
-function creatorAgent(host, ctx) {
-	const agents = host.ctx?.get?.("agents") ?? host.ctx?.agents;
-	if (!isRecord(agents) || typeof agents.get !== "function") return void 0;
-	const sessionId = ctx.run?.createdBy?.sessionId;
-	if (typeof sessionId !== "string" || sessionId === "") return void 0;
+async function ensureJobDirectories(paths) {
+	await Promise.all([
+		promises.mkdir(paths.prompts, { recursive: true }),
+		promises.mkdir(paths.results, { recursive: true }),
+		promises.mkdir(paths.attachments, { recursive: true })
+	]);
+}
+/**
+* 把作业目录内的相对路径解析成绝对路径，并确保仍在作业根目录内。
+*
+* @param paths 目录布局
+* @param relative 记录里的相对路径
+* @returns 绝对路径
+* @throws 越界时抛出
+*/
+function resolveJobFile(paths, relative) {
+	const absolute = path.resolve(paths.root, relative);
+	const rel = path.relative(paths.root, absolute);
+	if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`path escapes the job directory: ${relative}`);
+	return absolute;
+}
+/**
+* 写一份大文本到作业目录，返回相对作业根目录的路径。
+*
+* @param paths 目录布局
+* @param kind `prompts` / `results`
+* @param name 文件名（单个安全段）
+* @param text 文本
+* @returns 相对作业根目录的路径
+*/
+async function writeJobText(paths, kind, name, text) {
+	const directory = kind === "prompts" ? paths.prompts : paths.results;
+	const file = path.join(directory, `${assertSafeSegment(name, "file name")}.txt`);
+	await promises.writeFile(file, text, "utf8");
+	return path.relative(paths.root, file);
+}
+/**
+* 读一份作业目录里的大文本。
+*
+* @param paths 目录布局
+* @param relative 相对路径
+* @returns 文本；文件不存在时是 null
+*/
+async function readJobText(paths, relative) {
 	try {
-		const get = agents.get;
-		return get(sessionId) ?? void 0;
+		return await promises.readFile(resolveJobFile(paths, relative), "utf8");
 	} catch {
-		return;
+		return null;
 	}
 }
+// .build/workflows/store/queue.js
 /**
-* 观察者需要非阻塞的 dispatchSession；旧版 robots 只有 startSession（会自己
-* await 一轮），不能交给观察者，所以明确按失败处理并提示升级。
+* per-job 串行队列：同一个作业的状态变更排队执行，避免并发认领 / 创建竞争。
 *
-* @param robots
-* @returns
-*/
-function canDispatch(_host, robots) {
-	return typeof robots?.dispatchSession === "function";
-}
-/**
-* @param runId
-* @returns
-*/
-function dispatchEntriesForRun(host, runId) {
-	return [...host.dispatchBySession.values()].filter((entry) => entry.runId === runId);
-}
-/**
-* @param entry
-* @returns
-*/
-function removeEntry(host, entry) {
-	if (entry.timer !== null) {
-		clearTimeout(entry.timer);
-		entry.timer = null;
-	}
-	for (const [key, value] of host.dispatchBySession) if (value === entry) host.dispatchBySession.delete(key);
-}
-/**
-* 节点结束 / 运行终止时尽力关闭该 entry 进入的 plan 模式。
+* 不同作业互不阻塞。队列只保证「同一 key 的异步任务按调用顺序串行」；任务抛错
+* 不会中断后续任务（下一个任务照常执行）。
 *
-* 失败只记日志：模式清理不能改变节点结果；下一次进入同一机器人时 supervisor
-* 会按节点的 `mode` 重新归一，所以这里只是避免把 plan 状态留在用户可见的
-* 会话里。超时 / 取消时 turn 可能还没关闭，`set(false)` 会排队；不影响结果。
-*
-* @param entry
-* @returns
+* @module @buka/dsh-plugin-workflows/store/queue
 */
-function clearEntryPlanMode(host, entry) {
-	if (entry?.planMode !== true) return;
-	entry.planMode = false;
-	const handle = entry.handle;
-	if (handle === null || handle === void 0 || typeof handle.setPlanMode !== "function") return;
-	try {
-		handle.setPlanMode(false);
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: could not leave plan mode for the robot session: ${describeError(error)}`);
+/** 按 key 串行执行异步任务的队列。 */
+var KeyedQueue = class {
+	/** 每个 key 的队尾（永远 settle，便于挂下一个任务）。 */
+	chains = /* @__PURE__ */ new Map();
+	/**
+	* 把任务排到某个 key 的队尾。
+	*
+	* @param key 队列 key（作业 id）
+	* @param task 要执行的异步任务
+	* @returns 任务自身的结果 / 错误
+	*/
+	run(key, task) {
+		const result = (this.chains.get(key) ?? Promise.resolve()).then(task, task);
+		const tail = result.then(() => void 0, () => void 0);
+		this.chains.set(key, tail);
+		tail.then(() => {
+			if (this.chains.get(key) === tail) this.chains.delete(key);
+		});
+		return result;
 	}
+	/**
+	* 当前排队的 key 数量（诊断 / 测试用）。
+	*
+	* @returns 队列数量
+	*/
+	get size() {
+		return this.chains.size;
+	}
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/core.js
+var _a$1;
+/* @__NO_SIDE_EFFECTS__ */
+function $constructor(name, initializer, params) {
+	function init(inst, def) {
+		if (!inst._zod) Object.defineProperty(inst, "_zod", {
+			value: {
+				def,
+				constr: _,
+				traits: /* @__PURE__ */ new Set()
+			},
+			enumerable: false
+		});
+		if (inst._zod.traits.has(name)) return;
+		inst._zod.traits.add(name);
+		initializer(inst, def);
+		const proto = _.prototype;
+		const keys = Object.keys(proto);
+		for (let i = 0; i < keys.length; i++) {
+			const k = keys[i];
+			if (!(k in inst)) inst[k] = proto[k].bind(inst);
+		}
+	}
+	const Parent = params?.Parent ?? Object;
+	class Definition extends Parent {}
+	Object.defineProperty(Definition, "name", { value: name });
+	function _(def) {
+		var _a;
+		const inst = params?.Parent ? new Definition() : this;
+		init(inst, def);
+		(_a = inst._zod).deferred ?? (_a.deferred = []);
+		for (const fn of inst._zod.deferred) fn();
+		return inst;
+	}
+	Object.defineProperty(_, "init", { value: init });
+	Object.defineProperty(_, Symbol.hasInstance, { value: (inst) => {
+		if (params?.Parent && inst instanceof params.Parent) return true;
+		return inst?._zod?.traits?.has(name);
+	} });
+	Object.defineProperty(_, "name", { value: name });
+	return _;
 }
-/**
-* @returns
-*/
-async function waitForRobots(host) {
-	if (host.robots !== null) return host.robots;
-	const existing = host.ctx?.get?.("bukaRobots") ?? null;
-	if (existing !== null) {
-		host.attachRobots(existing);
-		return existing;
+var $ZodAsyncError = class extends Error {
+	constructor() {
+		super(`Encountered Promise during synchronous parse. Use .parseAsync() instead.`);
 	}
-	return await new Promise((resolve) => {
-		let timer;
-		const finish = (value) => {
-			clearTimeout(timer);
-			const index = host.robotsWaiters.indexOf(waiter);
-			if (index >= 0) host.robotsWaiters.splice(index, 1);
-			resolve(value);
-		};
-		const waiter = (robots) => finish(robots);
-		host.robotsWaiters.push(waiter);
-		timer = setTimeout(() => finish(null), ROBOTS_WAIT_MS);
-		timer.unref?.();
+};
+var $ZodEncodeError = class extends Error {
+	constructor(name) {
+		super(`Encountered unidirectional transform during encode: ${name}`);
+		this.name = "ZodEncodeError";
+	}
+};
+(_a$1 = globalThis).__zod_globalConfig ?? (_a$1.__zod_globalConfig = {});
+const globalConfig = globalThis.__zod_globalConfig;
+function config(newConfig) {
+	if (newConfig) Object.assign(globalConfig, newConfig);
+	return globalConfig;
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/util.js
+function getEnumValues(entries) {
+	const numericValues = Object.values(entries).filter((v) => typeof v === "number");
+	return Object.entries(entries).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
+}
+function jsonStringifyReplacer(_, value) {
+	if (typeof value === "bigint") return value.toString();
+	return value;
+}
+function cached(getter) {
+	return { get value() {
+		{
+			const value = getter();
+			Object.defineProperty(this, "value", { value });
+			return value;
+		}
+	} };
+}
+function nullish(input) {
+	return input === null || input === void 0;
+}
+function cleanRegex(source) {
+	const start = source.startsWith("^") ? 1 : 0;
+	const end = source.endsWith("$") ? source.length - 1 : source.length;
+	return source.slice(start, end);
+}
+function floatSafeRemainder(val, step) {
+	const ratio = val / step;
+	const roundedRatio = Math.round(ratio);
+	const tolerance = Number.EPSILON * Math.max(Math.abs(ratio), 1);
+	if (Math.abs(ratio - roundedRatio) < tolerance) return 0;
+	return ratio - roundedRatio;
+}
+const EVALUATING = /* @__PURE__*/ Symbol("evaluating");
+function defineLazy(object, key, getter) {
+	let value = void 0;
+	Object.defineProperty(object, key, {
+		get() {
+			if (value === EVALUATING) return;
+			if (value === void 0) {
+				value = EVALUATING;
+				value = getter();
+			}
+			return value;
+		},
+		set(v) {
+			Object.defineProperty(object, key, { value: v });
+		},
+		configurable: true
 	});
 }
-/**
-* 从所有运行记录重建「机器人会话 → 运行」索引。
-*
-* `run.steps` 覆盖已结束的执行，`run.sessions` 覆盖每个机器人的会话摘要，
-* `run.current` 覆盖运行中尚未形成 step 的节点；旧记录缺其中一项时其他来源
-* 仍能兜底。
-*
-* @returns
-*/
-async function buildSessionIndex(host) {
-	const remember = (runId, sessionId) => {
-		if (typeof sessionId !== "string" || sessionId === "") return;
-		host.sessionRuns.set(sessionId, { runId });
-	};
-	for (const runId of await host.store.listRunIds()) {
-		const run = await host.store.readRun(runId);
-		if (run === null) continue;
-		const effectiveRunId = typeof run.runId === "string" && run.runId !== "" ? run.runId : runId;
-		for (const step of Array.isArray(run.steps) ? run.steps : []) remember(effectiveRunId, step?.sessionId);
-		for (const session of Array.isArray(run.sessions) ? run.sessions : []) {
-			remember(effectiveRunId, session?.sessionId);
-			for (const entry of Array.isArray(session?.entries) ? session.entries : []) remember(effectiveRunId, entry?.sessionId);
-		}
-		for (const current of Array.isArray(run.active) ? run.active : []) remember(effectiveRunId, current?.sessionId);
-		remember(effectiveRunId, run.current?.sessionId);
-	}
-}
-// .build/workflows/engine/supervisor-turn.js
-/**
-* 机器人会话一轮结束后的处理：读结果、校验路由、计划模式门禁与重试。
-*/
-/**
-* 处理一次 `turn/end`：读结果、校验 JSON/next、正常完成或异常恢复。
-*
-* @param entry
-* @param session
-* @param event
-* @returns
-*/
-async function processTurn(host, entry, _session, event) {
-	if (entry.claimed === true) return;
-	entry.claimed = true;
-	if (entry.timer !== null) {
-		clearTimeout(entry.timer);
-		entry.timer = null;
-	}
-	const ctx = host.runs.get(entry.runId);
-	if (ctx === void 0 || ctx.closed || ctx.cancelled) return;
-	const current = host.findActive(ctx, entry.seq);
-	if (current === null) return;
-	if (entry.startSeq !== null && typeof event.seq === "number" && event.seq < entry.startSeq) {
-		entry.claimed = false;
-		return;
-	}
-	const node = ctx.plan.nodes[current.nodeId ?? ""];
-	if (node === void 0) {
-		await host.fail(ctx, new WorkflowRunError(`workflow node "${current.nodeId}" is missing`));
-		return;
-	}
-	const handle = entry.handle;
-	if (handle === null) return;
-	let result;
-	try {
-		result = await handle.readResult({ sinceSeq: entry.startSeq ?? 0 });
-	} catch (error) {
-		entry.claimed = false;
-		entry.recoveryRequested = true;
-		await host.recoverNode(entry, `could not read the robot session result: ${describeError(error)}`);
-		return;
-	}
-	const abort = result.structured === void 0 ? null : resolveAbort(result.structured);
-	if (abort?.abort !== void 0) {
-		if (ctx.run.pendingInteraction !== null) {
-			ctx.run.pendingInteraction = null;
-			await host.save(ctx);
-		}
-		await host.abortNode(ctx, current, node, result, abort.abort.reason, { workspace: typeof entry.handle?.cwd === "string" ? entry.handle.cwd : void 0 });
-		return;
-	}
-	if (typeof result.stopReason === "string" && RECOVERABLE_STOP_REASONS.has(result.stopReason) && result.stopReason !== "completed") {
-		entry.claimed = false;
-		entry.recoveryRequested = true;
-		await host.recoverNode(entry, `the robot session ended with ${result.stopReason}`);
-		return;
-	}
-	if (ctx.run.pendingInteraction !== null) {
-		ctx.run.pendingInteraction = null;
-		await host.save(ctx);
-	}
-	if (await host.handlePlanGate(ctx, entry, current, node, result)) return;
-	const workspace = typeof entry.handle?.cwd === "string" ? entry.handle.cwd : void 0;
-	if (result.structured === void 0) {
-		if (await host.retryResult(ctx, entry, node, {
-			reason: "missing-json",
-			routes: routeNamesOf(node)
-		})) return;
-		result = {
-			...result,
-			stopReason: "error",
-			error: typeof result.error === "string" && result.error !== "" ? result.error : "the node did not submit a structured JSON result"
-		};
-		await host.completeNode(ctx, current, node, result, {
-			routes: null,
-			workspace
-		});
-		return;
-	}
-	if (abort?.error !== void 0) {
-		if (await host.retryResult(ctx, entry, node, {
-			reason: abort.error.kind,
-			routes: routeNamesOf(node)
-		})) return;
-		result = {
-			...result,
-			stopReason: "error",
-			error: `invalid workflow result for node "${node.id}": ${abort.error.message}`
-		};
-		await host.completeNode(ctx, current, node, result, {
-			routes: null,
-			workspace
-		});
-		return;
-	}
-	const problems = outputProblems(node, result.structured);
-	if (problems.length > 0) {
-		const detail = problems.slice(0, 3).join("; ");
-		if (await host.retryResult(ctx, entry, node, {
-			reason: "invalid-output",
-			routes: routeNamesOf(node),
-			detail
-		})) return;
-		result = {
-			...result,
-			stopReason: "error",
-			error: `invalid workflow output for node "${node.id}": ${detail}`
-		};
-		await host.completeNode(ctx, current, node, result, {
-			routes: null,
-			workspace
-		});
-		return;
-	}
-	const route = resolveRoutes(node, result.structured);
-	if (route.error !== void 0) {
-		if (await host.retryResult(ctx, entry, node, {
-			reason: "invalid-next",
-			routes: route.routes
-		})) return;
-		result = {
-			...result,
-			stopReason: "error",
-			error: `invalid workflow route: ${route.error}`
-		};
-		await host.completeNode(ctx, current, node, result, {
-			routes: null,
-			workspace
-		});
-		return;
-	}
-	await host.completeNode(ctx, current, node, result, {
-		routes: route.rules,
-		workspace
+function assignProp(target, prop, value) {
+	Object.defineProperty(target, prop, {
+		value,
+		writable: true,
+		enumerable: true,
+		configurable: true
 	});
 }
-/**
-* plan 节点的模式门禁：一轮结束时如果会话仍停在 plan 模式，这一轮不能按
-* 普通结果路由。
-*
-* 三种情况：
-* - 用户关闭了原生审阅卡（`planReviewAsked`）：不抢答，保持节点等待，用户在
-*   机器人会话里的下一条消息继续这一节点；
-* - 机器人自己停在计划阶段：发一次有界提示，要求先把计划交给
-*   `exit_plan_mode` 审阅；第二次仍如此则节点失败；
-* - 已经批准 / 用户手动退出 / 读不到模式：返回 false，走原有结果处理。
-*
-* @param ctx
-* @param entry
-* @param current
-* @param node
-* @param result
-* @returns true 表示已处理，调用方不要再路由
-*/
-async function handlePlanGate(host, ctx, entry, current, node, result) {
-	if (node.mode !== "plan") return false;
-	if ((typeof entry.handle?.getPlanMode === "function" ? entry.handle.getPlanMode() : null)?.active !== true) return false;
-	if (entry.planReviewAsked === true) {
-		entry.planReviewAsked = false;
-		entry.claimed = false;
-		await host.save(ctx);
-		host.armTimeout(ctx, entry);
-		await host.store.appendEvent(ctx.runId, "node/plan-review-wait", {
-			nodeId: current.nodeId,
-			visit: current.visit
-		});
+function mergeDefs(...defs) {
+	const mergedDescriptors = {};
+	for (const def of defs) {
+		const descriptors = Object.getOwnPropertyDescriptors(def);
+		Object.assign(mergedDescriptors, descriptors);
+	}
+	return Object.defineProperties({}, mergedDescriptors);
+}
+function esc(str) {
+	return JSON.stringify(str);
+}
+function slugify(input) {
+	return input.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+const captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace : (..._args) => {};
+function isObject(data) {
+	return typeof data === "object" && data !== null && !Array.isArray(data);
+}
+const allowsEval = /* @__PURE__*/ cached(() => {
+	if (globalConfig.jitless) return false;
+	if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare")) return false;
+	try {
+		new Function("");
 		return true;
+	} catch (_) {
+		return false;
 	}
-	const handle = entry.handle;
-	if (entry.planNudged !== true && handle !== null && typeof handle.send === "function") {
-		entry.planNudged = true;
-		try {
-			const next = await handle.send(PLAN_REVIEW_NUDGE, { compactFirst: false });
-			entry.startSeq = typeof next === "number" && Number.isInteger(next) ? next : entry.startSeq;
-			current.startSeq = entry.startSeq;
-			entry.claimed = false;
-			await host.save(ctx);
-			host.armTimeout(ctx, entry);
-			await host.store.appendEvent(ctx.runId, "node/plan-review-nudge", {
-				nodeId: current.nodeId,
-				visit: current.visit
-			});
-			return true;
-		} catch (error) {
-			entry.planNudged = false;
-			host.logger?.warn?.(`buka-workflows: could not ask the robot to present its plan（${ctx.runId}/${node.id}）：${describeError(error)}`);
-		}
-	}
-	await host.completeNode(ctx, current, node, {
-		...result,
-		stopReason: "error",
-		error: `workflow node "${node.id}" ended its turn in plan mode without presenting a plan for review`
-	}, {
-		routes: null,
-		workspace: typeof entry.handle?.cwd === "string" ? entry.handle.cwd : void 0
-	});
+});
+function isPlainObject(o) {
+	if (isObject(o) === false) return false;
+	const ctor = o.constructor;
+	if (ctor === void 0) return true;
+	if (typeof ctor !== "function") return true;
+	const prot = ctor.prototype;
+	if (isObject(prot) === false) return false;
+	if (Object.prototype.hasOwnProperty.call(prot, "isPrototypeOf") === false) return false;
 	return true;
 }
-/**
-* 在同一会话里要求机器人重新提交结果 / 修正 next。
-*
-* @param ctx
-* @param entry
-* @param node
-* @param input
-* @returns true 表示已经发出重试
-*/
-async function retryResult(host, ctx, entry, node, input) {
-	const { reason, routes, detail } = input;
-	const handle = entry.handle;
-	const prompt = handle?.retryReport?.({
-		reason,
-		routes,
-		detail,
-		abortable: true
+function shallowClone(o) {
+	if (isPlainObject(o)) return { ...o };
+	if (Array.isArray(o)) return [...o];
+	if (o instanceof Map) return new Map(o);
+	if (o instanceof Set) return new Set(o);
+	return o;
+}
+const propertyKeyTypes = /* @__PURE__*/ new Set([
+	"string",
+	"number",
+	"symbol"
+]);
+function escapeRegex(str) {
+	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function clone(inst, def, params) {
+	const cl = new inst._zod.constr(def ?? inst._zod.def);
+	if (!def || params?.parent) cl._zod.parent = inst;
+	return cl;
+}
+function normalizeParams(_params) {
+	const params = _params;
+	if (!params) return {};
+	if (typeof params === "string") return { error: () => params };
+	if (params?.message !== void 0) {
+		if (params?.error !== void 0) throw new Error("Cannot specify both `message` and `error` params");
+		params.error = params.message;
+	}
+	delete params.message;
+	if (typeof params.error === "string") return {
+		...params,
+		error: () => params.error
+	};
+	return params;
+}
+function optionalKeys(shape) {
+	return Object.keys(shape).filter((k) => {
+		return shape[k]._zod.optin === "optional" && shape[k]._zod.optout === "optional";
 	});
-	if (handle === null || typeof prompt !== "string" || prompt.trim() === "") return false;
-	try {
-		await handle.send(prompt, { compactFirst: false });
-		const nextSeq = handle.startSeq;
-		entry.startSeq = typeof nextSeq === "number" && Number.isInteger(nextSeq) ? nextSeq : entry.startSeq;
-		const current = host.findActive(ctx, entry.seq);
-		if (current !== null) current.startSeq = entry.startSeq;
-		entry.claimed = false;
-		await host.save(ctx);
-		host.armTimeout(ctx, entry);
-		await host.store.appendEvent(ctx.runId, "node/result-retry", {
-			nodeId: node.id,
-			visit: current?.visit ?? null,
-			reason,
-			routes
+}
+const NUMBER_FORMAT_RANGES = {
+	safeint: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+	int32: [-2147483648, 2147483647],
+	uint32: [0, 4294967295],
+	float32: [-34028234663852886e22, 34028234663852886e22],
+	float64: [-Number.MAX_VALUE, Number.MAX_VALUE]
+};
+function pick(schema, mask) {
+	const currDef = schema._zod.def;
+	const checks = currDef.checks;
+	if (checks && checks.length > 0) throw new Error(".pick() cannot be used on object schemas containing refinements");
+	return clone(schema, mergeDefs(schema._zod.def, {
+		get shape() {
+			const newShape = {};
+			for (const key in mask) {
+				if (!(key in currDef.shape)) throw new Error(`Unrecognized key: "${key}"`);
+				if (!mask[key]) continue;
+				newShape[key] = currDef.shape[key];
+			}
+			assignProp(this, "shape", newShape);
+			return newShape;
+		},
+		checks: []
+	}));
+}
+function omit(schema, mask) {
+	const currDef = schema._zod.def;
+	const checks = currDef.checks;
+	if (checks && checks.length > 0) throw new Error(".omit() cannot be used on object schemas containing refinements");
+	return clone(schema, mergeDefs(schema._zod.def, {
+		get shape() {
+			const newShape = { ...schema._zod.def.shape };
+			for (const key in mask) {
+				if (!(key in currDef.shape)) throw new Error(`Unrecognized key: "${key}"`);
+				if (!mask[key]) continue;
+				delete newShape[key];
+			}
+			assignProp(this, "shape", newShape);
+			return newShape;
+		},
+		checks: []
+	}));
+}
+function extend(schema, shape) {
+	if (!isPlainObject(shape)) throw new Error("Invalid input to extend: expected a plain object");
+	const checks = schema._zod.def.checks;
+	if (checks && checks.length > 0) {
+		const existingShape = schema._zod.def.shape;
+		for (const key in shape) if (Object.getOwnPropertyDescriptor(existingShape, key) !== void 0) throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+	}
+	return clone(schema, mergeDefs(schema._zod.def, { get shape() {
+		const _shape = {
+			...schema._zod.def.shape,
+			...shape
+		};
+		assignProp(this, "shape", _shape);
+		return _shape;
+	} }));
+}
+function safeExtend(schema, shape) {
+	if (!isPlainObject(shape)) throw new Error("Invalid input to safeExtend: expected a plain object");
+	return clone(schema, mergeDefs(schema._zod.def, { get shape() {
+		const _shape = {
+			...schema._zod.def.shape,
+			...shape
+		};
+		assignProp(this, "shape", _shape);
+		return _shape;
+	} }));
+}
+function merge(a, b) {
+	if (a._zod.def.checks?.length) throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+	return clone(a, mergeDefs(a._zod.def, {
+		get shape() {
+			const _shape = {
+				...a._zod.def.shape,
+				...b._zod.def.shape
+			};
+			assignProp(this, "shape", _shape);
+			return _shape;
+		},
+		get catchall() {
+			return b._zod.def.catchall;
+		},
+		checks: b._zod.def.checks ?? []
+	}));
+}
+function partial(Class, schema, mask) {
+	const checks = schema._zod.def.checks;
+	if (checks && checks.length > 0) throw new Error(".partial() cannot be used on object schemas containing refinements");
+	return clone(schema, mergeDefs(schema._zod.def, {
+		get shape() {
+			const oldShape = schema._zod.def.shape;
+			const shape = { ...oldShape };
+			if (mask) for (const key in mask) {
+				if (!(key in oldShape)) throw new Error(`Unrecognized key: "${key}"`);
+				if (!mask[key]) continue;
+				shape[key] = Class ? new Class({
+					type: "optional",
+					innerType: oldShape[key]
+				}) : oldShape[key];
+			}
+			else for (const key in oldShape) shape[key] = Class ? new Class({
+				type: "optional",
+				innerType: oldShape[key]
+			}) : oldShape[key];
+			assignProp(this, "shape", shape);
+			return shape;
+		},
+		checks: []
+	}));
+}
+function required(Class, schema, mask) {
+	return clone(schema, mergeDefs(schema._zod.def, { get shape() {
+		const oldShape = schema._zod.def.shape;
+		const shape = { ...oldShape };
+		if (mask) for (const key in mask) {
+			if (!(key in shape)) throw new Error(`Unrecognized key: "${key}"`);
+			if (!mask[key]) continue;
+			shape[key] = new Class({
+				type: "nonoptional",
+				innerType: oldShape[key]
+			});
+		}
+		else for (const key in oldShape) shape[key] = new Class({
+			type: "nonoptional",
+			innerType: oldShape[key]
 		});
+		assignProp(this, "shape", shape);
+		return shape;
+	} }));
+}
+function aborted(x, startIndex = 0) {
+	if (x.aborted === true) return true;
+	for (let i = startIndex; i < x.issues.length; i++) if (x.issues[i]?.continue !== true) return true;
+	return false;
+}
+function explicitlyAborted(x, startIndex = 0) {
+	if (x.aborted === true) return true;
+	for (let i = startIndex; i < x.issues.length; i++) if (x.issues[i]?.continue === false) return true;
+	return false;
+}
+function prefixIssues(path, issues) {
+	return issues.map((iss) => {
+		var _a;
+		(_a = iss).path ?? (_a.path = []);
+		iss.path.unshift(path);
+		return iss;
+	});
+}
+function unwrapMessage(message) {
+	return typeof message === "string" ? message : message?.message;
+}
+function finalizeIssue(iss, ctx, config) {
+	const message = iss.message ? iss.message : unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config.customError?.(iss)) ?? unwrapMessage(config.localeError?.(iss)) ?? "Invalid input";
+	const { inst: _inst, continue: _continue, input: _input, ...rest } = iss;
+	rest.path ?? (rest.path = []);
+	rest.message = message;
+	if (ctx?.reportInput) rest.input = _input;
+	return rest;
+}
+function getLengthableOrigin(input) {
+	if (Array.isArray(input)) return "array";
+	if (typeof input === "string") return "string";
+	return "unknown";
+}
+function issue(...args) {
+	const [iss, input, inst] = args;
+	if (typeof iss === "string") return {
+		message: iss,
+		code: "custom",
+		input,
+		inst
+	};
+	return { ...iss };
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/errors.js
+const initializer$1 = (inst, def) => {
+	inst.name = "$ZodError";
+	Object.defineProperty(inst, "_zod", {
+		value: inst._zod,
+		enumerable: false
+	});
+	Object.defineProperty(inst, "issues", {
+		value: def,
+		enumerable: false
+	});
+	inst.message = JSON.stringify(def, jsonStringifyReplacer, 2);
+	Object.defineProperty(inst, "toString", {
+		value: () => inst.message,
+		enumerable: false
+	});
+};
+const $ZodError = /* @__PURE__ */ $constructor("$ZodError", initializer$1);
+const $ZodRealError = /* @__PURE__ */ $constructor("$ZodError", initializer$1, { Parent: Error });
+function flattenError(error, mapper = (issue) => issue.message) {
+	const fieldErrors = {};
+	const formErrors = [];
+	for (const sub of error.issues) if (sub.path.length > 0) {
+		fieldErrors[sub.path[0]] = fieldErrors[sub.path[0]] || [];
+		fieldErrors[sub.path[0]].push(mapper(sub));
+	} else formErrors.push(mapper(sub));
+	return {
+		formErrors,
+		fieldErrors
+	};
+}
+function formatError(error, mapper = (issue) => issue.message) {
+	const fieldErrors = { _errors: [] };
+	const processError = (error, path = []) => {
+		for (const issue of error.issues) if (issue.code === "invalid_union" && issue.errors.length) issue.errors.map((issues) => processError({ issues }, [...path, ...issue.path]));
+		else if (issue.code === "invalid_key") processError({ issues: issue.issues }, [...path, ...issue.path]);
+		else if (issue.code === "invalid_element") processError({ issues: issue.issues }, [...path, ...issue.path]);
+		else {
+			const fullpath = [...path, ...issue.path];
+			if (fullpath.length === 0) fieldErrors._errors.push(mapper(issue));
+			else {
+				let curr = fieldErrors;
+				let i = 0;
+				while (i < fullpath.length) {
+					const el = fullpath[i];
+					if (!(i === fullpath.length - 1)) curr[el] = curr[el] || { _errors: [] };
+					else {
+						curr[el] = curr[el] || { _errors: [] };
+						curr[el]._errors.push(mapper(issue));
+					}
+					curr = curr[el];
+					i++;
+				}
+			}
+		}
+	};
+	processError(error);
+	return fieldErrors;
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/parse.js
+const _parse = (_Err) => (schema, value, _ctx, _params) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		async: false
+	} : { async: false };
+	const result = schema._zod.run({
+		value,
+		issues: []
+	}, ctx);
+	if (result instanceof Promise) throw new $ZodAsyncError();
+	if (result.issues.length) {
+		const e = new ((_params?.Err) ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())));
+		captureStackTrace(e, _params?.callee);
+		throw e;
+	}
+	return result.value;
+};
+const _parseAsync = (_Err) => async (schema, value, _ctx, params) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		async: true
+	} : { async: true };
+	let result = schema._zod.run({
+		value,
+		issues: []
+	}, ctx);
+	if (result instanceof Promise) result = await result;
+	if (result.issues.length) {
+		const e = new ((params?.Err) ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())));
+		captureStackTrace(e, params?.callee);
+		throw e;
+	}
+	return result.value;
+};
+const _safeParse = (_Err) => (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		async: false
+	} : { async: false };
+	const result = schema._zod.run({
+		value,
+		issues: []
+	}, ctx);
+	if (result instanceof Promise) throw new $ZodAsyncError();
+	return result.issues.length ? {
+		success: false,
+		error: new (_Err ?? $ZodError)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+	} : {
+		success: true,
+		data: result.value
+	};
+};
+const safeParse$1 = /* @__PURE__*/ _safeParse($ZodRealError);
+const _safeParseAsync = (_Err) => async (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		async: true
+	} : { async: true };
+	let result = schema._zod.run({
+		value,
+		issues: []
+	}, ctx);
+	if (result instanceof Promise) result = await result;
+	return result.issues.length ? {
+		success: false,
+		error: new _Err(result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+	} : {
+		success: true,
+		data: result.value
+	};
+};
+const safeParseAsync$1 = /* @__PURE__*/ _safeParseAsync($ZodRealError);
+const _encode = (_Err) => (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		direction: "backward"
+	} : { direction: "backward" };
+	return _parse(_Err)(schema, value, ctx);
+};
+const _decode = (_Err) => (schema, value, _ctx) => {
+	return _parse(_Err)(schema, value, _ctx);
+};
+const _encodeAsync = (_Err) => async (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		direction: "backward"
+	} : { direction: "backward" };
+	return _parseAsync(_Err)(schema, value, ctx);
+};
+const _decodeAsync = (_Err) => async (schema, value, _ctx) => {
+	return _parseAsync(_Err)(schema, value, _ctx);
+};
+const _safeEncode = (_Err) => (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		direction: "backward"
+	} : { direction: "backward" };
+	return _safeParse(_Err)(schema, value, ctx);
+};
+const _safeDecode = (_Err) => (schema, value, _ctx) => {
+	return _safeParse(_Err)(schema, value, _ctx);
+};
+const _safeEncodeAsync = (_Err) => async (schema, value, _ctx) => {
+	const ctx = _ctx ? {
+		..._ctx,
+		direction: "backward"
+	} : { direction: "backward" };
+	return _safeParseAsync(_Err)(schema, value, ctx);
+};
+const _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
+	return _safeParseAsync(_Err)(schema, value, _ctx);
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/regexes.js
+/**
+* @deprecated CUID v1 is deprecated by its authors due to information leakage
+* (timestamps embedded in the id). Use {@link cuid2} instead.
+* See https://github.com/paralleldrive/cuid.
+*/
+const cuid = /^[cC][0-9a-z]{6,}$/;
+const cuid2 = /^[0-9a-z]+$/;
+const ulid = /^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$/;
+const xid = /^[0-9a-vA-V]{20}$/;
+const ksuid = /^[A-Za-z0-9]{27}$/;
+const nanoid = /^[a-zA-Z0-9_-]{21}$/;
+/** ISO 8601-1 duration regex. Does not support the 8601-2 extensions like negative durations or fractional/negative components. */
+const duration$1 = /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/;
+/** A regex for any UUID-like identifier: 8-4-4-4-12 hex pattern */
+const guid = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+/** Returns a regex for validating an RFC 9562/4122 UUID.
+*
+* @param version Optionally specify a version 1-8. If no version is specified, all versions are supported. */
+const uuid = (version) => {
+	if (!version) return /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+	return new RegExp(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${version}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$`);
+};
+/** Practical email validation */
+const email = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+const _emoji$1 = `^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$`;
+function emoji() {
+	return new RegExp(_emoji$1, "u");
+}
+const ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+const ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
+const cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
+const cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
+const base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
+const base64url = /^[A-Za-z0-9_-]*$/;
+const httpProtocol = /^https?$/;
+const e164 = /^\+[1-9]\d{6,14}$/;
+const dateSource = `(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))`;
+const date$1 = /*@__PURE__*/ new RegExp(`^${dateSource}$`);
+function timeSource(args) {
+	const hhmm = `(?:[01]\\d|2[0-3]):[0-5]\\d`;
+	return typeof args.precision === "number" ? args.precision === -1 ? `${hhmm}` : args.precision === 0 ? `${hhmm}:[0-5]\\d` : `${hhmm}:[0-5]\\d\\.\\d{${args.precision}}` : `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
+}
+function time$1(args) {
+	return new RegExp(`^${timeSource(args)}$`);
+}
+function datetime$1(args) {
+	const time = timeSource({ precision: args.precision });
+	const opts = ["Z"];
+	if (args.local) opts.push("");
+	if (args.offset) opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+	const timeRegex = `${time}(?:${opts.join("|")})`;
+	return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
+}
+const string$1 = (params) => {
+	const regex = params ? `[\\s\\S]{${params?.minimum ?? 0},${params?.maximum ?? ""}}` : `[\\s\\S]*`;
+	return new RegExp(`^${regex}$`);
+};
+const integer = /^-?\d+$/;
+const number$1 = /^-?\d+(?:\.\d+)?$/;
+const boolean$1 = /^(?:true|false)$/i;
+const lowercase = /^[^A-Z]*$/;
+const uppercase = /^[^a-z]*$/;
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/checks.js
+const $ZodCheck = /*@__PURE__*/ $constructor("$ZodCheck", (inst, def) => {
+	var _a;
+	inst._zod ?? (inst._zod = {});
+	inst._zod.def = def;
+	(_a = inst._zod).onattach ?? (_a.onattach = []);
+});
+const numericOriginMap = {
+	number: "number",
+	bigint: "bigint",
+	object: "date"
+};
+const $ZodCheckLessThan = /*@__PURE__*/ $constructor("$ZodCheckLessThan", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	const origin = numericOriginMap[typeof def.value];
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		const curr = (def.inclusive ? bag.maximum : bag.exclusiveMaximum) ?? Number.POSITIVE_INFINITY;
+		if (def.value < curr) {
+			if (def.inclusive) bag.maximum = def.value;
+			else bag.exclusiveMaximum = def.value;
+		}
+	});
+	inst._zod.check = (payload) => {
+		if (def.inclusive ? payload.value <= def.value : payload.value < def.value) return;
+		payload.issues.push({
+			origin,
+			code: "too_big",
+			maximum: typeof def.value === "object" ? def.value.getTime() : def.value,
+			input: payload.value,
+			inclusive: def.inclusive,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckGreaterThan = /*@__PURE__*/ $constructor("$ZodCheckGreaterThan", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	const origin = numericOriginMap[typeof def.value];
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		const curr = (def.inclusive ? bag.minimum : bag.exclusiveMinimum) ?? Number.NEGATIVE_INFINITY;
+		if (def.value > curr) {
+			if (def.inclusive) bag.minimum = def.value;
+			else bag.exclusiveMinimum = def.value;
+		}
+	});
+	inst._zod.check = (payload) => {
+		if (def.inclusive ? payload.value >= def.value : payload.value > def.value) return;
+		payload.issues.push({
+			origin,
+			code: "too_small",
+			minimum: typeof def.value === "object" ? def.value.getTime() : def.value,
+			input: payload.value,
+			inclusive: def.inclusive,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckMultipleOf = /*@__PURE__*/ $constructor("$ZodCheckMultipleOf", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	inst._zod.onattach.push((inst) => {
+		var _a;
+		(_a = inst._zod.bag).multipleOf ?? (_a.multipleOf = def.value);
+	});
+	inst._zod.check = (payload) => {
+		if (typeof payload.value !== typeof def.value) throw new Error("Cannot mix number and bigint in multiple_of check.");
+		if (typeof payload.value === "bigint" ? payload.value % def.value === BigInt(0) : floatSafeRemainder(payload.value, def.value) === 0) return;
+		payload.issues.push({
+			origin: typeof payload.value,
+			code: "not_multiple_of",
+			divisor: def.value,
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckNumberFormat = /*@__PURE__*/ $constructor("$ZodCheckNumberFormat", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	def.format = def.format || "float64";
+	const isInt = def.format?.includes("int");
+	const origin = isInt ? "int" : "number";
+	const [minimum, maximum] = NUMBER_FORMAT_RANGES[def.format];
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.format = def.format;
+		bag.minimum = minimum;
+		bag.maximum = maximum;
+		if (isInt) bag.pattern = integer;
+	});
+	inst._zod.check = (payload) => {
+		const input = payload.value;
+		if (isInt) {
+			if (!Number.isInteger(input)) {
+				payload.issues.push({
+					expected: origin,
+					format: def.format,
+					code: "invalid_type",
+					continue: false,
+					input,
+					inst
+				});
+				return;
+			}
+			if (!Number.isSafeInteger(input)) {
+				if (input > 0) payload.issues.push({
+					input,
+					code: "too_big",
+					maximum: Number.MAX_SAFE_INTEGER,
+					note: "Integers must be within the safe integer range.",
+					inst,
+					origin,
+					inclusive: true,
+					continue: !def.abort
+				});
+				else payload.issues.push({
+					input,
+					code: "too_small",
+					minimum: Number.MIN_SAFE_INTEGER,
+					note: "Integers must be within the safe integer range.",
+					inst,
+					origin,
+					inclusive: true,
+					continue: !def.abort
+				});
+				return;
+			}
+		}
+		if (input < minimum) payload.issues.push({
+			origin: "number",
+			input,
+			code: "too_small",
+			minimum,
+			inclusive: true,
+			inst,
+			continue: !def.abort
+		});
+		if (input > maximum) payload.issues.push({
+			origin: "number",
+			input,
+			code: "too_big",
+			maximum,
+			inclusive: true,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckMaxLength = /*@__PURE__*/ $constructor("$ZodCheckMaxLength", (inst, def) => {
+	var _a;
+	$ZodCheck.init(inst, def);
+	(_a = inst._zod.def).when ?? (_a.when = (payload) => {
+		const val = payload.value;
+		return !nullish(val) && val.length !== void 0;
+	});
+	inst._zod.onattach.push((inst) => {
+		const curr = inst._zod.bag.maximum ?? Number.POSITIVE_INFINITY;
+		if (def.maximum < curr) inst._zod.bag.maximum = def.maximum;
+	});
+	inst._zod.check = (payload) => {
+		const input = payload.value;
+		if (input.length <= def.maximum) return;
+		const origin = getLengthableOrigin(input);
+		payload.issues.push({
+			origin,
+			code: "too_big",
+			maximum: def.maximum,
+			inclusive: true,
+			input,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckMinLength = /*@__PURE__*/ $constructor("$ZodCheckMinLength", (inst, def) => {
+	var _a;
+	$ZodCheck.init(inst, def);
+	(_a = inst._zod.def).when ?? (_a.when = (payload) => {
+		const val = payload.value;
+		return !nullish(val) && val.length !== void 0;
+	});
+	inst._zod.onattach.push((inst) => {
+		const curr = inst._zod.bag.minimum ?? Number.NEGATIVE_INFINITY;
+		if (def.minimum > curr) inst._zod.bag.minimum = def.minimum;
+	});
+	inst._zod.check = (payload) => {
+		const input = payload.value;
+		if (input.length >= def.minimum) return;
+		const origin = getLengthableOrigin(input);
+		payload.issues.push({
+			origin,
+			code: "too_small",
+			minimum: def.minimum,
+			inclusive: true,
+			input,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckLengthEquals = /*@__PURE__*/ $constructor("$ZodCheckLengthEquals", (inst, def) => {
+	var _a;
+	$ZodCheck.init(inst, def);
+	(_a = inst._zod.def).when ?? (_a.when = (payload) => {
+		const val = payload.value;
+		return !nullish(val) && val.length !== void 0;
+	});
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.minimum = def.length;
+		bag.maximum = def.length;
+		bag.length = def.length;
+	});
+	inst._zod.check = (payload) => {
+		const input = payload.value;
+		const length = input.length;
+		if (length === def.length) return;
+		const origin = getLengthableOrigin(input);
+		const tooBig = length > def.length;
+		payload.issues.push({
+			origin,
+			...tooBig ? {
+				code: "too_big",
+				maximum: def.length
+			} : {
+				code: "too_small",
+				minimum: def.length
+			},
+			inclusive: true,
+			exact: true,
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckStringFormat = /*@__PURE__*/ $constructor("$ZodCheckStringFormat", (inst, def) => {
+	var _a, _b;
+	$ZodCheck.init(inst, def);
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.format = def.format;
+		if (def.pattern) {
+			bag.patterns ?? (bag.patterns = /* @__PURE__ */ new Set());
+			bag.patterns.add(def.pattern);
+		}
+	});
+	if (def.pattern) (_a = inst._zod).check ?? (_a.check = (payload) => {
+		def.pattern.lastIndex = 0;
+		if (def.pattern.test(payload.value)) return;
+		payload.issues.push({
+			origin: "string",
+			code: "invalid_format",
+			format: def.format,
+			input: payload.value,
+			...def.pattern ? { pattern: def.pattern.toString() } : {},
+			inst,
+			continue: !def.abort
+		});
+	});
+	else (_b = inst._zod).check ?? (_b.check = () => {});
+});
+const $ZodCheckRegex = /*@__PURE__*/ $constructor("$ZodCheckRegex", (inst, def) => {
+	$ZodCheckStringFormat.init(inst, def);
+	inst._zod.check = (payload) => {
+		def.pattern.lastIndex = 0;
+		if (def.pattern.test(payload.value)) return;
+		payload.issues.push({
+			origin: "string",
+			code: "invalid_format",
+			format: "regex",
+			input: payload.value,
+			pattern: def.pattern.toString(),
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckLowerCase = /*@__PURE__*/ $constructor("$ZodCheckLowerCase", (inst, def) => {
+	def.pattern ?? (def.pattern = lowercase);
+	$ZodCheckStringFormat.init(inst, def);
+});
+const $ZodCheckUpperCase = /*@__PURE__*/ $constructor("$ZodCheckUpperCase", (inst, def) => {
+	def.pattern ?? (def.pattern = uppercase);
+	$ZodCheckStringFormat.init(inst, def);
+});
+const $ZodCheckIncludes = /*@__PURE__*/ $constructor("$ZodCheckIncludes", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	const escapedRegex = escapeRegex(def.includes);
+	const pattern = new RegExp(typeof def.position === "number" ? `^.{${def.position}}${escapedRegex}` : escapedRegex);
+	def.pattern = pattern;
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.patterns ?? (bag.patterns = /* @__PURE__ */ new Set());
+		bag.patterns.add(pattern);
+	});
+	inst._zod.check = (payload) => {
+		if (payload.value.includes(def.includes, def.position)) return;
+		payload.issues.push({
+			origin: "string",
+			code: "invalid_format",
+			format: "includes",
+			includes: def.includes,
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckStartsWith = /*@__PURE__*/ $constructor("$ZodCheckStartsWith", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	const pattern = new RegExp(`^${escapeRegex(def.prefix)}.*`);
+	def.pattern ?? (def.pattern = pattern);
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.patterns ?? (bag.patterns = /* @__PURE__ */ new Set());
+		bag.patterns.add(pattern);
+	});
+	inst._zod.check = (payload) => {
+		if (payload.value.startsWith(def.prefix)) return;
+		payload.issues.push({
+			origin: "string",
+			code: "invalid_format",
+			format: "starts_with",
+			prefix: def.prefix,
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckEndsWith = /*@__PURE__*/ $constructor("$ZodCheckEndsWith", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	const pattern = new RegExp(`.*${escapeRegex(def.suffix)}$`);
+	def.pattern ?? (def.pattern = pattern);
+	inst._zod.onattach.push((inst) => {
+		const bag = inst._zod.bag;
+		bag.patterns ?? (bag.patterns = /* @__PURE__ */ new Set());
+		bag.patterns.add(pattern);
+	});
+	inst._zod.check = (payload) => {
+		if (payload.value.endsWith(def.suffix)) return;
+		payload.issues.push({
+			origin: "string",
+			code: "invalid_format",
+			format: "ends_with",
+			suffix: def.suffix,
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodCheckOverwrite = /*@__PURE__*/ $constructor("$ZodCheckOverwrite", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	inst._zod.check = (payload) => {
+		payload.value = def.tx(payload.value);
+	};
+});
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/doc.js
+var Doc = class {
+	constructor(args = []) {
+		this.content = [];
+		this.indent = 0;
+		if (this) this.args = args;
+	}
+	indented(fn) {
+		this.indent += 1;
+		fn(this);
+		this.indent -= 1;
+	}
+	write(arg) {
+		if (typeof arg === "function") {
+			arg(this, { execution: "sync" });
+			arg(this, { execution: "async" });
+			return;
+		}
+		const lines = arg.split("\n").filter((x) => x);
+		const minIndent = Math.min(...lines.map((x) => x.length - x.trimStart().length));
+		const dedented = lines.map((x) => x.slice(minIndent)).map((x) => " ".repeat(this.indent * 2) + x);
+		for (const line of dedented) this.content.push(line);
+	}
+	compile() {
+		const F = Function;
+		const args = this?.args;
+		const lines = [...(this?.content ?? [``]).map((x) => `  ${x}`)];
+		return new F(...args, lines.join("\n"));
+	}
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/versions.js
+const version = {
+	major: 4,
+	minor: 4,
+	patch: 3
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/schemas.js
+const $ZodType = /*@__PURE__*/ $constructor("$ZodType", (inst, def) => {
+	var _a;
+	inst ?? (inst = {});
+	inst._zod.def = def;
+	inst._zod.bag = inst._zod.bag || {};
+	inst._zod.version = version;
+	const checks = [...inst._zod.def.checks ?? []];
+	if (inst._zod.traits.has("$ZodCheck")) checks.unshift(inst);
+	for (const ch of checks) for (const fn of ch._zod.onattach) fn(inst);
+	if (checks.length === 0) {
+		(_a = inst._zod).deferred ?? (_a.deferred = []);
+		inst._zod.deferred?.push(() => {
+			inst._zod.run = inst._zod.parse;
+		});
+	} else {
+		const runChecks = (payload, checks, ctx) => {
+			let isAborted = aborted(payload);
+			let asyncResult;
+			for (const ch of checks) {
+				if (ch._zod.def.when) {
+					if (explicitlyAborted(payload)) continue;
+					if (!ch._zod.def.when(payload)) continue;
+				} else if (isAborted) continue;
+				const currLen = payload.issues.length;
+				const _ = ch._zod.check(payload);
+				if (_ instanceof Promise && ctx?.async === false) throw new $ZodAsyncError();
+				if (asyncResult || _ instanceof Promise) asyncResult = (asyncResult ?? Promise.resolve()).then(async () => {
+					await _;
+					if (payload.issues.length === currLen) return;
+					if (!isAborted) isAborted = aborted(payload, currLen);
+				});
+				else {
+					if (payload.issues.length === currLen) continue;
+					if (!isAborted) isAborted = aborted(payload, currLen);
+				}
+			}
+			if (asyncResult) return asyncResult.then(() => {
+				return payload;
+			});
+			return payload;
+		};
+		const handleCanaryResult = (canary, payload, ctx) => {
+			if (aborted(canary)) {
+				canary.aborted = true;
+				return canary;
+			}
+			const checkResult = runChecks(payload, checks, ctx);
+			if (checkResult instanceof Promise) {
+				if (ctx.async === false) throw new $ZodAsyncError();
+				return checkResult.then((checkResult) => inst._zod.parse(checkResult, ctx));
+			}
+			return inst._zod.parse(checkResult, ctx);
+		};
+		inst._zod.run = (payload, ctx) => {
+			if (ctx.skipChecks) return inst._zod.parse(payload, ctx);
+			if (ctx.direction === "backward") {
+				const canary = inst._zod.parse({
+					value: payload.value,
+					issues: []
+				}, {
+					...ctx,
+					skipChecks: true
+				});
+				if (canary instanceof Promise) return canary.then((canary) => {
+					return handleCanaryResult(canary, payload, ctx);
+				});
+				return handleCanaryResult(canary, payload, ctx);
+			}
+			const result = inst._zod.parse(payload, ctx);
+			if (result instanceof Promise) {
+				if (ctx.async === false) throw new $ZodAsyncError();
+				return result.then((result) => runChecks(result, checks, ctx));
+			}
+			return runChecks(result, checks, ctx);
+		};
+	}
+	defineLazy(inst, "~standard", () => ({
+		validate: (value) => {
+			try {
+				const r = safeParse$1(inst, value);
+				return r.success ? { value: r.data } : { issues: r.error?.issues };
+			} catch (_) {
+				return safeParseAsync$1(inst, value).then((r) => r.success ? { value: r.data } : { issues: r.error?.issues });
+			}
+		},
+		vendor: "zod",
+		version: 1
+	}));
+});
+const $ZodString = /*@__PURE__*/ $constructor("$ZodString", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.pattern = [...inst?._zod.bag?.patterns ?? []].pop() ?? string$1(inst._zod.bag);
+	inst._zod.parse = (payload, _) => {
+		if (def.coerce) try {
+			payload.value = String(payload.value);
+		} catch (_) {}
+		if (typeof payload.value === "string") return payload;
+		payload.issues.push({
+			expected: "string",
+			code: "invalid_type",
+			input: payload.value,
+			inst
+		});
+		return payload;
+	};
+});
+const $ZodStringFormat = /*@__PURE__*/ $constructor("$ZodStringFormat", (inst, def) => {
+	$ZodCheckStringFormat.init(inst, def);
+	$ZodString.init(inst, def);
+});
+const $ZodGUID = /*@__PURE__*/ $constructor("$ZodGUID", (inst, def) => {
+	def.pattern ?? (def.pattern = guid);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodUUID = /*@__PURE__*/ $constructor("$ZodUUID", (inst, def) => {
+	if (def.version) {
+		const v = {
+			v1: 1,
+			v2: 2,
+			v3: 3,
+			v4: 4,
+			v5: 5,
+			v6: 6,
+			v7: 7,
+			v8: 8
+		}[def.version];
+		if (v === void 0) throw new Error(`Invalid UUID version: "${def.version}"`);
+		def.pattern ?? (def.pattern = uuid(v));
+	} else def.pattern ?? (def.pattern = uuid());
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodEmail = /*@__PURE__*/ $constructor("$ZodEmail", (inst, def) => {
+	def.pattern ?? (def.pattern = email);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodURL = /*@__PURE__*/ $constructor("$ZodURL", (inst, def) => {
+	$ZodStringFormat.init(inst, def);
+	inst._zod.check = (payload) => {
+		try {
+			const trimmed = payload.value.trim();
+			if (!def.normalize && def.protocol?.source === httpProtocol.source) {
+				if (!/^https?:\/\//i.test(trimmed)) {
+					payload.issues.push({
+						code: "invalid_format",
+						format: "url",
+						note: "Invalid URL format",
+						input: payload.value,
+						inst,
+						continue: !def.abort
+					});
+					return;
+				}
+			}
+			const url = new URL(trimmed);
+			if (def.hostname) {
+				def.hostname.lastIndex = 0;
+				if (!def.hostname.test(url.hostname)) payload.issues.push({
+					code: "invalid_format",
+					format: "url",
+					note: "Invalid hostname",
+					pattern: def.hostname.source,
+					input: payload.value,
+					inst,
+					continue: !def.abort
+				});
+			}
+			if (def.protocol) {
+				def.protocol.lastIndex = 0;
+				if (!def.protocol.test(url.protocol.endsWith(":") ? url.protocol.slice(0, -1) : url.protocol)) payload.issues.push({
+					code: "invalid_format",
+					format: "url",
+					note: "Invalid protocol",
+					pattern: def.protocol.source,
+					input: payload.value,
+					inst,
+					continue: !def.abort
+				});
+			}
+			if (def.normalize) payload.value = url.href;
+			else payload.value = trimmed;
+			return;
+		} catch (_) {
+			payload.issues.push({
+				code: "invalid_format",
+				format: "url",
+				input: payload.value,
+				inst,
+				continue: !def.abort
+			});
+		}
+	};
+});
+const $ZodEmoji = /*@__PURE__*/ $constructor("$ZodEmoji", (inst, def) => {
+	def.pattern ?? (def.pattern = emoji());
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodNanoID = /*@__PURE__*/ $constructor("$ZodNanoID", (inst, def) => {
+	def.pattern ?? (def.pattern = nanoid);
+	$ZodStringFormat.init(inst, def);
+});
+/**
+* @deprecated CUID v1 is deprecated by its authors due to information leakage
+* (timestamps embedded in the id). Use {@link $ZodCUID2} instead.
+* See https://github.com/paralleldrive/cuid.
+*/
+const $ZodCUID = /*@__PURE__*/ $constructor("$ZodCUID", (inst, def) => {
+	def.pattern ?? (def.pattern = cuid);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodCUID2 = /*@__PURE__*/ $constructor("$ZodCUID2", (inst, def) => {
+	def.pattern ?? (def.pattern = cuid2);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodULID = /*@__PURE__*/ $constructor("$ZodULID", (inst, def) => {
+	def.pattern ?? (def.pattern = ulid);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodXID = /*@__PURE__*/ $constructor("$ZodXID", (inst, def) => {
+	def.pattern ?? (def.pattern = xid);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodKSUID = /*@__PURE__*/ $constructor("$ZodKSUID", (inst, def) => {
+	def.pattern ?? (def.pattern = ksuid);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodISODateTime = /*@__PURE__*/ $constructor("$ZodISODateTime", (inst, def) => {
+	def.pattern ?? (def.pattern = datetime$1(def));
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodISODate = /*@__PURE__*/ $constructor("$ZodISODate", (inst, def) => {
+	def.pattern ?? (def.pattern = date$1);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodISOTime = /*@__PURE__*/ $constructor("$ZodISOTime", (inst, def) => {
+	def.pattern ?? (def.pattern = time$1(def));
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodISODuration = /*@__PURE__*/ $constructor("$ZodISODuration", (inst, def) => {
+	def.pattern ?? (def.pattern = duration$1);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodIPv4 = /*@__PURE__*/ $constructor("$ZodIPv4", (inst, def) => {
+	def.pattern ?? (def.pattern = ipv4);
+	$ZodStringFormat.init(inst, def);
+	inst._zod.bag.format = `ipv4`;
+});
+const $ZodIPv6 = /*@__PURE__*/ $constructor("$ZodIPv6", (inst, def) => {
+	def.pattern ?? (def.pattern = ipv6);
+	$ZodStringFormat.init(inst, def);
+	inst._zod.bag.format = `ipv6`;
+	inst._zod.check = (payload) => {
+		try {
+			new URL(`http://[${payload.value}]`);
+		} catch {
+			payload.issues.push({
+				code: "invalid_format",
+				format: "ipv6",
+				input: payload.value,
+				inst,
+				continue: !def.abort
+			});
+		}
+	};
+});
+const $ZodCIDRv4 = /*@__PURE__*/ $constructor("$ZodCIDRv4", (inst, def) => {
+	def.pattern ?? (def.pattern = cidrv4);
+	$ZodStringFormat.init(inst, def);
+});
+const $ZodCIDRv6 = /*@__PURE__*/ $constructor("$ZodCIDRv6", (inst, def) => {
+	def.pattern ?? (def.pattern = cidrv6);
+	$ZodStringFormat.init(inst, def);
+	inst._zod.check = (payload) => {
+		const parts = payload.value.split("/");
+		try {
+			if (parts.length !== 2) throw new Error();
+			const [address, prefix] = parts;
+			if (!prefix) throw new Error();
+			const prefixNum = Number(prefix);
+			if (`${prefixNum}` !== prefix) throw new Error();
+			if (prefixNum < 0 || prefixNum > 128) throw new Error();
+			new URL(`http://[${address}]`);
+		} catch {
+			payload.issues.push({
+				code: "invalid_format",
+				format: "cidrv6",
+				input: payload.value,
+				inst,
+				continue: !def.abort
+			});
+		}
+	};
+});
+function isValidBase64(data) {
+	if (data === "") return true;
+	if (/\s/.test(data)) return false;
+	if (data.length % 4 !== 0) return false;
+	try {
+		atob(data);
 		return true;
-	} catch (error) {
-		host.logger?.warn?.(`buka-workflows: 重新要求机器人提交结果失败（${ctx.runId}/${node.id}）：${describeError(error)}`);
+	} catch {
 		return false;
 	}
 }
-/**
-* 把节点主动终止落成一条失败的 robot step，并结束整个运行（fail-fast 取消其余分支）。
-*
-* @param ctx
-* @param current 要终结的活跃节点
-* @param node
-* @param result
-* @param reason 节点给出的无法完成原因
-* @param [extra]
-* @returns
-*/
-async function abortNode(host, ctx, current, node, result, reason, extra = {}) {
-	await host.completeNode(ctx, current, node, {
-		...result,
-		stopReason: "aborted",
-		error: reason
-	}, {
-		...extra,
-		routes: null,
-		aborted: true
-	});
-}
-// .build/workflows/engine/supervisor-user.js
-/**
-* 用户介入节点：在原生提问卡上等用户作答，再把答案写回运行。
-*/
-/**
-* 执行一个用户介入节点（仅前台模式）。原生提问卡要求调用者会话有活跃 turn。
-*
-* 用户的选项就是节点的出边（`label` 显示给用户）；`questions` 收集额外的
-* 反馈 / 信息。回答会落成一条 user step，后续 prompt 可以用模板引用答案。
-*
-* @param ctx
-* @param node
-* @returns
-*/
-async function runUser(host, ctx, node) {
-	if (ctx.mode !== "foreground") {
-		await host.fail(ctx, new WorkflowRunError(`user node "${node.id}" requires a foreground run`));
-		return;
-	}
-	const userQuestions = host.ctx?.get?.("userQuestions") ?? null;
-	if (userQuestions === null || typeof userQuestions.ask !== "function") {
-		await host.fail(ctx, new WorkflowRunError("user node needs the user-questions service"));
-		return;
-	}
-	const run = ctx.run;
-	const seq = ctx.seq + 1;
-	if (seq > ctx.plan.maxSteps) {
-		await host.fail(ctx, new WorkflowRunError(`workflow exceeded its ${ctx.plan.maxSteps}-step limit`));
-		return;
-	}
-	const visit = (ctx.visits.get(node.id) ?? 0) + 1;
-	const startedAt = Date.now();
-	let detail;
-	try {
-		detail = renderUserDetail(node, ctx.values, ctx.plan, seq, run.runId);
-	} catch (error) {
-		await host.fail(ctx, error);
-		return;
-	}
-	ctx.seq = seq;
-	ctx.visits.set(node.id, visit);
-	run.status = "waiting";
-	run.pendingUser = {
-		nodeId: node.id,
-		visit,
-		seq,
-		title: node.title,
-		detail,
-		options: (Array.isArray(node.next) ? node.next : []).map((rule) => ({
-			name: rule.name,
-			label: rule.label,
-			...typeof rule.description === "string" && rule.description !== "" ? { description: rule.description } : {}
-		})),
-		questions: (Array.isArray(node.questions) ? node.questions : []).map((question) => ({
-			...question,
-			options: (Array.isArray(question.options) ? question.options : []).map((option) => ({ ...option }))
-		})),
-		requestedAt: startedAt,
-		sessionId: typeof ctx.agent?.id === "string" ? ctx.agent.id : null
-	};
-	await host.save(ctx);
-	await host.store.appendEvent(run.runId, "user/waiting", { nodeId: node.id });
-	let answer;
-	try {
-		answer = await userQuestions.ask({
-			questions: buildUserQuestions(node, detail),
-			agent: ctx.agent,
-			signal: ctx.controller.signal
+const $ZodBase64 = /*@__PURE__*/ $constructor("$ZodBase64", (inst, def) => {
+	def.pattern ?? (def.pattern = base64);
+	$ZodStringFormat.init(inst, def);
+	inst._zod.bag.contentEncoding = "base64";
+	inst._zod.check = (payload) => {
+		if (isValidBase64(payload.value)) return;
+		payload.issues.push({
+			code: "invalid_format",
+			format: "base64",
+			input: payload.value,
+			inst,
+			continue: !def.abort
 		});
-	} catch (error) {
-		run.pendingUser = null;
-		run.current = null;
-		const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
-		if (ctx.cancelled === true || ctx.controller.signal.aborted === true || code === "ASK_CANCELLED") {
-			await host.finish(ctx, "cancelled", {
-				nodeId: node.id,
-				message: `user node "${node.id}" was cancelled before the user answered`
+	};
+});
+function isValidBase64URL(data) {
+	if (!base64url.test(data)) return false;
+	const base64 = data.replace(/[-_]/g, (c) => c === "-" ? "+" : "/");
+	return isValidBase64(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+}
+const $ZodBase64URL = /*@__PURE__*/ $constructor("$ZodBase64URL", (inst, def) => {
+	def.pattern ?? (def.pattern = base64url);
+	$ZodStringFormat.init(inst, def);
+	inst._zod.bag.contentEncoding = "base64url";
+	inst._zod.check = (payload) => {
+		if (isValidBase64URL(payload.value)) return;
+		payload.issues.push({
+			code: "invalid_format",
+			format: "base64url",
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodE164 = /*@__PURE__*/ $constructor("$ZodE164", (inst, def) => {
+	def.pattern ?? (def.pattern = e164);
+	$ZodStringFormat.init(inst, def);
+});
+function isValidJWT(token, algorithm = null) {
+	try {
+		const tokensParts = token.split(".");
+		if (tokensParts.length !== 3) return false;
+		const [header] = tokensParts;
+		if (!header) return false;
+		const parsedHeader = JSON.parse(atob(header));
+		if ("typ" in parsedHeader && parsedHeader?.typ !== "JWT") return false;
+		if (!parsedHeader.alg) return false;
+		if (algorithm && (!("alg" in parsedHeader) || parsedHeader.alg !== algorithm)) return false;
+		return true;
+	} catch {
+		return false;
+	}
+}
+const $ZodJWT = /*@__PURE__*/ $constructor("$ZodJWT", (inst, def) => {
+	$ZodStringFormat.init(inst, def);
+	inst._zod.check = (payload) => {
+		if (isValidJWT(payload.value, def.alg)) return;
+		payload.issues.push({
+			code: "invalid_format",
+			format: "jwt",
+			input: payload.value,
+			inst,
+			continue: !def.abort
+		});
+	};
+});
+const $ZodNumber = /*@__PURE__*/ $constructor("$ZodNumber", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.pattern = inst._zod.bag.pattern ?? number$1;
+	inst._zod.parse = (payload, _ctx) => {
+		if (def.coerce) try {
+			payload.value = Number(payload.value);
+		} catch (_) {}
+		const input = payload.value;
+		if (typeof input === "number" && !Number.isNaN(input) && Number.isFinite(input)) return payload;
+		const received = typeof input === "number" ? Number.isNaN(input) ? "NaN" : !Number.isFinite(input) ? "Infinity" : void 0 : void 0;
+		payload.issues.push({
+			expected: "number",
+			code: "invalid_type",
+			input,
+			inst,
+			...received ? { received } : {}
+		});
+		return payload;
+	};
+});
+const $ZodNumberFormat = /*@__PURE__*/ $constructor("$ZodNumberFormat", (inst, def) => {
+	$ZodCheckNumberFormat.init(inst, def);
+	$ZodNumber.init(inst, def);
+});
+const $ZodBoolean = /*@__PURE__*/ $constructor("$ZodBoolean", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.pattern = boolean$1;
+	inst._zod.parse = (payload, _ctx) => {
+		if (def.coerce) try {
+			payload.value = Boolean(payload.value);
+		} catch (_) {}
+		const input = payload.value;
+		if (typeof input === "boolean") return payload;
+		payload.issues.push({
+			expected: "boolean",
+			code: "invalid_type",
+			input,
+			inst
+		});
+		return payload;
+	};
+});
+const $ZodUnknown = /*@__PURE__*/ $constructor("$ZodUnknown", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload) => payload;
+});
+const $ZodNever = /*@__PURE__*/ $constructor("$ZodNever", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload, _ctx) => {
+		payload.issues.push({
+			expected: "never",
+			code: "invalid_type",
+			input: payload.value,
+			inst
+		});
+		return payload;
+	};
+});
+function handleArrayResult(result, final, index) {
+	if (result.issues.length) final.issues.push(...prefixIssues(index, result.issues));
+	final.value[index] = result.value;
+}
+const $ZodArray = /*@__PURE__*/ $constructor("$ZodArray", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		if (!Array.isArray(input)) {
+			payload.issues.push({
+				expected: "array",
+				code: "invalid_type",
+				input,
+				inst
 			});
-			return;
+			return payload;
 		}
-		if (code === "NO_PROVIDER") {
-			await host.fail(ctx, new WorkflowRunError(`user node "${node.id}" could not ask the user: no user-questions answerer is available in this composition`, { cause: error }));
-			return;
+		payload.value = Array(input.length);
+		const proms = [];
+		for (let i = 0; i < input.length; i++) {
+			const item = input[i];
+			const result = def.element._zod.run({
+				value: item,
+				issues: []
+			}, ctx);
+			if (result instanceof Promise) proms.push(result.then((result) => handleArrayResult(result, payload, i)));
+			else handleArrayResult(result, payload, i);
 		}
-		await host.fail(ctx, new WorkflowRunError(`user node "${node.id}" could not ask the user: ${describeError(error)}`, { cause: error }));
-		return;
-	}
-	const resolved = resolveUserAnswer(node, answer);
-	const finishedAt = Date.now();
-	if (resolved.error !== void 0) {
-		run.pendingUser = null;
-		run.current = null;
-		await host.fail(ctx, new WorkflowRunError(`invalid answer for user node "${node.id}": ${resolved.error}`));
-		return;
-	}
-	const cancelled = resolved.cancelled === true;
-	const route = resolved.route ?? null;
-	run.pendingUser = null;
-	run.current = null;
-	run.status = "running";
-	run.steps.push({
-		seq,
-		nodeId: node.id,
-		visit,
-		type: "user",
-		robot: null,
-		sessionId: null,
-		status: cancelled ? "cancelled" : "completed",
-		route: cancelled ? null : route?.name ?? null,
-		routeTo: cancelled ? null : route?.to ?? null,
-		answers: resolved.answers,
-		input: detail,
-		text: resolved.text,
-		startedAt,
-		finishedAt,
-		error: null
-	});
-	run.updatedAt = finishedAt;
-	ctx.stepCount = run.steps.length;
-	ctx.values[node.id] = {
-		route: cancelled ? null : route?.name ?? null,
-		routeTo: cancelled ? null : route?.to ?? null,
-		answers: answersValue(resolved.answers),
-		text: resolved.text
+		if (proms.length) return Promise.all(proms).then(() => payload);
+		return payload;
 	};
-	await host.save(ctx);
-	await host.store.appendEvent(run.runId, "user/answered", {
-		nodeId: node.id,
-		...cancelled ? { cancelled: true } : { route: route?.name ?? null }
-	});
-	if (cancelled) {
-		await host.finish(ctx, "cancelled", {
-			nodeId: node.id,
-			message: `user node "${node.id}" was submitted without a choice; the run was cancelled`
+});
+function handlePropertyResult(result, final, key, input, isOptionalIn, isOptionalOut) {
+	const isPresent = key in input;
+	if (result.issues.length) {
+		if (isOptionalIn && isOptionalOut && !isPresent) return;
+		final.issues.push(...prefixIssues(key, result.issues));
+	}
+	if (!isPresent && !isOptionalIn) {
+		if (!result.issues.length) final.issues.push({
+			code: "invalid_type",
+			expected: "nonoptional",
+			input: void 0,
+			path: [key]
 		});
 		return;
 	}
-	if (route === null) {
-		await host.maybeFinish(ctx);
-		return;
+	if (result.value === void 0) {
+		if (isPresent) final.value[key] = void 0;
+	} else final.value[key] = result.value;
+}
+function normalizeDef(def) {
+	const keys = Object.keys(def.shape);
+	for (const k of keys) if (!def.shape?.[k]?._zod?.traits?.has("$ZodType")) throw new Error(`Invalid element at key "${k}": expected a Zod schema`);
+	const okeys = optionalKeys(def.shape);
+	return {
+		...def,
+		keys,
+		keySet: new Set(keys),
+		numKeys: keys.length,
+		optionalKeys: new Set(okeys)
+	};
+}
+function handleCatchall(proms, input, payload, ctx, def, inst) {
+	const unrecognized = [];
+	const keySet = def.keySet;
+	const _catchall = def.catchall._zod;
+	const t = _catchall.def.type;
+	const isOptionalIn = _catchall.optin === "optional";
+	const isOptionalOut = _catchall.optout === "optional";
+	for (const key in input) {
+		if (key === "__proto__") continue;
+		if (keySet.has(key)) continue;
+		if (t === "never") {
+			unrecognized.push(key);
+			continue;
+		}
+		const r = _catchall.run({
+			value: input[key],
+			issues: []
+		}, ctx);
+		if (r instanceof Promise) proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut)));
+		else handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut);
 	}
-	ctx.frontier.push({
-		nodeId: route.to,
-		edgePrompt: typeof route.prompt === "string" && route.prompt !== "" ? route.prompt : null
+	if (unrecognized.length) payload.issues.push({
+		code: "unrecognized_keys",
+		keys: unrecognized,
+		input,
+		inst
+	});
+	if (!proms.length) return payload;
+	return Promise.all(proms).then(() => {
+		return payload;
 	});
 }
-// .build/workflows/supervisor.js
-/**
-* 工作流观察者（Host 生命周期服务）。
-*
-* 这里不在任何会话的 `result` promise 上等待：节点 prompt 投进机器人会话后
-* 立即返回，观察者订阅全局 `session/event`，等这一轮 `turn/end` 后读会话日志、
-* 校验 JSON 的 `next`、写 step 并按边路由到下一个节点。会话异常终止
-* （disposed / interrupted）时，观察者尝试 resume 同一会话、发“继续”prompt；
-* 续接失败直接终止运行并写明原因，不新开会话；宿主重启后由 `resumeAll()`
-* 从落盘的 `run.json` 继续，续接失败则标成 interrupted。
-*
-* 一个 run 同时只有一个活跃节点；每个 run 的推进串行化，避免事件竞争导致
-* 重复 dispatch。运行状态以磁盘上的 run.json 为权威，内存里只有活跃句柄。
-* 节点正常完成时会把结果里的附件复制到该次执行的节点目录，并把清单写进
-* run.steps / 节点结果 / 模板上下文。
-*
-* 观察者还维护 `sessionId → runId` 索引，供机器人会话里的四个只读工具判断
-* 可见性：启动时从 `run.steps` / `run.sessions` 重建，dispatch / 恢复时实时
-* 补充，运行结束后保留，所以重新打开机器人会话仍能查看这次运行。
-*
-* @module @buka/dsh-plugin-workflows/supervisor
-*/
-var WorkflowSupervisor = class {
-	/**
-	* @param input 上下文、运行存储、限额选项与可选日志器
-	*/
-	constructor({ ctx, store, options = {}, logger }) {
-		this.ctx = ctx;
-		this.store = store;
-		this.options = {
-			nodeTimeoutMs: positive(options.nodeTimeoutMs) ?? 0,
-			maxNodeTextBytes: positive(options.maxNodeTextBytes) ?? 65536,
-			previewBytes: positive(options.previewBytes) ?? 4e3,
-			robotPreset: typeof options.robotPreset === "string" ? options.robotPreset : ""
+const $ZodObject = /*@__PURE__*/ $constructor("$ZodObject", (inst, def) => {
+	$ZodType.init(inst, def);
+	if (!Object.getOwnPropertyDescriptor(def, "shape")?.get) {
+		const sh = def.shape;
+		Object.defineProperty(def, "shape", { get: () => {
+			const newSh = { ...sh };
+			Object.defineProperty(def, "shape", { value: newSh });
+			return newSh;
+		} });
+	}
+	const _normalized = cached(() => normalizeDef(def));
+	defineLazy(inst._zod, "propValues", () => {
+		const shape = def.shape;
+		const propValues = {};
+		for (const key in shape) {
+			const field = shape[key]._zod;
+			if (field.values) {
+				propValues[key] ?? (propValues[key] = /* @__PURE__ */ new Set());
+				for (const v of field.values) propValues[key].add(v);
+			}
+		}
+		return propValues;
+	});
+	const isObject$1 = isObject;
+	const catchall = def.catchall;
+	let value;
+	inst._zod.parse = (payload, ctx) => {
+		value ?? (value = _normalized.value);
+		const input = payload.value;
+		if (!isObject$1(input)) {
+			payload.issues.push({
+				expected: "object",
+				code: "invalid_type",
+				input,
+				inst
+			});
+			return payload;
+		}
+		payload.value = {};
+		const proms = [];
+		const shape = value.shape;
+		for (const key of value.keys) {
+			const el = shape[key];
+			const isOptionalIn = el._zod.optin === "optional";
+			const isOptionalOut = el._zod.optout === "optional";
+			const r = el._zod.run({
+				value: input[key],
+				issues: []
+			}, ctx);
+			if (r instanceof Promise) proms.push(r.then((r) => handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut)));
+			else handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut);
+		}
+		if (!catchall) return proms.length ? Promise.all(proms).then(() => payload) : payload;
+		return handleCatchall(proms, input, payload, ctx, _normalized.value, inst);
+	};
+});
+const $ZodObjectJIT = /*@__PURE__*/ $constructor("$ZodObjectJIT", (inst, def) => {
+	$ZodObject.init(inst, def);
+	const superParse = inst._zod.parse;
+	const _normalized = cached(() => normalizeDef(def));
+	const generateFastpass = (shape) => {
+		const doc = new Doc([
+			"shape",
+			"payload",
+			"ctx"
+		]);
+		const normalized = _normalized.value;
+		const parseStr = (key) => {
+			const k = esc(key);
+			return `shape[${k}]._zod.run({ value: input[${k}], issues: [] }, ctx)`;
 		};
-		this.logger = logger;
-		this.runs = /* @__PURE__ */ new Map();
-		this.dispatchBySession = /* @__PURE__ */ new Map();
-		/**
-		* 机器人会话 id → 所属运行。运行结束后重新打开会话时，四个只读工具靠它
-		* 判断可见性；启动时从运行记录重建，dispatch / 恢复时实时补充。
-		*
-		* @type
-		*/
-		this.sessionRuns = /* @__PURE__ */ new Map();
-		this.sessionIndexPromise = null;
-		this.queues = /* @__PURE__ */ new Map();
-		this.unsubscribes = null;
-		this.disposed = false;
-		this.robots = null;
-		this.robotsWaiters = [];
-		this.recovered = false;
-		this.subscribe();
+		doc.write(`const input = payload.value;`);
+		const ids = Object.create(null);
+		let counter = 0;
+		for (const key of normalized.keys) ids[key] = `key_${counter++}`;
+		doc.write(`const newResult = {};`);
+		for (const key of normalized.keys) {
+			const id = ids[key];
+			const k = esc(key);
+			const schema = shape[key];
+			const isOptionalIn = schema?._zod?.optin === "optional";
+			const isOptionalOut = schema?._zod?.optout === "optional";
+			doc.write(`const ${id} = ${parseStr(key)};`);
+			if (isOptionalIn && isOptionalOut) doc.write(`
+        if (${id}.issues.length) {
+          if (${k} in input) {
+            payload.issues = payload.issues.concat(${id}.issues.map(iss => ({
+              ...iss,
+              path: iss.path ? [${k}, ...iss.path] : [${k}]
+            })));
+          }
+        }
+        
+        if (${id}.value === undefined) {
+          if (${k} in input) {
+            newResult[${k}] = undefined;
+          }
+        } else {
+          newResult[${k}] = ${id}.value;
+        }
+        
+      `);
+			else if (!isOptionalIn) doc.write(`
+        const ${id}_present = ${k} in input;
+        if (${id}.issues.length) {
+          payload.issues = payload.issues.concat(${id}.issues.map(iss => ({
+            ...iss,
+            path: iss.path ? [${k}, ...iss.path] : [${k}]
+          })));
+        }
+        if (!${id}_present && !${id}.issues.length) {
+          payload.issues.push({
+            code: "invalid_type",
+            expected: "nonoptional",
+            input: undefined,
+            path: [${k}]
+          });
+        }
+
+        if (${id}_present) {
+          if (${id}.value === undefined) {
+            newResult[${k}] = undefined;
+          } else {
+            newResult[${k}] = ${id}.value;
+          }
+        }
+
+      `);
+			else doc.write(`
+        if (${id}.issues.length) {
+          payload.issues = payload.issues.concat(${id}.issues.map(iss => ({
+            ...iss,
+            path: iss.path ? [${k}, ...iss.path] : [${k}]
+          })));
+        }
+        
+        if (${id}.value === undefined) {
+          if (${k} in input) {
+            newResult[${k}] = undefined;
+          }
+        } else {
+          newResult[${k}] = ${id}.value;
+        }
+        
+      `);
+		}
+		doc.write(`payload.value = newResult;`);
+		doc.write(`return payload;`);
+		const fn = doc.compile();
+		return (payload, ctx) => fn(shape, payload, ctx);
+	};
+	let fastpass;
+	const isObject$2 = isObject;
+	const jit = !globalConfig.jitless;
+	const fastEnabled = jit && allowsEval.value;
+	const catchall = def.catchall;
+	let value;
+	inst._zod.parse = (payload, ctx) => {
+		value ?? (value = _normalized.value);
+		const input = payload.value;
+		if (!isObject$2(input)) {
+			payload.issues.push({
+				expected: "object",
+				code: "invalid_type",
+				input,
+				inst
+			});
+			return payload;
+		}
+		if (jit && fastEnabled && ctx?.async === false && ctx.jitless !== true) {
+			if (!fastpass) fastpass = generateFastpass(def.shape);
+			payload = fastpass(payload, ctx);
+			if (!catchall) return payload;
+			return handleCatchall([], input, payload, ctx, value, inst);
+		}
+		return superParse(payload, ctx);
+	};
+});
+function handleUnionResults(results, final, inst, ctx) {
+	for (const result of results) if (result.issues.length === 0) {
+		final.value = result.value;
+		return final;
 	}
-	createContext(input) {
-		return createContext(this, input);
+	const nonaborted = results.filter((r) => !aborted(r));
+	if (nonaborted.length === 1) {
+		final.value = nonaborted[0].value;
+		return nonaborted[0];
 	}
-	rebuildFromSteps(ctx) {
-		rebuildFromSteps(this, ctx);
+	final.issues.push({
+		code: "invalid_union",
+		input: final.value,
+		inst,
+		errors: results.map((result) => result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+	});
+	return final;
+}
+const $ZodUnion = /*@__PURE__*/ $constructor("$ZodUnion", (inst, def) => {
+	$ZodType.init(inst, def);
+	defineLazy(inst._zod, "optin", () => def.options.some((o) => o._zod.optin === "optional") ? "optional" : void 0);
+	defineLazy(inst._zod, "optout", () => def.options.some((o) => o._zod.optout === "optional") ? "optional" : void 0);
+	defineLazy(inst._zod, "values", () => {
+		if (def.options.every((o) => o._zod.values)) return new Set(def.options.flatMap((option) => Array.from(option._zod.values)));
+	});
+	defineLazy(inst._zod, "pattern", () => {
+		if (def.options.every((o) => o._zod.pattern)) {
+			const patterns = def.options.map((o) => o._zod.pattern);
+			return new RegExp(`^(${patterns.map((p) => cleanRegex(p.source)).join("|")})$`);
+		}
+	});
+	const first = def.options.length === 1 ? def.options[0]._zod.run : null;
+	inst._zod.parse = (payload, ctx) => {
+		if (first) return first(payload, ctx);
+		let async = false;
+		const results = [];
+		for (const option of def.options) {
+			const result = option._zod.run({
+				value: payload.value,
+				issues: []
+			}, ctx);
+			if (result instanceof Promise) {
+				results.push(result);
+				async = true;
+			} else {
+				if (result.issues.length === 0) return result;
+				results.push(result);
+			}
+		}
+		if (!async) return handleUnionResults(results, payload, inst, ctx);
+		return Promise.all(results).then((results) => {
+			return handleUnionResults(results, payload, inst, ctx);
+		});
+	};
+});
+const $ZodDiscriminatedUnion = /*@__PURE__*/ $constructor("$ZodDiscriminatedUnion", (inst, def) => {
+	def.inclusive = false;
+	$ZodUnion.init(inst, def);
+	const _super = inst._zod.parse;
+	defineLazy(inst._zod, "propValues", () => {
+		const propValues = {};
+		for (const option of def.options) {
+			const pv = option._zod.propValues;
+			if (!pv || Object.keys(pv).length === 0) throw new Error(`Invalid discriminated union option at index "${def.options.indexOf(option)}"`);
+			for (const [k, v] of Object.entries(pv)) {
+				if (!propValues[k]) propValues[k] = /* @__PURE__ */ new Set();
+				for (const val of v) propValues[k].add(val);
+			}
+		}
+		return propValues;
+	});
+	const disc = cached(() => {
+		const opts = def.options;
+		const map = /* @__PURE__ */ new Map();
+		for (const o of opts) {
+			const values = o._zod.propValues?.[def.discriminator];
+			if (!values || values.size === 0) throw new Error(`Invalid discriminated union option at index "${def.options.indexOf(o)}"`);
+			for (const v of values) {
+				if (map.has(v)) throw new Error(`Duplicate discriminator value "${String(v)}"`);
+				map.set(v, o);
+			}
+		}
+		return map;
+	});
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		if (!isObject(input)) {
+			payload.issues.push({
+				code: "invalid_type",
+				expected: "object",
+				input,
+				inst
+			});
+			return payload;
+		}
+		const opt = disc.value.get(input?.[def.discriminator]);
+		if (opt) return opt._zod.run(payload, ctx);
+		if (def.unionFallback || ctx.direction === "backward") return _super(payload, ctx);
+		payload.issues.push({
+			code: "invalid_union",
+			errors: [],
+			note: "No matching discriminator",
+			discriminator: def.discriminator,
+			options: Array.from(disc.value.keys()),
+			input,
+			path: [def.discriminator],
+			inst
+		});
+		return payload;
+	};
+});
+const $ZodIntersection = /*@__PURE__*/ $constructor("$ZodIntersection", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		const left = def.left._zod.run({
+			value: input,
+			issues: []
+		}, ctx);
+		const right = def.right._zod.run({
+			value: input,
+			issues: []
+		}, ctx);
+		if (left instanceof Promise || right instanceof Promise) return Promise.all([left, right]).then(([left, right]) => {
+			return handleIntersectionResults(payload, left, right);
+		});
+		return handleIntersectionResults(payload, left, right);
+	};
+});
+function mergeValues(a, b) {
+	if (a === b) return {
+		valid: true,
+		data: a
+	};
+	if (a instanceof Date && b instanceof Date && +a === +b) return {
+		valid: true,
+		data: a
+	};
+	if (isPlainObject(a) && isPlainObject(b)) {
+		const bKeys = Object.keys(b);
+		const sharedKeys = Object.keys(a).filter((key) => bKeys.indexOf(key) !== -1);
+		const newObj = {
+			...a,
+			...b
+		};
+		for (const key of sharedKeys) {
+			const sharedValue = mergeValues(a[key], b[key]);
+			if (!sharedValue.valid) return {
+				valid: false,
+				mergeErrorPath: [key, ...sharedValue.mergeErrorPath]
+			};
+			newObj[key] = sharedValue.data;
+		}
+		return {
+			valid: true,
+			data: newObj
+		};
 	}
-	enqueue(runId, task) {
-		return enqueue(this, runId, task);
+	if (Array.isArray(a) && Array.isArray(b)) {
+		if (a.length !== b.length) return {
+			valid: false,
+			mergeErrorPath: []
+		};
+		const newArray = [];
+		for (let index = 0; index < a.length; index++) {
+			const itemA = a[index];
+			const itemB = b[index];
+			const sharedValue = mergeValues(itemA, itemB);
+			if (!sharedValue.valid) return {
+				valid: false,
+				mergeErrorPath: [index, ...sharedValue.mergeErrorPath]
+			};
+			newArray.push(sharedValue.data);
+		}
+		return {
+			valid: true,
+			data: newArray
+		};
 	}
-	deriveFrontier(ctx) {
-		return deriveFrontier(this, ctx);
+	return {
+		valid: false,
+		mergeErrorPath: []
+	};
+}
+function handleIntersectionResults(result, left, right) {
+	const unrecKeys = /* @__PURE__ */ new Map();
+	let unrecIssue;
+	for (const iss of left.issues) if (iss.code === "unrecognized_keys") {
+		unrecIssue ?? (unrecIssue = iss);
+		for (const k of iss.keys) {
+			if (!unrecKeys.has(k)) unrecKeys.set(k, {});
+			unrecKeys.get(k).l = true;
+		}
+	} else result.issues.push(iss);
+	for (const iss of right.issues) if (iss.code === "unrecognized_keys") for (const k of iss.keys) {
+		if (!unrecKeys.has(k)) unrecKeys.set(k, {});
+		unrecKeys.get(k).r = true;
 	}
-	activeNodeId(ctx) {
-		return activeNodeId(this, ctx);
+	else result.issues.push(iss);
+	const bothKeys = [...unrecKeys].filter(([, f]) => f.l && f.r).map(([k]) => k);
+	if (bothKeys.length && unrecIssue) result.issues.push({
+		...unrecIssue,
+		keys: bothKeys
+	});
+	if (aborted(result)) return result;
+	const merged = mergeValues(left.value, right.value);
+	if (!merged.valid) throw new Error(`Unmergable intersection. Error path: ${JSON.stringify(merged.mergeErrorPath)}`);
+	result.value = merged.data;
+	return result;
+}
+const $ZodRecord = /*@__PURE__*/ $constructor("$ZodRecord", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		if (!isPlainObject(input)) {
+			payload.issues.push({
+				expected: "record",
+				code: "invalid_type",
+				input,
+				inst
+			});
+			return payload;
+		}
+		const proms = [];
+		const values = def.keyType._zod.values;
+		if (values) {
+			payload.value = {};
+			const recordKeys = /* @__PURE__ */ new Set();
+			for (const key of values) if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
+				recordKeys.add(typeof key === "number" ? key.toString() : key);
+				const keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (keyResult.issues.length) {
+					payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const outKey = keyResult.value;
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}
+			}
+			let unrecognized;
+			for (const key in input) if (!recordKeys.has(key)) {
+				unrecognized = unrecognized ?? [];
+				unrecognized.push(key);
+			}
+			if (unrecognized && unrecognized.length > 0) payload.issues.push({
+				code: "unrecognized_keys",
+				input,
+				inst,
+				keys: unrecognized
+			});
+		} else {
+			payload.value = {};
+			for (const key of Reflect.ownKeys(input)) {
+				if (key === "__proto__") continue;
+				if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+				let keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (typeof key === "string" && number$1.test(key) && keyResult.issues.length) {
+					const retryResult = def.keyType._zod.run({
+						value: Number(key),
+						issues: []
+					}, ctx);
+					if (retryResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+					if (retryResult.issues.length === 0) keyResult = retryResult;
+				}
+				if (keyResult.issues.length) {
+					if (def.mode === "loose") payload.value[key] = input[key];
+					else payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[keyResult.value] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[keyResult.value] = result.value;
+				}
+			}
+		}
+		if (proms.length) return Promise.all(proms).then(() => payload);
+		return payload;
+	};
+});
+const $ZodEnum = /*@__PURE__*/ $constructor("$ZodEnum", (inst, def) => {
+	$ZodType.init(inst, def);
+	const values = getEnumValues(def.entries);
+	const valuesSet = new Set(values);
+	inst._zod.values = valuesSet;
+	inst._zod.pattern = new RegExp(`^(${values.filter((k) => propertyKeyTypes.has(typeof k)).map((o) => typeof o === "string" ? escapeRegex(o) : o.toString()).join("|")})$`);
+	inst._zod.parse = (payload, _ctx) => {
+		const input = payload.value;
+		if (valuesSet.has(input)) return payload;
+		payload.issues.push({
+			code: "invalid_value",
+			values,
+			input,
+			inst
+		});
+		return payload;
+	};
+});
+const $ZodLiteral = /*@__PURE__*/ $constructor("$ZodLiteral", (inst, def) => {
+	$ZodType.init(inst, def);
+	if (def.values.length === 0) throw new Error("Cannot create literal schema with no valid values");
+	const values = new Set(def.values);
+	inst._zod.values = values;
+	inst._zod.pattern = new RegExp(`^(${def.values.map((o) => typeof o === "string" ? escapeRegex(o) : o ? escapeRegex(o.toString()) : String(o)).join("|")})$`);
+	inst._zod.parse = (payload, _ctx) => {
+		const input = payload.value;
+		if (values.has(input)) return payload;
+		payload.issues.push({
+			code: "invalid_value",
+			values: def.values,
+			input,
+			inst
+		});
+		return payload;
+	};
+});
+const $ZodTransform = /*@__PURE__*/ $constructor("$ZodTransform", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.optin = "optional";
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") throw new $ZodEncodeError(inst.constructor.name);
+		const _out = def.transform(payload.value, payload);
+		if (ctx.async) return (_out instanceof Promise ? _out : Promise.resolve(_out)).then((output) => {
+			payload.value = output;
+			payload.fallback = true;
+			return payload;
+		});
+		if (_out instanceof Promise) throw new $ZodAsyncError();
+		payload.value = _out;
+		payload.fallback = true;
+		return payload;
+	};
+});
+function handleOptionalResult(result, input) {
+	if (input === void 0 && (result.issues.length || result.fallback)) return {
+		issues: [],
+		value: void 0
+	};
+	return result;
+}
+const $ZodOptional = /*@__PURE__*/ $constructor("$ZodOptional", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.optin = "optional";
+	inst._zod.optout = "optional";
+	defineLazy(inst._zod, "values", () => {
+		return def.innerType._zod.values ? /* @__PURE__ */ new Set([...def.innerType._zod.values, void 0]) : void 0;
+	});
+	defineLazy(inst._zod, "pattern", () => {
+		const pattern = def.innerType._zod.pattern;
+		return pattern ? new RegExp(`^(${cleanRegex(pattern.source)})?$`) : void 0;
+	});
+	inst._zod.parse = (payload, ctx) => {
+		if (def.innerType._zod.optin === "optional") {
+			const input = payload.value;
+			const result = def.innerType._zod.run(payload, ctx);
+			if (result instanceof Promise) return result.then((r) => handleOptionalResult(r, input));
+			return handleOptionalResult(result, input);
+		}
+		if (payload.value === void 0) return payload;
+		return def.innerType._zod.run(payload, ctx);
+	};
+});
+const $ZodExactOptional = /*@__PURE__*/ $constructor("$ZodExactOptional", (inst, def) => {
+	$ZodOptional.init(inst, def);
+	defineLazy(inst._zod, "values", () => def.innerType._zod.values);
+	defineLazy(inst._zod, "pattern", () => def.innerType._zod.pattern);
+	inst._zod.parse = (payload, ctx) => {
+		return def.innerType._zod.run(payload, ctx);
+	};
+});
+const $ZodNullable = /*@__PURE__*/ $constructor("$ZodNullable", (inst, def) => {
+	$ZodType.init(inst, def);
+	defineLazy(inst._zod, "optin", () => def.innerType._zod.optin);
+	defineLazy(inst._zod, "optout", () => def.innerType._zod.optout);
+	defineLazy(inst._zod, "pattern", () => {
+		const pattern = def.innerType._zod.pattern;
+		return pattern ? new RegExp(`^(${cleanRegex(pattern.source)}|null)$`) : void 0;
+	});
+	defineLazy(inst._zod, "values", () => {
+		return def.innerType._zod.values ? /* @__PURE__ */ new Set([...def.innerType._zod.values, null]) : void 0;
+	});
+	inst._zod.parse = (payload, ctx) => {
+		if (payload.value === null) return payload;
+		return def.innerType._zod.run(payload, ctx);
+	};
+});
+const $ZodDefault = /*@__PURE__*/ $constructor("$ZodDefault", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.optin = "optional";
+	defineLazy(inst._zod, "values", () => def.innerType._zod.values);
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") return def.innerType._zod.run(payload, ctx);
+		if (payload.value === void 0) {
+			payload.value = def.defaultValue;
+			/**
+			* $ZodDefault returns the default value immediately in forward direction.
+			* It doesn't pass the default value into the validator ("prefault"). There's no reason to pass the default value through validation. The validity of the default is enforced by TypeScript statically. Otherwise, it's the responsibility of the user to ensure the default is valid. In the case of pipes with divergent in/out types, you can specify the default on the `in` schema of your ZodPipe to set a "prefault" for the pipe.   */
+			return payload;
+		}
+		const result = def.innerType._zod.run(payload, ctx);
+		if (result instanceof Promise) return result.then((result) => handleDefaultResult(result, def));
+		return handleDefaultResult(result, def);
+	};
+});
+function handleDefaultResult(payload, def) {
+	if (payload.value === void 0) payload.value = def.defaultValue;
+	return payload;
+}
+const $ZodPrefault = /*@__PURE__*/ $constructor("$ZodPrefault", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.optin = "optional";
+	defineLazy(inst._zod, "values", () => def.innerType._zod.values);
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") return def.innerType._zod.run(payload, ctx);
+		if (payload.value === void 0) payload.value = def.defaultValue;
+		return def.innerType._zod.run(payload, ctx);
+	};
+});
+const $ZodNonOptional = /*@__PURE__*/ $constructor("$ZodNonOptional", (inst, def) => {
+	$ZodType.init(inst, def);
+	defineLazy(inst._zod, "values", () => {
+		const v = def.innerType._zod.values;
+		return v ? new Set([...v].filter((x) => x !== void 0)) : void 0;
+	});
+	inst._zod.parse = (payload, ctx) => {
+		const result = def.innerType._zod.run(payload, ctx);
+		if (result instanceof Promise) return result.then((result) => handleNonOptionalResult(result, inst));
+		return handleNonOptionalResult(result, inst);
+	};
+});
+function handleNonOptionalResult(payload, inst) {
+	if (!payload.issues.length && payload.value === void 0) payload.issues.push({
+		code: "invalid_type",
+		expected: "nonoptional",
+		input: payload.value,
+		inst
+	});
+	return payload;
+}
+const $ZodCatch = /*@__PURE__*/ $constructor("$ZodCatch", (inst, def) => {
+	$ZodType.init(inst, def);
+	inst._zod.optin = "optional";
+	defineLazy(inst._zod, "optout", () => def.innerType._zod.optout);
+	defineLazy(inst._zod, "values", () => def.innerType._zod.values);
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") return def.innerType._zod.run(payload, ctx);
+		const result = def.innerType._zod.run(payload, ctx);
+		if (result instanceof Promise) return result.then((result) => {
+			payload.value = result.value;
+			if (result.issues.length) {
+				payload.value = def.catchValue({
+					...payload,
+					error: { issues: result.issues.map((iss) => finalizeIssue(iss, ctx, config())) },
+					input: payload.value
+				});
+				payload.issues = [];
+				payload.fallback = true;
+			}
+			return payload;
+		});
+		payload.value = result.value;
+		if (result.issues.length) {
+			payload.value = def.catchValue({
+				...payload,
+				error: { issues: result.issues.map((iss) => finalizeIssue(iss, ctx, config())) },
+				input: payload.value
+			});
+			payload.issues = [];
+			payload.fallback = true;
+		}
+		return payload;
+	};
+});
+const $ZodPipe = /*@__PURE__*/ $constructor("$ZodPipe", (inst, def) => {
+	$ZodType.init(inst, def);
+	defineLazy(inst._zod, "values", () => def.in._zod.values);
+	defineLazy(inst._zod, "optin", () => def.in._zod.optin);
+	defineLazy(inst._zod, "optout", () => def.out._zod.optout);
+	defineLazy(inst._zod, "propValues", () => def.in._zod.propValues);
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") {
+			const right = def.out._zod.run(payload, ctx);
+			if (right instanceof Promise) return right.then((right) => handlePipeResult(right, def.in, ctx));
+			return handlePipeResult(right, def.in, ctx);
+		}
+		const left = def.in._zod.run(payload, ctx);
+		if (left instanceof Promise) return left.then((left) => handlePipeResult(left, def.out, ctx));
+		return handlePipeResult(left, def.out, ctx);
+	};
+});
+function handlePipeResult(left, next, ctx) {
+	if (left.issues.length) {
+		left.aborted = true;
+		return left;
 	}
-	findActive(ctx, seq) {
-		return findActive(this, ctx, seq);
+	return next._zod.run({
+		value: left.value,
+		issues: left.issues,
+		fallback: left.fallback
+	}, ctx);
+}
+const $ZodReadonly = /*@__PURE__*/ $constructor("$ZodReadonly", (inst, def) => {
+	$ZodType.init(inst, def);
+	defineLazy(inst._zod, "propValues", () => def.innerType._zod.propValues);
+	defineLazy(inst._zod, "values", () => def.innerType._zod.values);
+	defineLazy(inst._zod, "optin", () => def.innerType?._zod?.optin);
+	defineLazy(inst._zod, "optout", () => def.innerType?._zod?.optout);
+	inst._zod.parse = (payload, ctx) => {
+		if (ctx.direction === "backward") return def.innerType._zod.run(payload, ctx);
+		const result = def.innerType._zod.run(payload, ctx);
+		if (result instanceof Promise) return result.then(handleReadonlyResult);
+		return handleReadonlyResult(result);
+	};
+});
+function handleReadonlyResult(payload) {
+	payload.value = Object.freeze(payload.value);
+	return payload;
+}
+const $ZodCustom = /*@__PURE__*/ $constructor("$ZodCustom", (inst, def) => {
+	$ZodCheck.init(inst, def);
+	$ZodType.init(inst, def);
+	inst._zod.parse = (payload, _) => {
+		return payload;
+	};
+	inst._zod.check = (payload) => {
+		const input = payload.value;
+		const r = def.fn(input);
+		if (r instanceof Promise) return r.then((r) => handleRefineResult(r, payload, input, inst));
+		handleRefineResult(r, payload, input, inst);
+	};
+});
+function handleRefineResult(result, payload, input, inst) {
+	if (!result) {
+		const _iss = {
+			code: "custom",
+			input,
+			inst,
+			path: [...inst._zod.def.path ?? []],
+			continue: !inst._zod.def.abort
+		};
+		if (inst._zod.def.params) _iss.params = inst._zod.def.params;
+		payload.issues.push(issue(_iss));
 	}
-	removeActive(ctx, current) {
-		removeActive(this, ctx, current);
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/registries.js
+var _a;
+var $ZodRegistry = class {
+	constructor() {
+		this._map = /* @__PURE__ */ new WeakMap();
+		this._idmap = /* @__PURE__ */ new Map();
 	}
-	activateJoins(ctx, startedIds) {
-		activateJoins(this, ctx, startedIds);
+	add(schema, ..._meta) {
+		const meta = _meta[0];
+		this._map.set(schema, meta);
+		if (meta && typeof meta === "object" && "id" in meta) this._idmap.set(meta.id, schema);
+		return this;
 	}
-	async contributeJoins(ctx, nodeId) {
-		return contributeJoins(this, ctx, nodeId);
+	clear() {
+		this._map = /* @__PURE__ */ new WeakMap();
+		this._idmap = /* @__PURE__ */ new Map();
+		return this;
 	}
-	async save(ctx) {
-		return save(this, ctx);
+	remove(schema) {
+		const meta = this._map.get(schema);
+		if (meta && typeof meta === "object" && "id" in meta) this._idmap.delete(meta.id);
+		this._map.delete(schema);
+		return this;
 	}
-	async saveRunningNodeResult(ctx, current, node, prompt, startedAt) {
-		return saveRunningNodeResult(this, ctx, current, node, prompt, startedAt);
+	get(schema) {
+		const p = schema._zod.parent;
+		if (p) {
+			const pm = { ...this.get(p) ?? {} };
+			delete pm.id;
+			const f = {
+				...pm,
+				...this._map.get(schema)
+			};
+			return Object.keys(f).length ? f : void 0;
+		}
+		return this._map.get(schema);
 	}
-	sessionRequest(ctx, node, sessionId) {
-		return sessionRequest(this, ctx, node, sessionId);
-	}
-	creatorAgent(ctx) {
-		return creatorAgent(this, ctx);
-	}
-	canDispatch(robots) {
-		return canDispatch(this, robots);
-	}
-	dispatchEntriesForRun(runId) {
-		return dispatchEntriesForRun(this, runId);
-	}
-	removeEntry(entry) {
-		removeEntry(this, entry);
-	}
-	clearEntryPlanMode(entry) {
-		clearEntryPlanMode(this, entry);
-	}
-	async waitForRobots() {
-		return waitForRobots(this);
-	}
-	async buildSessionIndex() {
-		return buildSessionIndex(this);
-	}
-	subscribe() {
-		subscribe(this);
-	}
-	onHumanRequest(event, request, next) {
-		return onHumanRequest(this, event, request, next);
-	}
-	async recordInteraction(ctx, entry, kind, request, interactionId, planReview = false) {
-		return recordInteraction(this, ctx, entry, kind, request, interactionId, planReview);
-	}
-	async clearInteraction(ctx, interactionId) {
-		return clearInteraction(this, ctx, interactionId);
-	}
-	onSessionEvent(session, event) {
-		onSessionEvent(this, session, event);
-	}
-	onSessionDisposed(session) {
-		onSessionDisposed(this, session);
-	}
-	onAgentDisposed(payload) {
-		onAgentDisposed(this, payload);
-	}
-	disposeEntry(ctx, sessionId) {
-		disposeEntry(this, ctx, sessionId);
-	}
-	attachRobots(robots) {
-		attachRobots(this, robots);
-	}
-	async ensureSessionIndex() {
-		return ensureSessionIndex(this);
-	}
-	sessionRun(sessionId) {
-		return sessionRun(this, sessionId);
-	}
-	rememberSession(runId, sessionId) {
-		rememberSession(this, runId, sessionId);
-	}
-	async start(input) {
-		return start(this, input);
-	}
-	async cancel(runId, reason = "cancelled by the workflow orchestrator") {
-		return cancel(this, runId, reason);
-	}
-	async dispose() {
-		return dispose(this);
-	}
-	async resumeAll() {
-		return resumeAll(this);
-	}
-	async recoverRun(run) {
-		return recoverRun(this, run);
-	}
-	async recoverNode(entry, reason) {
-		return recoverNode(this, entry, reason);
-	}
-	async resumeActive(ctx, current) {
-		return resumeActive(this, ctx, current);
-	}
-	advance(ctx) {
-		return advance(this, ctx);
-	}
-	async advanceInner(ctx) {
-		return advanceInner(this, ctx);
-	}
-	async arriveEnd(ctx, node) {
-		return arriveEnd(this, ctx, node);
-	}
-	async maybeFinish(ctx) {
-		return maybeFinish(this, ctx);
-	}
-	async finish(ctx, status, extra = {}) {
-		return finish(this, ctx, status, extra);
-	}
-	async fail(ctx, error) {
-		return fail(this, ctx, error);
-	}
-	async startRobotNode(ctx, node, edgePrompt) {
-		return startRobotNode(this, ctx, node, edgePrompt);
-	}
-	async dispatchRobot(robots, request) {
-		return dispatchRobot(this, robots, request);
-	}
-	armTimeout(ctx, entry) {
-		armTimeout(this, ctx, entry);
-	}
-	async onTimeout(ctx, entry, timeoutMs) {
-		return onTimeout(this, ctx, entry, timeoutMs);
-	}
-	async requireVisibleHandle(handle) {
-		return requireVisibleHandle(this, handle);
-	}
-	async requireSameSession(handle, sessionId) {
-		return requireSameSession(this, handle, sessionId);
-	}
-	async rejectHandle(handle, message) {
-		return rejectHandle(this, handle, message);
-	}
-	async processTurn(entry, _session, event) {
-		return processTurn(this, entry, _session, event);
-	}
-	async handlePlanGate(ctx, entry, current, node, result) {
-		return handlePlanGate(this, ctx, entry, current, node, result);
-	}
-	async retryResult(ctx, entry, node, input) {
-		return retryResult(this, ctx, entry, node, input);
-	}
-	async abortNode(ctx, current, node, result, reason, extra = {}) {
-		return abortNode(this, ctx, current, node, result, reason, extra);
-	}
-	async completeNode(ctx, current, node, result, extra) {
-		return completeNode(this, ctx, current, node, result, extra);
-	}
-	async runUser(ctx, node) {
-		return runUser(this, ctx, node);
+	has(schema) {
+		return this._map.has(schema);
 	}
 };
-// .build/workflows/tools.js
-/**
-* 编排 agent 能看到 / 调用的工具注册：plan / start / status / cancel / templates。
-*
-* 工具定义与结果渲染分离：schema 在这里，展示文本在 render.ts。
-*/
-/** 模型可读的定义格式说明。 */
-const DEFINITION_HELP = `A one-off workflow definition is a JSON object:
-{
-  "goal": "optional overall goal, available to prompts as {{goal}}",
-  "maxSteps": 64,
-  "nodes": [ ... ]
+function registry() {
+	return new $ZodRegistry();
 }
-
-Node types:
-- start: { "id", "type": "start", "next": [{ "to": "<robot id>", "name": "short edge name", "prompt": "..." }] }
-  Exactly one start node. It never executes and does not count as a step; its single outgoing edge carries the prompt for the first real node, which must be a robot node.
-- robot: { "id", "type": "robot", "robot": "<robot name>", "output": { ... }, "summary": "one-line step summary shown in the run page", "mode"?: "plan", "agentOptions"?: {...}, "timeoutMs"?, "maxVisits"?, "next"?: [edge, ...] }
-  Each robot keeps ONE session for the whole run: the first time any node uses that robot, its session is created; every later entry (another node, or a loop back to the same node) first compacts that session's history and then sends the new edge prompt into the same session. The robot keeps continuity across entries while its context stays bounded.
-  A robot node has NO prompt of its own: every edge entering it carries the prompt for that entry. This is how the same robot node gets a different instruction when a loop sends work back to it.
-  Set "mode": "plan" when the robot should plan before acting. Its session is switched to DSH plan mode before the first prompt: the robot explores, presents the plan through the native plan review card, and only after the user approves does it carry out the plan and submit the node's structured result. This is ONE node, not a separate approval node: do not add a user node just to approve the plan when the native review is what you want. Plan mode is guidance, not a hard sandbox, and it needs the commands service (the /plan command), the user-questions service and a compatible Buka Robots plugin. The output contract and "next" routes are unchanged; include the plan in an "output" field if later nodes need it.
-  "output" is REQUIRED: a JSON Schema object with "type": "object" that declares the result JSON fields. Allowed keywords: type, description, properties, required, additionalProperties (boolean), items, enum, const, oneOf; property names use [A-Za-z0-9_-]. Do NOT declare "next", "abort" or "attachments" inside output: the engine adds "next" from the outgoing edge names (used only when the node chooses to continue), always adds the built-in "abort" escape, and always adds the built-in "attachments" capability.
-  Give every robot node a short "summary": the run page shows it as the step's title.
-  "timeoutMs" is optional and there is NO default timeout: a slow model, a large task or a slow network must not be killed by a guessed deadline. Only set it when the node genuinely has a hard time bound.
-  Every robot node must finish by calling structured_output with one JSON object matching that schema (a plain-text JSON object is also accepted and validated the same way). When the node has outgoing edges, that JSON MUST contain exactly one of "next" and "abort": "next" is one of the outgoing edge names, or a non-empty list of them to start several edges as concurrent branches (fan-out). The engine reads "next" and follows each edge automatically; no other agent decides the route. A terminal robot node (no outgoing edges) still submits JSON but does not need "next". Any node may instead return {"abort": "<short non-empty reason>"} when it cannot complete the task: the run ends as failed immediately, no edge is followed, and the declared output fields are not required. A missing/invalid JSON result, an invalid "abort", or both "next" and "abort" together is asked again in the same session, then the node fails.
-  The engine appends this declared result contract to every node prompt, so the edge prompt should only state the task and explain what each outgoing edge name means; do not repeat the field list. The abort escape is part of that contract, so do not invent a route or an end node just to model "cannot".
-  A node may also return optional "attachments": an array of file paths (relative to its workspace) or { "path", "name"?, "description"? } objects. Attachments are a built-in capability for independent data or files (binaries, archives, traces, large datasets); they are NOT a channel for the answer itself. The node's final text is this step's output shown on the run page: tell the robot to put the actual answer there and in the declared fields, never only in an attachment. The workflow copies those files into that execution's node directory so later nodes can read them; attachments are copied only when the node completes normally, not when it aborts.
-  The outgoing edge names are the only valid values for "next"; "abort" is not a route.
-- user: { "id", "type": "user", "title": "...", "detail"?: "...", "next"?: [{ "to": "<node id>", "name": "route key", "label": "option text", "description"?: "...", "prompt"?: "..." }], "questions"?: [{ "id", "header"?, "question", "multiSelect"?, "options"?: [{ "label", "description"? }] }] }
-  A user-intervention checkpoint: the run pauses, shows "title" plus "detail" (templates allowed) to the user through the native question card, and waits. Use it for a decision (the user's options are the outgoing edges), for a manual operation only a human can do (one edge, e.g. label "Done"), or for reviewing a result only a human can see and returning feedback (add "questions"). "title" is required; a user node needs at least one outgoing edge or one extra question.
-  User edges are the choices: "name" is a unique route key, "label" is the required, unique text the user sees, "description" is optional. The chosen edge's name is available to later prompts as the route of this node; an edge entering a robot node must carry its prompt.
-  "questions" (max 4) collect extra answers in the same batch: each needs a unique "id" (not "route"), a required "question", optional "header", "multiSelect", and "options" [ { "label", "description"? } ]. Answers are stored by question id, so later prompts can read the selected labels and custom text. User nodes need the creating session to have an active turn: a definition containing a user node runs in the foreground, and is marked interrupted if DSH restarts while it waits.
-- end: { "id", "type": "end", "status"?: "completed" | "failed" | "rejected" }
-- join: { "id", "type": "join", "inputs": ["<robot node id>", ...], "next": [{ "to": "<node id>", "prompt"?: "..." }] }
-  A barrier that collects concurrent fan-out branches. It has no robot, no output, no prompt and no result. It fires ONCE when every one of its "inputs" that was actually started in that fan-out has completed, then continues down its single outgoing edge (whose "prompt" is the instruction for the next robot node). Inputs that were never started are ignored, so it waits only for the branches that really ran. One task may appear in several joins (its completion feeds all of them), which gives overlapping groups: with tasks 1..8 available and a fan-out that starts 1..6, X = {1,2,3,7} fires when 1,2,3 finish and Y = {3,4,5,6,8} fires when 3,4,5,6 finish, even though 7 and 8 never started. "inputs" must be robot node ids, and its single outgoing edge enters a robot node (with a prompt) or an end node. Any branch aborting or failing fails the whole run and cancels its siblings (fail-fast).
-
-"next" is an array of edge rules: { "to": "<node id>", "name": "route key", "prompt"?: "prompt for the target robot node", "tone"?: "success" | "failure" }; user-choice edges add "label" (and optional "description").
-Every edge leaving a robot node needs a unique "name" within that node; that name is the route value the robot returns in JSON "next". Every edge leaving a user node needs a unique "name" and a unique "label"; the label is the option the user clicks. Edges entering a robot node must carry "prompt"; edges entering a user or end node must not. The prompt is rendered only when that edge is taken; its template variables are checked at plan time (the referenced node must exist and every data path must be declared in that node's "output").
-"tone" is optional and purely cosmetic: it draws that edge green ("success") or red ("failure") on the run page and changes nothing about routing, validation or execution. Set it where a branch clearly means success or failure - especially when a node has two outgoing edges whose names alone do not make the difference obvious.
-The start node's edge is the prompt for the first robot node; a loop edge back to a robot node is how a revisit gets different instructions.
-Every node must be reachable from the start node: a node nothing leads to would never run, so it is rejected instead of being drawn as a second entry. Edges may not point back at the start node.
-A loop node should set "maxVisits": the run warns when a robot node is on a cycle without it, because then only maxSteps bounds the loop.
-
-"report" and "when" were removed in workflow format 2, and the gate node was replaced by the user node in workflow format 3; the validator rejects all three. Robot routing is driven solely by the JSON "next" route; "abort" is a failure escape that ends the run, not a route.
-
-Prompt templates only interpolate these paths (no expressions):
-{{goal}}, {{step}}, {{nodes.<node id>.text}}, {{nodes.<node id>.data.<path>}}, {{nodes.<node id>.route}},
-for a user node: {{nodes.<user id>.answers.<question id>.selected}}, {{nodes.<user id>.answers.<question id>.custom}} (or the whole answer object via {{nodes.<user id>.answers}}); the reserved question id "route" holds the chosen option's label,
-and for an attachment of a completed node: {{nodes.<node id>.attachments.<index>.text}}, .path, .name, .bytes, .description.
-The engine validates templates at plan time: the referenced node must exist, and every {{nodes.<node id>.data.<path>}} must be declared in that node's "output" (objects by properties, arrays by numeric index plus "items", oneOf in every variant). Plain {{nodes.<id>.data}} passes the whole result object. Use .text only for small UTF-8 text files; binary or oversized attachments need .path or buka_workflow_execution_attachment. Use buka_robots first to see the available robot names. Use buka_workflow_plan to validate before starting.`;
-/** "计划"工具的描述。 */
-const PLAN_DESCRIPTION = `Validate a one-off workflow definition without running it, and return the normalized node graph or precise errors. Use it after buka_robots and before buka_workflow_start. This tool is only visible to the workflow-orchestrator preset; other sessions must not create workflows.\n\n${DEFINITION_HELP}`;
-/** "启动"工具的描述。 */
-const START_DESCRIPTION = `Create and run a one-off workflow as a scheduled run. Every robot keeps one session for the whole run (spawned in the plugin-configured worker preset); later entries compact that session before sending the new prompt. Every robot node declares its result schema in "output"; the engine installs that schema on structured_output (adding "next", the built-in "abort" escape and the built-in attachments array) and appends the result contract to the node prompt. When a node has outgoing edges the JSON carries exactly one of "next" (the outgoing edge name) and "abort", and the observer follows "next" automatically; "abort" ends the run as failed with the node's reason and follows no edge. User nodes pause the run on the native question card: the user's choices are the outgoing edges, and optional extra questions collect feedback that later prompts can read; the answer is returned to the run automatically. There is no default node timeout: a session is allowed to finish at its own pace, and only an explicit robot timeoutMs creates a hard deadline. The definition is stored under the plugin run directory together with the run record, node results and node attachments, and the read-only sidebar page observes them live. Attachments are a built-in capability for independent data/files, not a way to move the answer out of the result, and are copied only when the node completes normally; a node's final text is the step output shown on the run page.
-
-Robot sessions are normal sessions: they run as runtime roots, use the deployment's normal approval policy (an explicit approval:'never' is headless only), and may request tool approvals or ask the user questions. The workflow does not inject behavior instructions; it only provides the task prompt, the declared result contract and the meaning of each route. A robot node with "mode": "plan" is the one mode-specific exception: its session enters DSH plan mode before the prompt, the robot presents its plan through the native plan review card, and after approval it carries out the plan and submits the node result. The review card lives in the robot's own session, so the run page shows a waiting notice with an open-session action; a run without user nodes may still be background. If the robot ends its turn while still in plan mode without presenting a plan, the observer sends one bounded nudge and then fails the node with an explicit reason. Plan mode is soft guidance, not a sandbox; it needs the commands service (the /plan command), the user-questions service and a compatible Buka Robots plugin, checked before the run starts.
-
-A host-level observer (not the robot session itself) watches session events: when the active session finishes its turn, it reads the JSON result and follows "next". If the JSON is missing, does not match the declared output, has an invalid "next", carries an invalid "abort", or carries both "next" and "abort", the observer asks the same session to correct it a bounded number of times, then fails the node. A valid "abort" ends the run as failed at that node without resuming an interrupted session. If that session is interrupted or disposed, the observer resumes it with a continuation prompt and continues; if it cannot be resumed, the node and run fail with an explicit error and no substitute session is opened. A run that is still going when DSH restarts is resumed from its persisted state (runs that contain user nodes are marked interrupted because their question card needs an active caller turn). Old-format run data is deleted on startup by WORKFLOW_FORMAT_VERSION.
-
-Every run gets a persistent, increasing sequence number (seq, starting at 1) that the sidebar page and buka_workflow_status show as #N. A definition WITHOUT user nodes starts in the background: the call returns after the first node is dispatched with a runId and that seq, and the observer keeps the run going, so it never blocks your turn. Poll it with buka_workflow_status (or watch the sidebar page). A definition WITH user nodes must run inside this call, because the native question card needs an active turn: the call returns only after the run reaches a terminal state.
-
-Only the workflow-orchestrator preset can see this tool; robot node sessions run in the worker preset and cannot start nested workflows. Requires the Buka Robots plugin for robot nodes.\n\n${DEFINITION_HELP}`;
-/** "状态"工具的描述。 */
-const STATUS_DESCRIPTION = "Read one persisted workflow run by id, or list the most recent runs (each labelled with its persistent sequence number, #N). Runs are recorded on disk by buka_workflow_start; each robot step shows its JSON route (next), and a step that aborted the run is marked aborted with the node reason in error; a user node waiting for the user is reported as pendingUser, and a robot session question or tool approval as pendingInteraction. Unfinished runs are resumed by the host observer after a restart (except runs that contain user nodes). Background runs keep advancing while you poll.";
-/** "取消"工具的描述。 */
-const CANCEL_DESCRIPTION = "Cancel one still-running workflow run started by buka_workflow_start. Cancelling a finished run is a no-op; the run record is updated on disk.";
-/** "模板"工具的描述。 */
-const TEMPLATES_DESCRIPTION = `Read the abstract workflow template catalog for reference while designing a real one-off workflow. Templates are NOT runnable definitions: each robot node carries an abstract role name (e.g. a role like "development" or "testing"), has no output schema, and no goal. Each template has a description telling you when to reference it. Use this tool first with no arguments to see the catalog (id, name, description), then pass an id to read one template's full abstract node flow. To build the real workflow, run buka_robots to see the robots you actually own, map each abstract role to a real robot, add the required output schema to every robot node, and write concrete edge prompts for the task; adapt the flow to the requirement instead of copying it verbatim. The sidebar "templates" tab shows the same catalog.`;
+(_a = globalThis).__zod_globalRegistry ?? (_a.__zod_globalRegistry = registry());
+const globalRegistry = globalThis.__zod_globalRegistry;
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/api.js
+// @__NO_SIDE_EFFECTS__
+function _string(Class, params) {
+	return new Class({
+		type: "string",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _email(Class, params) {
+	return new Class({
+		type: "string",
+		format: "email",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _guid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "guid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _uuid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "uuid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _uuidv4(Class, params) {
+	return new Class({
+		type: "string",
+		format: "uuid",
+		check: "string_format",
+		abort: false,
+		version: "v4",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _uuidv6(Class, params) {
+	return new Class({
+		type: "string",
+		format: "uuid",
+		check: "string_format",
+		abort: false,
+		version: "v6",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _uuidv7(Class, params) {
+	return new Class({
+		type: "string",
+		format: "uuid",
+		check: "string_format",
+		abort: false,
+		version: "v7",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _url(Class, params) {
+	return new Class({
+		type: "string",
+		format: "url",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _emoji(Class, params) {
+	return new Class({
+		type: "string",
+		format: "emoji",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _nanoid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "nanoid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
 /**
-* 注册编排 agent 的工作流工具。
-*
-* @param deps 上下文、配置与已建好的存储 / 观察者
+* @deprecated CUID v1 is deprecated by its authors due to information leakage
+* (timestamps embedded in the id). Use {@link _cuid2} instead.
+* See https://github.com/paralleldrive/cuid.
 */
-function registerWorkflowTools({ ctx, options, store, supervisor, ensureReady, assertOrchestrator, visibleWhen }) {
-	ctx.tools.register(defineTool({
-		name: "buka_workflow_plan",
-		description: PLAN_DESCRIPTION,
-		parameters: { definition: {
-			type: "object",
-			additionalProperties: true,
-			required: true,
-			description: "The complete ephemeral workflow definition (JSON object) described in the tool description."
-		} },
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					ok: {
-						type: "boolean",
-						required: true,
-						description: "Whether the definition can run."
-					},
-					errors: {
-						type: "array",
-						required: true,
-						description: "Validation errors.",
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								path: {
-									type: "string",
-									required: true
-								},
-								message: {
-									type: "string",
-									required: true
-								}
-							}
-						}
-					},
-					warnings: {
-						type: "array",
-						required: true,
-						description: "Non-fatal problems such as a workflow without any robot node.",
-						items: { type: "string" }
-					},
-					summary: {
-						type: "json",
-						required: true,
-						description: "Normalized node graph, or null when invalid."
-					}
-				}
-			},
-			render: (_args, value) => [{
-				type: "text",
-				text: renderPlanResult(value)
-			}]
-		},
-		async execute(args) {
-			const parsed = validateDefinition(args.definition, { maxSteps: options.maxSteps });
+// @__NO_SIDE_EFFECTS__
+function _cuid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "cuid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _cuid2(Class, params) {
+	return new Class({
+		type: "string",
+		format: "cuid2",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _ulid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "ulid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _xid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "xid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _ksuid(Class, params) {
+	return new Class({
+		type: "string",
+		format: "ksuid",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _ipv4(Class, params) {
+	return new Class({
+		type: "string",
+		format: "ipv4",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _ipv6(Class, params) {
+	return new Class({
+		type: "string",
+		format: "ipv6",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _cidrv4(Class, params) {
+	return new Class({
+		type: "string",
+		format: "cidrv4",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _cidrv6(Class, params) {
+	return new Class({
+		type: "string",
+		format: "cidrv6",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _base64(Class, params) {
+	return new Class({
+		type: "string",
+		format: "base64",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _base64url(Class, params) {
+	return new Class({
+		type: "string",
+		format: "base64url",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _e164(Class, params) {
+	return new Class({
+		type: "string",
+		format: "e164",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _jwt(Class, params) {
+	return new Class({
+		type: "string",
+		format: "jwt",
+		check: "string_format",
+		abort: false,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _isoDateTime(Class, params) {
+	return new Class({
+		type: "string",
+		format: "datetime",
+		check: "string_format",
+		offset: false,
+		local: false,
+		precision: null,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _isoDate(Class, params) {
+	return new Class({
+		type: "string",
+		format: "date",
+		check: "string_format",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _isoTime(Class, params) {
+	return new Class({
+		type: "string",
+		format: "time",
+		check: "string_format",
+		precision: null,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _isoDuration(Class, params) {
+	return new Class({
+		type: "string",
+		format: "duration",
+		check: "string_format",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _number(Class, params) {
+	return new Class({
+		type: "number",
+		checks: [],
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _int(Class, params) {
+	return new Class({
+		type: "number",
+		check: "number_format",
+		abort: false,
+		format: "safeint",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _boolean(Class, params) {
+	return new Class({
+		type: "boolean",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _unknown(Class) {
+	return new Class({ type: "unknown" });
+}
+// @__NO_SIDE_EFFECTS__
+function _never(Class, params) {
+	return new Class({
+		type: "never",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _lt(value, params) {
+	return new $ZodCheckLessThan({
+		check: "less_than",
+		...normalizeParams(params),
+		value,
+		inclusive: false
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _lte(value, params) {
+	return new $ZodCheckLessThan({
+		check: "less_than",
+		...normalizeParams(params),
+		value,
+		inclusive: true
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _gt(value, params) {
+	return new $ZodCheckGreaterThan({
+		check: "greater_than",
+		...normalizeParams(params),
+		value,
+		inclusive: false
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _gte(value, params) {
+	return new $ZodCheckGreaterThan({
+		check: "greater_than",
+		...normalizeParams(params),
+		value,
+		inclusive: true
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _multipleOf(value, params) {
+	return new $ZodCheckMultipleOf({
+		check: "multiple_of",
+		...normalizeParams(params),
+		value
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _maxLength(maximum, params) {
+	return new $ZodCheckMaxLength({
+		check: "max_length",
+		...normalizeParams(params),
+		maximum
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _minLength(minimum, params) {
+	return new $ZodCheckMinLength({
+		check: "min_length",
+		...normalizeParams(params),
+		minimum
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _length(length, params) {
+	return new $ZodCheckLengthEquals({
+		check: "length_equals",
+		...normalizeParams(params),
+		length
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _regex(pattern, params) {
+	return new $ZodCheckRegex({
+		check: "string_format",
+		format: "regex",
+		...normalizeParams(params),
+		pattern
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _lowercase(params) {
+	return new $ZodCheckLowerCase({
+		check: "string_format",
+		format: "lowercase",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _uppercase(params) {
+	return new $ZodCheckUpperCase({
+		check: "string_format",
+		format: "uppercase",
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _includes(includes, params) {
+	return new $ZodCheckIncludes({
+		check: "string_format",
+		format: "includes",
+		...normalizeParams(params),
+		includes
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _startsWith(prefix, params) {
+	return new $ZodCheckStartsWith({
+		check: "string_format",
+		format: "starts_with",
+		...normalizeParams(params),
+		prefix
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _endsWith(suffix, params) {
+	return new $ZodCheckEndsWith({
+		check: "string_format",
+		format: "ends_with",
+		...normalizeParams(params),
+		suffix
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _overwrite(tx) {
+	return new $ZodCheckOverwrite({
+		check: "overwrite",
+		tx
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _normalize(form) {
+	return /* @__PURE__ */ _overwrite((input) => input.normalize(form));
+}
+// @__NO_SIDE_EFFECTS__
+function _trim() {
+	return /* @__PURE__ */ _overwrite((input) => input.trim());
+}
+// @__NO_SIDE_EFFECTS__
+function _toLowerCase() {
+	return /* @__PURE__ */ _overwrite((input) => input.toLowerCase());
+}
+// @__NO_SIDE_EFFECTS__
+function _toUpperCase() {
+	return /* @__PURE__ */ _overwrite((input) => input.toUpperCase());
+}
+// @__NO_SIDE_EFFECTS__
+function _slugify() {
+	return /* @__PURE__ */ _overwrite((input) => slugify(input));
+}
+// @__NO_SIDE_EFFECTS__
+function _array(Class, element, params) {
+	return new Class({
+		type: "array",
+		element,
+		...normalizeParams(params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _refine(Class, fn, _params) {
+	return new Class({
+		type: "custom",
+		check: "custom",
+		fn,
+		...normalizeParams(_params)
+	});
+}
+// @__NO_SIDE_EFFECTS__
+function _superRefine(fn, params) {
+	const ch = /* @__PURE__ */ _check((payload) => {
+		payload.addIssue = (issue$2) => {
+			if (typeof issue$2 === "string") payload.issues.push(issue(issue$2, payload.value, ch._zod.def));
+			else {
+				const _issue = issue$2;
+				if (_issue.fatal) _issue.continue = false;
+				_issue.code ?? (_issue.code = "custom");
+				_issue.input ?? (_issue.input = payload.value);
+				_issue.inst ?? (_issue.inst = ch);
+				_issue.continue ?? (_issue.continue = !ch._zod.def.abort);
+				payload.issues.push(issue(_issue));
+			}
+		};
+		return fn(payload.value, payload);
+	}, params);
+	return ch;
+}
+// @__NO_SIDE_EFFECTS__
+function _check(fn, params) {
+	const ch = new $ZodCheck({
+		check: "custom",
+		...normalizeParams(params)
+	});
+	ch._zod.check = fn;
+	return ch;
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/to-json-schema.js
+function initializeContext(params) {
+	let target = params?.target ?? "draft-2020-12";
+	if (target === "draft-4") target = "draft-04";
+	if (target === "draft-7") target = "draft-07";
+	return {
+		processors: params.processors ?? {},
+		metadataRegistry: params?.metadata ?? globalRegistry,
+		target,
+		unrepresentable: params?.unrepresentable ?? "throw",
+		override: params?.override ?? (() => {}),
+		io: params?.io ?? "output",
+		counter: 0,
+		seen: /* @__PURE__ */ new Map(),
+		cycles: params?.cycles ?? "ref",
+		reused: params?.reused ?? "inline",
+		external: params?.external ?? void 0
+	};
+}
+function process$1(schema, ctx, _params = {
+	path: [],
+	schemaPath: []
+}) {
+	var _a;
+	const def = schema._zod.def;
+	const seen = ctx.seen.get(schema);
+	if (seen) {
+		seen.count++;
+		if (_params.schemaPath.includes(schema)) seen.cycle = _params.path;
+		return seen.schema;
+	}
+	const result = {
+		schema: {},
+		count: 1,
+		cycle: void 0,
+		path: _params.path
+	};
+	ctx.seen.set(schema, result);
+	const overrideSchema = schema._zod.toJSONSchema?.();
+	if (overrideSchema) result.schema = overrideSchema;
+	else {
+		const params = {
+			..._params,
+			schemaPath: [..._params.schemaPath, schema],
+			path: _params.path
+		};
+		if (schema._zod.processJSONSchema) schema._zod.processJSONSchema(ctx, result.schema, params);
+		else {
+			const _json = result.schema;
+			const processor = ctx.processors[def.type];
+			if (!processor) throw new Error(`[toJSONSchema]: Non-representable type encountered: ${def.type}`);
+			processor(schema, ctx, _json, params);
+		}
+		const parent = schema._zod.parent;
+		if (parent) {
+			if (!result.ref) result.ref = parent;
+			process$1(parent, ctx, params);
+			ctx.seen.get(parent).isParent = true;
+		}
+	}
+	const meta = ctx.metadataRegistry.get(schema);
+	if (meta) Object.assign(result.schema, meta);
+	if (ctx.io === "input" && isTransforming(schema)) {
+		delete result.schema.examples;
+		delete result.schema.default;
+	}
+	if (ctx.io === "input" && "_prefault" in result.schema) (_a = result.schema).default ?? (_a.default = result.schema._prefault);
+	delete result.schema._prefault;
+	return ctx.seen.get(schema).schema;
+}
+function extractDefs(ctx, schema) {
+	const root = ctx.seen.get(schema);
+	if (!root) throw new Error("Unprocessed schema. This is a bug in Zod.");
+	const idToSchema = /* @__PURE__ */ new Map();
+	for (const entry of ctx.seen.entries()) {
+		const id = ctx.metadataRegistry.get(entry[0])?.id;
+		if (id) {
+			const existing = idToSchema.get(id);
+			if (existing && existing !== entry[0]) throw new Error(`Duplicate schema id "${id}" detected during JSON Schema conversion. Two different schemas cannot share the same id when converted together.`);
+			idToSchema.set(id, entry[0]);
+		}
+	}
+	const makeURI = (entry) => {
+		const defsSegment = ctx.target === "draft-2020-12" ? "$defs" : "definitions";
+		if (ctx.external) {
+			const externalId = ctx.external.registry.get(entry[0])?.id;
+			const uriGenerator = ctx.external.uri ?? ((id) => id);
+			if (externalId) return { ref: uriGenerator(externalId) };
+			const id = entry[1].defId ?? entry[1].schema.id ?? `schema${ctx.counter++}`;
+			entry[1].defId = id;
 			return {
-				ok: parsed.ok,
-				errors: parsed.errors.slice(0, 50).map((error) => ({
-					path: error.path,
-					message: error.message
-				})),
-				warnings: parsed.warnings,
-				summary: parsed.ok ? jsonValue(describePlan(parsed.plan)) : null
+				defId: id,
+				ref: `${uriGenerator("__shared")}#/${defsSegment}/${id}`
 			};
 		}
-	}), { when: visibleWhen });
-	ctx.tools.register(defineTool({
-		name: "buka_workflow_start",
-		description: START_DESCRIPTION,
-		parameters: { definition: {
-			type: "object",
-			additionalProperties: true,
-			required: true,
-			description: "The complete ephemeral workflow definition (JSON object) described in the tool description."
-		} },
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					run: {
-						type: "json",
-						required: true,
-						description: "The final run record when the call ran the workflow itself; null for a background run."
-					},
-					runId: {
-						type: "string",
-						required: true,
-						description: "Run id used for buka_workflow_status / buka_workflow_cancel."
-					},
-					seq: {
-						type: "number",
-						required: true,
-						description: "Persistent run sequence number (starts at 1 and never goes back when old runs are deleted)."
-					},
-					mode: {
-						type: "string",
-						required: true,
-						description: "'background' when the observer keeps scheduling node sessions after this call returns; 'foreground' when the call waited for a terminal state."
-					}
+		if (entry[1] === root) return { ref: "#" };
+		const defUriPrefix = `#/${defsSegment}/`;
+		const defId = entry[1].schema.id ?? `__schema${ctx.counter++}`;
+		return {
+			defId,
+			ref: defUriPrefix + defId
+		};
+	};
+	const extractToDef = (entry) => {
+		if (entry[1].schema.$ref) return;
+		const seen = entry[1];
+		const { ref, defId } = makeURI(entry);
+		seen.def = { ...seen.schema };
+		if (defId) seen.defId = defId;
+		const schema = seen.schema;
+		for (const key in schema) delete schema[key];
+		schema.$ref = ref;
+	};
+	if (ctx.cycles === "throw") for (const entry of ctx.seen.entries()) {
+		const seen = entry[1];
+		if (seen.cycle) throw new Error(`Cycle detected: #/${seen.cycle?.join("/")}/<root>
+
+Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.`);
+	}
+	for (const entry of ctx.seen.entries()) {
+		const seen = entry[1];
+		if (schema === entry[0]) {
+			extractToDef(entry);
+			continue;
+		}
+		if (ctx.external) {
+			const ext = ctx.external.registry.get(entry[0])?.id;
+			if (schema !== entry[0] && ext) {
+				extractToDef(entry);
+				continue;
+			}
+		}
+		if (ctx.metadataRegistry.get(entry[0])?.id) {
+			extractToDef(entry);
+			continue;
+		}
+		if (seen.cycle) {
+			extractToDef(entry);
+			continue;
+		}
+		if (seen.count > 1) {
+			if (ctx.reused === "ref") {
+				extractToDef(entry);
+				continue;
+			}
+		}
+	}
+}
+function finalize(ctx, schema) {
+	const root = ctx.seen.get(schema);
+	if (!root) throw new Error("Unprocessed schema. This is a bug in Zod.");
+	const flattenRef = (zodSchema) => {
+		const seen = ctx.seen.get(zodSchema);
+		if (seen.ref === null) return;
+		const schema = seen.def ?? seen.schema;
+		const _cached = { ...schema };
+		const ref = seen.ref;
+		seen.ref = null;
+		if (ref) {
+			flattenRef(ref);
+			const refSeen = ctx.seen.get(ref);
+			const refSchema = refSeen.schema;
+			if (refSchema.$ref && (ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0")) {
+				schema.allOf = schema.allOf ?? [];
+				schema.allOf.push(refSchema);
+			} else Object.assign(schema, refSchema);
+			Object.assign(schema, _cached);
+			if (zodSchema._zod.parent === ref) for (const key in schema) {
+				if (key === "$ref" || key === "allOf") continue;
+				if (!(key in _cached)) delete schema[key];
+			}
+			if (refSchema.$ref && refSeen.def) for (const key in schema) {
+				if (key === "$ref" || key === "allOf") continue;
+				if (key in refSeen.def && JSON.stringify(schema[key]) === JSON.stringify(refSeen.def[key])) delete schema[key];
+			}
+		}
+		const parent = zodSchema._zod.parent;
+		if (parent && parent !== ref) {
+			flattenRef(parent);
+			const parentSeen = ctx.seen.get(parent);
+			if (parentSeen?.schema.$ref) {
+				schema.$ref = parentSeen.schema.$ref;
+				if (parentSeen.def) for (const key in schema) {
+					if (key === "$ref" || key === "allOf") continue;
+					if (key in parentSeen.def && JSON.stringify(schema[key]) === JSON.stringify(parentSeen.def[key])) delete schema[key];
+				}
+			}
+		}
+		ctx.override({
+			zodSchema,
+			jsonSchema: schema,
+			path: seen.path ?? []
+		});
+	};
+	for (const entry of [...ctx.seen.entries()].reverse()) flattenRef(entry[0]);
+	const result = {};
+	if (ctx.target === "draft-2020-12") result.$schema = "https://json-schema.org/draft/2020-12/schema";
+	else if (ctx.target === "draft-07") result.$schema = "http://json-schema.org/draft-07/schema#";
+	else if (ctx.target === "draft-04") result.$schema = "http://json-schema.org/draft-04/schema#";
+	else if (ctx.target === "openapi-3.0") {}
+	if (ctx.external?.uri) {
+		const id = ctx.external.registry.get(schema)?.id;
+		if (!id) throw new Error("Schema is missing an `id` property");
+		result.$id = ctx.external.uri(id);
+	}
+	Object.assign(result, root.def ?? root.schema);
+	const rootMetaId = ctx.metadataRegistry.get(schema)?.id;
+	if (rootMetaId !== void 0 && result.id === rootMetaId) delete result.id;
+	const defs = ctx.external?.defs ?? {};
+	for (const entry of ctx.seen.entries()) {
+		const seen = entry[1];
+		if (seen.def && seen.defId) {
+			if (seen.def.id === seen.defId) delete seen.def.id;
+			defs[seen.defId] = seen.def;
+		}
+	}
+	if (ctx.external) {} else if (Object.keys(defs).length > 0) {
+		if (ctx.target === "draft-2020-12") result.$defs = defs;
+		else result.definitions = defs;
+	}
+	try {
+		const finalized = JSON.parse(JSON.stringify(result));
+		Object.defineProperty(finalized, "~standard", {
+			value: {
+				...schema["~standard"],
+				jsonSchema: {
+					input: createStandardJSONSchemaMethod(schema, "input", ctx.processors),
+					output: createStandardJSONSchemaMethod(schema, "output", ctx.processors)
 				}
 			},
-			render: (_args, value) => [{
-				type: "text",
-				text: renderStart(value)
-			}]
-		},
-		async execute(args, exec) {
-			const agent = exec.agent;
-			if (agent === void 0 || agent === null) throw new Error("buka_workflow_start requires a calling agent; start it from a DSH session rather than a service call");
-			assertOrchestrator(agent);
-			const parsed = validateDefinition(args.definition, { maxSteps: options.maxSteps });
-			if (!parsed.ok) throw new Error(`invalid workflow definition: ${formatErrors(parsed.errors)}`);
-			const plan = parsed.plan;
-			const robots = ctx.get("bukaRobots");
-			if (plan.order.some((id) => plan.nodes[id]?.type === "robot") && (robots === void 0 || robots === null || typeof robots.dispatchSession !== "function")) throw new Error("robot nodes need a Buka Robots service with dispatchSession(); install or update @buka/dsh-plugin-robots first");
-			const userQuestions = ctx.get("userQuestions");
-			const needsUser = plan.order.some((id) => plan.nodes[id]?.type === "user");
-			if (needsUser && (userQuestions === void 0 || userQuestions === null || typeof userQuestions.ask !== "function")) throw new Error("user nodes need the user-questions service, which is unavailable in this composition");
-			if (plan.order.some((id) => {
-				const node = plan.nodes[id];
-				return node !== void 0 && node.type === "robot" && node.mode === "plan";
-			})) {
-				const commands = ctx.get("commands");
-				if (commands === void 0 || commands === null || typeof commands.execute !== "function") throw new Error("plan mode robot nodes need the commands service (the `/plan` command entry), which is unavailable in this composition");
-				if (robots === void 0 || robots === null || robots.supportsPlanMode !== true) throw new Error("plan mode robot nodes need @buka/dsh-plugin-robots 0.9.0 or newer (supportsPlanMode is missing); update the Buka Robots plugin");
-				if (userQuestions === void 0 || userQuestions === null || typeof userQuestions.ask !== "function") throw new Error("plan mode robot nodes need the user-questions service for the native plan review card, which is unavailable in this composition");
-			}
-			await ensureReady();
-			if (needsUser) {
-				const run = await supervisor.start({
-					plan,
-					definition: args.definition,
-					agent,
-					mode: "foreground",
-					signal: exec.signal
+			enumerable: false,
+			writable: false
+		});
+		return finalized;
+	} catch (_err) {
+		throw new Error("Error converting schema to JSON.");
+	}
+}
+function isTransforming(_schema, _ctx) {
+	const ctx = _ctx ?? { seen: /* @__PURE__ */ new Set() };
+	if (ctx.seen.has(_schema)) return false;
+	ctx.seen.add(_schema);
+	const def = _schema._zod.def;
+	if (def.type === "transform") return true;
+	if (def.type === "array") return isTransforming(def.element, ctx);
+	if (def.type === "set") return isTransforming(def.valueType, ctx);
+	if (def.type === "lazy") return isTransforming(def.getter(), ctx);
+	if (def.type === "promise" || def.type === "optional" || def.type === "nonoptional" || def.type === "nullable" || def.type === "readonly" || def.type === "default" || def.type === "prefault") return isTransforming(def.innerType, ctx);
+	if (def.type === "intersection") return isTransforming(def.left, ctx) || isTransforming(def.right, ctx);
+	if (def.type === "record" || def.type === "map") return isTransforming(def.keyType, ctx) || isTransforming(def.valueType, ctx);
+	if (def.type === "pipe") {
+		if (_schema._zod.traits.has("$ZodCodec")) return true;
+		return isTransforming(def.in, ctx) || isTransforming(def.out, ctx);
+	}
+	if (def.type === "object") {
+		for (const key in def.shape) if (isTransforming(def.shape[key], ctx)) return true;
+		return false;
+	}
+	if (def.type === "union") {
+		for (const option of def.options) if (isTransforming(option, ctx)) return true;
+		return false;
+	}
+	if (def.type === "tuple") {
+		for (const item of def.items) if (isTransforming(item, ctx)) return true;
+		if (def.rest && isTransforming(def.rest, ctx)) return true;
+		return false;
+	}
+	return false;
+}
+/**
+* Creates a toJSONSchema method for a schema instance.
+* This encapsulates the logic of initializing context, processing, extracting defs, and finalizing.
+*/
+const createToJSONSchemaMethod = (schema, processors = {}) => (params) => {
+	const ctx = initializeContext({
+		...params,
+		processors
+	});
+	process$1(schema, ctx);
+	extractDefs(ctx, schema);
+	return finalize(ctx, schema);
+};
+const createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) => {
+	const { libraryOptions, target } = params ?? {};
+	const ctx = initializeContext({
+		...libraryOptions ?? {},
+		target,
+		io,
+		processors
+	});
+	process$1(schema, ctx);
+	extractDefs(ctx, schema);
+	return finalize(ctx, schema);
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/json-schema-processors.js
+const formatMap = {
+	guid: "uuid",
+	url: "uri",
+	datetime: "date-time",
+	json_string: "json-string",
+	regex: ""
+};
+const stringProcessor = (schema, ctx, _json, _params) => {
+	const json = _json;
+	json.type = "string";
+	const { minimum, maximum, format, patterns, contentEncoding } = schema._zod.bag;
+	if (typeof minimum === "number") json.minLength = minimum;
+	if (typeof maximum === "number") json.maxLength = maximum;
+	if (format) {
+		json.format = formatMap[format] ?? format;
+		if (json.format === "") delete json.format;
+		if (format === "time") delete json.format;
+	}
+	if (contentEncoding) json.contentEncoding = contentEncoding;
+	if (patterns && patterns.size > 0) {
+		const regexes = [...patterns];
+		if (regexes.length === 1) json.pattern = regexes[0].source;
+		else if (regexes.length > 1) json.allOf = [...regexes.map((regex) => ({
+			...ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0" ? { type: "string" } : {},
+			pattern: regex.source
+		}))];
+	}
+};
+const numberProcessor = (schema, ctx, _json, _params) => {
+	const json = _json;
+	const { minimum, maximum, format, multipleOf, exclusiveMaximum, exclusiveMinimum } = schema._zod.bag;
+	if (typeof format === "string" && format.includes("int")) json.type = "integer";
+	else json.type = "number";
+	const exMin = typeof exclusiveMinimum === "number" && exclusiveMinimum >= (minimum ?? Number.NEGATIVE_INFINITY);
+	const exMax = typeof exclusiveMaximum === "number" && exclusiveMaximum <= (maximum ?? Number.POSITIVE_INFINITY);
+	const legacy = ctx.target === "draft-04" || ctx.target === "openapi-3.0";
+	if (exMin) {
+		if (legacy) {
+			json.minimum = exclusiveMinimum;
+			json.exclusiveMinimum = true;
+		} else json.exclusiveMinimum = exclusiveMinimum;
+	} else if (typeof minimum === "number") json.minimum = minimum;
+	if (exMax) {
+		if (legacy) {
+			json.maximum = exclusiveMaximum;
+			json.exclusiveMaximum = true;
+		} else json.exclusiveMaximum = exclusiveMaximum;
+	} else if (typeof maximum === "number") json.maximum = maximum;
+	if (typeof multipleOf === "number") json.multipleOf = multipleOf;
+};
+const booleanProcessor = (_schema, _ctx, json, _params) => {
+	json.type = "boolean";
+};
+const neverProcessor = (_schema, _ctx, json, _params) => {
+	json.not = {};
+};
+const enumProcessor = (schema, _ctx, json, _params) => {
+	const def = schema._zod.def;
+	const values = getEnumValues(def.entries);
+	if (values.every((v) => typeof v === "number")) json.type = "number";
+	if (values.every((v) => typeof v === "string")) json.type = "string";
+	json.enum = values;
+};
+const literalProcessor = (schema, ctx, json, _params) => {
+	const def = schema._zod.def;
+	const vals = [];
+	for (const val of def.values) if (val === void 0) {
+		if (ctx.unrepresentable === "throw") throw new Error("Literal `undefined` cannot be represented in JSON Schema");
+	} else if (typeof val === "bigint") {
+		if (ctx.unrepresentable === "throw") throw new Error("BigInt literals cannot be represented in JSON Schema");
+		else vals.push(Number(val));
+	} else vals.push(val);
+	if (vals.length === 0) {} else if (vals.length === 1) {
+		const val = vals[0];
+		json.type = val === null ? "null" : typeof val;
+		if (ctx.target === "draft-04" || ctx.target === "openapi-3.0") json.enum = [val];
+		else json.const = val;
+	} else {
+		if (vals.every((v) => typeof v === "number")) json.type = "number";
+		if (vals.every((v) => typeof v === "string")) json.type = "string";
+		if (vals.every((v) => typeof v === "boolean")) json.type = "boolean";
+		if (vals.every((v) => v === null)) json.type = "null";
+		json.enum = vals;
+	}
+};
+const customProcessor = (_schema, ctx, _json, _params) => {
+	if (ctx.unrepresentable === "throw") throw new Error("Custom types cannot be represented in JSON Schema");
+};
+const transformProcessor = (_schema, ctx, _json, _params) => {
+	if (ctx.unrepresentable === "throw") throw new Error("Transforms cannot be represented in JSON Schema");
+};
+const arrayProcessor = (schema, ctx, _json, params) => {
+	const json = _json;
+	const def = schema._zod.def;
+	const { minimum, maximum } = schema._zod.bag;
+	if (typeof minimum === "number") json.minItems = minimum;
+	if (typeof maximum === "number") json.maxItems = maximum;
+	json.type = "array";
+	json.items = process$1(def.element, ctx, {
+		...params,
+		path: [...params.path, "items"]
+	});
+};
+const objectProcessor = (schema, ctx, _json, params) => {
+	const json = _json;
+	const def = schema._zod.def;
+	json.type = "object";
+	json.properties = {};
+	const shape = def.shape;
+	for (const key in shape) json.properties[key] = process$1(shape[key], ctx, {
+		...params,
+		path: [
+			...params.path,
+			"properties",
+			key
+		]
+	});
+	const allKeys = new Set(Object.keys(shape));
+	const requiredKeys = new Set([...allKeys].filter((key) => {
+		const v = def.shape[key]._zod;
+		if (ctx.io === "input") return v.optin === void 0;
+		else return v.optout === void 0;
+	}));
+	if (requiredKeys.size > 0) json.required = Array.from(requiredKeys);
+	if (def.catchall?._zod.def.type === "never") json.additionalProperties = false;
+	else if (!def.catchall) {
+		if (ctx.io === "output") json.additionalProperties = false;
+	} else if (def.catchall) json.additionalProperties = process$1(def.catchall, ctx, {
+		...params,
+		path: [...params.path, "additionalProperties"]
+	});
+};
+const unionProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	const isExclusive = def.inclusive === false;
+	const options = def.options.map((x, i) => process$1(x, ctx, {
+		...params,
+		path: [
+			...params.path,
+			isExclusive ? "oneOf" : "anyOf",
+			i
+		]
+	}));
+	if (isExclusive) json.oneOf = options;
+	else json.anyOf = options;
+};
+const intersectionProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	const a = process$1(def.left, ctx, {
+		...params,
+		path: [
+			...params.path,
+			"allOf",
+			0
+		]
+	});
+	const b = process$1(def.right, ctx, {
+		...params,
+		path: [
+			...params.path,
+			"allOf",
+			1
+		]
+	});
+	const isSimpleIntersection = (val) => "allOf" in val && Object.keys(val).length === 1;
+	json.allOf = [...isSimpleIntersection(a) ? a.allOf : [a], ...isSimpleIntersection(b) ? b.allOf : [b]];
+};
+const recordProcessor = (schema, ctx, _json, params) => {
+	const json = _json;
+	const def = schema._zod.def;
+	json.type = "object";
+	const keyType = def.keyType;
+	const patterns = keyType._zod.bag?.patterns;
+	if (def.mode === "loose" && patterns && patterns.size > 0) {
+		const valueSchema = process$1(def.valueType, ctx, {
+			...params,
+			path: [
+				...params.path,
+				"patternProperties",
+				"*"
+			]
+		});
+		json.patternProperties = {};
+		for (const pattern of patterns) json.patternProperties[pattern.source] = valueSchema;
+	} else {
+		if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") json.propertyNames = process$1(def.keyType, ctx, {
+			...params,
+			path: [...params.path, "propertyNames"]
+		});
+		json.additionalProperties = process$1(def.valueType, ctx, {
+			...params,
+			path: [...params.path, "additionalProperties"]
+		});
+	}
+	const keyValues = keyType._zod.values;
+	if (keyValues) {
+		const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
+		if (validKeyValues.length > 0) json.required = validKeyValues;
+	}
+};
+const nullableProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	const inner = process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	if (ctx.target === "openapi-3.0") {
+		seen.ref = def.innerType;
+		json.nullable = true;
+	} else json.anyOf = [inner, { type: "null" }];
+};
+const nonoptionalProcessor = (schema, ctx, _json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+};
+const defaultProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+	json.default = JSON.parse(JSON.stringify(def.defaultValue));
+};
+const prefaultProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+	if (ctx.io === "input") json._prefault = JSON.parse(JSON.stringify(def.defaultValue));
+};
+const catchProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+	let catchValue;
+	try {
+		catchValue = def.catchValue(void 0);
+	} catch {
+		throw new Error("Dynamic catch values are not supported in JSON Schema");
+	}
+	json.default = catchValue;
+};
+const pipeProcessor = (schema, ctx, _json, params) => {
+	const def = schema._zod.def;
+	const inIsTransform = def.in._zod.traits.has("$ZodTransform");
+	const innerType = ctx.io === "input" ? inIsTransform ? def.out : def.in : def.out;
+	process$1(innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = innerType;
+};
+const readonlyProcessor = (schema, ctx, json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+	json.readOnly = true;
+};
+const optionalProcessor = (schema, ctx, _json, params) => {
+	const def = schema._zod.def;
+	process$1(def.innerType, ctx, params);
+	const seen = ctx.seen.get(schema);
+	seen.ref = def.innerType;
+};
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/iso.js
+const ZodISODateTime = /*@__PURE__*/ $constructor("ZodISODateTime", (inst, def) => {
+	$ZodISODateTime.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+function datetime(params) {
+	return /* @__PURE__ */ _isoDateTime(ZodISODateTime, params);
+}
+const ZodISODate = /*@__PURE__*/ $constructor("ZodISODate", (inst, def) => {
+	$ZodISODate.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+function date(params) {
+	return /* @__PURE__ */ _isoDate(ZodISODate, params);
+}
+const ZodISOTime = /*@__PURE__*/ $constructor("ZodISOTime", (inst, def) => {
+	$ZodISOTime.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+function time(params) {
+	return /* @__PURE__ */ _isoTime(ZodISOTime, params);
+}
+const ZodISODuration = /*@__PURE__*/ $constructor("ZodISODuration", (inst, def) => {
+	$ZodISODuration.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+function duration(params) {
+	return /* @__PURE__ */ _isoDuration(ZodISODuration, params);
+}
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/errors.js
+const initializer = (inst, issues) => {
+	$ZodError.init(inst, issues);
+	inst.name = "ZodError";
+	Object.defineProperties(inst, {
+		format: { value: (mapper) => formatError(inst, mapper) },
+		flatten: { value: (mapper) => flattenError(inst, mapper) },
+		addIssue: { value: (issue) => {
+			inst.issues.push(issue);
+			inst.message = JSON.stringify(inst.issues, jsonStringifyReplacer, 2);
+		} },
+		addIssues: { value: (issues) => {
+			inst.issues.push(...issues);
+			inst.message = JSON.stringify(inst.issues, jsonStringifyReplacer, 2);
+		} },
+		isEmpty: { get() {
+			return inst.issues.length === 0;
+		} }
+	});
+};
+const ZodRealError = /*@__PURE__*/ $constructor("ZodError", initializer, { Parent: Error });
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/parse.js
+const parse = /* @__PURE__ */ _parse(ZodRealError);
+const parseAsync = /* @__PURE__ */ _parseAsync(ZodRealError);
+const safeParse = /* @__PURE__ */ _safeParse(ZodRealError);
+const safeParseAsync = /* @__PURE__ */ _safeParseAsync(ZodRealError);
+const encode = /* @__PURE__ */ _encode(ZodRealError);
+const decode = /* @__PURE__ */ _decode(ZodRealError);
+const encodeAsync = /* @__PURE__ */ _encodeAsync(ZodRealError);
+const decodeAsync = /* @__PURE__ */ _decodeAsync(ZodRealError);
+const safeEncode = /* @__PURE__ */ _safeEncode(ZodRealError);
+const safeDecode = /* @__PURE__ */ _safeDecode(ZodRealError);
+const safeEncodeAsync = /* @__PURE__ */ _safeEncodeAsync(ZodRealError);
+const safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync(ZodRealError);
+// node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/schemas.js
+const _installedGroups = /* @__PURE__ */ new WeakMap();
+function _installLazyMethods(inst, group, methods) {
+	const proto = Object.getPrototypeOf(inst);
+	let installed = _installedGroups.get(proto);
+	if (!installed) {
+		installed = /* @__PURE__ */ new Set();
+		_installedGroups.set(proto, installed);
+	}
+	if (installed.has(group)) return;
+	installed.add(group);
+	for (const key in methods) {
+		const fn = methods[key];
+		Object.defineProperty(proto, key, {
+			configurable: true,
+			enumerable: false,
+			get() {
+				const bound = fn.bind(this);
+				Object.defineProperty(this, key, {
+					configurable: true,
+					writable: true,
+					enumerable: true,
+					value: bound
 				});
-				return {
-					run: jsonValue(run),
-					runId: typeof run.runId === "string" ? run.runId : "",
-					seq: typeof run.seq === "number" && Number.isInteger(run.seq) ? run.seq : 0,
-					mode: "foreground"
-				};
+				return bound;
+			},
+			set(v) {
+				Object.defineProperty(this, key, {
+					configurable: true,
+					writable: true,
+					enumerable: true,
+					value: v
+				});
 			}
-			const started = await supervisor.start({
-				plan,
-				definition: args.definition,
-				agent,
-				mode: "background"
-			});
-			const runId = typeof started?.runId === "string" ? started.runId : "";
-			if (runId === "") throw new Error("workflow failed to start");
-			const createdRun = await store.readRun(runId);
-			return {
-				run: null,
-				runId,
-				seq: createdRun !== null && typeof createdRun.seq === "number" && Number.isInteger(createdRun.seq) ? createdRun.seq : typeof started.seq === "number" ? started.seq : 0,
-				mode: "background"
-			};
-		}
-	}), { when: visibleWhen });
-	ctx.tools.register(defineTool({
-		name: "buka_workflow_status",
-		description: STATUS_DESCRIPTION,
-		parameters: { run_id: {
-			type: "string",
-			description: "Run id returned by buka_workflow_start. Omit to list the most recent runs."
-		} },
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					run: {
-						type: "json",
-						required: true,
-						description: "One run record, or null."
-					},
-					runs: {
-						type: "json",
-						required: true,
-						description: "Recent run summaries when no run id was given."
-					}
-				}
-			},
-			render: (_args, value) => [{
-				type: "text",
-				text: renderStatus(value)
-			}]
+		});
+	}
+}
+const ZodType = /*@__PURE__*/ $constructor("ZodType", (inst, def) => {
+	$ZodType.init(inst, def);
+	Object.assign(inst["~standard"], { jsonSchema: {
+		input: createStandardJSONSchemaMethod(inst, "input"),
+		output: createStandardJSONSchemaMethod(inst, "output")
+	} });
+	inst.toJSONSchema = createToJSONSchemaMethod(inst, {});
+	inst.def = def;
+	inst.type = def.type;
+	Object.defineProperty(inst, "_def", { value: def });
+	inst.parse = (data, params) => parse(inst, data, params, { callee: inst.parse });
+	inst.safeParse = (data, params) => safeParse(inst, data, params);
+	inst.parseAsync = async (data, params) => parseAsync(inst, data, params, { callee: inst.parseAsync });
+	inst.safeParseAsync = async (data, params) => safeParseAsync(inst, data, params);
+	inst.spa = inst.safeParseAsync;
+	inst.encode = (data, params) => encode(inst, data, params);
+	inst.decode = (data, params) => decode(inst, data, params);
+	inst.encodeAsync = async (data, params) => encodeAsync(inst, data, params);
+	inst.decodeAsync = async (data, params) => decodeAsync(inst, data, params);
+	inst.safeEncode = (data, params) => safeEncode(inst, data, params);
+	inst.safeDecode = (data, params) => safeDecode(inst, data, params);
+	inst.safeEncodeAsync = async (data, params) => safeEncodeAsync(inst, data, params);
+	inst.safeDecodeAsync = async (data, params) => safeDecodeAsync(inst, data, params);
+	_installLazyMethods(inst, "ZodType", {
+		check(...chks) {
+			const def = this.def;
+			return this.clone(mergeDefs(def, { checks: [...def.checks ?? [], ...chks.map((ch) => typeof ch === "function" ? { _zod: {
+				check: ch,
+				def: { check: "custom" },
+				onattach: []
+			} } : ch)] }), { parent: true });
 		},
-		async execute(args) {
-			await ensureReady();
-			const runId = typeof args.run_id === "string" ? args.run_id.trim() : "";
-			if (runId !== "") return {
-				run: jsonValue(await store.readRun(runId)),
-				runs: []
-			};
-			return {
-				run: null,
-				runs: jsonValue(await store.listRuns(10))
-			};
+		with(...chks) {
+			return this.check(...chks);
+		},
+		clone(def, params) {
+			return clone(this, def, params);
+		},
+		brand() {
+			return this;
+		},
+		register(reg, meta) {
+			reg.add(this, meta);
+			return this;
+		},
+		refine(check, params) {
+			return this.check(refine(check, params));
+		},
+		superRefine(refinement, params) {
+			return this.check(superRefine(refinement, params));
+		},
+		overwrite(fn) {
+			return this.check(/* @__PURE__ */ _overwrite(fn));
+		},
+		optional() {
+			return optional(this);
+		},
+		exactOptional() {
+			return exactOptional(this);
+		},
+		nullable() {
+			return nullable(this);
+		},
+		nullish() {
+			return optional(nullable(this));
+		},
+		nonoptional(params) {
+			return nonoptional(this, params);
+		},
+		array() {
+			return array(this);
+		},
+		or(arg) {
+			return union([this, arg]);
+		},
+		and(arg) {
+			return intersection(this, arg);
+		},
+		transform(tx) {
+			return pipe(this, transform(tx));
+		},
+		default(d) {
+			return _default(this, d);
+		},
+		prefault(d) {
+			return prefault(this, d);
+		},
+		catch(params) {
+			return _catch(this, params);
+		},
+		pipe(target) {
+			return pipe(this, target);
+		},
+		readonly() {
+			return readonly(this);
+		},
+		describe(description) {
+			const cl = this.clone();
+			globalRegistry.add(cl, { description });
+			return cl;
+		},
+		meta(...args) {
+			if (args.length === 0) return globalRegistry.get(this);
+			const cl = this.clone();
+			globalRegistry.add(cl, args[0]);
+			return cl;
+		},
+		isOptional() {
+			return this.safeParse(void 0).success;
+		},
+		isNullable() {
+			return this.safeParse(null).success;
+		},
+		apply(fn) {
+			return fn(this);
 		}
-	}), { when: visibleWhen });
-	ctx.tools.register(defineTool({
-		name: "buka_workflow_cancel",
-		description: CANCEL_DESCRIPTION,
-		parameters: { run_id: {
-			type: "string",
-			required: true,
-			description: "Run id returned by buka_workflow_start."
-		} },
+	});
+	Object.defineProperty(inst, "description", {
+		get() {
+			return globalRegistry.get(inst)?.description;
+		},
+		configurable: true
+	});
+	return inst;
+});
+/** @internal */
+const _ZodString = /*@__PURE__*/ $constructor("_ZodString", (inst, def) => {
+	$ZodString.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => stringProcessor(inst, ctx, json, params);
+	const bag = inst._zod.bag;
+	inst.format = bag.format ?? null;
+	inst.minLength = bag.minimum ?? null;
+	inst.maxLength = bag.maximum ?? null;
+	_installLazyMethods(inst, "_ZodString", {
+		regex(...args) {
+			return this.check(/* @__PURE__ */ _regex(...args));
+		},
+		includes(...args) {
+			return this.check(/* @__PURE__ */ _includes(...args));
+		},
+		startsWith(...args) {
+			return this.check(/* @__PURE__ */ _startsWith(...args));
+		},
+		endsWith(...args) {
+			return this.check(/* @__PURE__ */ _endsWith(...args));
+		},
+		min(...args) {
+			return this.check(/* @__PURE__ */ _minLength(...args));
+		},
+		max(...args) {
+			return this.check(/* @__PURE__ */ _maxLength(...args));
+		},
+		length(...args) {
+			return this.check(/* @__PURE__ */ _length(...args));
+		},
+		nonempty(...args) {
+			return this.check(/* @__PURE__ */ _minLength(1, ...args));
+		},
+		lowercase(params) {
+			return this.check(/* @__PURE__ */ _lowercase(params));
+		},
+		uppercase(params) {
+			return this.check(/* @__PURE__ */ _uppercase(params));
+		},
+		trim() {
+			return this.check(/* @__PURE__ */ _trim());
+		},
+		normalize(...args) {
+			return this.check(/* @__PURE__ */ _normalize(...args));
+		},
+		toLowerCase() {
+			return this.check(/* @__PURE__ */ _toLowerCase());
+		},
+		toUpperCase() {
+			return this.check(/* @__PURE__ */ _toUpperCase());
+		},
+		slugify() {
+			return this.check(/* @__PURE__ */ _slugify());
+		}
+	});
+});
+const ZodString = /*@__PURE__*/ $constructor("ZodString", (inst, def) => {
+	$ZodString.init(inst, def);
+	_ZodString.init(inst, def);
+	inst.email = (params) => inst.check(/* @__PURE__ */ _email(ZodEmail, params));
+	inst.url = (params) => inst.check(/* @__PURE__ */ _url(ZodURL, params));
+	inst.jwt = (params) => inst.check(/* @__PURE__ */ _jwt(ZodJWT, params));
+	inst.emoji = (params) => inst.check(/* @__PURE__ */ _emoji(ZodEmoji, params));
+	inst.guid = (params) => inst.check(/* @__PURE__ */ _guid(ZodGUID, params));
+	inst.uuid = (params) => inst.check(/* @__PURE__ */ _uuid(ZodUUID, params));
+	inst.uuidv4 = (params) => inst.check(/* @__PURE__ */ _uuidv4(ZodUUID, params));
+	inst.uuidv6 = (params) => inst.check(/* @__PURE__ */ _uuidv6(ZodUUID, params));
+	inst.uuidv7 = (params) => inst.check(/* @__PURE__ */ _uuidv7(ZodUUID, params));
+	inst.nanoid = (params) => inst.check(/* @__PURE__ */ _nanoid(ZodNanoID, params));
+	inst.guid = (params) => inst.check(/* @__PURE__ */ _guid(ZodGUID, params));
+	inst.cuid = (params) => inst.check(/* @__PURE__ */ _cuid(ZodCUID, params));
+	inst.cuid2 = (params) => inst.check(/* @__PURE__ */ _cuid2(ZodCUID2, params));
+	inst.ulid = (params) => inst.check(/* @__PURE__ */ _ulid(ZodULID, params));
+	inst.base64 = (params) => inst.check(/* @__PURE__ */ _base64(ZodBase64, params));
+	inst.base64url = (params) => inst.check(/* @__PURE__ */ _base64url(ZodBase64URL, params));
+	inst.xid = (params) => inst.check(/* @__PURE__ */ _xid(ZodXID, params));
+	inst.ksuid = (params) => inst.check(/* @__PURE__ */ _ksuid(ZodKSUID, params));
+	inst.ipv4 = (params) => inst.check(/* @__PURE__ */ _ipv4(ZodIPv4, params));
+	inst.ipv6 = (params) => inst.check(/* @__PURE__ */ _ipv6(ZodIPv6, params));
+	inst.cidrv4 = (params) => inst.check(/* @__PURE__ */ _cidrv4(ZodCIDRv4, params));
+	inst.cidrv6 = (params) => inst.check(/* @__PURE__ */ _cidrv6(ZodCIDRv6, params));
+	inst.e164 = (params) => inst.check(/* @__PURE__ */ _e164(ZodE164, params));
+	inst.datetime = (params) => inst.check(datetime(params));
+	inst.date = (params) => inst.check(date(params));
+	inst.time = (params) => inst.check(time(params));
+	inst.duration = (params) => inst.check(duration(params));
+});
+function string(params) {
+	return /* @__PURE__ */ _string(ZodString, params);
+}
+const ZodStringFormat = /*@__PURE__*/ $constructor("ZodStringFormat", (inst, def) => {
+	$ZodStringFormat.init(inst, def);
+	_ZodString.init(inst, def);
+});
+const ZodEmail = /*@__PURE__*/ $constructor("ZodEmail", (inst, def) => {
+	$ZodEmail.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodGUID = /*@__PURE__*/ $constructor("ZodGUID", (inst, def) => {
+	$ZodGUID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodUUID = /*@__PURE__*/ $constructor("ZodUUID", (inst, def) => {
+	$ZodUUID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodURL = /*@__PURE__*/ $constructor("ZodURL", (inst, def) => {
+	$ZodURL.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodEmoji = /*@__PURE__*/ $constructor("ZodEmoji", (inst, def) => {
+	$ZodEmoji.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodNanoID = /*@__PURE__*/ $constructor("ZodNanoID", (inst, def) => {
+	$ZodNanoID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+/**
+* @deprecated CUID v1 is deprecated by its authors due to information leakage
+* (timestamps embedded in the id). Use {@link ZodCUID2} instead.
+* See https://github.com/paralleldrive/cuid.
+*/
+const ZodCUID = /*@__PURE__*/ $constructor("ZodCUID", (inst, def) => {
+	$ZodCUID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodCUID2 = /*@__PURE__*/ $constructor("ZodCUID2", (inst, def) => {
+	$ZodCUID2.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodULID = /*@__PURE__*/ $constructor("ZodULID", (inst, def) => {
+	$ZodULID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodXID = /*@__PURE__*/ $constructor("ZodXID", (inst, def) => {
+	$ZodXID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodKSUID = /*@__PURE__*/ $constructor("ZodKSUID", (inst, def) => {
+	$ZodKSUID.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodIPv4 = /*@__PURE__*/ $constructor("ZodIPv4", (inst, def) => {
+	$ZodIPv4.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodIPv6 = /*@__PURE__*/ $constructor("ZodIPv6", (inst, def) => {
+	$ZodIPv6.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodCIDRv4 = /*@__PURE__*/ $constructor("ZodCIDRv4", (inst, def) => {
+	$ZodCIDRv4.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodCIDRv6 = /*@__PURE__*/ $constructor("ZodCIDRv6", (inst, def) => {
+	$ZodCIDRv6.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodBase64 = /*@__PURE__*/ $constructor("ZodBase64", (inst, def) => {
+	$ZodBase64.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodBase64URL = /*@__PURE__*/ $constructor("ZodBase64URL", (inst, def) => {
+	$ZodBase64URL.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodE164 = /*@__PURE__*/ $constructor("ZodE164", (inst, def) => {
+	$ZodE164.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodJWT = /*@__PURE__*/ $constructor("ZodJWT", (inst, def) => {
+	$ZodJWT.init(inst, def);
+	ZodStringFormat.init(inst, def);
+});
+const ZodNumber = /*@__PURE__*/ $constructor("ZodNumber", (inst, def) => {
+	$ZodNumber.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => numberProcessor(inst, ctx, json, params);
+	_installLazyMethods(inst, "ZodNumber", {
+		gt(value, params) {
+			return this.check(/* @__PURE__ */ _gt(value, params));
+		},
+		gte(value, params) {
+			return this.check(/* @__PURE__ */ _gte(value, params));
+		},
+		min(value, params) {
+			return this.check(/* @__PURE__ */ _gte(value, params));
+		},
+		lt(value, params) {
+			return this.check(/* @__PURE__ */ _lt(value, params));
+		},
+		lte(value, params) {
+			return this.check(/* @__PURE__ */ _lte(value, params));
+		},
+		max(value, params) {
+			return this.check(/* @__PURE__ */ _lte(value, params));
+		},
+		int(params) {
+			return this.check(int(params));
+		},
+		safe(params) {
+			return this.check(int(params));
+		},
+		positive(params) {
+			return this.check(/* @__PURE__ */ _gt(0, params));
+		},
+		nonnegative(params) {
+			return this.check(/* @__PURE__ */ _gte(0, params));
+		},
+		negative(params) {
+			return this.check(/* @__PURE__ */ _lt(0, params));
+		},
+		nonpositive(params) {
+			return this.check(/* @__PURE__ */ _lte(0, params));
+		},
+		multipleOf(value, params) {
+			return this.check(/* @__PURE__ */ _multipleOf(value, params));
+		},
+		step(value, params) {
+			return this.check(/* @__PURE__ */ _multipleOf(value, params));
+		},
+		finite() {
+			return this;
+		}
+	});
+	const bag = inst._zod.bag;
+	inst.minValue = Math.max(bag.minimum ?? Number.NEGATIVE_INFINITY, bag.exclusiveMinimum ?? Number.NEGATIVE_INFINITY) ?? null;
+	inst.maxValue = Math.min(bag.maximum ?? Number.POSITIVE_INFINITY, bag.exclusiveMaximum ?? Number.POSITIVE_INFINITY) ?? null;
+	inst.isInt = (bag.format ?? "").includes("int") || Number.isSafeInteger(bag.multipleOf ?? .5);
+	inst.isFinite = true;
+	inst.format = bag.format ?? null;
+});
+function number(params) {
+	return /* @__PURE__ */ _number(ZodNumber, params);
+}
+const ZodNumberFormat = /*@__PURE__*/ $constructor("ZodNumberFormat", (inst, def) => {
+	$ZodNumberFormat.init(inst, def);
+	ZodNumber.init(inst, def);
+});
+function int(params) {
+	return /* @__PURE__ */ _int(ZodNumberFormat, params);
+}
+const ZodBoolean = /*@__PURE__*/ $constructor("ZodBoolean", (inst, def) => {
+	$ZodBoolean.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
+});
+function boolean(params) {
+	return /* @__PURE__ */ _boolean(ZodBoolean, params);
+}
+const ZodUnknown = /*@__PURE__*/ $constructor("ZodUnknown", (inst, def) => {
+	$ZodUnknown.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => void 0;
+});
+function unknown() {
+	return /* @__PURE__ */ _unknown(ZodUnknown);
+}
+const ZodNever = /*@__PURE__*/ $constructor("ZodNever", (inst, def) => {
+	$ZodNever.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => neverProcessor(inst, ctx, json, params);
+});
+function never(params) {
+	return /* @__PURE__ */ _never(ZodNever, params);
+}
+const ZodArray = /*@__PURE__*/ $constructor("ZodArray", (inst, def) => {
+	$ZodArray.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => arrayProcessor(inst, ctx, json, params);
+	inst.element = def.element;
+	_installLazyMethods(inst, "ZodArray", {
+		min(n, params) {
+			return this.check(/* @__PURE__ */ _minLength(n, params));
+		},
+		nonempty(params) {
+			return this.check(/* @__PURE__ */ _minLength(1, params));
+		},
+		max(n, params) {
+			return this.check(/* @__PURE__ */ _maxLength(n, params));
+		},
+		length(n, params) {
+			return this.check(/* @__PURE__ */ _length(n, params));
+		},
+		unwrap() {
+			return this.element;
+		}
+	});
+});
+function array(element, params) {
+	return /* @__PURE__ */ _array(ZodArray, element, params);
+}
+const ZodObject = /*@__PURE__*/ $constructor("ZodObject", (inst, def) => {
+	$ZodObjectJIT.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => objectProcessor(inst, ctx, json, params);
+	defineLazy(inst, "shape", () => {
+		return def.shape;
+	});
+	_installLazyMethods(inst, "ZodObject", {
+		keyof() {
+			return _enum(Object.keys(this._zod.def.shape));
+		},
+		catchall(catchall) {
+			return this.clone({
+				...this._zod.def,
+				catchall
+			});
+		},
+		passthrough() {
+			return this.clone({
+				...this._zod.def,
+				catchall: unknown()
+			});
+		},
+		loose() {
+			return this.clone({
+				...this._zod.def,
+				catchall: unknown()
+			});
+		},
+		strict() {
+			return this.clone({
+				...this._zod.def,
+				catchall: never()
+			});
+		},
+		strip() {
+			return this.clone({
+				...this._zod.def,
+				catchall: void 0
+			});
+		},
+		extend(incoming) {
+			return extend(this, incoming);
+		},
+		safeExtend(incoming) {
+			return safeExtend(this, incoming);
+		},
+		merge(other) {
+			return merge(this, other);
+		},
+		pick(mask) {
+			return pick(this, mask);
+		},
+		omit(mask) {
+			return omit(this, mask);
+		},
+		partial(...args) {
+			return partial(ZodOptional, this, args[0]);
+		},
+		required(...args) {
+			return required(ZodNonOptional, this, args[0]);
+		}
+	});
+});
+function object(shape, params) {
+	const def = {
+		type: "object",
+		shape: shape ?? {},
+		...normalizeParams(params)
+	};
+	return new ZodObject(def);
+}
+const ZodUnion = /*@__PURE__*/ $constructor("ZodUnion", (inst, def) => {
+	$ZodUnion.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => unionProcessor(inst, ctx, json, params);
+	inst.options = def.options;
+});
+function union(options, params) {
+	return new ZodUnion({
+		type: "union",
+		options,
+		...normalizeParams(params)
+	});
+}
+const ZodDiscriminatedUnion = /*@__PURE__*/ $constructor("ZodDiscriminatedUnion", (inst, def) => {
+	ZodUnion.init(inst, def);
+	$ZodDiscriminatedUnion.init(inst, def);
+});
+function discriminatedUnion(discriminator, options, params) {
+	return new ZodDiscriminatedUnion({
+		type: "union",
+		options,
+		discriminator,
+		...normalizeParams(params)
+	});
+}
+const ZodIntersection = /*@__PURE__*/ $constructor("ZodIntersection", (inst, def) => {
+	$ZodIntersection.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => intersectionProcessor(inst, ctx, json, params);
+});
+function intersection(left, right) {
+	return new ZodIntersection({
+		type: "intersection",
+		left,
+		right
+	});
+}
+const ZodRecord = /*@__PURE__*/ $constructor("ZodRecord", (inst, def) => {
+	$ZodRecord.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+	inst.keyType = def.keyType;
+	inst.valueType = def.valueType;
+});
+function record(keyType, valueType, params) {
+	if (!valueType || !valueType._zod) return new ZodRecord({
+		type: "record",
+		keyType: string(),
+		valueType: keyType,
+		...normalizeParams(valueType)
+	});
+	return new ZodRecord({
+		type: "record",
+		keyType,
+		valueType,
+		...normalizeParams(params)
+	});
+}
+const ZodEnum = /*@__PURE__*/ $constructor("ZodEnum", (inst, def) => {
+	$ZodEnum.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => enumProcessor(inst, ctx, json, params);
+	inst.enum = def.entries;
+	inst.options = Object.values(def.entries);
+	const keys = new Set(Object.keys(def.entries));
+	inst.extract = (values, params) => {
+		const newEntries = {};
+		for (const value of values) if (keys.has(value)) newEntries[value] = def.entries[value];
+		else throw new Error(`Key ${value} not found in enum`);
+		return new ZodEnum({
+			...def,
+			checks: [],
+			...normalizeParams(params),
+			entries: newEntries
+		});
+	};
+	inst.exclude = (values, params) => {
+		const newEntries = { ...def.entries };
+		for (const value of values) if (keys.has(value)) delete newEntries[value];
+		else throw new Error(`Key ${value} not found in enum`);
+		return new ZodEnum({
+			...def,
+			checks: [],
+			...normalizeParams(params),
+			entries: newEntries
+		});
+	};
+});
+function _enum(values, params) {
+	const entries = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
+	return new ZodEnum({
+		type: "enum",
+		entries,
+		...normalizeParams(params)
+	});
+}
+const ZodLiteral = /*@__PURE__*/ $constructor("ZodLiteral", (inst, def) => {
+	$ZodLiteral.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => literalProcessor(inst, ctx, json, params);
+	inst.values = new Set(def.values);
+	Object.defineProperty(inst, "value", { get() {
+		if (def.values.length > 1) throw new Error("This schema contains multiple valid literal values. Use `.values` instead.");
+		return def.values[0];
+	} });
+});
+function literal(value, params) {
+	return new ZodLiteral({
+		type: "literal",
+		values: Array.isArray(value) ? value : [value],
+		...normalizeParams(params)
+	});
+}
+const ZodTransform = /*@__PURE__*/ $constructor("ZodTransform", (inst, def) => {
+	$ZodTransform.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => transformProcessor(inst, ctx, json, params);
+	inst._zod.parse = (payload, _ctx) => {
+		if (_ctx.direction === "backward") throw new $ZodEncodeError(inst.constructor.name);
+		payload.addIssue = (issue$1) => {
+			if (typeof issue$1 === "string") payload.issues.push(issue(issue$1, payload.value, def));
+			else {
+				const _issue = issue$1;
+				if (_issue.fatal) _issue.continue = false;
+				_issue.code ?? (_issue.code = "custom");
+				_issue.input ?? (_issue.input = payload.value);
+				_issue.inst ?? (_issue.inst = inst);
+				payload.issues.push(issue(_issue));
+			}
+		};
+		const output = def.transform(payload.value, payload);
+		if (output instanceof Promise) return output.then((output) => {
+			payload.value = output;
+			payload.fallback = true;
+			return payload;
+		});
+		payload.value = output;
+		payload.fallback = true;
+		return payload;
+	};
+});
+function transform(fn) {
+	return new ZodTransform({
+		type: "transform",
+		transform: fn
+	});
+}
+const ZodOptional = /*@__PURE__*/ $constructor("ZodOptional", (inst, def) => {
+	$ZodOptional.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function optional(innerType) {
+	return new ZodOptional({
+		type: "optional",
+		innerType
+	});
+}
+const ZodExactOptional = /*@__PURE__*/ $constructor("ZodExactOptional", (inst, def) => {
+	$ZodExactOptional.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function exactOptional(innerType) {
+	return new ZodExactOptional({
+		type: "optional",
+		innerType
+	});
+}
+const ZodNullable = /*@__PURE__*/ $constructor("ZodNullable", (inst, def) => {
+	$ZodNullable.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => nullableProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function nullable(innerType) {
+	return new ZodNullable({
+		type: "nullable",
+		innerType
+	});
+}
+const ZodDefault = /*@__PURE__*/ $constructor("ZodDefault", (inst, def) => {
+	$ZodDefault.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => defaultProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+	inst.removeDefault = inst.unwrap;
+});
+function _default(innerType, defaultValue) {
+	return new ZodDefault({
+		type: "default",
+		innerType,
+		get defaultValue() {
+			return typeof defaultValue === "function" ? defaultValue() : shallowClone(defaultValue);
+		}
+	});
+}
+const ZodPrefault = /*@__PURE__*/ $constructor("ZodPrefault", (inst, def) => {
+	$ZodPrefault.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => prefaultProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function prefault(innerType, defaultValue) {
+	return new ZodPrefault({
+		type: "prefault",
+		innerType,
+		get defaultValue() {
+			return typeof defaultValue === "function" ? defaultValue() : shallowClone(defaultValue);
+		}
+	});
+}
+const ZodNonOptional = /*@__PURE__*/ $constructor("ZodNonOptional", (inst, def) => {
+	$ZodNonOptional.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => nonoptionalProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function nonoptional(innerType, params) {
+	return new ZodNonOptional({
+		type: "nonoptional",
+		innerType,
+		...normalizeParams(params)
+	});
+}
+const ZodCatch = /*@__PURE__*/ $constructor("ZodCatch", (inst, def) => {
+	$ZodCatch.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => catchProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+	inst.removeCatch = inst.unwrap;
+});
+function _catch(innerType, catchValue) {
+	return new ZodCatch({
+		type: "catch",
+		innerType,
+		catchValue: typeof catchValue === "function" ? catchValue : () => catchValue
+	});
+}
+const ZodPipe = /*@__PURE__*/ $constructor("ZodPipe", (inst, def) => {
+	$ZodPipe.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => pipeProcessor(inst, ctx, json, params);
+	inst.in = def.in;
+	inst.out = def.out;
+});
+function pipe(in_, out) {
+	return new ZodPipe({
+		type: "pipe",
+		in: in_,
+		out
+	});
+}
+const ZodReadonly = /*@__PURE__*/ $constructor("ZodReadonly", (inst, def) => {
+	$ZodReadonly.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => readonlyProcessor(inst, ctx, json, params);
+	inst.unwrap = () => inst._zod.def.innerType;
+});
+function readonly(innerType) {
+	return new ZodReadonly({
+		type: "readonly",
+		innerType
+	});
+}
+const ZodCustom = /*@__PURE__*/ $constructor("ZodCustom", (inst, def) => {
+	$ZodCustom.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => customProcessor(inst, ctx, json, params);
+});
+function refine(fn, _params = {}) {
+	return /* @__PURE__ */ _refine(ZodCustom, fn, _params);
+}
+function superRefine(fn, params) {
+	return /* @__PURE__ */ _superRefine(fn, params);
+}
+/** 域名称；与 storage backend 里的 unit 名一致。 */
+const WORKFLOW_DOMAIN_NAME = "buka_workflow";
+/** 宽松对象：嵌套结构的完整校验在各自的使用路径上做。 */
+const looseObject = record(string(), unknown());
+/** 任务 / 作业 / 工作流状态。 */
+const workflowStatusSchema = _enum([
+	"draft",
+	"active",
+	"retired"
+]);
+const jobStatusSchema = _enum([
+	"running",
+	"completed",
+	"failed",
+	"cancelled"
+]);
+const taskStatusSchema = _enum([
+	"pending",
+	"ready",
+	"running",
+	"completed",
+	"failed",
+	"blocked",
+	"cancelled"
+]);
+/** 执行者：机器人或人。 */
+const storedExecutorSchema = discriminatedUnion("kind", [
+	object({
+		kind: literal("robot"),
+		name: string(),
+		driver: _enum(["agent", "program"]),
+		program: string().optional(),
+		avatar: string().optional()
+	}).passthrough(),
+	object({ kind: literal("human") }).passthrough(),
+	object({
+		kind: literal("session"),
+		sessionId: string()
+	}).passthrough()
+]);
+/** 承办者。 */
+const claimantSchema = object({
+	kind: _enum([
+		"human",
+		"robot",
+		"assistant"
+	]),
+	name: string(),
+	sessionId: string().nullable()
+}).passthrough();
+/** 启动者。 */
+const starterSchema = discriminatedUnion("kind", [object({ kind: literal("human") }).passthrough(), object({
+	kind: literal("session"),
+	sessionId: string()
+}).passthrough()]);
+/** 任务结果。 */
+const taskResultSchema = object({
+	output: unknown().nullable(),
+	text: string(),
+	textBytes: number().int().nonnegative(),
+	textFile: string().nullable(),
+	attachmentIds: array(string())
+}).passthrough();
+/** 工作流版本快照。 */
+const workflowVersionSchema = object({
+	version: number().int().positive(),
+	definition: looseObject,
+	createdAt: string()
+}).passthrough();
+/** workflows 表记录。 */
+const workflowRecordSchema = object({
+	id: string().min(1),
+	name: string(),
+	description: string(),
+	status: workflowStatusSchema,
+	latestVersion: number().int().positive(),
+	versions: record(string(), workflowVersionSchema),
+	jobSeq: number().int().nonnegative(),
+	createdAt: string(),
+	updatedAt: string()
+}).passthrough();
+/** jobs 表记录。 */
+const jobRecordSchema = object({
+	id: string().min(1),
+	seq: number().int().positive(),
+	workflowId: string().min(1),
+	workflowVersion: number().int().positive(),
+	workflowName: string(),
+	workflowDescription: string(),
+	definition: looseObject,
+	status: jobStatusSchema,
+	starter: starterSchema,
+	input: object({
+		raw: unknown(),
+		structured: unknown().optional()
+	}).passthrough(),
+	inputSummary: string(),
+	error: string().nullable(),
+	createdAt: string(),
+	updatedAt: string(),
+	finishedAt: string().nullable()
+}).passthrough();
+/** tasks 表记录。 */
+const taskRecordSchema = object({
+	id: string().min(1),
+	jobId: string().min(1),
+	position: string().min(1),
+	type: string().min(1),
+	payload: unknown(),
+	deps: array(string()),
+	status: taskStatusSchema,
+	createdBy: object({
+		taskId: string(),
+		position: string()
+	}).passthrough().nullable(),
+	assignee: storedExecutorSchema,
+	claimant: claimantSchema.nullable(),
+	attemptIds: array(string()),
+	result: taskResultSchema.nullable(),
+	error: string().nullable(),
+	assistantBlocked: boolean(),
+	createdAt: string(),
+	startedAt: string().nullable(),
+	finishedAt: string().nullable(),
+	updatedAt: string()
+}).passthrough();
+/** attempts 表记录。 */
+const attemptRecordSchema = object({
+	id: string().min(1),
+	jobId: string().min(1),
+	taskId: string().min(1),
+	sessionId: string().nullable(),
+	startSeq: number().int().nonnegative().nullable(),
+	status: _enum([
+		"running",
+		"completed",
+		"failed",
+		"cancelled"
+	]),
+	stopReason: string().nullable(),
+	error: string().nullable(),
+	promptFile: string().nullable(),
+	startedAt: string(),
+	finishedAt: string().nullable()
+}).passthrough();
+/** attachments 表记录。 */
+const attachmentRecordSchema = object({
+	id: string().min(1),
+	jobId: string().min(1),
+	name: string(),
+	bytes: number().int().nonnegative(),
+	mime: string(),
+	sha256: string(),
+	description: string(),
+	sourceTaskId: string().min(1),
+	sourcePositionId: string().min(1),
+	createdBy: string(),
+	createdAt: string(),
+	path: string(),
+	tags: array(string()).optional()
+}).passthrough();
+/**
+* `buka-workflow` 域声明。表记录类型与 `domain/types.ts` 的 TS 接口一一对应；
+* zod 输出只用于运行时校验，消费方仍用 TS 接口。
+*/
+const workflowDomain = defineDomain({
+	name: WORKFLOW_DOMAIN_NAME,
+	version: 1,
+	layout: "per-record",
+	tables: {
+		workflows: domainTable(workflowRecordSchema),
+		jobs: domainTable(jobRecordSchema),
+		tasks: domainTable(taskRecordSchema),
+		attempts: domainTable(attemptRecordSchema),
+		attachments: domainTable(attachmentRecordSchema)
+	}
+});
+// .build/workflows/store/index.js
+/**
+* 业务存储：`ctx.storageDomain` 上的 workflows / jobs / tasks / attempts /
+* attachments 读写，以及 per-job 串行队列与作业目录。
+*
+* 记录全部是不可变数据：更新一律用表句柄的原子 `update`（传入纯函数），
+* 或构造新记录 `put`。读是同步内存读，写返回时已落盘。
+*
+* 本模块不 import 任何 DSH 服务类型；`openWorkflowStore`（`store/open.ts`）
+* 负责把真实宿主域接进来，单测直接传内存实现。
+*
+* @module @buka/dsh-plugin-workflows/store
+*/
+/** 存储根对象。 */
+var WorkflowStore = class {
+	domain;
+	dataDir;
+	logger;
+	queue = new KeyedQueue();
+	constructor(options) {
+		this.domain = options.domain;
+		this.dataDir = options.dataDir;
+		this.logger = options.logger;
+	}
+	/** 存储域版本；迁移入口在 `init` 里按它检查。 */
+	get domainVersion() {
+		return 1;
+	}
+	/** 打开域之后的初始化：键唯一性、作业编号回填。 */
+	async init() {
+		for (const [key, record] of this.domain.table("workflows").entries()) if (key !== record.id) throw new Error(`workflows: stored key "${key}" differs from record id`);
+		for (const [key, record] of this.domain.table("jobs").entries()) if (key !== record.id) throw new Error(`jobs: stored key "${key}" differs from record id`);
+		for (const [key, record] of this.domain.table("tasks").entries()) if (key !== record.id) throw new Error(`tasks: stored key "${key}" differs from record id`);
+		for (const [key, record] of this.domain.table("attempts").entries()) if (key !== record.id) throw new Error(`attempts: stored key "${key}" differs from record id`);
+		for (const [key, record] of this.domain.table("attachments").entries()) if (key !== record.id) throw new Error(`attachments: stored key "${key}" differs from record id`);
+		const maxSeq = /* @__PURE__ */ new Map();
+		for (const [, job] of this.domain.table("jobs").entries()) maxSeq.set(job.workflowId, Math.max(maxSeq.get(job.workflowId) ?? 0, job.seq));
+		for (const [workflowId, seq] of maxSeq) {
+			const workflow = this.domain.table("workflows").get(workflowId);
+			if (workflow === void 0) {
+				this.logger?.warn?.(`buka-workflows: job ${workflowId} has no workflow record`);
+				continue;
+			}
+			if (workflow.jobSeq >= seq) continue;
+			await this.domain.table("workflows").update(workflowId, (current) => ({
+				...current,
+				jobSeq: seq,
+				updatedAt: nowIso()
+			}));
+		}
+	}
+	/**
+	* 关闭存储域。
+	*
+	* @returns 无返回值
+	*/
+	async close() {
+		await this.domain.close();
+	}
+	/**
+	* 新建一条工作流（版本 1，默认草稿）。
+	*
+	* @param input 名称、描述与定义
+	* @returns 新建的记录
+	*/
+	async createWorkflow(input) {
+		const createdAt = nowIso();
+		const versionRecord = {
+			version: 1,
+			definition: input.definition,
+			createdAt
+		};
+		const record = {
+			id: newWorkflowId(),
+			name: input.name,
+			description: input.description,
+			status: input.status ?? "draft",
+			latestVersion: 1,
+			versions: { "1": versionRecord },
+			jobSeq: 0,
+			createdAt,
+			updatedAt: createdAt
+		};
+		await this.domain.table("workflows").put(record.id, record);
+		return record;
+	}
+	/**
+	* 取一条工作流记录。
+	*
+	* @param workflowId 工作流 id
+	* @returns 记录；不存在时是 undefined
+	*/
+	getWorkflow(workflowId) {
+		return this.domain.table("workflows").get(workflowId);
+	}
+	/**
+	* 全部工作流记录（按更新时间倒序）。
+	*
+	* @returns 工作流记录
+	*/
+	listWorkflows() {
+		return [...this.domain.table("workflows").entries()].map(([, record]) => record).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+	}
+	/**
+	* 保存一个工作流新版本；名称 / 描述同步为最新定义里的值。
+	*
+	* @param workflowId 工作流 id
+	* @param definition 已校验的定义
+	* @returns 更新后的记录
+	* @throws 工作流不存在时抛出
+	*/
+	async saveWorkflowVersion(workflowId, definition) {
+		const updatedAt = nowIso();
+		return await this.domain.table("workflows").update(workflowId, (current) => {
+			const version = current.latestVersion + 1;
+			return {
+				...current,
+				latestVersion: version,
+				versions: {
+					...current.versions,
+					[String(version)]: {
+						version,
+						definition,
+						createdAt: updatedAt
+					}
+				},
+				name: definition.name,
+				description: definition.description ?? "",
+				updatedAt
+			};
+		});
+	}
+	/**
+	* 改工作流状态（草稿 / 已激活 / 已停用）。
+	*
+	* @param workflowId 工作流 id
+	* @param status 新状态
+	* @returns 更新后的记录
+	*/
+	async setWorkflowStatus(workflowId, status) {
+		return await this.domain.table("workflows").update(workflowId, (current) => ({
+			...current,
+			status,
+			updatedAt: nowIso()
+		}));
+	}
+	/**
+	* 激活 / 停用；停用后状态是 `retired`。
+	*
+	* @param workflowId 工作流 id
+	* @param active 是否激活
+	* @returns 更新后的记录
+	*/
+	async activateWorkflow(workflowId, active) {
+		return await this.setWorkflowStatus(workflowId, active ? "active" : "retired");
+	}
+	/**
+	* 取工作流的某个版本（默认最新）。
+	*
+	* @param workflowId 工作流 id
+	* @param version 版本号；省略取最新
+	* @returns 工作流与版本记录；不存在时是 null
+	*/
+	readWorkflowVersion(workflowId, version) {
+		const record = this.getWorkflow(workflowId);
+		if (record === void 0) return null;
+		const target = version ?? record.latestVersion;
+		const versionRecord = record.versions[String(target)];
+		if (versionRecord === void 0) return null;
+		return {
+			record,
+			version: target,
+			versionRecord
+		};
+	}
+	/**
+	* 在当前工作流内分配下一个作业编号（原子递增）。
+	*
+	* @param workflowId 工作流 id
+	* @returns 递增后的作业编号
+	*/
+	async allocateJobSeq(workflowId) {
+		return (await this.domain.table("workflows").update(workflowId, (current) => ({
+			...current,
+			jobSeq: current.jobSeq + 1,
+			updatedAt: nowIso()
+		}))).jobSeq;
+	}
+	/**
+	* 统计工作流下的作业数。
+	*
+	* @param workflowId 工作流 id
+	* @returns 作业数
+	*/
+	countJobs(workflowId) {
+		let count = 0;
+		for (const [, job] of this.domain.table("jobs").entries()) if (job.workflowId === workflowId) count += 1;
+		return count;
+	}
+	/**
+	* 插入一条作业记录。
+	*
+	* @param job 作业记录
+	* @returns 无返回值
+	*/
+	async insertJob(job) {
+		await this.domain.table("jobs").put(job.id, job);
+	}
+	/**
+	* 取作业记录。
+	*
+	* @param jobId 作业 id
+	* @returns 作业；不存在时是 undefined
+	*/
+	getJob(jobId) {
+		return this.domain.table("jobs").get(jobId);
+	}
+	/**
+	* 列出某个工作流下的作业（按编号倒序）。
+	*
+	* @param workflowId 工作流 id
+	* @returns 作业记录
+	*/
+	listJobs(workflowId) {
+		const jobs = [];
+		for (const [, job] of this.domain.table("jobs").entries()) if (job.workflowId === workflowId) jobs.push(job);
+		return jobs.sort((left, right) => right.seq - left.seq);
+	}
+	/**
+	* 全部作业（恢复时用）。
+	*
+	* @returns 作业记录
+	*/
+	allJobs() {
+		return [...this.domain.table("jobs").entries()].map(([, job]) => job);
+	}
+	/**
+	* 原子更新作业记录。
+	*
+	* @param jobId 作业 id
+	* @param update 纯函数：当前记录 → 新记录
+	* @returns 新记录
+	*/
+	async updateJob(jobId, update) {
+		return await this.domain.table("jobs").update(jobId, update);
+	}
+	/**
+	* 插入一条任务记录。
+	*
+	* @param task 任务记录
+	* @returns 无返回值
+	*/
+	async insertTask(task) {
+		await this.domain.table("tasks").put(task.id, task);
+	}
+	/**
+	* 取任务记录。
+	*
+	* @param taskId 任务 id
+	* @returns 任务；不存在时是 undefined
+	*/
+	getTask(taskId) {
+		return this.domain.table("tasks").get(taskId);
+	}
+	/**
+	* 列出某个作业的全部任务（按创建时间升序）。
+	*
+	* @param jobId 作业 id
+	* @returns 任务记录
+	*/
+	listTasks(jobId) {
+		const tasks = [];
+		for (const [, task] of this.domain.table("tasks").entries()) if (task.jobId === jobId) tasks.push(task);
+		return tasks.sort((left, right) => left.createdAt === right.createdAt ? left.id.localeCompare(right.id) : left.createdAt.localeCompare(right.createdAt));
+	}
+	/**
+	* 原子更新一条任务记录。
+	*
+	* @param taskId 任务 id
+	* @param update 纯函数：当前记录 → 新记录
+	* @returns 新记录
+	*/
+	async updateTask(taskId, update) {
+		return await this.domain.table("tasks").update(taskId, update);
+	}
+	/**
+	* 插入一条执行记录。
+	*
+	* @param attempt 执行记录
+	* @returns 无返回值
+	*/
+	async insertAttempt(attempt) {
+		await this.domain.table("attempts").put(attempt.id, attempt);
+	}
+	/**
+	* 取执行记录。
+	*
+	* @param attemptId 执行记录 id
+	* @returns 执行记录；不存在时是 undefined
+	*/
+	getAttempt(attemptId) {
+		return this.domain.table("attempts").get(attemptId);
+	}
+	/**
+	* 按 id 顺序列出某个任务的执行记录。
+	*
+	* @param taskId 任务 id
+	* @returns 执行记录
+	*/
+	listAttempts(taskId) {
+		const attempts = [];
+		for (const [, attempt] of this.domain.table("attempts").entries()) if (attempt.taskId === taskId) attempts.push(attempt);
+		return attempts.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+	}
+	/**
+	* 原子更新一条执行记录。
+	*
+	* @param attemptId 执行记录 id
+	* @param update 纯函数：当前记录 → 新记录
+	* @returns 新记录
+	*/
+	async updateAttempt(attemptId, update) {
+		return await this.domain.table("attempts").update(attemptId, update);
+	}
+	/**
+	* 插入一条附件元数据。
+	*
+	* @param attachment 附件记录
+	* @returns 无返回值
+	*/
+	async insertAttachment(attachment) {
+		await this.domain.table("attachments").put(attachment.id, attachment);
+	}
+	/**
+	* 取附件元数据。
+	*
+	* @param attachmentId 附件 id
+	* @returns 附件；不存在时是 undefined
+	*/
+	getAttachment(attachmentId) {
+		return this.domain.table("attachments").get(attachmentId);
+	}
+	/**
+	* 列出某个作业的附件库（按创建时间升序）。
+	*
+	* @param jobId 作业 id
+	* @returns 附件记录
+	*/
+	listAttachments(jobId) {
+		const attachments = [];
+		for (const [, attachment] of this.domain.table("attachments").entries()) if (attachment.jobId === jobId) attachments.push(attachment);
+		return attachments.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+	}
+	/**
+	* 串行执行一个作业的状态变更。
+	*
+	* @param jobId 作业 id
+	* @param task 异步任务
+	* @returns 任务结果
+	*/
+	runExclusive(jobId, task) {
+		return this.queue.run(jobId, task);
+	}
+	/**
+	* 当前有排队任务的作业数（诊断 / 测试用）。
+	*
+	* @returns 队列数量
+	*/
+	get queueSize() {
+		return this.queue.size;
+	}
+	/**
+	* 计算作业目录布局。
+	*
+	* @param jobId 作业 id
+	* @returns 目录布局
+	*/
+	paths(jobId) {
+		return jobPaths(this.dataDir, jobId);
+	}
+	/**
+	* 建好作业目录。
+	*
+	* @param jobId 作业 id
+	* @returns 目录布局
+	*/
+	async ensureJobDirectories(jobId) {
+		const paths = this.paths(jobId);
+		await ensureJobDirectories(paths);
+		return paths;
+	}
+	/**
+	* 写一份大文本到作业目录。
+	*
+	* @param jobId 作业 id
+	* @param kind prompt / 结果
+	* @param name 文件名
+	* @param text 文本
+	* @returns 相对作业根目录的路径
+	*/
+	async writeText(jobId, kind, name, text) {
+		return await writeJobText(this.paths(jobId), kind, name, text);
+	}
+	/**
+	* 读一份作业目录里的大文本。
+	*
+	* @param jobId 作业 id
+	* @param relative 相对路径
+	* @returns 文本；不存在时是 null
+	*/
+	async readText(jobId, relative) {
+		return await readJobText(this.paths(jobId), relative);
+	}
+	/**
+	* 校验并返回一个安全的作业 id（路由参数用）。
+	*
+	* @param jobId 作业 id
+	* @returns 原值
+	*/
+	assertJobId(jobId) {
+		return assertSafeSegment(jobId, "job id");
+	}
+};
+// .build/workflows/store/open.js
+/**
+* 从宿主 `ctx.storageDomain` 打开 `buka-workflow` 域，构造 `WorkflowStore`。
+*
+* storageDomain 不放进 cordis `inject`：缺少它的组合里插件仍应加载，只在真正
+* 需要存储时给出明确错误。打开后把 `Domain.close()` 挂到插件生命周期上。
+*
+* @module @buka/dsh-plugin-workflows/store/open
+*/
+/**
+* 打开存储域并初始化。
+*
+* @param ctx 插件上下文
+* @param options 数据目录与日志
+* @returns 已初始化的存储
+* @throws 宿主缺少 storageDomain 服务 / 打开失败时抛出
+*/
+function openWorkflowStore(ctx, options) {
+	const facility = ctx.storageDomain;
+	if (facility === void 0 || facility === null || typeof facility.open !== "function") return Promise.reject(/* @__PURE__ */ new Error("the host storage domain service is unavailable in this composition (ctx.storageDomain is missing); update DeepSeek Harness or enable the dsh-storage-domain plugin"));
+	let domain;
+	ctx.effect(() => () => {
+		if (domain !== void 0) domain.close().catch(() => void 0);
+	}, "buka-workflows: close workflow storage domain");
+	return (async () => {
+		domain = await facility.open(workflowDomain);
+		const store = new WorkflowStore({
+			domain,
+			dataDir: options.dataDir,
+			logger: options.logger
+		});
+		try {
+			await store.init();
+		} catch (error) {
+			await domain.close().catch(() => void 0);
+			domain = void 0;
+			throw error;
+		}
+		return store;
+	})();
+}
+// .build/workflows/tools/index.js
+/**
+* 模型工具注册（`.tmp/workflow-v4-spec.md` §13.2）。
+*
+* 可见性：
+* - 工作流定义工具只对配置点名的编排 preset 根会话可见；
+* - 启动 / 状态 / 取消工具对普通会话可见（启动者 = 当前会话）；
+* - 执行工具（建任务 / 提交结果 / 看板 / 任务 / 附件）只对引擎创建的任务会话、
+*   助理会话与启动者会话可见，并在 `execute` 里按会话再校验一次。
+*
+* @module @buka/dsh-plugin-workflows/tools
+*/
+/** 把已知 JSON 兼容的运行时对象标成工具输出的 json 类型。 */
+function toolJson(value) {
+	return value;
+}
+/** 一段模型可读文本。 */
+function text(value) {
+	return [{
+		type: "text",
+		text: value
+	}];
+}
+/** 取调用会话 id。 */
+function sessionIdOf(context) {
+	return typeof context.agent?.id === "string" ? context.agent.id : "";
+}
+/** 定义格式的简短帮助（给编排 agent）。 */
+const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
+{
+  "version": 4, "name": "...", "description": "...",
+  "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
+  "start": {
+    "task": {
+      "payload": <JSON Schema object: the raw input form>,
+      "output":  <JSON Schema object: the first structured input>
+    },
+    "next": [
+      { "position": "<position id>", "type": "<task type id>",
+        "payload": { ...templates... }, "dependsOn": ["$start"] }
+    ]
+  },
+  "end": { "task": { "payload": <JSON Schema object: the final deliverable> } },
+  "positions": [
+    { "id": "dev", "label": "研发", "description": "...",
+      "executor": { "kind": "robot", "name": "<registered robot>" } | { "kind": "human" },
+      "taskTypes": [
+        { "id": "dev.implement", "label": "开发", "description": "...",
+          "payload": <JSON Schema object>, "output": <JSON Schema object>,
+          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant robot>" | null,
+          "mode": "plan" | null }
+      ] }
+  ],
+  "edges": [
+    { "from": "start", "to": "dev" },
+    { "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
+    { "from": "deploy", "to": "end" }
+  ]
+}
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back edge; a back edge must close a cycle. start.next entries must depend on "$start" and target a direct successor of start. Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Edges carry no prompt: instructions live in task payloads and task type contracts.`;
+/**
+* 注册全部工作流工具。
+*
+* @param deps 上下文、引擎 getter 与可见性条件
+*/
+function registerWorkflowTools(deps) {
+	const { ctx, ready, orchestratorVisible, executionVisible, starterVisible, assertOrchestrator } = deps;
+	/** 注册一个工具。 */
+	const register = (tool, when) => {
+		ctx.tools.register(tool, when === void 0 ? void 0 : { when });
+	};
+	register(defineTool({
+		name: "buka_workflow_save",
+		description: `Validate and save a workflow definition as a new version (draft). Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+		parameters: {
+			definition: {
+				type: "json",
+				required: true,
+				description: "The complete workflow v4 definition object."
+			},
+			id: {
+				type: "string",
+				description: "Existing workflow id; omit to create a new workflow."
+			}
+		},
 		output: {
 			schema: {
 				type: "object",
 				additionalProperties: false,
 				properties: {
-					cancelled: {
-						type: "boolean",
-						required: true,
-						description: "Whether a live run was signalled."
+					workflowId: {
+						type: "string",
+						required: true
 					},
-					run: {
-						type: "json",
-						required: true,
-						description: "The run record read back from disk, or null."
+					version: {
+						type: "number",
+						required: true
+					},
+					name: {
+						type: "string",
+						required: true
+					},
+					status: {
+						type: "string",
+						required: true
 					}
 				}
 			},
-			render: (_args, value) => [{
-				type: "text",
-				text: renderCancel(value)
-			}]
+			render: (_args, value) => text(`已保存工作流「${String(value.name)}」（${String(value.workflowId)}，版本 ${String(value.version)}，状态 ${String(value.status)}）。`)
 		},
 		async execute(args, exec) {
 			assertOrchestrator(exec.agent);
-			const runId = typeof args.run_id === "string" ? args.run_id.trim() : "";
-			if (runId === "") throw new Error("run_id is required");
-			await ensureReady();
+			const workflow = await (await ready()).saveWorkflow({
+				definition: args.definition,
+				...typeof args.id === "string" && args.id.trim() !== "" ? { workflowId: args.id.trim() } : {}
+			});
 			return {
-				cancelled: await supervisor.cancel(runId, "cancelled by the workflow orchestrator"),
-				run: jsonValue(await store.readRun(runId))
+				workflowId: workflow.id,
+				version: workflow.latestVersion,
+				name: workflow.name,
+				status: workflow.status
 			};
 		}
-	}), { when: visibleWhen });
-	ctx.tools.register(defineTool({
-		name: "buka_workflow_templates",
-		description: TEMPLATES_DESCRIPTION,
-		parameters: { id: {
+	}), orchestratorVisible);
+	register(defineTool({
+		name: "buka_workflow_list",
+		description: "List saved workflows (id, name, version, status, job count). Use buka_workflow_get to read a full definition.",
+		parameters: {},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { workflows: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => text(Array.isArray(value.workflows) && value.workflows.length > 0 ? value.workflows.map((workflow) => {
+				const record = workflow;
+				return `- ${String(record.id)}「${String(record.name)}」v${String(record.version)} ${String(record.status)}（${String(record.jobCount)} 个作业）`;
+			}).join("\n") : "还没有保存过工作流。")
+		},
+		async execute(_args, exec) {
+			assertOrchestrator(exec.agent);
+			return { workflows: toolJson((await ready()).listWorkflowSummaries()) };
+		}
+	}), orchestratorVisible);
+	register(defineTool({
+		name: "buka_workflow_get",
+		description: "Read one saved workflow definition (optionally a specific version).",
+		parameters: {
+			id: {
+				type: "string",
+				required: true,
+				description: "Workflow id."
+			},
+			version: {
+				type: "number",
+				description: "Version number; defaults to the latest."
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					workflow: {
+						type: "json",
+						required: true
+					},
+					jobs: {
+						type: "json",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => {
+				const record = value.workflow;
+				const definition = record.definition;
+				return text(`工作流 ${String(record.id)}「${String(record.name)}」v${String(record.version)}（${String(record.status)}）\n\n${JSON.stringify(definition, null, 2)}`);
+			}
+		},
+		async execute(args, exec) {
+			assertOrchestrator(exec.agent);
+			const detail = (await ready()).readWorkflowDetail(args.id, typeof args.version === "number" ? args.version : void 0);
+			if (detail === null) throw new Error(`workflow not found: ${args.id}`);
+			return {
+				workflow: toolJson(detail.workflow),
+				jobs: toolJson(detail.jobs)
+			};
+		}
+	}), orchestratorVisible);
+	register(defineTool({
+		name: "buka_job_start",
+		description: "Start a workflow job from this session. The starter is this session: the start task comes back as a new message in this conversation, asking you to convert the raw request into the first structured input and submit it with buka_task_complete. Use /job instead when the host supports commands.",
+		parameters: {
+			workflowId: {
+				type: "string",
+				required: true,
+				description: "Workflow id to start."
+			},
+			request: {
+				type: "string",
+				required: true,
+				description: "The raw request / input text."
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					jobId: {
+						type: "string",
+						required: true
+					},
+					seq: {
+						type: "number",
+						required: true
+					},
+					workflowName: {
+						type: "string",
+						required: true
+					},
+					message: {
+						type: "string",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => text(String(value.message))
+		},
+		async execute(args, exec) {
+			const sessionId = sessionIdOf(exec);
+			if (sessionId === "") throw new Error("buka_job_start must be called from a session");
+			const job = await (await ready()).createJobFromSession({
+				workflowId: args.workflowId,
+				rawInput: { request: args.request },
+				sessionId
+			});
+			return {
+				jobId: job.id,
+				seq: job.seq,
+				workflowName: job.workflowName,
+				message: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话；按它给的结构化输入契约调用 buka_task_complete 提交后，作业进入看板调度。`
+			};
+		}
+	}));
+	register(defineJobStatusTool(ready), starterVisible);
+	register(defineJobCancelTool(ready), starterVisible);
+	register(defineTaskCreateTool(ready), executionVisible);
+	register(defineTaskCompleteTool(ready), executionVisible);
+	register(defineBoardTool(ready), executionVisible);
+	register(defineTaskGetTool(ready), executionVisible);
+	register(defineAttachmentsTool(ready), executionVisible);
+}
+/** 作业状态工具。 */
+function defineJobStatusTool(ready) {
+	return defineTool({
+		name: "buka_job_status",
+		description: "Read one workflow job (status, task counts) or, without jobId, the job started by this session.",
+		parameters: { jobId: {
 			type: "string",
-			description: "Template id from the catalog; omit to list every template (id, name, description)."
+			description: "Job id; defaults to this session’s job."
 		} },
 		output: {
 			schema: {
 				type: "object",
 				additionalProperties: false,
 				properties: {
-					templates: {
-						type: "array",
-						required: true,
-						description: "The template catalog as { id, name, description } summaries.",
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								id: {
-									type: "string",
-									required: true
-								},
-								name: {
-									type: "string",
-									required: true
-								},
-								description: {
-									type: "string",
-									required: true
-								}
-							}
-						}
-					},
-					template: {
+					job: {
 						type: "json",
-						required: true,
-						description: "The full template (id, name, description, nodes) when an id was given and matched; otherwise null."
+						required: true
+					},
+					tasks: {
+						type: "json",
+						required: true
 					}
 				}
 			},
-			render: (_args, value) => [{
-				type: "text",
-				text: renderTemplates(value)
-			}]
+			render: (_args, value) => {
+				const job = value.job;
+				const tasks = Array.isArray(value.tasks) ? value.tasks : [];
+				const counts = /* @__PURE__ */ new Map();
+				for (const task of tasks) {
+					const status = String(task.status);
+					counts.set(status, (counts.get(status) ?? 0) + 1);
+				}
+				return text(`作业 #${String(job.seq)}「${String(job.workflowName)}」状态 ${String(job.status)}\n任务：${[...counts].map(([status, count]) => `${status}=${count}`).join(" ") || "（无）"}`);
+			}
 		},
-		async execute(args) {
-			const id = typeof args.id === "string" ? args.id.trim() : "";
-			const templates = listTemplates();
-			const template = id === "" ? null : findTemplate(id);
+		async execute(args, exec) {
+			const engine = await ready();
+			const sessionId = sessionIdOf(exec);
+			const jobId = typeof args.jobId === "string" && args.jobId.trim() !== "" ? args.jobId.trim() : engine.jobIdForSession(sessionId);
+			if (jobId === null) throw new Error("this session has not started a workflow job");
+			const detail = engine.jobDetail(jobId);
+			if (detail === null) throw new Error(`job not found: ${jobId}`);
 			return {
-				templates: summarizeTemplates(templates),
-				template: template === null ? null : jsonValue(template)
+				job: toolJson(detail.job),
+				tasks: toolJson(detail.tasks)
 			};
 		}
-	}), { when: visibleWhen });
+	});
+}
+/** 取消作业工具。 */
+function defineJobCancelTool(ready) {
+	return defineTool({
+		name: "buka_job_cancel",
+		description: "Cancel a running workflow job started by this session (or the given job id).",
+		parameters: { jobId: {
+			type: "string",
+			description: "Job id; defaults to this session’s job."
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					jobId: {
+						type: "string",
+						required: true
+					},
+					status: {
+						type: "string",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => text(`作业 ${String(value.jobId)} 已取消（状态 ${String(value.status)}）。`)
+		},
+		async execute(args, exec) {
+			const engine = await ready();
+			const sessionId = sessionIdOf(exec);
+			const jobId = typeof args.jobId === "string" && args.jobId.trim() !== "" ? args.jobId.trim() : engine.jobIdForSession(sessionId);
+			if (jobId === null) throw new Error("this session has not started a workflow job");
+			if (!engine.canViewJob(sessionId, jobId)) throw new Error("this session cannot cancel that job");
+			const job = await engine.cancelJob(jobId);
+			return {
+				jobId: job.id,
+				status: job.status
+			};
+		}
+	});
+}
+/** 派生任务工具。 */
+function defineTaskCreateTool(ready) {
+	return defineTool({
+		name: "buka_task_create",
+		description: "Create a task on the current job board (callable any number of times while executing a task). The engine validates the target position, task type, edge whitelist, payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.",
+		parameters: {
+			position: {
+				type: "string",
+				required: true,
+				description: "Target position id (or \"end\" for the end task)."
+			},
+			type: {
+				type: "string",
+				required: true,
+				description: "Task type id declared by the target position (\"end\" for the end task)."
+			},
+			payload: {
+				type: "json",
+				required: true,
+				description: "Task payload matching the task type payload schema; templates are rendered when the task starts."
+			},
+			deps: {
+				type: "array",
+				items: { type: "string" },
+				description: "Task ids in this job that must complete first."
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					taskId: {
+						type: "string",
+						required: true
+					},
+					status: {
+						type: "string",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => text(`已创建任务 ${String(value.taskId)}（状态 ${String(value.status)}）。`)
+		},
+		async execute(args, exec) {
+			const sessionId = sessionIdOf(exec);
+			if (sessionId === "") throw new Error("buka_task_create must be called from a task session");
+			const task = await (await ready()).createTaskFromSession({
+				sessionId,
+				position: args.position,
+				type: args.type,
+				payload: args.payload ?? {},
+				deps: Array.isArray(args.deps) ? args.deps : []
+			});
+			return {
+				taskId: task.id,
+				status: task.status
+			};
+		}
+	});
+}
+/** 提交结果工具。 */
+function defineTaskCompleteTool(ready) {
+	return defineTool({
+		name: "buka_task_complete",
+		description: "Submit the structured result of the task this session is executing. The engine validates `output` against the task type output schema (invalid output is returned as an error so you can correct it in the same turn), copies any attachments into the job attachment library, and advances the workflow.",
+		parameters: {
+			output: {
+				type: "json",
+				required: true,
+				description: "Structured result matching the task type output schema."
+			},
+			text: {
+				type: "string",
+				description: "Optional human-readable summary."
+			},
+			attachments: {
+				type: "array",
+				items: { type: "json" },
+				description: "Optional files to archive: strings or { path, name?, description? }. Paths are relative to your workspace."
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					taskId: {
+						type: "string",
+						required: true
+					},
+					status: {
+						type: "string",
+						required: true
+					},
+					jobStatus: {
+						type: "string",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => text(`已提交任务 ${String(value.taskId)}（${String(value.status)}）；作业状态 ${String(value.jobStatus)}。`)
+		},
+		async execute(args, exec) {
+			const sessionId = sessionIdOf(exec);
+			if (sessionId === "") throw new Error("buka_task_complete must be called from a task session");
+			const result = await (await ready()).completeTaskFromSession({
+				sessionId,
+				output: args.output ?? {},
+				text: typeof args.text === "string" ? args.text : "",
+				attachments: args.attachments
+			});
+			return {
+				taskId: result.task.id,
+				status: result.task.status,
+				jobStatus: result.job.status
+			};
+		}
+	});
+}
+/** 看板工具。 */
+function defineBoardTool(ready) {
+	return defineTool({
+		name: "buka_job_board",
+		description: "Read the read-only board of the job this session is executing: every task with status, dependencies, claimant and result summary. Useful to gather task ids when creating tasks across branches.",
+		parameters: {},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					job: {
+						type: "json",
+						required: true
+					},
+					tasks: {
+						type: "json",
+						required: true
+					}
+				}
+			},
+			render: (_args, value) => {
+				const job = value.job;
+				const tasks = Array.isArray(value.tasks) ? value.tasks : [];
+				const lines = [`作业 #${String(job.seq)}「${String(job.workflowName)}」状态 ${String(job.status)}`];
+				for (const task of tasks) {
+					const record = task;
+					lines.push(`- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] deps=${Array.isArray(record.deps) ? record.deps.join(",") : ""}`);
+				}
+				return text(lines.join("\n"));
+			}
+		},
+		async execute(_args, exec) {
+			const sessionId = sessionIdOf(exec);
+			const engine = await ready();
+			const reference = engine.taskForSession(sessionId);
+			if (reference === null) throw new Error("this session is not executing a workflow task");
+			const detail = engine.jobDetail(reference.jobId);
+			if (detail === null) throw new Error("job not found");
+			return {
+				job: toolJson(detail.job),
+				tasks: toolJson(detail.tasks)
+			};
+		}
+	});
+}
+/** 任务读取工具。 */
+function defineTaskGetTool(ready) {
+	return defineTool({
+		name: "buka_task_get",
+		description: "Read one task of the job this session is executing: payload, dependencies, attempts, result and attachments.",
+		parameters: { taskId: {
+			type: "string",
+			required: true,
+			description: "Task id on the current job board."
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { task: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => text(JSON.stringify(value.task, null, 2))
+		},
+		async execute(args, exec) {
+			const sessionId = sessionIdOf(exec);
+			const engine = await ready();
+			const reference = engine.taskForSession(sessionId);
+			if (reference === null) throw new Error("this session is not executing a workflow task");
+			const detail = engine.taskDetail(reference.jobId, args.taskId);
+			if (detail === null) throw new Error(`task not found: ${args.taskId}`);
+			return { task: toolJson(detail) };
+		}
+	});
+}
+/** 附件工具。 */
+function defineAttachmentsTool(ready) {
+	return defineTool({
+		name: "buka_job_attachments",
+		description: "Search or read the attachments this task is allowed to see (its own output plus the tasks it depends on, directly or transitively). Pass no arguments to list visible attachments; pass attachmentId to read one (metadata plus bounded inline text).",
+		parameters: {
+			query: {
+				type: "string",
+				description: "Optional keyword to filter by name / description."
+			},
+			attachmentId: {
+				type: "string",
+				description: "Attachment id to read."
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { attachments: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => text(JSON.stringify(value.attachments, null, 2))
+		},
+		async execute(args, exec) {
+			const sessionId = sessionIdOf(exec);
+			const engine = await ready();
+			if (typeof args.attachmentId === "string" && args.attachmentId.trim() !== "") {
+				const attachment = await engine.readAttachmentForSession(sessionId, args.attachmentId.trim());
+				if (attachment === null) throw new Error(`attachment not found or not visible to this task: ${args.attachmentId}`);
+				return { attachments: toolJson([attachment]) };
+			}
+			const query = typeof args.query === "string" ? args.query : "";
+			return { attachments: toolJson(engine.searchAttachmentsForSession(sessionId, query)) };
+		}
+	});
 }
 // .build/workflows/index.js
 /**
-* `@buka/dsh-plugin-workflows`：由编排 preset 现场创建的一次性工作流。
+* `@buka/dsh-plugin-workflows` 宿主一半入口：只做装配。
 *
-* 创建 / 启动 / 状态 / 取消工具注册在 Host 上，但只对配置里点名的 agent preset
-* （默认随插件发布的 `workflow-orchestrator`）的根会话可见；机器人节点会话另外
-* 获得四个只读观测工具（运行总览 / 执行输入 / 执行输出与附件清单 / 附件读取），可见性按运行记录里的
-* sessionId 判定。编排 agent 审视任务后，把一份节点定义连同目标交给
-* `buka_workflow_start`，插件现场校验并顺序执行：同一个 robot 在一次运行里只开
-* 一个会话（落到普通工作 preset），再次进入时先 compact 压缩历史、再把新的边
-* prompt 发进同一会话；每个 robot 节点交回一个 JSON，`next` 选中的出边就是下一跳；
-* user 节点在原生提问卡里等用户做决策 / 完成操作 / 给出反馈，用户的选项就是出边。
-* robot 节点可选 `mode: "plan"`：进入前把会话切到 DSH plan 模式，机器人先探索并
-* 交计划，用户在原生计划审阅卡里批准后在同一会话继续实施，再交回结构化结果。
+* 工作流是持久定义，作业是运行容器；任务级看板、显式依赖、内建开始 / 结束、
+* 人任务与助理都由引擎驱动。业务状态进 `ctx.storageDomain`，大文本与附件进
+* 插件数据目录，旧的运行目录由 `migration.ts` 在首次启动时删除。
 *
-* 不含 user 节点的定义在后台跑：工具立刻返回 runId，节点会话由 Host 侧观察者
-* 继续调度，浏览器里只读的运行页负责观察。含 user 节点的定义必须在调用者的
-* turn 内跑完，因为原生提问卡要求会话有活跃的 turn。
+* 装配顺序：
 *
-* 运行数据落盘到插件目录下的 `runs/`（定义快照、状态快照、事件流、节点结果、节点附件），
-* 既是回看依据，也是恢复的权威状态：Host 侧观察者（lib/supervisor.js）订阅全局
-* 会话事件推进运行，会话中断只续接同一会话，续接失败即终止运行；宿主重启后
-* 未完成的运行会尝试恢复，无法续接时标成 `interrupted`。等待用户作答的
-* user 运行无法重建原生提问，也会标成 `interrupted`。
-* 每次运行有一个持久递增的序号（`runs/sequence.json` 计数器），页面与工具输出
-* 都显示 `#N`；结束的运行按自动归档设置（`runs/` 同级的 `settings.json`，默认
-* 24 小时归档、168 小时删除）自动隐藏或删除，运行中的记录不会被处理。
+* 1. 解析配置；
+* 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
+* 3. 注册工具（可见性按编排 preset / 任务会话收窄）；
+* 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
+* 5. 注册浏览器路由。
 *
-* 跨插件依赖只走服务：`ctx.get('bukaRobots')`；取不到时在启动 robot 节点前
-* 报一条明确的安装提示。运行页的节点图还会用它提供的 `avatarMap()` 画出机器人
-* 头像（取不到时图照常画，只是不带头像）。
+* `storageDomain` 不放进 `inject`：缺少它的组合里插件仍然加载，只在真正需要
+* 存储时给出明确错误。
 *
 * @module @buka/dsh-plugin-workflows
 */
-/** 自动归档的巡检间隔：设置按小时计，每小时扫一次足够。 */
-const SWEEP_INTERVAL_MS = 36e5;
-/** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 不是一回事。 */
+/** Cordis 插件名；与 cordis.patch.yml 的补丁行 id 保持一致。 */
 const name = "tool-buka-workflows";
-/** 依赖的服务：只需要工具注册表；robots / userQuestions 在调用时按需获取。 */
+/** 依赖的服务：工具注册表。其余服务（storageDomain / webServer / commands / bukaRobots）按需可选获取。 */
 const inject = ["tools"];
+/**
+* 装配插件。
+*
+* @param ctx 插件上下文
+* @param config 插件配置
+*/
 function apply(ctx, config) {
 	const options = resolveOptions(config);
-	const settingsFile = resolveSettingsFile(options.runsDir);
-	const store = new WorkflowRunStore({
-		dir: options.runsDir,
-		maxRuns: options.maxRuns,
-		maxAttachmentBytes: options.maxAttachmentBytes,
-		maxAttachmentsPerNode: options.maxAttachmentsPerNode,
-		maxNodeAttachmentsBytes: options.maxNodeAttachmentsBytes,
-		maxInlineAttachmentBytes: options.maxInlineAttachmentBytes,
-		retention: defaultSettings().archive,
-		logger: ctx.logger
-	});
-	const supervisor = new WorkflowSupervisor({
-		ctx,
-		store,
-		options: {
-			nodeTimeoutMs: options.nodeTimeoutMs,
-			maxNodeTextBytes: options.maxNodeTextBytes,
-			robotPreset: options.robotPreset
-		},
-		logger: ctx.logger
-	});
-	ctx.inject(["bukaRobots"], (robotsCtx) => {
-		supervisor.attachRobots(robotsCtx.bukaRobots);
-	});
-	ctx.effect(() => () => {
-		supervisor.dispose().catch((error) => {
-			ctx.logger?.warn?.(`buka-workflows: 释放观察者失败：${describeError$3(error)}`);
-		});
-	}, "buka-workflows: dispose observer");
-	/** 自动归档巡检定时器；存储初始化完成后启动，插件卸载时停掉。 */
-	let sweepTimer = null;
-	ctx.effect(() => () => {
-		if (sweepTimer !== null) clearInterval(sweepTimer);
-		sweepTimer = null;
-	}, "buka-workflows: stop archive sweeper");
-	/** 启动每小时巡检：自动归档 / 删除只依赖这一个定时器与启动时的一次扫描。 */
-	function startSweeper() {
-		if (sweepTimer !== null) return;
-		sweepTimer = setInterval(() => {
-			store.sweep().catch((error) => {
-				ctx.logger?.warn?.(`buka-workflows: 自动归档巡检失败：${describeError$3(error)}`);
-			});
-		}, SWEEP_INTERVAL_MS);
-		sweepTimer.unref?.();
-	}
-	/**
-	* 存储初始化（建目录、回填序号、按设置清理）只做一次；随后由观察者恢复上次
-	* 进程留下的未完成运行。归档设置从设置文件读取，页面保存后会立即更新策略
-	* 并再扫一次。
-	*/
+	let engine;
 	let ready;
+	/** 引擎与存储当前实例；卸载时按登记顺序释放。 */
+	ctx.effect(() => () => {
+		engine?.dispose();
+		engine = void 0;
+	}, "buka-workflows: dispose engine");
+	/**
+	* 初始化：迁移 → 打开存储 → 构造引擎 → 恢复。只做一次。
+	*
+	* @returns 就绪的引擎
+	*/
 	function ensureReady() {
 		ready ??= (async () => {
-			const settings = await readSettings({ file: settingsFile });
-			store.setRetention(settings.archive);
-			await store.init();
-			startSweeper();
-			const existing = ctx.get("bukaRobots");
-			if (existing !== void 0 && existing !== null) supervisor.attachRobots(existing);
-			await supervisor.resumeAll();
+			await runMigrations({
+				dataDir: options.dataDir,
+				logger: ctx.logger
+			});
+			const created = new WorkflowEngine({
+				ctx,
+				store: await openWorkflowStore(ctx, {
+					dataDir: options.dataDir,
+					logger: ctx.logger
+				}),
+				options,
+				logger: ctx.logger,
+				robots: () => ctx.get("bukaRobots") ?? null,
+				delivery: createHostSessionDelivery(ctx)
+			});
+			engine = created;
+			await created.start();
+			return created;
 		})();
 		return ready;
 	}
 	ensureReady().catch((error) => {
-		ctx.logger?.warn?.(`buka-workflows: 初始化运行记录失败：${describeError$3(error)}`);
+		ctx.logger?.warn?.(`buka-workflows: 初始化工作流存储失败：${describeError$1(error)}`);
 	});
-	/**
-	* 判定某个 agent 能否看到 / 调用工作流工具。
-	*
-	* 只放行配置里点名的 preset 的根会话；preset 服务不可用时保持可见。
-	*
-	* @param agent
-	* @returns
-	*/
+	/** 判定某个 agent 能否看到 / 调用工作流定义工具（编排 preset 根会话）。 */
 	function accessOf(agent) {
 		return resolveWorkflowAccess({
 			allowed: options.orchestratorPresets,
@@ -10065,43 +11505,41 @@ function apply(ctx, config) {
 			agentPresets: ctx.get("agentPresets")
 		});
 	}
-	/** 工具在每一步的可见性条件。 */
-	const visibleWhen = (context) => accessOf(context?.agent).visible;
-	/**
-	* 调用时兜底再校验一次：即便绕过可见性判断直接调用也要被挡住。
-	*
-	* @param agent
-	* @returns
-	*/
-	function assertOrchestrator(agent) {
-		const access = accessOf(agent);
-		if (access.visible) return access;
-		throw new Error(`workflow tools are only available to the ${options.orchestratorPresets.join(" / ")} preset (reason: ${access.reason})`);
-	}
+	/** 定义工具可见性（同步判定，供每一步的 when 使用）。 */
+	const orchestratorVisible = (context) => accessOf(context.agent).visible;
+	/** 执行会话可见性：该会话正在执行一条任务（启动 / agent / 助理）。 */
+	const executionVisible = async (context) => {
+		const sessionId = typeof context.agent?.id === "string" ? context.agent.id : "";
+		if (sessionId === "") return false;
+		return (await ensureReady()).taskForSession(sessionId) !== null;
+	};
+	/** 启动者 / 执行会话可见性：作业状态与取消。 */
+	const starterVisible = async (context) => {
+		const sessionId = typeof context.agent?.id === "string" ? context.agent.id : "";
+		if (sessionId === "") return false;
+		const current = await ensureReady();
+		return current.taskForSession(sessionId) !== null || current.jobIdForSession(sessionId) !== null;
+	};
 	registerWorkflowTools({
 		ctx,
+		ready: ensureReady,
 		options,
-		store,
-		supervisor,
-		ensureReady,
-		assertOrchestrator,
-		visibleWhen
+		orchestratorVisible,
+		executionVisible,
+		starterVisible,
+		assertOrchestrator: (agent) => {
+			const access = accessOf(agent);
+			if (access.visible) return;
+			throw new Error(`workflow definition tools are only available to the ${options.orchestratorPresets.join(" / ")} preset (reason: ${access.reason})`);
+		}
 	});
-	const sessionTools = createWorkflowSessionTools({
-		defineTool,
-		store,
-		resolveSession: (sessionId) => supervisor.sessionRun(sessionId)
-	});
-	const sessionToolVisibleWhen = createSessionToolVisibility({
-		ensureIndex: () => supervisor.ensureSessionIndex(),
-		resolveSession: (sessionId) => supervisor.sessionRun(sessionId)
-	});
-	for (const tool of sessionTools) ctx.tools.register(tool, { when: sessionToolVisibleWhen });
+	if (!registerJobCommand({
+		ctx,
+		ready: ensureReady
+	})) ctx.logger?.info?.("buka-workflows: the host commands service cannot register /job; ordinary sessions can use the buka_job_start tool instead");
 	registerWorkflowRoutes({
 		ctx,
-		store,
-		settingsFile,
-		ensureReady
+		ready: ensureReady
 	});
 }
-export { Config, apply, defaultRunsDir, inject, name, renderCancel, renderPlanResult, renderRun, renderStart, renderStatus, renderTemplates, resolveRunsDir };
+export { Config, apply, defaultDataDir, inject, name, resolveDataDir };

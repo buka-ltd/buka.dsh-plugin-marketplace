@@ -1,26 +1,32 @@
 /**
  * HTTP 小工具：响应写出、请求体读取与附件流式下载。
+ *
+ * @module @buka/dsh-plugin-workflows/http
  */
 
 import { createReadStream } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import type { OpenedAttachment } from './run-store.ts'
-import type { WorkflowSettings } from './settings.ts'
+/** 设置请求体上限：工作流定义可能较大，但仍要防止无界读取。 */
+const MAX_BODY_BYTES = 256 * 1024
 
-/** 设置请求体上限：只有几个字段。 */
-const MAX_BODY_BYTES = 8 * 1024
+/** 一个可流式返回的附件。 */
+export interface AttachmentFile {
+  readonly path: string
+  readonly name: string
+  readonly bytes: number
+}
 
 /**
  * 把附件文件写进响应：默认下载，`inline` 时按给定 MIME 内联并附带安全头。
  *
  * @param res HTTP 响应
- * @param attachment 清单里的附件
+ * @param attachment 附件文件
  * @param options 内联 / MIME / 日志
  */
 export function pipeAttachment(
   res: ServerResponse,
-  attachment: OpenedAttachment,
+  attachment: AttachmentFile,
   options: {
     inline?: boolean | undefined
     mime?: string | undefined
@@ -49,6 +55,7 @@ export function pipeAttachment(
   })
   stream.pipe(res)
 }
+
 /**
  * 附件的响应头：ASCII 回退 + 完整 UTF-8 文件名。
  *
@@ -61,23 +68,7 @@ function attachmentDisposition(name: string, inline = false): string {
   const encoded = encodeURIComponent(name).replace(/'/gu, '%27')
   return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encoded}`
 }
-/**
- * 设置对象 → 浏览器用的平铺字段。页面不关心 `version` 与内部包装。
- *
- * @param settings 设置
- * @returns 平铺字段
- */
-export function settingsPayload(settings: WorkflowSettings): {
-  enabled: boolean
-  archiveAfterHours: number
-  deleteAfterHours: number
-} {
-  return {
-    enabled: settings.archive.enabled,
-    archiveAfterHours: settings.archive.archiveAfterHours,
-    deleteAfterHours: settings.archive.deleteAfterHours,
-  }
-}
+
 /**
  * 读取 JSON 请求体；content-type 不对、太大或不是合法 JSON 时已经写好响应，
  * 返回 undefined。
@@ -107,6 +98,7 @@ export async function readJsonBody(req: IncomingMessage, res: ServerResponse): P
     return undefined
   }
 }
+
 /**
  * 读取有上限的请求体；超过上限时丢弃剩余流并返回 null。
  *
@@ -127,6 +119,7 @@ async function readBoundedBody(req: IncomingMessage): Promise<string | null> {
   }
   return Buffer.concat(chunks, size).toString('utf8')
 }
+
 /**
  * 查询参数里的条数上限。
  *
@@ -138,6 +131,7 @@ export function parseLimit(value: string | null): number {
   if (!Number.isInteger(parsed) || parsed < 1) return 50
   return Math.min(parsed, 100)
 }
+
 /**
  * 发送 JSON 响应。
  *
@@ -151,6 +145,7 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
   res.setHeader('cache-control', 'no-store')
   res.end(JSON.stringify(payload))
 }
+
 /**
  * 统一的失败响应：`{ ok: false, code, message }`。
  *
@@ -167,6 +162,7 @@ export function sendError(
 ): void {
   sendJson(res, status, { ok: false, code, message })
 }
+
 /**
  * 405 并带上唯一支持的方法。
  *

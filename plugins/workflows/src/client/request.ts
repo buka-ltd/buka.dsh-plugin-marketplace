@@ -1,51 +1,48 @@
 /**
- * Host 只读路由的请求：JSON 请求与附件地址。
+ * Host 路由的请求封装：JSON 请求、POST 动作与附件地址。
+ *
+ * 所有请求都走界面侧公共包的 `requestJson`（同源、`ok !== true` 即抛错），
+ * 信任栅栏由 Host 一半负责。
  */
 
 import { requestJson } from '@buka/plugin-ui'
-import type { WorkflowRunRecord, WorkflowStep } from '../run-store.ts'
+import { ATTACHMENT_ROUTE } from './types.ts'
 
 export { requestJson }
 
 /**
- * 附件地址：只用运行 id、执行序号、节点 id 与清单里的文件名。`mode` 只在
- * preview / inline 时写入，省略就是下载（保持原有的下载链接行为）。
+ * 发一个 POST JSON 请求。
  *
- * @param token
- * @param [mode]
- * @returns
+ * @param url 路由地址
+ * @param body 已经序列化的请求体对象
  */
-export function attachmentUrl(
-  token: { runId?: unknown; seq?: unknown; nodeId?: unknown; name?: unknown },
-  mode?: 'preview' | 'inline',
-): string {
-  const params = new URLSearchParams({
-    runId: typeof token?.runId === 'string' ? token.runId : '',
-    seq: token?.seq === undefined || token?.seq === null ? '' : String(token.seq),
-    nodeId: typeof token?.nodeId === 'string' ? token.nodeId : '',
-    name: typeof token?.name === 'string' ? token.name : '',
-  })
-  if (mode === 'preview' || mode === 'inline') params.set('mode', mode)
-  return `/buka-workflows/attachment?${params.toString()}`
+export function postJson<T = Record<string, unknown>>(
+  url: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  return requestJson<T>(url, { method: 'POST', body: JSON.stringify(body) })
 }
 
 /**
- * 附件清单里的那条附件 → 路由参数。下载链接、预览请求与抽屉状态共用它。
+ * 附件地址：作业附件库里的附件 id + `mode`。
  *
- * @param run
- * @param step
- * @param attachment
+ * `mode` 省略即下载；`preview` 取预览元数据 / 文本；`inline` 直接取图片 / PDF
+ * 正文。沿用旧附件路由的 mode 语义。
+ *
+ * @param jobId 作业 id
+ * @param attachmentId 附件 id
+ * @param [mode] 下载 / 预览 / 内联
  * @returns
  */
-export function attachmentToken(
-  run: WorkflowRunRecord | null,
-  step: WorkflowStep | null | undefined,
-  attachment: Record<string, unknown> | null | undefined,
-): { runId: string; seq: unknown; nodeId: string; name: string } {
-  return {
-    runId: typeof run?.runId === 'string' ? run.runId : '',
-    seq: step?.seq ?? '',
-    nodeId: typeof step?.nodeId === 'string' ? step.nodeId : '',
-    name: typeof attachment?.name === 'string' ? attachment.name : '',
-  }
+export function attachmentUrl(
+  jobId: unknown,
+  attachmentId: unknown,
+  mode?: 'preview' | 'inline',
+): string {
+  const params = new URLSearchParams({
+    jobId: typeof jobId === 'string' ? jobId : '',
+    attachmentId: typeof attachmentId === 'string' ? attachmentId : '',
+  })
+  if (mode === 'preview' || mode === 'inline') params.set('mode', mode)
+  return `${ATTACHMENT_ROUTE}?${params.toString()}`
 }

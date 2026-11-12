@@ -1,37 +1,31 @@
 /**
- * 节点结果 JSON 的 schema：定义校验、运行期校验与 prompt 结果契约。
+ * 受限 JSON Schema 子集：定义校验、运行期结果校验与模板路径检查。
  *
- * 工作流的 robot 节点在定义里用 `output` 声明它交回的 JSON 对象长什么样。
- * 本模块只处理声明与结果之间的纯逻辑（不读盘、不依赖 DSH）：
+ * 工作流 v4 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
+ * 执行者必须交回的结构化结果；开始 / 结束节点也各自声明任务契约。本模块
+ * 只处理声明与值之间的纯逻辑（不读盘、不依赖 DSH）：
  *
- * - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。定义由模型现场
- *   生成，所以这里只放行一组可移植关键字，避免把任意 schema 直接当成工具参数；
- * - `buildResultSchema`：把声明的 `output` 与引擎字段合并成真正交给
- *   `structured_output` 的 schema。`next` 由出边名生成；`abort` 是每个 robot
- *   节点内置的主动终止能力；`attachments` 是每个 robot 节点内置的能力，总是
- *   可选出现（不是主输出，只放独立数据 / 文件）；
- * - `outputProblems`：运行期按声明的 `output` 校验节点交回的结果；
- * - `resolveOutputPath`：定义校验时检查 prompt 里 `{{nodes.<id>.data.<path>}}`
- *   的路径是否真的在目标节点的 `output` 里；
- * - `renderOutputContract`：给节点 prompt 追加一段固定契约（schema + 最终文本
- *   与附件的边界）。
+ * - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
+ *   由编排 agent 生成，所以这里只放行一组可移植关键字，避免把任意 schema
+ *   直接当成工具参数；
+ * - `schemaProblems`：运行期按声明的 schema 校验 payload / output；
+ * - `resolveOutputPath`：定义校验时检查 `{{start.output.<path>}}` 这类模板
+ *   引用的路径是否真的在目标 schema 里；
+ * - `schemaJson`：给 prompt 用的 schema 序列化。
  *
- * 本模块不修改调用方传入的定义对象：`buildResultSchema` 会 clone 后再合并。
+ * 本模块不修改调用方传入的对象。
  *
  * @module @buka/dsh-plugin-workflows/output
  */
 
-/** 单份 `output` schema 序列化后的字节上限。 */
+/** 单份 schema 序列化后的字节上限。 */
 export const MAX_OUTPUT_SCHEMA_BYTES = 16 * 1024
 
-/** `output` schema 的最大嵌套深度（顶层算第 1 层）。 */
+/** schema 的最大嵌套深度（顶层算第 1 层）。 */
 export const MAX_OUTPUT_SCHEMA_DEPTH = 8
 
-/** 一份 `output` schema 里所有 properties 的总数上限。 */
+/** 一份 schema 里所有 properties 的总数上限。 */
 export const MAX_OUTPUT_PROPERTIES = 64
-
-/** 引擎保留、不允许在 `output` 里声明的顶层字段。 */
-export const RESERVED_OUTPUT_FIELDS = Object.freeze(['next', 'attachments', 'abort'])
 
 /** 属性名必须能被 prompt 模板的点号路径寻址。 */
 const PROPERTY_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u
@@ -71,14 +65,8 @@ export interface OutputSchema {
   items?: OutputSchema
 }
 
-/** 带 `next` 出边与 `output` 声明的节点；本模块只用到这两个字段。 */
-export interface OutputNode {
-  readonly output?: unknown
-  readonly next?: readonly { readonly name?: unknown }[] | null | undefined
-}
-
 /** 定义校验时记录错误的回调。 */
-type FailFn = (path: string, message: string) => void
+export type FailFn = (path: string, message: string) => void
 
 /**
  * 判断一个值是不是普通对象。
@@ -86,7 +74,7 @@ type FailFn = (path: string, message: string) => void
  * @param value 待判断的值
  * @returns 是普通对象时为 true
  */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
@@ -106,11 +94,13 @@ function isPrimitive(value: unknown): boolean {
 }
 
 /**
- * 校验并规范化一个 robot 节点的 `output`。
+ * 校验并规范化一份 payload / output schema。
  *
- * 返回只包含合法关键字的新对象；无法构成 schema 时返回 null（错误已记录）。
+ * 顶层必须是 `type: "object"`：任务的 payload 与结构化结果都是 JSON 对象，
+ * 页面表单与 `buka_task_complete` 都按对象读写。返回只包含合法关键字的新对象；
+ * 无法构成 schema 时返回 null（错误已记录）。
  *
- * @param raw 声明的 `output`
+ * @param raw 声明的 schema
  * @param path 出错时使用的路径前缀
  * @param fail 记录错误的回调
  * @returns 规范化后的 schema；不合法时是 `null`
@@ -121,7 +111,7 @@ export function parseOutputSchema(raw: unknown, path: string, fail: FailFn): Out
     return null
   }
   if (raw.type !== 'object') {
-    fail(`${path}.type`, 'must be "object": a robot node always returns a JSON object')
+    fail(`${path}.type`, 'must be "object": task payload and results are JSON objects')
     return null
   }
   const state = { properties: 0 }
@@ -256,19 +246,7 @@ function walkSchema(
         if (!PROPERTY_NAME_PATTERN.test(name)) {
           fail(
             `${path}.properties.${name}`,
-            'must match [A-Za-z0-9_-] and be at most 64 characters so prompts can address it as {{nodes.<id>.data.<field>}}',
-          )
-          invalid = true
-          continue
-        }
-        if (depth === 1 && RESERVED_OUTPUT_FIELDS.includes(name)) {
-          fail(
-            `${path}.properties.${name}`,
-            name === 'next'
-              ? 'is added by the workflow from the outgoing edge names; do not declare it in output'
-              : name === 'abort'
-                ? 'is the built-in way to end the run when this node cannot complete its task; do not declare it in output'
-                : 'is always available as the built-in attachments capability; do not declare it in output',
+            'must match [A-Za-z0-9_-] and be at most 64 characters so prompts can address it by path',
           )
           invalid = true
           continue
@@ -352,109 +330,7 @@ function walkSchema(
 }
 
 /**
- * 一个 robot 节点可用于 JSON `next` 的路由键（出边 name）。
- *
- * @param node 已规范化的节点
- * @returns 可用的路由键
- */
-export function routeNamesOf(node: OutputNode | null | undefined): string[] {
-  const rules = Array.isArray(node?.next) ? node.next : []
-  return rules
-    .map((rule) => (typeof rule?.name === 'string' ? rule.name.trim() : ''))
-    .filter((name) => name !== '')
-}
-
-/**
- * 生成 attachments 数组的 schema（每次返回新对象，避免被调用方修改）。
- *
- * attachments 是每个 robot 节点内置的能力：用来交回与答案相互独立的数据 / 文件，
- * 不是主输出通道。
- *
- * @returns attachments 数组的 schema
- */
-function attachmentSchema(): OutputSchema {
-  return {
-    type: 'array',
-    description:
-      "Optional independent data or files this node produced (binary artifacts, archives, traces, large datasets). Supplementary only: never put the answer itself in an attachment. Paths are relative to your workspace; the workflow copies each file into this execution's node directory.",
-    items: {
-      oneOf: [
-        { type: 'string', description: 'Path to a file, relative to your workspace.' },
-        {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            path: { type: 'string', description: 'Path to a file, relative to your workspace.' },
-            name: {
-              type: 'string',
-              description: 'Optional destination name; defaults to the source file name.',
-            },
-            description: {
-              type: 'string',
-              description: 'Optional one-line description shown with the attachment.',
-            },
-          },
-          required: ['path'],
-        },
-      ],
-    },
-  }
-}
-
-/**
- * 构造真正交给 `structured_output` 的 schema。
- *
- * 新定义以声明的 `output` 为底，合并 `next`（有出边时 enum）、内置的 `abort`
- * 与内置的 `attachments`；升级前已在跑的快照没有 `output`，退回旧的宽松对象
- * schema，保证未完成的运行能继续。`next` 不放进 `required`：节点可以用 `abort`
- * 代替它。返回值是新对象，不会修改节点。
- *
- * @param node 已规范化的节点
- * @returns 交给 `structured_output` 的 schema
- */
-export function buildResultSchema(node: OutputNode | null | undefined): OutputSchema {
-  const declared = isPlainObject(node?.output) ? structuredClone(node.output) : null
-  const schema: OutputSchema = declared ?? {
-    type: 'object',
-    additionalProperties: true,
-    properties: {},
-  }
-  if (!isPlainObject(schema.properties)) schema.properties = {}
-
-  const routes = routeNamesOf(node)
-  if (routes.length > 0) {
-    schema.properties.next = {
-      oneOf: [
-        {
-          type: 'string',
-          enum: routes,
-          description: 'A single route key; the workflow follows exactly one edge.',
-        },
-        {
-          type: 'array',
-          items: { type: 'string', enum: routes },
-          description:
-            'One or more route keys (non-empty); the workflow starts every listed edge as a concurrent branch. Use this to fan out parallel work that a join node collects later.',
-        },
-      ],
-      description:
-        'Route key(s) from the workflow definition; selects the edge(s) to follow next. Use "abort" instead when you cannot complete this node\'s task.',
-    }
-  }
-
-  schema.properties.abort = {
-    type: 'string',
-    description:
-      'Set this instead of "next" (or instead of a normal result on a terminal node) when you cannot complete this task: a short reason why. The workflow ends and the run is recorded as failed. Abort does not need to satisfy the declared output fields.',
-  }
-  schema.properties.attachments = attachmentSchema()
-  return schema
-}
-
-/**
- * 判断 prompt 里的 `data.<path>` 是否真的在声明的 `output` 里。
- *
- * 返回 null 表示存在；否则返回可以拼进错误信息的原因片段。
+ * 判断 prompt 里的路径是否真的在声明的 schema 里。
  *
  * 规则：
  * - 对象按 `properties` 下钻；未声明的字段直接报错（即使 additionalProperties
@@ -462,8 +338,8 @@ export function buildResultSchema(node: OutputNode | null | undefined): OutputSc
  * - 数组只允许数字下标，并且必须声明了 `items` 才能继续下钻；
  * - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败。
  *
- * @param schema 节点声明的 output schema
- * @param segments `data` 之后的路径段
+ * @param schema 声明的 schema
+ * @param segments 路径段（不含 `start.output` 前缀）
  * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
  */
 export function resolveOutputPath(
@@ -499,24 +375,15 @@ export function resolveOutputPath(
 }
 
 /**
- * 按声明的 `output` 校验节点交回的结果。
+ * 按声明的 schema 校验一个值。
  *
- * 引擎保留的顶层 `next` / `abort` / `attachments` 不参与声明字段校验：`next`
- * 与 `abort` 由结果解析单独处理，`attachments` 是内置能力。返回可读问题列表，
- * 空数组表示通过。
- *
- * @param node 已规范化的节点
- * @param data 节点交回的结果
+ * @param schema 声明的 schema
+ * @param data 待校验的值
  * @returns 可读问题列表；空数组表示通过
  */
-export function outputProblems(node: OutputNode | null | undefined, data: unknown): string[] {
-  if (!isPlainObject(node?.output)) return []
+export function schemaProblems(schema: OutputSchema, data: unknown): string[] {
   const problems: string[] = []
-  if (!isPlainObject(data)) {
-    problems.push('result: expected a JSON object')
-    return problems
-  }
-  checkValue(node.output as OutputSchema, data, '', problems, 0)
+  checkValue(schema, data, '', problems, 0)
   return problems
 }
 
@@ -538,7 +405,7 @@ function checkValue(
   depth: number,
 ): void {
   if (depth > MAX_CHECK_DEPTH) return
-  const label = path === '' ? 'result' : path
+  const label = path === '' ? 'payload' : path
 
   if (Array.isArray(schema.oneOf)) {
     const matched = schema.oneOf.some((branch) => {
@@ -576,7 +443,6 @@ function checkValue(
       if (schema.additionalProperties === false) {
         for (const name of Object.keys(value)) {
           if (Object.hasOwn(properties, name)) continue
-          if (depth === 0 && RESERVED_OUTPUT_FIELDS.includes(name)) continue
           problems.push(`${joinPath(path, name)}: unexpected field (additionalProperties is false)`)
         }
       }
@@ -648,26 +514,11 @@ function actualType(value: unknown): string {
 }
 
 /**
- * 节点 prompt 末尾追加的结果契约。
+ * 把 schema 序列化成 prompt 里展示的 JSON 文本。
  *
- * 升级前的快照没有 `output`，返回空串，保持旧 prompt 不变。
- *
- * @param node 已规范化的节点
- * @returns 追加到 prompt 末尾的契约；旧快照是空串
+ * @param schema 声明的 schema
+ * @returns 格式化后的 JSON
  */
-export function renderOutputContract(node: OutputNode | null | undefined): string {
-  if (!isPlainObject(node?.output)) return ''
-  const schema = buildResultSchema(node)
-  return [
-    '---',
-    'Result contract (added by the workflow):',
-    'Finish by calling the structured_output tool with one JSON object that matches this schema:',
-    '```json',
-    JSON.stringify(schema, null, 2),
-    '```',
-    'When this node has outgoing edges, the object must contain exactly one of "next" and "abort": "next" is a declared route name, or a non-empty list of route names to start several edges as concurrent branches; "abort" is a short non-empty reason.',
-    'If you cannot complete this task, do not choose a route you do not believe in: submit "abort" with a short non-empty reason instead. The workflow ends immediately, the run is recorded as failed, and the declared output fields and attachments are not required.',
-    "The final assistant text is this step's output shown on the run page; put the actual answer in the final text and the declared fields.",
-    'The "attachments" list is a built-in capability for independent data or files this node produced (archives, traces, images, large datasets); it is not a place for the answer itself.',
-  ].join('\n')
+export function schemaJson(schema: OutputSchema): string {
+  return JSON.stringify(schema, null, 2)
 }

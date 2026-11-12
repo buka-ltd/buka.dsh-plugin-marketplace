@@ -1,3 +1,80 @@
 # Buka Workflows
 
-Orchestrator-preset workflows in format 3. The shipped workflow-orchestrator preset (only it can see the creation/start tools) turns a one-off request into a node graph and runs it: each robot keeps one session for the whole run in its workspace under the normal worker preset, compacting that session's history before every later entry. A user node is a user-intervention entry point: the graph pauses and hands the human one of three things only a person can do - wait for a decision, wait for the user to complete a manual action, or wait for feedback on a result only a human can see. A user node has a required title, an optional templated detail shown to the user, outgoing edges that are the user's choices (each with a route name, a user-facing label and an optional description) and optional questions that collect extra answers; the answers feed later prompts as nodes.<id>.route, nodes.<id>.answers.<qid>.selected / .custom and nodes.<id>.text. Definitions containing user nodes run in the foreground with an active caller turn because the native question card needs one (a host restart interrupts such runs); runs without user nodes return the run id as soon as the first node is dispatched and a host-side supervisor keeps scheduling sessions from session events (it never awaits the session result). Robots are normal sessions (runtime roots under the normal approval policy): they can request tool approvals or ask the user questions, and the run page shows a pending-interaction notice with an open-session action; the workflow injects only the task, the declared result contract and the path meanings. Every robot node session also gets four read-only observation tools available when its recorded session id belongs to a run: buka_workflow_overview (compact graph, node summaries/states and the ordered execution list without prompts or final texts), buka_workflow_execution_input and buka_workflow_execution_output (one execution's exact input or recorded output plus its attachment manifest), and buka_workflow_execution_attachment (list or read one attachment in bounded chunks). Attachments are a built-in capability of every robot node for independent data/files (binaries, archives, traces, large datasets), not a channel for the answer itself: a node may return an optional attachments array of workspace-relative paths, the observer copies those files into the execution's node directory, and later prompts can inline small text files or reference them by path. Visibility is rebuilt from run records, so the tools remain available after the run ends or DSH restarts when the robot session is reopened. Releasing a node's live agent re-announces its still-persisted session to clients, so it stays in the sidebar and the page's open-session action keeps working (it refreshes a stale client session list first). A robot node may also set "mode": "plan": its session enters DSH plan mode before the prompt, the robot presents its plan through the native plan review card, and after the user approves it carries out the plan and returns the node result; this is one node, not a separate approval node, and the run page shows a waiting notice while the review is open. Every robot node must declare output, a JSON Schema object for its result JSON; the engine merges next, the built-in abort escape and the built-in attachments capability into the scoped structured_output tool (plain-text JSON is accepted and validated the same way) and validates edge-prompt template variables against the declared schemas at plan time. When the node has outgoing edges, the JSON must carry exactly one of next and abort: next is one of those edge names, or a non-empty list of them to fan out into concurrent branches; the supervisor follows next and its prompt automatically - no when condition and no extra judge agent. A terminal robot node still returns JSON but no next. A valid abort ends the run as failed with the node's reason, follows no edge, and does not require the declared output fields; malformed or ambiguous next/abort results are retried in the same session. Edges on robot nodes are { to, name, prompt }: name is the unique route key, prompt explains that entry's task and what each next value means; report and when are validation errors. A user node's edges are { to, name, label, description?, prompt? }: label is the user-facing option text, prompt is required only when the target is a robot node and forbidden otherwise. There is no default node timeout (an explicit robot timeoutMs is the only hard deadline), interrupted sessions are resumed in the same session; if that fails the run fails with an explicit error and never opens a substitute session, and unfinished runs resume after a host restart except runs that contain user nodes (their question card cannot be recreated). Runs are one-off and format 3 only: a gate node is rejected with a migration error, on startup old-version runs are purged, run numbering restarts at #1 and settings.json keeps the archive settings. A read-only sidebar page draws each persisted run as a layered two-dimensional graph: nodes at the same depth and parallel branches sit side by side in one row with fixed-width capsules, edges leave and enter node top/bottom ports, adjacent-layer edges are direct or cubic curves, and cross-layer, loop and self edges use side lanes on both the left and the right whose layer intervals never overlap; every edge carries a direction arrow, revisited nodes show ×N, nodes the run never reached stay gray, and the graph scrolls horizontally when it is wider than the page; robot capsules show the robot's preset avatar and the creator-written step summary, user capsules show their title, clicking a node capsule opens a right-side 560px drawer that shows the node's single robot session with an open-session action, and one tab per execution shows the rendered task, the final text, status, time, duration and the route it took (a user execution shows the rendered instruction, the readable answer text and the chosen label), plus a pending-interaction notice, a waiting-for-you notice with an open-session action while a user node is waiting, and recovered/timed-out tags; the output tab shows the final text plus attachment previews (text/Markdown/images/PDF) and download links for other types, never the raw JSON or key/value routing fields. Clicking any edge (even one with no name) opens a right-side 560px drawer with its source and target, route key, user option label and description, entry prompt (the raw template, rendered only when the edge is taken), appearance tone and loop/back-edge flag, plus whether and how many times the run took this edge; template pages show no run-state rows. The node and edge drawers are mutually exclusive, an attachment preview can stack above the node drawer, and the footer keeps the legend and adds a hint to click a node for details or an edge for its configuration. Every run is numbered in creation order (#N); the page's auto-archive settings archive runs after 24 hours and delete them after 168 hours by default.
+Persistent workflows with a job board. A workflow is a **position graph**; a job is one workflow version plus one input, and every job gets a board; a **task** is the smallest work unit, added by running positions at any time and dispatched only along drawn edges.
+
+## Model
+
+- **Workflow**: a persistent definition with versions; an orchestrator preset saves it with `buka_workflow_save`, and the page reviews / activates / retires it.
+- **Position**: a graph node (besides the built-in start / end). One position has one executor: a person or a robot (agent / program).
+- **Task type**: the contract a position declares: payload schema, output schema, required upstream task types, the assistant for human tasks, and an optional plan mode.
+- **Edge**: an allowed dispatch relation, optionally limited to task types; back edges are explicit. An edge is a permission, not a pipe.
+- **Start / end**: built-in nodes executed by the starter. The start task turns the raw input into the first structured input; the end task carries the final deliverable and completes on delivery to the starter.
+- **Job**: one workflow plus one input, pinned to a workflow version; numbering is per workflow. There are no cross-workflow jobs.
+- **Task**: a card on the board with seven states: pending / ready / running / completed / failed / blocked / cancelled. Dependencies are explicit and the task graph is acyclic; each rework creates a new task record.
+- **Board**: rows are positions (including start / end), columns are queue / ready / running / done / exception.
+
+## Usage
+
+1. Start a session with the "workflow orchestrator" preset, draft the position graph, and save it as a workflow version.
+2. Review the graph and contracts in the sidebar "Workflows" page and activate the version.
+3. Create a job:
+   - page: fill raw input and structured input; the starter is the person;
+   - session: run `/job`; the starter is that session, and the start task runs back in it.
+4. On the job board, robot positions auto-claim ready tasks; human tasks are handled by the named assistant or by the person. Executors dispatch downstream tasks along edges; the end task returns the deliverable to the starter and the job settles.
+
+## Tools
+
+| Tool / command                             | Purpose                                                                             |
+| ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `/job`                                     | Ordinary sessions: list active workflows or start a job (starter = current session) |
+| `buka_workflow_save`                       | Orchestrator preset root session: validate and save a new workflow version (draft)  |
+| `buka_workflow_list` / `buka_workflow_get` | Read the workflow catalog / full definition                                         |
+| `buka_job_start`                           | Backend for `/job` and the page: create a job                                       |
+| `buka_job_status` / `buka_job_cancel`      | Read or cancel a job                                                                |
+| `buka_task_create`                         | Running tasks: add downstream tasks at any time, more than once                     |
+| `buka_task_complete`                       | Running tasks / assistant: submit structured result, text and attachments           |
+| `buka_job_board` / `buka_task_get`         | Running tasks / assistant: read the board, a task and dependency results            |
+| `buka_job_attachments`                     | Running tasks / assistant: search / read attachments within the visible set         |
+
+Workflow-editing tools are visible only to root sessions of the presets named by `orchestratorPresets`; execution tools are visible only to task sessions, assistant sessions and starter sessions. Human tasks have no model answer tool.
+
+## Human tasks and assistants
+
+- A human task is an ordinary task from a human position. There is no "waiting for human" state; every task lives on the board.
+- A human task type names an `assistant` (an agent robot) or `null`:
+  - named assistant: when the task is ready the engine starts that assistant's session; the assistant uses its own skills to talk to the person and submits the result. Only the named assistant may claim the task.
+  - `null`: the task waits in ready; the person claims it and fills the output form on the board.
+- If the assistant fails the task returns to ready; no automatic switch, and the person can always finish it.
+
+## Attachments
+
+Each job has one attachment store. Every attachment records its source task / position, creator, size, mime, sha256 and description; visibility follows the data flow: the producing task, tasks that transitively depend on it, the starter and the job page. Unrelated branches cannot list, search or read it. Files live in the plugin job directory; metadata lives in `ctx.storageDomain`.
+
+## Pages
+
+The sidebar "Workflows" page: workflow list -> workflow detail (graph, positions / task types / edges / start-end contracts / budgets, job list) -> job detail (board by default, plus graph, tasks, attachment store and timeline). The task drawer shows payload, dependencies, attempts, result and attachments, and offers the actions in `allowedActions`; human tasks render an output form; a failed end delivery offers "retry delivery".
+
+## Dependencies and storage
+
+- Requires `@buka/dsh-plugin-robots` for robot registration and task sessions, and `ctx.storageDomain` (shipped by the base composition).
+- Workflows / jobs / tasks / attempts / attachment metadata live in the `buka_workflow` domain; large texts and attachment files live under `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`.
+- The first v4 start deletes the old `runs/` and `settings.json` (hard cut); after that, jobs and tasks are never purged by a format version.
+
+## Configuration
+
+See `src/options.ts` for the data directory, orchestrator presets, robot preset, concurrency and budgets. `orchestratorPresets` defaults to the shipped `workflow-orchestrator`.
+
+## Structure
+
+- `src/domain/**`: types, state machines, ids.
+- `src/store/**`: storageDomain tables, per-job queue, job directories.
+- `src/definition/**`: workflow v4 validation and payload templates.
+- `src/engine/**`: scheduling, executors, settlement, recovery.
+- `src/tools/**`, `src/commands/**`: model tools and the `/job` command.
+- `src/routes/**`: page read / action routes.
+- `src/client/**`: sidebar page.
+- `lib/index.js`, `lib/client.js`: build output, committed, never edited by hand.
+
+## Tests
+
+`test/workflows-core.test.mjs` (domain / store / definition), `test/workflows-server.test.mjs` (engine / recovery / attachments / tools), `test/workflows-client.test.mjs` (render smoke). Run `node --test`.

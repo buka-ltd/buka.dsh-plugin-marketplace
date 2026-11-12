@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-workflows",
-  "version": "0.12.1",
-  "description": "用编排 preset 创建并运行一次性工作流，在关键节点停下来等待人工介入。",
+  "version": "1.0.0",
+  "description": "持久工作流 + 作业看板：岗位图约束任务流转，看板按任务分发与认领。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -21,13 +21,14 @@
   ],
   "engines": {
     "node": ">=22.20",
-    "dsh": ">=0.2.1-rc.5"
+    "dsh": ">=0.2.2-rc.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
     "@deepseek-ai/schemastery": "~3.18.5"
   },
   "dsh": {

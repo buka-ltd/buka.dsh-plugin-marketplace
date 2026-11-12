@@ -202,10 +202,6 @@ window.__ModuleLoader__.load({
     	return body;
     }
     // .build/workflows/client/element.js
-    /** 图标组件运行时把额外属性透传给 `<svg>`，官方 IconProps 没有声明这些属性。 */
-    function withAria(props) {
-    	return props;
-    }
     /** Modal 的 headless 模式不消费 closeLabel；运行时传了也会被忽略。 */
     const ClientModal = _deepseek_ai_dsh_client_ui_primitives.Modal;
     // .build/workflows/client/components/panel-icon.js
@@ -250,479 +246,473 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/i18n.js
     /**
-    * 侧边栏「工作流」页面的词典（英文 / 简体中文）。
+    * 浏览器一半的词典：工作流列表 / 详情 / 作业看板 / 任务抽屉 / 附件 / 时间线。
+    *
+    * 键固定为英文，值与 `locale` 的长期文案解耦；`t` 由 `locale.bind(NS)` 提供。
     */
+    /** 把词典里的 `{name}` 占位符换成值。 */
+    function fill(t, key, values) {
+    	let text = t(key);
+    	for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
+    	return text;
+    }
     /** 英文文案。 */
     const en = {
     	panel: "Workflows",
     	title: "Workflows",
-    	welcome: "No workflow runs yet.",
-    	welcomeHint: "Start a session with the workflow-orchestrator preset and ask it to run a workflow. The robot sessions it opens and the user nodes it waits at appear here as the graph advances.",
     	refresh: "Refresh",
     	loading: "Loading…",
-    	loadFailed: "Request failed:",
-    	empty: "No workflow runs have been recorded yet.",
-    	back: "Back to runs",
-    	error: "Error",
-    	stopReason: "Stop reason",
-    	openSession: "Open session",
-    	openSessionFailed: "Could not open the node session:",
-    	noUiWorkspace: "This client has no uiWorkspace service, so the node session cannot be opened.",
-    	nodeSession: "Robot session",
-    	nodeSessionsLegacy: "This node ran in more than one session (only in an older record); open the one you need.",
-    	waitingForAnswer: "A robot is waiting for your answer",
-    	waitingForApproval: "A robot is waiting for your approval",
-    	openAnswerSession: "Open session to answer",
-    	openApprovalSession: "Open session to approve",
-    	modePlan: "Plan mode",
-    	waitingForPlanReview: "A robot is waiting for you to review its plan",
-    	planReviewBody: "Open the robot session to approve the plan or keep planning.",
-    	openPlanReviewSession: "Open session to review",
-    	waitingForUser: "Waiting for you",
-    	userWaitingTitle: "The workflow is waiting for you",
-    	userWaitingBody: "Answer in the session that started this workflow; the run continues once you submit.",
-    	userChoice: "Choices",
-    	userAnswers: "Additional questions",
-    	userAnswerSkipped: "Not answered",
-    	sessionLive: "Current session",
-    	sessionCompacted: "History compacted",
-    	sessionRecovering: "Recovering (attempt {n})",
-    	sessionRecovered: "Recovered",
-    	sessionCompactFailed: "History compaction failed; the prompt was sent without it:",
-    	sessionReset: "Could not resume the old session, so a new one was started:",
+    	loadFailed: "Request failed: ",
+    	retry: "Retry",
+    	back: "Back",
+    	close: "Close",
+    	cancel: "Cancel",
     	unknown: "Unknown",
-    	statusCompleted: "Completed",
+    	notFound: "This item does not exist or was removed.",
+    	definitionMissing: "The host did not return a definition snapshot.",
+    	graphAria: "Workflow graph",
+    	workflowDraft: "Draft",
+    	workflowActive: "Active",
+    	workflowRetired: "Retired",
+    	statusDraft: "Draft",
+    	statusActive: "Active",
+    	statusRetired: "Retired",
     	statusRunning: "Running",
-    	statusWaiting: "Waiting",
+    	statusCompleted: "Completed",
     	statusFailed: "Failed",
-    	statusRejected: "Rejected",
     	statusCancelled: "Cancelled",
-    	statusInterrupted: "Interrupted",
-    	legendTypes: "Node types",
-    	legendStates: "Node states",
-    	legendEdges: "Edges",
-    	legendTraversed: "Traversed",
-    	legendPending: "Not taken",
-    	legendFlow: "Flow",
-    	legendDone: "Done",
-    	legendRunning: "Running",
-    	legendWaiting: "Waiting for you",
-    	legendFailed: "Failed",
-    	legendIdle: "Not run",
-    	visitsLabel: "Visits",
-    	typeStart: "Start",
-    	typeRobot: "Robot",
-    	typeUser: "User",
-    	typeJoin: "Join",
-    	typeEnd: "End",
-    	stateIdle: "Not run",
-    	stateUnavailable: "Questions unavailable",
-    	inspector: "Node detail",
-    	nodeNotRun: "This node has not run in this workflow.",
-    	nodeStart: "Start",
-    	startNodeHint: "The start node does not execute: it only gives the first real node its prompt through its outgoing edge. That prompt shows up in the first execution tab of the node it points to.",
-    	nodeUnreachable: "Nothing in this definition leads to this node, so it never runs. New definitions reject unreachable nodes; this line only explains a run recorded before that rule.",
-    	nodeExecutor: "Executor",
-    	nodePrompt: "Prompt",
-    	execution: "Execution",
-    	executionInput: "Task info",
-    	executionOutput: "Output result",
-    	executionAttachments: "Attachments",
-    	executionOutputAttachmentsOnly: "No text output; see the attachments below.",
+    	statusPending: "Queued",
+    	statusReady: "Claimable",
+    	statusBlocked: "Blocked",
+    	actorRobot: "Robot",
+    	actorHuman: "Human",
+    	actorAssistant: "Assistant",
+    	actorSession: "Session",
+    	workflowsTitle: "Workflows",
+    	workflowsHint: "A workflow is a durable definition. Each job is one run of it.",
+    	workflowsEmpty: "No workflows yet.",
+    	workflowsEmptyHint: "Save a workflow with buka_workflow_save from an orchestration preset session. Once it is active you can start jobs here.",
+    	autoRefreshLive: "Auto-refreshing every 1.5s while the job is running.",
+    	autoRefreshIdle: "Auto-refreshing every 5s.",
+    	jobCount: "{n} jobs",
+    	updatedAt: "Updated",
+    	backToWorkflows: "Back to workflows",
+    	newJob: "New job",
+    	activate: "Activate",
+    	deactivate: "Deactivate",
+    	activateDone: "Workflow updated.",
+    	activateFailed: "Could not update the workflow: ",
+    	workflowVersion: "Version",
+    	graphTitle: "Flow",
+    	graphStart: "Start",
+    	graphEnd: "End",
+    	graphRobot: "Robot position",
+    	graphHuman: "Human position",
+    	graphIdle: "Not started",
+    	graphEdgeForward: "Can dispatch",
+    	graphEdgeBack: "Back edge",
+    	graphLegendTypes: "Nodes",
+    	graphLegendStates: "Task state",
+    	graphLegendEdges: "Edges",
+    	positionsTitle: "Positions",
+    	positionsEmpty: "This workflow has no positions.",
+    	positionExecutor: "Executor",
+    	positionTypes: "Task types",
+    	taskTypesTitle: "Task types",
+    	taskTypePayload: "Input",
+    	taskTypeOutput: "Output",
+    	taskTypeRequires: "Requires",
+    	taskTypeAssistant: "Assistant",
+    	taskTypeMode: "Mode",
+    	taskTypeModePlan: "Plan",
+    	taskTypeUnset: "—",
+    	schemaNoFields: "No fields.",
+    	schemaFieldRequired: "required",
+    	edgesTitle: "Edges",
+    	edgesEmpty: "This workflow has no edges.",
+    	edgeAllTypes: "All task types",
+    	edgeBack: "Back edge",
+    	startContractTitle: "Start task",
+    	startContractHint: "The start task turns raw input into structured input. When a job starts from this page, both are filled in the form.",
+    	endContractTitle: "End task",
+    	endContractHint: "Delivers the final output to the starter. Delivery completes the task.",
+    	budgetsTitle: "Budgets",
+    	budgetMaxTasks: "Max tasks",
+    	budgetMaxDuration: "Max duration",
+    	budgetHours: "hours",
+    	budgetUnset: "Not set",
+    	workflowJobsTitle: "Jobs",
+    	workflowJobsEmpty: "No jobs yet.",
+    	workflowJobsEmptyHint: "Use \"New job\" to start one from this page.",
+    	jobSeq: "Job #{seq}",
+    	jobInput: "Input",
+    	jobTaskCounts: "Tasks",
+    	jobCreatedAt: "Created",
+    	newJobTitle: "New job",
+    	newJobHint: "Fill in the raw input and the structured input. Submitting completes the start task.",
+    	newJobRawTitle: "Raw input",
+    	newJobRawHint: "What you want to get done.",
+    	newJobStructuredTitle: "Structured input",
+    	newJobStructuredHint: "The start task output contract: this becomes the structured input.",
+    	newJobSubmit: "Start job",
+    	newJobSubmitting: "Starting…",
+    	newJobStarted: "Job created.",
+    	newJobFailed: "Could not start the job: ",
+    	newJobRawFallback: "Request",
+    	newJobStructuredFallback: "Structured input (JSON)",
+    	newJobJsonInvalid: "Structured input is not valid JSON: ",
+    	fieldRequired: "{name} is required.",
+    	fieldJsonInvalid: "{name} is not valid JSON: ",
+    	fieldInvalidBoolean: "{name} must be true or false.",
+    	fieldInvalidNumber: "{name} must be a number.",
+    	fallbackJsonTitle: "JSON",
+    	fallbackJsonHint: "No schema was provided; enter this field as JSON.",
+    	backToWorkflow: "Back to workflow",
+    	jobTitle: "Job",
+    	starter: "Starter",
+    	starterHuman: "Person (page)",
+    	starterSession: "Session",
+    	openStarterSession: "Open starter session",
+    	cancelJob: "Cancel job",
+    	cancelJobConfirm: "Cancel this job? All unfinished tasks will be cancelled.",
+    	retryDelivery: "Retry delivery",
+    	deliveryRetryHint: "The end task is still waiting to be claimed because delivery did not succeed. Retry the delivery.",
+    	deliveryRetryStarted: "Delivery retry requested.",
+    	jobUpdatedAt: "Updated",
+    	jobErrorTitle: "Error",
+    	jobViewsAria: "Job views",
+    	boardTab: "Board",
+    	graphTab: "Flow",
+    	tasksTab: "Tasks",
+    	attachmentsTab: "Attachments",
+    	timelineTab: "Timeline",
+    	boardStart: "Start",
+    	boardEnd: "End",
+    	boardColumnPending: "Queued",
+    	boardColumnReady: "Claimable",
+    	boardColumnRunning: "In progress",
+    	boardColumnCompleted: "Completed",
+    	boardColumnError: "Problems",
+    	boardNoTasks: "No tasks",
+    	boardEmpty: "This job has no tasks yet.",
+    	boardEmptyHint: "Tasks are created from the definition after the start task completes.",
+    	boardHint: "Select a card to open the task details.",
+    	boardCardDeps: "{n} deps",
+    	boardCardAttempts: "Attempts {n}",
+    	boardCardAttachments: "{n} files",
+    	boardCardWaiting: "Waiting {duration}",
+    	taskCount: "{n} tasks",
+    	jobGraphHint: "Select a position node to open one of its tasks.",
+    	tasksEmpty: "No tasks yet.",
+    	tasksHint: "Select a row to open the task details.",
+    	tasksTableType: "Type",
+    	tasksTablePosition: "Position",
+    	tasksTableStatus: "Status",
+    	tasksTableClaimant: "Claimed by",
+    	tasksTableCreated: "Created",
+    	attachmentsTitle: "Attachments",
+    	attachmentsEmpty: "This job has no attachments yet.",
+    	attachmentsHint: "Attachments come from task output. Select a file name to preview it.",
+    	attachmentSource: "Source",
+    	attachmentBy: "Created by",
+    	attachmentPreview: "Preview",
     	attachmentDownload: "Download",
-    	attachmentCount: "{n} attachments",
-    	attachmentPreviewOpenHint: "Click the file name to preview it on the right.",
     	attachmentPreviewLoading: "Loading preview…",
-    	attachmentPreviewFailed: "Could not load the preview:",
+    	attachmentPreviewFailed: "Could not load the preview: ",
     	attachmentPreviewRetry: "Retry",
     	attachmentPreviewClose: "Close preview",
-    	attachmentPreviewBinary: "This file cannot be previewed here.",
+    	attachmentPreviewBinary: "This file cannot be previewed here. Download it instead.",
     	attachmentPreviewUnsupported: "This file type cannot be previewed.",
     	attachmentPreviewTruncated: "Only the beginning of the file is shown.",
-    	attachmentPreviewEmpty: "This file is empty.",
+    	attachmentPreviewEmpty: "The file is empty.",
     	attachmentPreviewImageFailed: "The image could not be displayed.",
     	attachmentPreviewPdfHint: "The PDF is embedded above; download it to keep a copy.",
-    	copy: "Copy",
-    	copied: "Copied",
-    	code: "Code",
-    	wrap: "Wrap",
-    	unwrap: "Unwrap",
-    	routeLabel: "Route",
-    	executionNoInput: "This execution recorded no input.",
-    	executionInputMissing: "No input was recorded for this execution. Older runs did not persist a per-entry prompt, so the definition template is not shown again.",
-    	executionNoOutput: "This execution produced no text output.",
-    	executionTimedOut: "Timed out",
-    	executionAborted: "Node aborted the run",
-    	executionPrev: "Previous step",
-    	executionPrevNone: "This is the first execution in this run.",
-    	executionNext: "Next step",
-    	executionNextEnded: "The run ended after this execution.",
-    	executionEnded: "Run ended",
-    	executionStart: "Run start",
-    	nodeExecutions: "Executions",
-    	nodeTimeout: "Timeout",
-    	nodeMaxVisits: "Max visits",
-    	nodeEndStatus: "End status",
-    	userDetail: "User detail",
-    	finalDeliverable: "Final output",
-    	finalDeliverableEmpty: "This run produced no robot output.",
-    	finalDeliverableFrom: "From",
-    	promptTruncated: "The prompt is truncated for display.",
-    	noGraph: "This run has no saved definition snapshot, so the node graph cannot be drawn.",
-    	graphEmpty: "The saved definition has no nodes.",
-    	graphInteractHint: "Click a node for its details; click an edge for its configuration.",
-    	close: "Close",
-    	yes: "Yes",
-    	no: "No",
-    	edgeDrawerTitle: "Edge configuration",
-    	edgeRules: "Configuration",
-    	edgeRoute: "Route key",
-    	edgeOption: "User option",
-    	edgePrompt: "Entry prompt",
-    	edgePromptHint: "Template variables are rendered when the run takes this edge.",
-    	edgeNoPrompt: "This edge carries no prompt.",
-    	edgeToneSuccess: "Success (green)",
-    	edgeToneFailure: "Failure (red)",
-    	edgeState: "Run state",
-    	edgeTraversed: "Taken",
-    	edgeTraversals: "Times taken",
-    	edgeLoop: "Loop edge",
-    	edgeRulesEmpty: "This edge has no extra configuration.",
-    	edgeAriaLabel: "View the edge from {from} to {to}",
-    	settings: "Archive settings",
-    	archiveSettingsTitle: "Automatic archive",
-    	archiveEnabled: "Automatic archive",
-    	archiveEnabledDesc: "Finished runs leave the list after the archive time, and are deleted with their record after the delete time. Runs that are still going are never archived or deleted.",
-    	settingsEnabled: "On",
-    	settingsDisabled: "Off",
-    	settingsLoading: "Reading settings…",
-    	settingsLoadFailed: "Could not read settings:",
-    	save: "Save",
-    	saving: "Saving…",
-    	cancel: "Cancel",
-    	saved: "Settings saved.",
-    	archiveAfterHours: "Archive after",
-    	archiveAfterHoursHint: "In hours, counted from when the run finished. Default 24 hours (1 day).",
-    	deleteAfterHours: "Delete after",
-    	deleteAfterHoursHint: "In hours, counted from when the run finished; it must be later than the archive time. Default 168 hours (7 days).",
-    	hoursUnit: "hours",
-    	archiveDefaultsHint: "Defaults: archive after 1 day (24 hours), delete after 7 days (168 hours). Whole hours only.",
-    	archiveInvalid: "The archive time must be a whole number of hours between 1 and 720.",
-    	deleteInvalid: "The delete time must be a whole number of hours between 2 and 8760.",
-    	deleteBeforeArchive: "The delete time must be later than the archive time.",
-    	archiveView: "Archived",
-    	archiveTitle: "Archived workflows",
-    	archiveBack: "Back to list",
-    	archiveEmpty: "No archived runs yet.",
-    	archived: "Archived",
-    	runsTab: "Runs",
-    	templatesTab: "Templates",
-    	tabsLabel: "Workflow pages",
-    	templatesTitle: "Workflow templates",
-    	templatesBack: "Back to templates",
-    	templatesEmpty: "No workflow templates available.",
-    	templatesHint: "Abstract workflow patterns for reference. Each template names roles (not real robots) and lists its process stages; use your real robots to design a workflow that fits the request.",
-    	templatesStep: "Step",
-    	templatesRole: "Role",
-    	templatesAbstractRole: "Abstract role",
-    	templatesTransitions: "Transitions",
-    	templatesNoFlow: "This template has no flow.",
-    	templatesPurpose: "Purpose",
-    	templatesNoTransitions: "This node has no outgoing transitions."
+    	timelineTitle: "Timeline",
+    	timelineEmpty: "No events yet.",
+    	timelineJobCreated: "Job created",
+    	timelineJobUpdated: "Job updated",
+    	timelineTaskCreated: "Task created",
+    	timelineTaskStarted: "Task started",
+    	timelineTaskFinished: "Task finished",
+    	timelineTaskFailed: "Task failed",
+    	timelineTaskCancelled: "Task cancelled",
+    	taskDrawerTitle: "Task",
+    	taskPosition: "Position",
+    	taskType: "Type",
+    	taskStatus: "Status",
+    	taskId: "Task id",
+    	taskClaimant: "Claimed by",
+    	taskCreatedAt: "Created",
+    	taskStartedAt: "Started",
+    	taskFinishedAt: "Finished",
+    	taskDepsTitle: "Dependencies",
+    	taskDepsEmpty: "No dependencies.",
+    	taskPayloadTitle: "Input (payload)",
+    	taskPayloadEmpty: "No payload.",
+    	taskAttemptsTitle: "Attempts",
+    	taskAttemptsEmpty: "No attempts yet.",
+    	taskAttemptSession: "Session",
+    	taskAttemptStopReason: "Stop reason",
+    	taskAttemptError: "Error",
+    	taskResultTitle: "Result",
+    	taskResultEmpty: "No result yet.",
+    	taskResultText: "Text",
+    	taskResultOutput: "Structured output",
+    	taskResultAttachments: "Result files",
+    	finalDeliverableTitle: "Final deliverable",
+    	taskActionsTitle: "Actions",
+    	taskActionsEmpty: "No actions are available.",
+    	actionClaim: "Claim",
+    	actionComplete: "Submit",
+    	actionCancel: "Cancel task",
+    	actionRetry: "Retry",
+    	actionSubmitComplete: "Submit result",
+    	actionSubmitting: "Submitting…",
+    	actionTextLabel: "Note (optional)",
+    	actionFormTitle: "Fill in the result",
+    	actionFormHint: "Fill in the output contract declared by this task type.",
+    	actionFormNoSchema: "This task type has no output schema; enter the result as JSON.",
+    	actionJsonInvalid: "Result is not valid JSON: ",
+    	actionCancelConfirm: "Cancel this task? Tasks depending on it become blocked.",
+    	taskActionDone: "Done.",
+    	taskActionFailed: "Action failed: ",
+    	openSession: "Open session",
+    	openSessionFailed: "Could not open the session: ",
+    	noUiWorkspace: "This client has no uiWorkspace service, so sessions cannot be opened.",
+    	sessionLabel: "Session",
+    	payloadLabel: "Payload"
     };
     /** 简体中文文案。 */
     const zh = {
     	panel: "工作流",
     	title: "工作流",
-    	welcome: "还没有运行过工作流。",
-    	welcomeHint: "用 workflow-orchestrator preset 新建一个会话，让它跑一个工作流；它启动的机器人会话与正在等待你介入的节点都会随执行推进显示在这里。",
     	refresh: "刷新",
     	loading: "正在读取…",
     	loadFailed: "请求失败：",
-    	empty: "还没有记录任何工作流运行。",
-    	back: "返回运行列表",
-    	error: "错误",
-    	stopReason: "停止原因",
-    	openSession: "打开会话",
-    	openSessionFailed: "打开节点会话失败：",
-    	noUiWorkspace: "当前客户端没有 uiWorkspace 服务，无法打开节点会话。",
-    	nodeSession: "机器人会话",
-    	nodeSessionsLegacy: "这个节点在多个会话里执行过（仅存在于旧记录）；需要看哪次就打开哪个会话。",
-    	waitingForAnswer: "机器人正在等待你回答",
-    	waitingForApproval: "机器人正在等待你批准",
-    	openAnswerSession: "打开会话回答",
-    	openApprovalSession: "打开会话审批",
-    	modePlan: "计划模式",
-    	waitingForPlanReview: "机器人正在等待你审阅计划",
-    	planReviewBody: "打开机器人会话，批准计划或继续计划。",
-    	openPlanReviewSession: "打开会话审阅",
-    	waitingForUser: "等待用户",
-    	userWaitingTitle: "工作流正在等待你介入",
-    	userWaitingBody: "请在工作流创建者的会话里作答；提交后流程会继续。",
-    	userChoice: "选项",
-    	userAnswers: "补充问题",
-    	userAnswerSkipped: "未作答",
-    	sessionLive: "当前会话",
-    	sessionCompacted: "已压缩历史",
-    	sessionRecovering: "恢复中（第 {n} 次）",
-    	sessionRecovered: "已恢复",
-    	sessionCompactFailed: "历史压缩失败，已直接继续：",
-    	sessionReset: "旧会话无法续接，已新建会话：",
+    	retry: "重试",
+    	back: "返回",
+    	close: "关闭",
+    	cancel: "取消",
     	unknown: "未知",
+    	notFound: "目标不存在或已被删除。",
+    	definitionMissing: "Host 没有返回定义快照。",
+    	graphAria: "工作流流程图",
+    	workflowDraft: "草稿",
+    	workflowActive: "已激活",
+    	workflowRetired: "已停用",
+    	statusDraft: "草稿",
+    	statusActive: "已激活",
+    	statusRetired: "已停用",
+    	statusRunning: "进行中",
     	statusCompleted: "已完成",
-    	statusRunning: "运行中",
-    	statusWaiting: "等待中",
     	statusFailed: "失败",
-    	statusRejected: "已拒绝",
     	statusCancelled: "已取消",
-    	statusInterrupted: "已中断",
-    	legendTypes: "节点类型",
-    	legendStates: "节点状态",
-    	legendEdges: "连线",
-    	legendTraversed: "已走过",
-    	legendPending: "未走过",
-    	legendFlow: "流程走向",
-    	legendDone: "已完成",
-    	legendRunning: "运行中",
-    	legendWaiting: "等待用户",
-    	legendFailed: "失败",
-    	legendIdle: "未运行",
-    	visitsLabel: "执行次数",
-    	typeStart: "开始",
-    	typeRobot: "机器人",
-    	typeUser: "用户",
-    	typeJoin: "汇合",
-    	typeEnd: "终止",
-    	stateIdle: "未运行",
-    	stateUnavailable: "提问不可用",
-    	inspector: "节点详情",
-    	nodeNotRun: "这个节点在本次运行中还没有执行。",
-    	nodeStart: "起点",
-    	startNodeHint: "开始节点不执行：它只通过出边给第一个真实节点定义 prompt，那条 prompt 会出现在目标节点第一次执行的「任务信息」里。",
-    	nodeUnreachable: "定义里没有任何连线能到达这个节点，所以它不会执行。新定义里这种节点会直接校验失败，这里只用于回看旧记录。",
-    	nodeExecutor: "执行人",
-    	nodePrompt: "提示词",
-    	execution: "执行",
-    	executionInput: "任务信息",
-    	executionOutput: "输出结果",
-    	executionAttachments: "附件",
-    	executionOutputAttachmentsOnly: "这次执行没有文本输出，请查看下面的附件。",
+    	statusPending: "排队",
+    	statusReady: "待认领",
+    	statusBlocked: "阻塞",
+    	actorRobot: "机器人",
+    	actorHuman: "人",
+    	actorAssistant: "助理",
+    	actorSession: "会话",
+    	workflowsTitle: "工作流",
+    	workflowsHint: "工作流是持久定义；作业是它的一次执行。",
+    	workflowsEmpty: "还没有工作流。",
+    	workflowsEmptyHint: "在编排 preset 的会话里用 buka_workflow_save 保存一个工作流；激活后就能从这里新建作业。",
+    	autoRefreshLive: "作业运行中，每 1.5 秒自动刷新。",
+    	autoRefreshIdle: "每 5 秒自动刷新。",
+    	jobCount: "{n} 个作业",
+    	updatedAt: "更新于",
+    	backToWorkflows: "返回工作流列表",
+    	newJob: "新建作业",
+    	activate: "激活",
+    	deactivate: "停用",
+    	activateDone: "工作流状态已更新。",
+    	activateFailed: "更新工作流失败：",
+    	workflowVersion: "版本",
+    	graphTitle: "流程图",
+    	graphStart: "开始",
+    	graphEnd: "结束",
+    	graphRobot: "机器人岗位",
+    	graphHuman: "人岗位",
+    	graphIdle: "未开始",
+    	graphEdgeForward: "可派发",
+    	graphEdgeBack: "回边",
+    	graphLegendTypes: "节点",
+    	graphLegendStates: "任务状态",
+    	graphLegendEdges: "连线",
+    	positionsTitle: "岗位",
+    	positionsEmpty: "这个工作流还没有岗位。",
+    	positionExecutor: "执行者",
+    	positionTypes: "任务类型",
+    	taskTypesTitle: "任务类型",
+    	taskTypePayload: "输入",
+    	taskTypeOutput: "产出",
+    	taskTypeRequires: "依赖类型",
+    	taskTypeAssistant: "助理",
+    	taskTypeMode: "模式",
+    	taskTypeModePlan: "计划",
+    	taskTypeUnset: "—",
+    	schemaNoFields: "没有字段。",
+    	schemaFieldRequired: "必填",
+    	edgesTitle: "边",
+    	edgesEmpty: "这个工作流还没有边。",
+    	edgeAllTypes: "全部任务类型",
+    	edgeBack: "回边",
+    	startContractTitle: "开始任务",
+    	startContractHint: "开始任务把原始输入转换成结构化输入；从本页启动作业时两者都在表单里填写。",
+    	endContractTitle: "结束任务",
+    	endContractHint: "把最终交付物投递给启动者；投递成功即完成。",
+    	budgetsTitle: "预算",
+    	budgetMaxTasks: "任务上限",
+    	budgetMaxDuration: "最长时长",
+    	budgetHours: "小时",
+    	budgetUnset: "未设置",
+    	workflowJobsTitle: "作业",
+    	workflowJobsEmpty: "还没有作业。",
+    	workflowJobsEmptyHint: "点「新建作业」从页面启动一次。",
+    	jobSeq: "作业 #{seq}",
+    	jobInput: "输入",
+    	jobTaskCounts: "任务",
+    	jobCreatedAt: "创建",
+    	newJobTitle: "新建作业",
+    	newJobHint: "填写原始输入与结构化输入；提交即完成启动任务。",
+    	newJobRawTitle: "原始输入",
+    	newJobRawHint: "你想完成什么。",
+    	newJobStructuredTitle: "结构化输入",
+    	newJobStructuredHint: "开始任务的产出契约；它会成为这次作业的结构化输入。",
+    	newJobSubmit: "启动作业",
+    	newJobSubmitting: "正在启动…",
+    	newJobStarted: "作业已创建。",
+    	newJobFailed: "启动作业失败：",
+    	newJobRawFallback: "需求描述",
+    	newJobStructuredFallback: "结构化输入（JSON）",
+    	newJobJsonInvalid: "结构化输入不是合法 JSON：",
+    	fieldRequired: "{name} 为必填。",
+    	fieldJsonInvalid: "{name} 不是合法 JSON：",
+    	fieldInvalidBoolean: "{name} 必须是 true 或 false。",
+    	fieldInvalidNumber: "{name} 必须是数字。",
+    	fallbackJsonTitle: "JSON",
+    	fallbackJsonHint: "Host 没有提供 schema，按 JSON 填写这个字段。",
+    	backToWorkflow: "返回工作流",
+    	jobTitle: "作业",
+    	starter: "启动者",
+    	starterHuman: "人（页面启动）",
+    	starterSession: "会话",
+    	openStarterSession: "打开启动者会话",
+    	cancelJob: "取消作业",
+    	cancelJobConfirm: "确定取消这个作业？未完成的任务都会取消。",
+    	retryDelivery: "重试交付",
+    	deliveryRetryHint: "结束任务仍在「待认领」：交付没有成功。可以重试交付。",
+    	deliveryRetryStarted: "已发起重试交付。",
+    	jobUpdatedAt: "更新于",
+    	jobErrorTitle: "错误",
+    	jobViewsAria: "作业视图",
+    	boardTab: "看板",
+    	graphTab: "流程图",
+    	tasksTab: "任务",
+    	attachmentsTab: "附件库",
+    	timelineTab: "时间线",
+    	boardStart: "开始",
+    	boardEnd: "结束",
+    	boardColumnPending: "排队",
+    	boardColumnReady: "待认领",
+    	boardColumnRunning: "进行中",
+    	boardColumnCompleted: "已完成",
+    	boardColumnError: "异常",
+    	boardNoTasks: "无任务",
+    	boardEmpty: "这个作业还没有任务。",
+    	boardEmptyHint: "启动任务完成后，任务会按定义派生出来。",
+    	boardHint: "点击卡片查看任务详情。",
+    	boardCardDeps: "依赖 {n}",
+    	boardCardAttempts: "重试 {n}",
+    	boardCardAttachments: "附件 {n}",
+    	boardCardWaiting: "等待 {duration}",
+    	taskCount: "{n} 个任务",
+    	jobGraphHint: "点击岗位节点打开它的一个任务。",
+    	tasksEmpty: "还没有任务。",
+    	tasksHint: "点击一行查看任务详情。",
+    	tasksTableType: "类型",
+    	tasksTablePosition: "岗位",
+    	tasksTableStatus: "状态",
+    	tasksTableClaimant: "承办者",
+    	tasksTableCreated: "创建",
+    	attachmentsTitle: "附件库",
+    	attachmentsEmpty: "这个作业还没有附件。",
+    	attachmentsHint: "附件来自任务产出；点文件名预览。",
+    	attachmentSource: "来源",
+    	attachmentBy: "产出者",
+    	attachmentPreview: "预览",
     	attachmentDownload: "下载",
-    	attachmentCount: "{n} 个附件",
-    	attachmentPreviewOpenHint: "点击文件名可在右侧预览。",
     	attachmentPreviewLoading: "正在加载预览…",
     	attachmentPreviewFailed: "预览加载失败：",
     	attachmentPreviewRetry: "重试",
     	attachmentPreviewClose: "关闭预览",
-    	attachmentPreviewBinary: "这种文件无法在此预览。",
+    	attachmentPreviewBinary: "这种文件无法在此预览，请下载。",
     	attachmentPreviewUnsupported: "这种文件类型不支持预览。",
     	attachmentPreviewTruncated: "仅展示文件开头的一部分。",
     	attachmentPreviewEmpty: "文件内容为空。",
     	attachmentPreviewImageFailed: "图片无法显示。",
-    	attachmentPreviewPdfHint: "PDF 已在上方内嵌显示；需要保存副本请下载。",
-    	copy: "复制",
-    	copied: "已复制",
-    	code: "代码",
-    	wrap: "换行",
-    	unwrap: "不换行",
-    	routeLabel: "路由",
-    	executionNoInput: "这次执行没有记录输入。",
-    	executionInputMissing: "这次执行没有记录输入；旧运行没有按次落盘提示词，所以这里不重复展示定义里的模板。",
-    	executionNoOutput: "这次执行没有文本输出。",
-    	executionTimedOut: "超时",
-    	executionAborted: "节点主动终止运行",
-    	executionPrev: "上一步",
-    	executionPrevNone: "这是本次运行的第一次执行。",
-    	executionNext: "下一步",
-    	executionNextEnded: "这次执行后运行结束。",
-    	executionEnded: "运行结束",
-    	executionStart: "运行起点",
-    	nodeExecutions: "执行记录",
-    	nodeTimeout: "超时",
-    	nodeMaxVisits: "最多访问",
-    	nodeEndStatus: "终止状态",
-    	userDetail: "用户说明",
-    	finalDeliverable: "最终输出",
-    	finalDeliverableEmpty: "这次运行没有机器人输出。",
-    	finalDeliverableFrom: "来自",
-    	promptTruncated: "提示词过长，仅展示前面一部分。",
-    	noGraph: "这次运行没有保存定义快照，无法绘制节点图。",
-    	graphEmpty: "保存的定义里没有节点。",
-    	graphInteractHint: "点击节点查看详情，点击连线查看配置。",
-    	close: "关闭",
-    	yes: "是",
-    	no: "否",
-    	edgeDrawerTitle: "连线配置",
-    	edgeRules: "配置",
-    	edgeRoute: "路由键",
-    	edgeOption: "用户选项",
-    	edgePrompt: "进入提示词",
-    	edgePromptHint: "提示词里的模板变量会在运行走到这条边时渲染。",
-    	edgeNoPrompt: "这条边没有提示词。",
-    	edgeToneSuccess: "成功（绿）",
-    	edgeToneFailure: "失败（红）",
-    	edgeState: "运行状态",
-    	edgeTraversed: "是否走过",
-    	edgeTraversals: "走过次数",
-    	edgeLoop: "回边",
-    	edgeRulesEmpty: "这条边没有可展开的配置。",
-    	edgeAriaLabel: "查看从 {from} 到 {to} 的连线配置",
-    	settings: "归档设置",
-    	archiveSettingsTitle: "自动归档设置",
-    	archiveEnabled: "自动归档",
-    	archiveEnabledDesc: "结束的运行超过归档时间后从列表里隐藏；超过删除时间后连同记录一起删除。仍在运行的运行不会被归档或删除。",
-    	settingsEnabled: "已启用",
-    	settingsDisabled: "已停用",
-    	settingsLoading: "正在读取设置…",
-    	settingsLoadFailed: "读取设置失败：",
-    	save: "保存",
-    	saving: "正在保存…",
-    	cancel: "取消",
-    	saved: "设置已保存。",
-    	archiveAfterHours: "归档时间",
-    	archiveAfterHoursHint: "按小时计，从运行结束算起。默认 24 小时（1 天）。",
-    	deleteAfterHours: "删除时间",
-    	deleteAfterHoursHint: "按小时计，从运行结束算起，必须晚于归档时间。默认 168 小时（7 天）。",
-    	hoursUnit: "小时",
-    	archiveDefaultsHint: "默认：超过 1 天（24 小时）自动归档，超过 7 天（168 小时）自动删除。时间按整小时填写。",
-    	archiveInvalid: "归档时间需为 1–720 之间的整数小时。",
-    	deleteInvalid: "删除时间需为 2–8760 之间的整数小时。",
-    	deleteBeforeArchive: "删除时间必须晚于归档时间。",
-    	archiveView: "已归档",
-    	archiveTitle: "已归档的工作流",
-    	archiveBack: "返回列表",
-    	archiveEmpty: "还没有已归档的运行。",
-    	archived: "已归档",
-    	runsTab: "运行",
-    	templatesTab: "模板",
-    	tabsLabel: "工作流页面",
-    	templatesTitle: "工作流模板",
-    	templatesBack: "返回模板列表",
-    	templatesEmpty: "还没有工作流模板。",
-    	templatesHint: "抽象的工作流范式，供设计真实工作流时参考。每个模板用角色名（而不是真实机器人）描述流程阶段；设计时请用你真正拥有的机器人替换角色。",
-    	templatesStep: "步骤",
-    	templatesRole: "角色",
-    	templatesAbstractRole: "抽象角色",
-    	templatesTransitions: "流转",
-    	templatesNoFlow: "这个模板没有流程。",
-    	templatesPurpose: "目的",
-    	templatesNoTransitions: "这个节点没有流转去向。"
+    	attachmentPreviewPdfHint: "PDF 已在上方内嵌显示；需要副本请下载。",
+    	timelineTitle: "时间线",
+    	timelineEmpty: "还没有事件。",
+    	timelineJobCreated: "作业创建",
+    	timelineJobUpdated: "作业更新",
+    	timelineTaskCreated: "任务创建",
+    	timelineTaskStarted: "开始执行",
+    	timelineTaskFinished: "任务完成",
+    	timelineTaskFailed: "任务失败",
+    	timelineTaskCancelled: "任务取消",
+    	taskDrawerTitle: "任务详情",
+    	taskPosition: "岗位",
+    	taskType: "类型",
+    	taskStatus: "状态",
+    	taskId: "任务 id",
+    	taskClaimant: "承办者",
+    	taskCreatedAt: "创建",
+    	taskStartedAt: "开始",
+    	taskFinishedAt: "结束",
+    	taskDepsTitle: "依赖",
+    	taskDepsEmpty: "没有依赖。",
+    	taskPayloadTitle: "输入（payload）",
+    	taskPayloadEmpty: "没有 payload。",
+    	taskAttemptsTitle: "执行记录",
+    	taskAttemptsEmpty: "还没有执行记录。",
+    	taskAttemptSession: "会话",
+    	taskAttemptStopReason: "停止原因",
+    	taskAttemptError: "错误",
+    	taskResultTitle: "结果",
+    	taskResultEmpty: "还没有结果。",
+    	taskResultText: "文本",
+    	taskResultOutput: "结构化产出",
+    	taskResultAttachments: "结果附件",
+    	finalDeliverableTitle: "最终交付物",
+    	taskActionsTitle: "操作",
+    	taskActionsEmpty: "当前没有可执行的操作。",
+    	actionClaim: "认领",
+    	actionComplete: "提交",
+    	actionCancel: "取消任务",
+    	actionRetry: "重试",
+    	actionSubmitComplete: "提交结果",
+    	actionSubmitting: "正在提交…",
+    	actionTextLabel: "说明（可选）",
+    	actionFormTitle: "填写结果",
+    	actionFormHint: "按任务类型声明的产出契约填写。",
+    	actionFormNoSchema: "该任务类型没有产出 schema，按 JSON 填写结果。",
+    	actionJsonInvalid: "结果不是合法 JSON：",
+    	actionCancelConfirm: "确定取消这个任务？依赖它的任务会阻塞。",
+    	taskActionDone: "操作已完成。",
+    	taskActionFailed: "操作失败：",
+    	openSession: "打开会话",
+    	openSessionFailed: "打开会话失败：",
+    	noUiWorkspace: "当前客户端没有 uiWorkspace 服务，无法打开会话。",
+    	sessionLabel: "会话",
+    	payloadLabel: "Payload"
     };
-    // .build/workflows/client/types.js
-    /**
-    * 浏览器一半的共享类型与常量：Host 路由响应形状、页面状态、路由与刷新间隔。
-    */
-    /** 运行记录里的 steps；空记录时返回空数组。 */
-    function stepsOf(run) {
-    	return Array.isArray(run?.steps) ? run.steps : [];
-    }
-    /** 判断普通对象。 */
-    function isRecord(value) {
-    	return typeof value === "object" && value !== null && !Array.isArray(value);
-    }
-    /** 把 Host 返回的 JSON 收口成页面读取的形状（只读展示，不再校验输入）。 */
-    function asRunDetail(body) {
-    	return body;
-    }
-    /** 词典命名空间。 */
-    const NS = "buka-workflows";
-    /** 侧边栏条目 id 与 `main` 的 key 必须相同。 */
-    const PANEL_ID = "buka-workflows";
-    /** 与 Host 一半（`lib/index.js`）的路由常量保持一致。 */
-    const RUNS_ROUTE = "/buka-workflows/runs";
-    const RUN_ROUTE = "/buka-workflows/run";
-    const SETTINGS_ROUTE = "/buka-workflows/settings";
-    const TEMPLATES_ROUTE = "/buka-workflows/templates";
-    /** 页面刷新间隔：正在跑的运行也能看到节点进度。 */
-    const REFRESH_MS = 5e3;
-    /** 有运行在跑时缩短的刷新间隔：后台调度时这张图是唯一的观测点。 */
-    const LIVE_REFRESH_MS = 1500;
-    // .build/workflows/client/components/detail.js
-    /**
-    * 运行详情视图：图占据页面主体，节点 / 连线详情在右侧抽屉。
-    */
-    /**
-    * 运行详情的共享数据：详情主体、节点抽屉、连线抽屉都从这里取。
-    *
-    * @returns 详情主体、节点抽屉与连线抽屉共用的数据；没有选中运行时是 null
-    */
-    function runDetailModel(page) {
-    	const { detail } = page;
-    	const data = detail.data;
-    	if (data === null) return null;
-    	const run = data.run;
-    	if (run === null) return null;
-    	const steps = stepsOf(run);
-    	const nodeResults = Array.isArray(data.nodeResults) ? data.nodeResults : [];
-    	const fullResults = new Map(nodeResults.map((result) => [`${String(result.seq)}:${String(result.nodeId)}`, result]));
-    	const definition = data.definition;
-    	const graph = data.graph;
-    	return {
-    		run,
-    		steps,
-    		nodeResults,
-    		fullResults,
-    		definition,
-    		graph,
-    		nodes: Array.isArray(graph?.nodes) ? graph.nodes : []
-    	};
-    }
-    /**
-    * 详情视图：图占据页面主体；节点详情在右侧抽屉里打开。
-    *
-    * @returns React 元素
-    */
-    function renderDetail(page) {
-    	const { t, setSelectedId, detail, selectedNodeId, renderGraph, renderUserNotice, renderInteractionNotice, runDetailModel } = page;
-    	if (detail.error !== null && detail.data === null) return h("p", {
-    		className: "buka-workflows-failure",
-    		role: "alert"
-    	}, `${t("loadFailed")} ${detail.error}`);
-    	if (detail.status === "loading" && detail.data === null) return h("p", {
-    		className: "buka-workflows-statusWithDot",
-    		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading"));
-    	const model = runDetailModel();
-    	if (model === null) return h("p", { className: "buka-workflows-empty" }, t("empty"));
-    	const { run, graph, nodes } = model;
-    	const activeNodeId = selectedNodeId !== null && nodes.some((node) => node.id === selectedNodeId) ? selectedNodeId : null;
-    	const graphBody = graph === null ? h("p", { className: "buka-workflows-empty" }, t("noGraph")) : renderGraph(graph, activeNodeId);
-    	const notices = [renderUserNotice(run), renderInteractionNotice(run)].filter((notice) => notice !== null);
-    	return h("div", { className: "buka-workflows-pageBody buka-workflows-detail" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "ghost",
-    		size: "sm",
-    		className: "buka-workflows-detailBackButton buka-workflows-back",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 14 }),
-    		onClick: () => setSelectedId(null)
-    	}, t("back")), ...notices, graphBody);
-    }
-    // .build/workflows/client/components/drawer-head.js
-    /**
-    * 右侧抽屉的头部：标题、meta、可选操作与关闭按钮。
-    */
-    /**
-    * 右侧抽屉的头部：标题、meta、可选操作与关闭按钮。附件预览 / 连线配置共用。
-    *
-    * @param options 抽屉头部内容
-    * @returns React 元素
-    */
-    function renderDrawerHead(_page, options) {
-    	const meta = typeof options.meta === "string" ? options.meta : "";
-    	const actions = Array.isArray(options.actions) ? options.actions : [];
-    	return h("div", { className: "buka-workflows-drawerHead" }, h("div", { className: "buka-workflows-drawerTitleRow" }, options.icon ?? null, h("span", { className: "buka-workflows-drawerTitle" }, options.title)), meta === "" ? null : h("span", { className: "buka-workflows-drawerMeta" }, meta), h("div", { className: "buka-workflows-drawerActions" }, ...actions, h("button", {
-    		type: "button",
-    		className: "buka-workflows-drawerClose",
-    		"aria-label": options.closeLabel,
-    		title: options.closeLabel,
-    		onClick: options.onClose
-    	}, typeof _deepseek_ai_dsh_client_ui_primitives.IconCloseOutlineRegular === "function" ? h(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutlineRegular, withAria({
-    		size: 16,
-    		"aria-hidden": true
-    	})) : null)));
-    }
     // .build/workflows/client/format.js
     /**
-    * 展示文本：状态 / 时间 / 耗时 / 字节数 / 截断与错误文案。
+    * 展示文本：状态 / 时间 / 耗时 / 字节数 / 截断 / JSON 与错误文案。
+    *
+    * 时间在 HTTP 契约里是 ISO 字符串；旧数据可能是毫秒时间戳，这里两种都接受。
     */
     /**
     * 把失败原因转成展示文本。
@@ -731,7 +721,40 @@ window.__ModuleLoader__.load({
     * @returns
     */
     function messageOf(failure) {
-    	return failure instanceof Error ? failure.message : String(failure);
+    	if (failure instanceof Error) return failure.message;
+    	return String(failure);
+    }
+    /**
+    * 工作流状态 → 词典 key。
+    *
+    * @param status
+    * @returns
+    */
+    function workflowStatusKey(status) {
+    	switch (status) {
+    		case "active": return "workflowActive";
+    		case "retired": return "workflowRetired";
+    		case "draft": return "workflowDraft";
+    		default: return "unknown";
+    	}
+    }
+    /**
+    * 作业 / 任务状态 → 词典 key。
+    *
+    * @param status
+    * @returns
+    */
+    function statusKey(status) {
+    	switch (status) {
+    		case "running": return "statusRunning";
+    		case "completed": return "statusCompleted";
+    		case "failed": return "statusFailed";
+    		case "cancelled": return "statusCancelled";
+    		case "pending": return "statusPending";
+    		case "ready": return "statusReady";
+    		case "blocked": return "statusBlocked";
+    		default: return "unknown";
+    	}
     }
     /**
     * 状态 → Tag tone。
@@ -741,63 +764,74 @@ window.__ModuleLoader__.load({
     */
     function statusTone(status) {
     	switch (status) {
-    		case "completed": return "success";
-    		case "running":
-    		case "waiting": return "info";
+    		case "completed":
+    		case "active": return "success";
+    		case "running": return "info";
+    		case "ready":
     		case "failed":
-    		case "rejected":
-    		case "cancelled":
-    		case "interrupted":
-    		case "unavailable": return "warning";
+    		case "blocked": return "warning";
     		default: return "neutral";
     	}
     }
     /**
-    * 状态 → 本地化文案。
+    * 状态 → 看板 / 节点圆点的 CSS 状态名。
     *
-    * @param t
     * @param status
     * @returns
     */
-    function statusLabel(t, status) {
+    function stateClass(status) {
     	switch (status) {
-    		case "completed": return t("statusCompleted");
-    		case "running": return t("statusRunning");
-    		case "waiting": return t("statusWaiting");
-    		case "failed": return t("statusFailed");
-    		case "rejected": return t("statusRejected");
-    		case "cancelled": return t("statusCancelled");
-    		case "interrupted": return t("statusInterrupted");
-    		case "unavailable": return t("stateUnavailable");
-    		case "idle": return t("stateIdle");
-    		default: return t("unknown");
+    		case "running": return "running";
+    		case "ready": return "waiting";
+    		case "completed": return "done";
+    		case "failed":
+    		case "blocked": return "failed";
+    		default: return "idle";
     	}
     }
     /**
-    * 时间戳 → 本地时间。
+    * ISO 时间 / 毫秒时间戳 → 本地时间。
     *
     * @param value
     * @returns
     */
     function formatTime(value) {
-    	if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    	const date = toDate(value);
+    	if (date === null) return "—";
     	try {
-    		return new Date(value).toLocaleString();
+    		return date.toLocaleString();
     	} catch {
     		return "—";
     	}
     }
     /**
-    * 节点耗时。
+    * 把一个时间值解析成 Date。
     *
-    * @param step
+    * @param value
     * @returns
     */
-    function formatDuration(step) {
-    	const started = typeof step?.startedAt === "number" ? step.startedAt : null;
-    	const finished = typeof step?.finishedAt === "number" ? step.finishedAt : null;
-    	if (started === null || finished === null || finished < started) return "";
-    	return formatMs(finished - started);
+    function toDate(value) {
+    	if (typeof value === "number" && Number.isFinite(value)) {
+    		const date = new Date(value);
+    		return Number.isNaN(date.getTime()) ? null : date;
+    	}
+    	if (typeof value !== "string" || value === "") return null;
+    	const date = new Date(value);
+    	return Number.isNaN(date.getTime()) ? null : date;
+    }
+    /**
+    * 从创建到现在的等待时长；没有终点时用当前时间。
+    *
+    * @param since
+    * @param [until]
+    * @returns
+    */
+    function formatWaiting(since, until = null) {
+    	const started = toDate(since);
+    	if (started === null) return "";
+    	const finished = until === null ? /* @__PURE__ */ new Date() : toDate(until);
+    	if (finished === null) return "";
+    	return formatMs(finished.getTime() - started.getTime());
     }
     /**
     * 毫秒数 → 简短耗时。
@@ -810,7 +844,9 @@ window.__ModuleLoader__.load({
     	if (value < 1e3) return `${Math.max(1, Math.round(value))}ms`;
     	const seconds = value / 1e3;
     	if (seconds < 60) return `${seconds.toFixed(1)}s`;
-    	return `${(seconds / 60).toFixed(1)}min`;
+    	const minutes = seconds / 60;
+    	if (minutes < 60) return `${minutes.toFixed(1)}min`;
+    	return `${(minutes / 60).toFixed(1)}h`;
     }
     /**
     * 字节数 → 简短的附件大小。
@@ -826,1082 +862,1027 @@ window.__ModuleLoader__.load({
     	return `${(value / 1073741824).toFixed(1)} GiB`;
     }
     /**
-    * 按字符数截断长文本（prompt 可能有 256 KiB，不能整段渲染）。
+    * 任意值 → 可读 JSON；循环引用 / 不可序列化时退回字符串。
     *
     * @param value
-    * @param limit
     * @returns
     */
-    function truncateText(value, limit) {
-    	if (typeof value !== "string" || value === "") return {
-    		text: "",
-    		truncated: false
-    	};
-    	if (value.length <= limit) return {
-    		text: value,
-    		truncated: false
-    	};
-    	return {
-    		text: value.slice(0, limit),
-    		truncated: true
-    	};
+    function jsonText(value) {
+    	if (value === void 0) return "";
+    	if (value === null) return "null";
+    	try {
+    		return JSON.stringify(value, null, 2);
+    	} catch {
+    		return String(value);
+    	}
+    }
+    /**
+    * 任务状态 → 看板列 key。
+    *
+    * @param status
+    * @returns
+    */
+    function boardColumn(status) {
+    	switch (status) {
+    		case "ready": return "ready";
+    		case "running": return "running";
+    		case "completed": return "completed";
+    		case "failed":
+    		case "blocked":
+    		case "cancelled": return "error";
+    		default: return "pending";
+    	}
+    }
+    /**
+    * 翻译状态；未知状态直接展示原值。
+    *
+    * @param t
+    * @param status
+    * @returns
+    */
+    function statusLabel(t, status) {
+    	const key = statusKey(status);
+    	if (key !== "unknown") return t(key);
+    	return typeof status === "string" && status !== "" ? status : t("unknown");
+    }
+    // .build/workflows/client/types.js
+    /**
+    * 浏览器一半的共享类型与常量。
+    *
+    * 这里的形状全部是**客户端本地定义**：按 `.tmp/workflow-v4-api.md` 的 HTTP
+    * 契约声明，不 import 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
+    *
+    * 契约字段一律按「可能缺失」处理（响应来自新版 / 旧版 Host 都可能），页面
+    * 只做防御式读取，不做完整校验。
+    */
+    /** 侧边栏条目的词典命名空间，也是 `main` 插槽的 locale。 */
+    const NS = "buka-workflows";
+    /** 侧边栏条目 id；与 `main` 插槽的 key 必须相同。 */
+    const PANEL_ID = "buka-workflows";
+    /** 工作流列表。 */
+    const WORKFLOWS_ROUTE = "/buka-workflows/workflows";
+    /** 工作流详情（定义快照 + 图 + 作业列表）。 */
+    const WORKFLOW_ROUTE = "/buka-workflows/workflow";
+    /** 激活 / 停用工作流。 */
+    const WORKFLOW_ACTIVATE_ROUTE = "/buka-workflows/workflow/activate";
+    /** 某个工作流下的作业列表。 */
+    const JOBS_ROUTE = "/buka-workflows/jobs";
+    /** 作业详情（含任务摘要）。 */
+    const JOB_ROUTE = "/buka-workflows/job";
+    /** 页面人启动作业。 */
+    const JOB_START_ROUTE = "/buka-workflows/job/start";
+    /** 作业动作：cancel / retry-delivery。 */
+    const JOB_ACTION_ROUTE = "/buka-workflows/job/action";
+    /** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
+    const TASK_ROUTE = "/buka-workflows/task";
+    /** 任务动作：cancel / retry / claim / complete。 */
+    const TASK_ACTION_ROUTE = "/buka-workflows/task/action";
+    /** 作业附件库。 */
+    const ATTACHMENTS_ROUTE = "/buka-workflows/attachments";
+    /** 单个附件的下载 / 预览 / 内联地址。 */
+    const ATTACHMENT_ROUTE = "/buka-workflows/attachment";
+    /** 有运行中作业时的刷新间隔（沿用旧页面风格）。 */
+    const LIVE_REFRESH_MS = 1500;
+    /** 没有运行中作业时的刷新间隔。 */
+    const REFRESH_MS = 5e3;
+    /** 判断普通对象。 */
+    function isRecord(value) {
+    	return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+    /** 安全数组。 */
+    function asArray(value) {
+    	return Array.isArray(value) ? value : [];
     }
     // .build/workflows/client/request.js
     /**
-    * 附件地址：只用运行 id、执行序号、节点 id 与清单里的文件名。`mode` 只在
-    * preview / inline 时写入，省略就是下载（保持原有的下载链接行为）。
+    * Host 路由的请求封装：JSON 请求、POST 动作与附件地址。
     *
-    * @param token
-    * @param [mode]
+    * 所有请求都走界面侧公共包的 `requestJson`（同源、`ok !== true` 即抛错），
+    * 信任栅栏由 Host 一半负责。
+    */
+    /**
+    * 发一个 POST JSON 请求。
+    *
+    * @param url 路由地址
+    * @param body 已经序列化的请求体对象
+    */
+    function postJson(url, body) {
+    	return requestJson(url, {
+    		method: "POST",
+    		body: JSON.stringify(body)
+    	});
+    }
+    /**
+    * 附件地址：作业附件库里的附件 id + `mode`。
+    *
+    * `mode` 省略即下载；`preview` 取预览元数据 / 文本；`inline` 直接取图片 / PDF
+    * 正文。沿用旧附件路由的 mode 语义。
+    *
+    * @param jobId 作业 id
+    * @param attachmentId 附件 id
+    * @param [mode] 下载 / 预览 / 内联
     * @returns
     */
-    function attachmentUrl(token, mode) {
+    function attachmentUrl(jobId, attachmentId, mode) {
     	const params = new URLSearchParams({
-    		runId: typeof token?.runId === "string" ? token.runId : "",
-    		seq: token?.seq === void 0 || token?.seq === null ? "" : String(token.seq),
-    		nodeId: typeof token?.nodeId === "string" ? token.nodeId : "",
-    		name: typeof token?.name === "string" ? token.name : ""
+    		jobId: typeof jobId === "string" ? jobId : "",
+    		attachmentId: typeof attachmentId === "string" ? attachmentId : ""
     	});
     	if (mode === "preview" || mode === "inline") params.set("mode", mode);
-    	return `/buka-workflows/attachment?${params.toString()}`;
+    	return `${ATTACHMENT_ROUTE}?${params.toString()}`;
     }
+    // .build/workflows/client/schema.js
     /**
-    * 附件清单里的那条附件 → 路由参数。下载链接、预览请求与抽屉状态共用它。
+    * 受限 JSON Schema → 表单：人任务产出、页面启动作业的原始 / 结构化输入共用。
     *
-    * @param run
-    * @param step
-    * @param attachment
+    * schema 是 spec §5.4 的子集（object / array / string / number / integer /
+    * boolean / enum / const / oneOf），不是完整的 JSON Schema 实现。
+    */
+    /** 多行输入更合适的字段名。 */
+    const MULTILINE_NAMES = /* @__PURE__ */ new Set([
+    	"request",
+    	"requirement",
+    	"acceptance",
+    	"summary",
+    	"description",
+    	"note",
+    	"focus",
+    	"detail",
+    	"content",
+    	"text",
+    	"prompt"
+    ]);
+    /**
+    * 取出 schema 的字段列表；没有 properties 时返回空数组。
+    *
+    * @param schema
     * @returns
     */
-    function attachmentToken(run, step, attachment) {
-    	return {
-    		runId: typeof run?.runId === "string" ? run.runId : "",
-    		seq: step?.seq ?? "",
-    		nodeId: typeof step?.nodeId === "string" ? step.nodeId : "",
-    		name: typeof attachment?.name === "string" ? attachment.name : ""
-    	};
-    }
-    // .build/workflows/client/components/attachments.js
-    /**
-    * 节点附件清单：文件名（点击打开右侧预览抽屉）、大小、描述与下载入口。
-    */
-    /**
-    * 附件清单：文件名（点击打开右侧预览抽屉）、大小、描述与下载入口。
-    *
-    * @param t
-    * @param run
-    * @param step
-    * @param attachments
-    * @param [onOpen]
-    * @returns
-    */
-    function renderAttachments(t, run, step, attachments, onOpen = null) {
-    	if (!Array.isArray(attachments) || attachments.length === 0) return null;
-    	return h("ul", { className: "buka-workflows-attachmentList" }, attachments.map((attachment, index) => {
-    		const token = attachmentToken(run, step, attachment);
-    		const name = typeof attachment?.name === "string" ? attachment.name : "attachment";
-    		return h("li", {
-    			key: `${String(attachment?.index ?? index)}-${name}`,
-    			className: "buka-workflows-attachment"
-    		}, h("button", {
-    			type: "button",
-    			className: "buka-workflows-attachmentLink",
-    			title: t("attachmentPreviewOpenHint"),
-    			onClick: () => {
-    				if (typeof onOpen === "function") onOpen(run, step, attachment);
-    			}
-    		}, name), h("span", { className: "buka-workflows-attachmentMeta" }, formatBytes(attachment?.bytes)), typeof attachment?.description === "string" && attachment.description !== "" ? h("span", { className: "buka-workflows-attachmentDescription" }, attachment.description) : null, h("a", {
-    			className: "buka-workflows-attachmentDownload",
-    			href: attachmentUrl(token),
-    			download: name
-    		}, t("attachmentDownload")));
+    function schemaFields(schema) {
+    	const properties = isRecord(schema?.properties) ? schema.properties : {};
+    	const required = new Set(Array.isArray(schema?.required) ? schema.required.filter((name) => typeof name === "string") : []);
+    	return Object.entries(properties).map(([name, value]) => ({
+    		name,
+    		schema: isRecord(value) ? value : {},
+    		required: required.has(name)
     	}));
     }
-    // .build/workflows/client/node-model.js
     /**
-    * 图模型 / 定义快照的读取：节点标题、类型、状态、出边与步骤概览。
-    */
-    /**
-    * 节点步骤概要：创建者写的 summary，缺省时退回提示词的第一行。
+    * 字段的类型名（处理 `type` 是数组与 `oneOf` 的简化）。
     *
-    * @param config
+    * @param schema
     * @returns
     */
-    function summaryText(config) {
-    	if (config === null || typeof config !== "object") return "";
-    	const summary = typeof config.summary === "string" ? config.summary.trim() : "";
-    	if (summary !== "") return summary;
-    	const first = (typeof config.prompt === "string" ? config.prompt : "").split("\n").map((line) => line.trim()).find((line) => line !== "");
-    	if (first === void 0) return "";
-    	return truncateText(first, 160).text;
-    }
-    /**
-    * 节点标题：步骤概要就是标题。机器人节点用创建者写的 summary（旧定义退回
-    * 提示词第一行，再退回机器人名），用户介入节点用标题，终止节点用 id。
-    *
-    * @param node 图模型里的节点
-    * @param config 定义快照里的节点
-    * @returns
-    */
-    function nodeTitle(node, config) {
-    	if (node.type === "robot") return summaryText(config) || node.robot || node.id;
-    	if (node.type === "user") return node.title || node.id;
-    	return node.id;
-    }
-    /**
-    * 节点类型 → 本地化名称。
-    *
-    * @param t
-    * @param type
-    * @returns
-    */
-    function typeLabel(t, type) {
-    	if (type === "start") return t("typeStart");
-    	if (type === "robot") return t("typeRobot");
-    	if (type === "user") return t("typeUser");
-    	if (type === "join") return t("typeJoin");
-    	if (type === "end") return t("typeEnd");
-    	return String(type);
-    }
-    /**
-    * 节点状态 → 卡片样式类。
-    *
-    * @param state
-    * @returns
-    */
-    function stateClass(state) {
-    	switch (state) {
-    		case "completed": return "done";
-    		case "running": return "running";
-    		case "waiting": return "waiting";
-    		case "failed":
-    		case "rejected":
-    		case "cancelled":
-    		case "interrupted":
-    		case "unavailable": return "failed";
-    		default: return "idle";
+    function fieldKind(schema) {
+    	const value = schema.const !== void 0 ? schema.const : void 0;
+    	if (schema.enum !== void 0 || value !== void 0) return "enum";
+    	const oneOf = Array.isArray(schema.oneOf) ? schema.oneOf : [];
+    	if (oneOf.length === 1 && isRecord(oneOf[0])) return fieldKind(oneOf[0]);
+    	switch (Array.isArray(schema.type) ? schema.type.find((item) => item !== "null") : schema.type) {
+    		case "boolean": return "boolean";
+    		case "number":
+    		case "integer": return "number";
+    		case "object":
+    		case "array": return "json";
+    		default: return "string";
     	}
     }
     /**
-    * 从定义快照里取一个节点的原始配置（用于提示词、用户说明）。
+    * 字段是否用多行输入。
     *
-    * @param definition
+    * @param field
+    * @returns
+    */
+    function isMultilineField(field) {
+    	return field.schema.type !== "object" && field.schema.type !== "array" && MULTILINE_NAMES.has(field.name);
+    }
+    /**
+    * 枚举候选值。
+    *
+    * @param schema
+    * @returns
+    */
+    function enumOptions(schema) {
+    	if (Array.isArray(schema.enum)) return schema.enum.map((item) => ({
+    		value: String(item),
+    		label: String(item)
+    	}));
+    	if (schema.const !== void 0) return [{
+    		value: String(schema.const),
+    		label: String(schema.const)
+    	}];
+    	const first = (Array.isArray(schema.oneOf) ? schema.oneOf : []).find((item) => isRecord(item) && Array.isArray(item.enum));
+    	return first === void 0 ? [] : enumOptions(first);
+    }
+    /**
+    * 渲染一组 schema 字段。受控输入：值来自 `values`，变化交给 `onChange`。
+    *
+    * @param page 页面上下文（只用到词典）
+    * @param options schema、值、变化回调与 id 前缀
+    * @returns 表单字段数组
+    */
+    function renderSchemaFields(page, options) {
+    	const { t } = page;
+    	const fields = schemaFields(options.schema);
+    	if (fields.length === 0) return [h("p", {
+    		className: "buka-workflows-hint",
+    		key: "no-fields"
+    	}, t("schemaNoFields"))];
+    	return fields.map((field) => renderField(page, field, options));
+    }
+    /**
+    * 单个字段。
+    *
+    * @param page
+    * @param field
+    * @param options
+    * @returns
+    */
+    function renderField(page, field, options) {
+    	const { t } = page;
+    	const id = `${options.idPrefix}-${field.name}`;
+    	const value = options.values[field.name] ?? "";
+    	const kind = fieldKind(field.schema);
+    	const onChange = (next) => options.onChange(field.name, next);
+    	let control;
+    	if (kind === "enum") {
+    		const choices = enumOptions(field.schema);
+    		control = h("select", {
+    			id,
+    			className: "buka-workflows-select",
+    			value,
+    			onChange: (event) => onChange(event.target.value)
+    		}, h("option", { value: "" }, "—"), ...choices.map((choice) => h("option", {
+    			key: choice.value,
+    			value: choice.value
+    		}, choice.label)));
+    	} else if (kind === "boolean") control = h("select", {
+    		id,
+    		className: "buka-workflows-select",
+    		value,
+    		onChange: (event) => onChange(event.target.value)
+    	}, h("option", { value: "" }, "—"), h("option", { value: "true" }, "true"), h("option", { value: "false" }, "false"));
+    	else if (kind === "json") control = h("textarea", {
+    		id,
+    		className: "buka-workflows-textarea",
+    		rows: 4,
+    		value,
+    		spellcheck: "false",
+    		onChange: (event) => onChange(event.target.value)
+    	});
+    	else if (kind === "number") control = h(_deepseek_ai_dsh_client_ui_primitives.Input, {
+    		id,
+    		type: "number",
+    		value,
+    		className: "buka-workflows-input",
+    		onChange: (event) => onChange(event.target.value)
+    	});
+    	else if (isMultilineField(field)) control = h("textarea", {
+    		id,
+    		className: "buka-workflows-textarea",
+    		rows: 3,
+    		value,
+    		onChange: (event) => onChange(event.target.value)
+    	});
+    	else control = h(_deepseek_ai_dsh_client_ui_primitives.Input, {
+    		id,
+    		type: "text",
+    		value,
+    		className: "buka-workflows-input",
+    		onChange: (event) => onChange(event.target.value)
+    	});
+    	return h("div", {
+    		key: field.name,
+    		className: "buka-workflows-field"
+    	}, h("label", {
+    		className: "buka-workflows-fieldLabel",
+    		htmlFor: id
+    	}, field.name, field.required ? h("span", { className: "buka-workflows-required" }, ` · ${t("schemaFieldRequired")}`) : null), control, kind === "json" ? h("p", { className: "buka-workflows-fieldHint" }, t("fallbackJsonHint")) : null);
+    }
+    /**
+    * 把表单值解析成 schema 约定的对象。必填缺失 / 类型不对 / JSON 非法时返回错误。
+    *
+    * @param schema
+    * @param values
+    * @param t
+    * @returns 解析结果
+    */
+    function parseSchemaValues(schema, values, t) {
+    	const fields = schemaFields(schema);
+    	if (fields.length === 0) {
+    		const text = Object.values(values).join("").trim();
+    		if (text === "") return { value: {} };
+    		const parsed = parseJson(text);
+    		return isRecord(parsed) ? { value: parsed } : { error: fill(t, "fieldJsonInvalid", { name: "" }) };
+    	}
+    	const output = {};
+    	for (const field of fields) {
+    		const raw = (values[field.name] ?? "").trim();
+    		if (raw === "") {
+    			if (field.required) return { error: fill(t, "fieldRequired", { name: field.name }) };
+    			continue;
+    		}
+    		const kind = fieldKind(field.schema);
+    		if (kind === "boolean") {
+    			if (raw !== "true" && raw !== "false") return { error: fill(t, "fieldInvalidBoolean", { name: field.name }) };
+    			output[field.name] = raw === "true";
+    		} else if (kind === "number") {
+    			const asNumber = Number(raw);
+    			if (!Number.isFinite(asNumber)) return { error: fill(t, "fieldInvalidNumber", { name: field.name }) };
+    			output[field.name] = field.schema.type === "integer" ? Math.trunc(asNumber) : asNumber;
+    		} else if (kind === "json") {
+    			const parsed = parseJson(raw);
+    			if (parsed === void 0) return { error: fill(t, "fieldJsonInvalid", { name: field.name }) };
+    			output[field.name] = parsed;
+    		} else if (kind === "enum") output[field.name] = coerceEnum(field.schema, raw);
+    		else output[field.name] = raw;
+    	}
+    	return { value: output };
+    }
+    /**
+    * 枚举值按原 schema 的类型还原（数字枚举保持数字）。
+    *
+    * @param schema
+    * @param raw
+    * @returns
+    */
+    function coerceEnum(schema, raw) {
+    	const direct = (Array.isArray(schema.enum) ? schema.enum : []).find((value) => String(value) === raw);
+    	if (direct !== void 0) return direct;
+    	if (typeof schema.const !== "undefined" && String(schema.const) === raw) return schema.const;
+    	const first = (Array.isArray(schema.oneOf) ? schema.oneOf : []).find((item) => isRecord(item) && Array.isArray(item.enum));
+    	if (first !== void 0) return coerceEnum(first, raw);
+    	return raw;
+    }
+    /**
+    * 解析 JSON；非法时返回 `undefined`（合法 `undefined` 本身也不在 JSON 里）。
+    *
+    * @param text
+    * @returns
+    */
+    function parseJson(text) {
+    	try {
+    		return JSON.parse(text);
+    	} catch {
+    		return;
+    	}
+    }
+    /**
+    * 没有 schema 时给一个「整段 JSON」的 textarea 字段。
+    *
+    * @param page
+    * @param value
+    * @param onChange
     * @param id
     * @returns
     */
-    function definitionNode(definition, id) {
-    	if (definition === null || typeof definition !== "object") return null;
-    	const plan = definition.plan;
-    	if (plan !== null && typeof plan === "object" && plan.nodes !== null && typeof plan.nodes === "object") {
-    		const node = plan.nodes[id];
-    		if (node !== null && typeof node === "object") return node;
-    	}
-    	const raw = definition.definition;
-    	if (raw !== null && typeof raw === "object" && Array.isArray(raw.nodes)) {
-    		for (const node of raw.nodes) if (node !== null && typeof node === "object" && node.id === id) return node;
-    	}
-    	return null;
+    function renderJsonFallback(page, value, onChange, id) {
+    	const { t } = page;
+    	return h("div", { className: "buka-workflows-field" }, h("label", {
+    		className: "buka-workflows-fieldLabel",
+    		htmlFor: id
+    	}, t("fallbackJsonTitle")), h("textarea", {
+    		id,
+    		className: "buka-workflows-textarea",
+    		rows: 6,
+    		value,
+    		spellcheck: "false",
+    		onChange: (event) => onChange(event.target.value)
+    	}), h("p", { className: "buka-workflows-fieldHint" }, t("fallbackJsonHint")));
     }
+    // .build/workflows/client/components/parts.js
     /**
-    * 一个节点关联的唯一会话 id 列表（按展示顺序）：
-    *
-    * - 运行中 `run.current.sessionId` 排最前（当前会话优先展示）；
-    * - `run.sessions[].entries` 里记录到这个节点的会话（新格式）；
-    * - 旧记录没有逐次进入的 `entries` 时，退回机器人 / 首末节点归属；
-    * - 该节点各次执行自己记下的 `sessionId`。
-    *
-    * 同一个机器人一次运行通常只有一个会话，所以正常情况下列表长度为 1；只有旧记录
-    * 里一个节点在几个会话中执行过，才会出现多项（每一段历史都要有打开入口）。
-    *
-    * @param node 图模型里的节点
-    * @param nodeSteps 该节点的执行记录
-    * @param liveSession 运行中节点在 `run.current` 上的会话 id（没有则为空串）
-    * @param run 运行记录
-    * @returns
+    * 页面通用小部件：状态标签、加载 / 失败 / 空态、键值行、只读 schema 与 JSON 块。
     */
-    function collectNodeSessionIds(node, nodeSteps, liveSession, run) {
-    	const ids = [];
-    	const seen = /* @__PURE__ */ new Set();
-    	/** @param value 候选会话 id */
-    	const add = (value) => {
-    		if (typeof value !== "string" || value === "" || seen.has(value)) return;
-    		seen.add(value);
-    		ids.push(value);
-    	};
-    	add(liveSession);
-    	const sessions = Array.isArray(run?.sessions) ? run.sessions : [];
-    	for (const session of sessions) {
-    		if (session === null || typeof session !== "object") continue;
-    		const entries = Array.isArray(session.entries) ? session.entries : [];
-    		let listedHere = false;
-    		for (const entry of entries) {
-    			if (entry === null || typeof entry !== "object" || entry.nodeId !== node.id) continue;
-    			listedHere = true;
-    			add(typeof entry.sessionId === "string" ? entry.sessionId : session.sessionId);
-    		}
-    		if (listedHere) continue;
-    		const sameRobot = node.type === "robot" && typeof node.robot === "string" && node.robot !== "" && session.robot === node.robot;
-    		const touchesNode = session.firstNodeId === node.id || session.lastNodeId === node.id;
-    		if (sameRobot || touchesNode) add(session.sessionId);
-    	}
-    	for (const step of nodeSteps) add(step?.sessionId);
-    	return ids;
-    }
-    /**
-    * 一行「键：值」。
-    *
-    * @param key
-    * @param value
-    * @returns React 元素
-    */
-    function kvRow(key, value) {
-    	return h("div", { className: "buka-workflows-kvRow" }, h("span", { className: "buka-workflows-kvKey" }, key), h("span", { className: "buka-workflows-kvValue" }, value));
-    }
-    /**
-    * 胶囊文案：机器人节点优先用创建者写的步骤概要（旧定义没有时退回机器人
-    * 名），用户介入节点用标题，终止节点用 id。
-    *
-    * @param node
-    * @returns
-    */
-    function capsuleText(t, node) {
-    	if (node.type === "robot") return node.summary || node.robot || node.id;
-    	if (node.type === "user") return node.title || node.id;
-    	if (node.type === "start") return t("typeStart");
-    	return node.id;
-    }
-    /**
-    * 一条边在悬停时展示的名字。
-    *
-    * - 用户介入节点的边：先显示给用户看的选项文字（`labels`），这才是这条边
-    *   对用户的意义；
-    * - 机器人节点的边：创建者写的路由名 `names`；多条规则合并成一条边时按顺序
-    *   并列；
-    * - 没写名字的边：不展示，不拿目标 id 凑数。
-    *
-    * @param edge
-    * @returns
-    */
-    function edgeLabel(edge) {
-    	const labels = Array.isArray(edge?.labels) ? edge.labels.filter((label) => typeof label === "string" && label !== "") : [];
-    	if (labels.length > 0) return labels.join(" / ");
-    	const names = Array.isArray(edge?.names) ? edge.names.filter((name) => typeof name === "string" && name !== "") : [];
-    	if (names.length > 0) return names.join(" / ");
-    	return "";
-    }
-    /**
-    * 边的外观色 class：只认图模型归一后的 `success` / `failure`。
-    *
-    * 颜色是纯展示属性（定义里的可选 `tone`），不参与路由；状态 class
-    * （`is-traversed` / `is-static` / `is-hovered`）仍然各自控制线宽、实线与
-    * 压暗，CSS 里让 tone 的颜色优先于它们。
-    *
-    * @param edge
-    * @returns
-    */
-    function edgeToneClass(edge) {
-    	if (edge?.tone === "success") return " is-success";
-    	if (edge?.tone === "failure") return " is-failure";
-    	return "";
-    }
-    /**
-    * 一次用户执行的 route 展示文字：优先用所选边的 `label`（定义里用户看到的
-    * 选项），找不到时退回路由键。机器人执行仍然显示路由名。
-    *
-    * @param node 图模型里的节点
-    * @param config 定义快照里的节点
-    * @param route 路由键
-    * @returns
-    */
-    function routeText(node, config, route) {
-    	if (node.type !== "user" || route === "") return route;
-    	const edge = (Array.isArray(config?.next) ? config.next : []).find((item) => item?.name === route);
-    	const label = typeof edge?.label === "string" ? edge.label.trim() : "";
-    	return label === "" ? route : label;
-    }
-    /**
-    * 节点类型 → Tag tone；颜色用于区分类型。
-    *
-    * @param type
-    * @returns
-    */
-    function typeTone(type) {
-    	if (type === "start") return "neutral";
-    	if (type === "robot") return "info";
-    	if (type === "user") return "warning";
-    	if (type === "end") return "success";
-    	return "neutral";
-    }
-    /**
-    * 模板节点的可读标题：机器人用抽象角色名，用户用标题，起止用固定文案。
-    *
-    * @param node
-    * @returns
-    */
-    function templateNodeLabel(t, node) {
-    	if (node.type === "robot") return node.robot || node.summary || node.id || "";
-    	if (node.type === "user") return node.title || node.id || "";
-    	if (node.type === "start") return t("typeStart");
-    	return t("typeEnd");
-    }
-    // .build/workflows/client/components/execution.js
-    /**
-    * 一次执行的 Tab 内容：输入、输出、附件、会话与前后步骤。
-    */
-    /**
-    * 一次执行的 Tab 内容：当次输入（渲染后的提示词）、当次输出、会话，以及这次
-    * 执行把运行带到了哪个节点的哪一次执行（点一下就能跳过去）。
-    *
-    * @param step
-    * @param full 落盘的节点结果全文（旧记录可能没有）
-    * @param config 定义快照里的节点
-    * @param node 图模型里的节点
-    * @param steps 整个运行按顺序记下的所有执行
-    * @param definition 定义快照（下一步要拿目标节点的步骤概要）
-    * @param graph 图模型（同上）
-    * @param run 运行记录（最后一步用它找到终止节点）
-    * @param [nodeSessionIds] 节点级已经展示过的会话 id（这里不再重复）
-    * @returns React 元素
-    */
-    function renderExecution(page, step, full, config, node, steps, definition, graph, run, nodeSessionIds = []) {
-    	const { t, openAttachment, openSession, focusExecution } = page;
-    	const visit = typeof step.visit === "number" ? step.visit : 1;
-    	const route = typeof step.route === "string" ? step.route.trim() : "";
-    	let promptText = typeof full?.prompt === "string" && full.prompt !== "" ? full.prompt : "";
-    	let inputMissing = false;
-    	if (node.type === "user") {
-    		const stepInput = typeof step.input === "string" ? step.input.trim() : "";
-    		const pending = run !== null && typeof run === "object" && run.pendingUser !== null && typeof run.pendingUser === "object" && run.pendingUser.nodeId === node.id && run.pendingUser.visit === visit ? run.pendingUser : null;
-    		const pendingText = typeof pending?.detail === "string" && pending.detail !== "" ? pending.detail : typeof pending?.title === "string" ? pending.title : "";
-    		const detail = typeof config?.detail === "string" ? config.detail : "";
-    		const title = typeof config?.title === "string" ? config.title : "";
-    		promptText = stepInput !== "" ? stepInput : pendingText !== "" ? pendingText : detail !== "" ? detail : title;
-    	} else if (promptText === "") {
-    		if (visit === 1) promptText = typeof config?.prompt === "string" ? config.prompt : "";
-    		else inputMissing = true;
-    	}
-    	const stepText = typeof step.text === "string" ? step.text : "";
-    	const fullText = typeof full?.text === "string" ? full.text : "";
-    	const outputText = fullText !== "" ? fullText : stepText;
-    	const attachments = Array.isArray(full?.attachments) ? full.attachments : Array.isArray(step.attachments) ? step.attachments : [];
-    	const duration = formatDuration(step);
-    	const nextStep = steps.find((other) => other.seq === step.seq + 1) ?? null;
-    	const nextNode = nextStep === null ? null : (Array.isArray(graph?.nodes) ? graph.nodes : []).find((item) => item?.id === nextStep.nodeId) ?? null;
-    	const nextTitle = nextStep === null ? "" : nextNode === null ? nextStep.nodeId : nodeTitle(nextNode, definitionNode(definition, nextStep.nodeId));
-    	const nextVisit = nextStep !== null && typeof nextStep.visit === "number" ? nextStep.visit : 1;
-    	const lastSeq = steps.reduce((max, other) => Math.max(max, other.seq), 0);
-    	const result = run !== null && typeof run?.result === "object" ? run.result : null;
-    	const endTarget = nextStep === null && step.seq === lastSeq && typeof result?.lastNode === "string" && result.lastNode !== step.nodeId ? result.lastNode : null;
-    	const endNode = endTarget === null ? null : (Array.isArray(graph?.nodes) ? graph.nodes : []).find((item) => item?.id === endTarget) ?? null;
-    	const endTitle = endNode === null ? endTarget : nodeTitle(endNode, definitionNode(definition, endTarget ?? ""));
-    	/** 下一步的目标：优先下一次执行，其次这次执行走到的终止节点。 */
-    	const nextTarget = nextStep !== null ? {
-    		nodeId: nextStep.nodeId,
-    		seq: nextStep.seq,
-    		title: nextTitle,
-    		visit: `#${nextVisit}`
-    	} : endTarget !== null ? {
-    		nodeId: endTarget,
-    		seq: null,
-    		title: endTitle,
-    		visit: null
-    	} : null;
-    	const prevStep = steps.find((other) => other.seq === step.seq - 1) ?? null;
-    	const prevNode = prevStep === null ? null : (Array.isArray(graph?.nodes) ? graph.nodes : []).find((item) => item?.id === prevStep.nodeId) ?? null;
-    	const prevTitle = prevStep === null ? "" : prevNode === null ? prevStep.nodeId : nodeTitle(prevNode, definitionNode(definition, prevStep.nodeId));
-    	const prevVisit = prevStep !== null && typeof prevStep.visit === "number" ? prevStep.visit : 1;
-    	const startNode = (Array.isArray(graph?.nodes) ? graph.nodes : []).find((item) => item?.id === graph?.start) ?? null;
-    	const firstTarget = prevStep === null && step.seq === 1 && startNode?.type === "start" && startNode.id !== step.nodeId ? {
-    		nodeId: startNode.id,
-    		seq: null,
-    		title: t("typeStart"),
-    		visit: null
-    	} : null;
-    	const prevTarget = prevStep !== null ? {
-    		nodeId: prevStep.nodeId,
-    		seq: prevStep.seq,
-    		title: prevTitle,
-    		visit: `#${prevVisit}`
-    	} : firstTarget;
-    	return h("div", {
-    		key: `${String(step.seq)}-${String(step.nodeId)}`,
-    		className: "buka-workflows-tabPanel",
-    		role: "tabpanel"
-    	}, h("div", { className: "buka-workflows-tabMeta" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: statusTone(step.status) }, statusLabel(t, step.status)), route === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("routeLabel")}: ${routeText(node, config, route)}`), attachments.length === 0 ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, String(t("attachmentCount")).replace("{n}", String(attachments.length))), typeof step.startedAt === "number" ? h("span", { className: "buka-workflows-meta" }, formatTime(step.startedAt)) : null, duration === "" ? null : h("span", { className: "buka-workflows-meta" }, duration), step.compacted === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("sessionCompacted")) : null, step.recovered === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("sessionRecovered")) : null, step.timedOut === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("executionTimedOut")) : null, step.aborted === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("executionAborted")) : null), h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("executionInput")), promptText === "" ? h("p", { className: "buka-workflows-hint" }, t(inputMissing ? "executionInputMissing" : "executionNoInput")) : h("pre", { className: "buka-workflows-pre" }, promptText)), h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("executionOutput")), outputText === "" ? h("p", { className: "buka-workflows-hint" }, t(attachments.length === 0 ? "executionNoOutput" : "executionOutputAttachmentsOnly")) : h("pre", { className: "buka-workflows-pre" }, outputText)), attachments.length === 0 ? null : h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("executionAttachments")), renderAttachments(t, run, step, attachments, openAttachment)), typeof step.error === "string" && step.error !== "" ? h("p", {
-    		className: "buka-workflows-failure",
-    		role: "alert"
-    	}, `${t("error")}: ${step.error}`) : null, typeof step.stopReason === "string" && step.stopReason !== "" && step.stopReason !== "completed" ? h("p", { className: "buka-workflows-warn" }, `${t("stopReason")}: ${step.stopReason}`) : null, typeof step.compactionError === "string" && step.compactionError !== "" ? h("p", { className: "buka-workflows-warn" }, `${t("sessionCompactFailed")} ${step.compactionError}`) : null, typeof step.sessionResetReason === "string" && step.sessionResetReason !== "" ? h("p", { className: "buka-workflows-warn" }, `${t("sessionReset")} ${step.sessionResetReason}`) : null, typeof step.sessionId === "string" && step.sessionId !== "" && !nodeSessionIds.includes(step.sessionId) ? h("div", { className: "buka-workflows-stepActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
-    		onClick: () => openSession(step)
-    	}, t("openSession")), h("code", { className: "buka-workflows-inlineCode" }, step.sessionId)) : null, h("div", { className: "buka-workflows-executionNav" }, h("div", { className: "buka-workflows-navSide is-prev" }, h("span", { className: "buka-workflows-label" }, t("executionPrev")), prevTarget === null ? h("p", { className: "buka-workflows-hint" }, t("executionPrevNone")) : h("button", {
-    		type: "button",
-    		className: "buka-workflows-prevLink",
-    		title: prevTarget.visit === null ? prevTarget.title : `${prevTarget.title} ${prevTarget.visit}`,
-    		onClick: () => focusExecution(prevTarget.nodeId, prevTarget.seq)
-    	}, h("span", {
-    		className: "buka-workflows-prevArrow",
-    		"aria-hidden": true
-    	}, "←"), h("span", { className: "buka-workflows-prevTitle" }, prevTarget.title), prevTarget.visit === null ? h("span", { className: "buka-workflows-prevVisit" }, t("executionStart")) : h("span", { className: "buka-workflows-prevVisit" }, prevTarget.visit))), h("div", { className: "buka-workflows-navSide is-next" }, h("span", { className: "buka-workflows-label" }, t("executionNext")), nextTarget === null ? h("p", { className: "buka-workflows-hint" }, t("executionNextEnded")) : h("button", {
-    		type: "button",
-    		className: "buka-workflows-nextLink",
-    		title: nextTarget.visit === null ? nextTarget.title : `${nextTarget.title} ${nextTarget.visit}`,
-    		onClick: () => focusExecution(nextTarget.nodeId, nextTarget.seq)
-    	}, h("span", { className: "buka-workflows-nextTitle" }, nextTarget.title), nextTarget.visit === null ? h("span", { className: "buka-workflows-nextVisit" }, t("executionEnded")) : h("span", { className: "buka-workflows-nextVisit" }, nextTarget.visit), h("span", {
-    		className: "buka-workflows-nextArrow",
-    		"aria-hidden": true
-    	}, "→")))));
-    }
-    // .build/workflows/client/components/footer.js
-    /**
-    * 详情页底部的图例与说明。
-    */
-    /**
-    * 详情页底部的图例与说明。它固定占据页面底部，不跟内容一起滚动，内容再长
-    * 也不会把它顶下去。模板页没有执行状态，传入 false 省掉「节点状态」图例，
-    * 连线图例也换成单一「流程走向」。
-    *
-    * @param [withStates]
-    * @returns React 元素
-    */
-    function renderFooter(page, withStates = true) {
-    	const { t, renderLegend } = page;
-    	return h("footer", { className: "buka-workflows-footer" }, h("p", { className: "buka-workflows-hint" }, t("graphInteractHint")), renderLegend({ states: withStates }));
-    }
-    // .build/workflows/client/components/list.js
-    /**
-    * 运行列表视图。
-    */
-    /**
-    * 列表视图。
-    *
-    * @returns React 元素
-    */
-    function renderList(page) {
-    	const { t, list, setSelectedId, showArchived } = page;
-    	if (list.error !== null && list.runs.length === 0) return h("div", { className: "buka-workflows-listPane" }, h("p", {
-    		className: "buka-workflows-failure",
-    		role: "alert"
-    	}, `${t("loadFailed")} ${list.error}`));
-    	if (list.status === "loading" && list.runs.length === 0) return h("div", { className: "buka-workflows-listPane" }, h("p", {
+    /** 加载态。 */
+    function renderLoading(page) {
+    	return h("p", {
     		className: "buka-workflows-statusWithDot",
     		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")));
-    	if (list.runs.length === 0) return h("div", { className: "buka-workflows-listPane" }, h("div", { className: "buka-workflows-emptyBox" }, h("p", { className: "buka-workflows-empty" }, showArchived ? t("archiveEmpty") : t("welcome")), showArchived ? null : h("p", { className: "buka-workflows-hint" }, t("welcomeHint"))));
-    	return h("div", { className: "buka-workflows-listPane" }, h("ul", { className: "buka-workflows-cards" }, ...list.runs.map((run) => h("li", { key: run.runId }, h("button", {
-    		type: "button",
-    		className: "buka-workflows-card",
-    		onClick: () => setSelectedId(run.runId)
-    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, typeof run.seq === "number" ? h("span", { className: "buka-workflows-seq" }, `#${run.seq}`) : null, h("span", { className: "buka-workflows-cardTitle" }, run.goal || run.runId)), h("span", { className: "buka-workflows-cardTags" }, typeof run.archivedAt === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("archived")) : null, run.waitingForUser === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("waitingForUser")) : null, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: statusTone(run.status) }, statusLabel(t, run.status)))), h("span", { className: "buka-workflows-meta" }, `${run.runId} · ${formatTime(run.createdAt)}${typeof run.error === "string" && run.error !== "" ? ` · ${run.error}` : ""}`))))));
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), page.t("loading"));
     }
-    // .build/workflows/client/components/notices.js
-    /**
-    * 运行等待提示：用户介入 / 机器人提问与审批。
-    */
-    /**
-    * 运行停在用户介入节点时的提示条：说明在等什么（标题 + 渲染后的说明），列出
-    * 用户可选的出口与追加问题，并提供直达工作流创建者会话的入口。数据由
-    * supervisor 写在 `run.pendingUser` 上。
-    *
-    * @param run 运行记录
-    * @returns React 元素；没有等待中的用户介入时返回 null
-    */
-    function renderUserNotice(page, run) {
-    	const { t, openSession } = page;
-    	const pending = run !== null && typeof run === "object" && run.pendingUser !== null && typeof run.pendingUser === "object" ? run.pendingUser : null;
-    	if (pending === null) return null;
-    	const nodeId = typeof pending.nodeId === "string" ? pending.nodeId : "";
-    	const title = typeof pending.title === "string" ? pending.title.trim() : "";
-    	const detail = typeof pending.detail === "string" ? pending.detail.trim() : "";
-    	const sessionId = typeof pending.sessionId === "string" ? pending.sessionId : "";
-    	const requestedAt = typeof pending.requestedAt === "number" && Number.isFinite(pending.requestedAt) ? formatTime(pending.requestedAt) : "";
-    	const body = [title, detail].filter((text) => text !== "").join("\n");
-    	const options = Array.isArray(pending.options) ? pending.options.filter((option) => isRecord(option)) : [];
-    	const questions = Array.isArray(pending.questions) ? pending.questions.filter((question) => isRecord(question)) : [];
-    	return h("div", {
-    		className: "buka-workflows-interactionNotice buka-workflows-userNotice",
-    		role: "status"
-    	}, h("div", { className: "buka-workflows-interactionHead" }, h("span", { className: "buka-workflows-interactionTitle" }, t("userWaitingTitle")), nodeId === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, nodeId), requestedAt === "" ? null : h("span", { className: "buka-workflows-meta" }, requestedAt)), body === "" ? null : h("p", { className: "buka-workflows-interactionBody" }, body), options.length === 0 ? null : h("div", { className: "buka-workflows-userNoticeGroup" }, h("span", { className: "buka-workflows-label" }, t("userChoice")), h("ul", { className: "buka-workflows-userChoiceList" }, ...options.map((option, index) => {
-    		const label = typeof option.label === "string" ? option.label.trim() : "";
-    		const description = typeof option.description === "string" ? option.description.trim() : "";
-    		return h("li", {
-    			key: `${String(option.name ?? index)}-${label}`,
-    			className: "buka-workflows-userChoice"
-    		}, h("span", { className: "buka-workflows-userChoiceLabel" }, label === "" ? t("userAnswerSkipped") : label), description === "" ? null : h("span", { className: "buka-workflows-userChoiceDesc" }, description));
-    	}))), questions.length === 0 ? null : h("div", { className: "buka-workflows-userNoticeGroup" }, h("span", { className: "buka-workflows-label" }, t("userAnswers")), h("ul", { className: "buka-workflows-userQuestionList" }, ...questions.map((question, index) => {
-    		const id = typeof question.id === "string" ? question.id : String(index);
-    		const header = typeof question.header === "string" ? question.header.trim() : "";
-    		const text = typeof question.question === "string" ? question.question.trim() : "";
-    		return h("li", {
-    			key: id,
-    			className: "buka-workflows-userQuestion"
-    		}, header === "" ? null : h("span", { className: "buka-workflows-userQuestionHeader" }, header), text === "" ? null : h("span", { className: "buka-workflows-userQuestionText" }, text));
-    	}))), sessionId === "" ? null : h("div", { className: "buka-workflows-interactionActions" }, h("span", { className: "buka-workflows-hint" }, t("userWaitingBody")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
-    		onClick: () => openSession({ sessionId })
-    	}, t("openSession"))));
-    }
-    /**
-    * 运行在等待用户时（机器人提问 / 请求批准）的提示条：说明在等什么，并提供
-    * 直达当前机器人会话的入口。数据由 supervisor 写在 `run.pendingInteraction`。
-    *
-    * @param run 运行记录
-    * @returns React 元素；没有等待中的交互时返回 null
-    */
-    function renderInteractionNotice(page, run) {
-    	const { t, openSession } = page;
-    	const interaction = run !== null && typeof run === "object" && run.pendingInteraction !== null && typeof run.pendingInteraction === "object" ? run.pendingInteraction : null;
-    	if (interaction === null) return null;
-    	const approval = interaction.kind === "approval";
-    	const planReview = interaction.planReview === true && !approval;
-    	const toolName = typeof interaction.toolName === "string" ? interaction.toolName.trim() : "";
-    	const nodeId = typeof interaction.nodeId === "string" ? interaction.nodeId : "";
-    	const sessionId = typeof interaction.sessionId === "string" ? interaction.sessionId : "";
-    	const askedAt = typeof interaction.askedAt === "number" && Number.isFinite(interaction.askedAt) ? formatTime(interaction.askedAt) : "";
-    	let body = "";
-    	if (approval) {
-    		const displayReason = typeof interaction.displayReason === "string" ? interaction.displayReason.trim() : "";
-    		const reason = typeof interaction.reason === "string" ? interaction.reason.trim() : "";
-    		body = displayReason !== "" ? displayReason : reason;
-    	} else if (planReview) body = t("planReviewBody");
-    	else {
-    		const questions = Array.isArray(interaction.questions) ? interaction.questions : [];
-    		const first = isRecord(questions[0]) ? questions[0] : null;
-    		const question = typeof first?.question === "string" ? first.question.trim() : "";
-    		const header = typeof first?.header === "string" ? first.header.trim() : "";
-    		body = question !== "" ? question : header;
-    	}
-    	const title = planReview ? t("waitingForPlanReview") : approval ? `${t("waitingForApproval")}${toolName === "" ? "" : ` ${toolName}`}` : t("waitingForAnswer");
-    	return h("div", {
-    		className: "buka-workflows-interactionNotice",
-    		role: "status"
-    	}, h("div", { className: "buka-workflows-interactionHead" }, h("span", { className: "buka-workflows-interactionTitle" }, title), nodeId === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, nodeId), askedAt === "" ? null : h("span", { className: "buka-workflows-meta" }, askedAt)), body === "" ? null : h("p", { className: "buka-workflows-interactionBody" }, body), sessionId === "" ? null : h("div", { className: "buka-workflows-interactionActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
-    		onClick: () => openSession({ sessionId })
-    	}, t(planReview ? "openPlanReviewSession" : approval ? "openApprovalSession" : "openAnswerSession"))));
-    }
-    // .build/workflows/client/graph/geometry.js
-    /**
-    * 节点图的几何小工具：边名字的落点与 tooltip 定位。
-    */
-    /**
-    * 边名字的落点：钉在这条线箭头的位置上，不跟着鼠标走。箭头要么在竖段中点、
-    * 要么在目标端口前，所以名字不会压在节点上；拿不到 SVG 几何时返回 `null`，
-    * 退回鼠标位置。
-    *
-    * @param path 悬浮中的命中区 path
-    * @param arrow 这条线的方向箭头
-    * @returns
-    */
-    function edgeTipAnchor(path, arrow) {
-    	if (path === null || typeof path !== "object") return null;
-    	const svg = path.ownerSVGElement;
-    	if (svg === null || svg === void 0 || typeof svg !== "object") return null;
-    	const svgRecord = svg;
-    	if (typeof svgRecord.getBoundingClientRect !== "function") return null;
-    	if (arrow === null || typeof arrow !== "object") return null;
-    	const arrowRecord = arrow;
-    	if (typeof arrowRecord.x !== "number" || typeof arrowRecord.y !== "number") return null;
-    	const rect = svgRecord.getBoundingClientRect();
-    	return {
-    		left: rect.left + arrowRecord.x + 8,
-    		top: rect.top + arrowRecord.y
-    	};
-    }
-    /**
-    * 边名字 tooltip 的位置：优先用钉住的中段落点，否则跟随鼠标；两种情况都夹
-    * 在视口内，靠近右 / 下边缘时不会被裁掉。测试环境没有 `window`，此时直接
-    * 用原值。
-    *
-    * @param tip
-    * @returns
-    */
-    function edgeTipPosition(tip) {
-    	const anchor = tip.anchor ?? null;
-    	const left = anchor === null ? tip.x + 12 : anchor.left;
-    	const top = anchor === null ? tip.y + 14 : anchor.top;
-    	const width = typeof window !== "undefined" && typeof window.innerWidth === "number" ? window.innerWidth : 0;
-    	const height = typeof window !== "undefined" && typeof window.innerHeight === "number" ? window.innerHeight : 0;
-    	if (width <= 0 || height <= 0) return {
-    		left: `${left}px`,
-    		top: `${top}px`
-    	};
-    	const minTop = anchor === null ? 8 : 24;
-    	const maxTop = height - (anchor === null ? 40 : 24);
-    	return {
-    		left: `${Math.max(8, Math.min(left, width - 248))}px`,
-    		top: `${Math.max(minTop, Math.min(top, maxTop))}px`
-    	};
-    }
-    // .build/workflows/client/components/page-shell.js
-    /**
-    * 页面外壳：页签、工具栏、内容区、页脚、抽屉与 Toast。
-    */
-    function renderPage(page) {
-    	const { t, list, selectedId, detail, templates, showArchived, setShowArchived, reload, notice, setNotice, edgeTip, view, switchView, selectedTemplateId, openSettingsDialog, renderList, renderDetail, renderTemplatesList, renderTemplateDetail, renderFooter, renderSettingsDialog, renderAttachmentDrawer, renderRunNodeDrawer, renderTemplateNodeDrawer, renderEdgeDrawer } = page;
-    	const selectedRun = selectedId !== null ? detail.data?.run ?? null : null;
-    	const inTemplates = view === "templates";
-    	const inTemplateDetail = inTemplates && selectedTemplateId !== null;
-    	const selectedTemplate = inTemplateDetail ? templates.items.find((item) => item.id === selectedTemplateId) ?? null : null;
-    	return h("div", { className: "buka-workflows-page" }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, h("div", { className: "buka-workflows-titleRow" }, h("div", { className: "buka-workflows-tabbar" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
-    		size: "sm",
-    		className: "buka-workflows-tabList",
-    		label: t("tabsLabel"),
-    		value: view,
-    		onChange: (value) => switchView(value),
-    		items: [{
-    			value: "runs",
-    			label: t("runsTab"),
-    			id: "buka-workflows-tab-runs",
-    			panelId: "buka-workflows-panel-runs"
-    		}, {
-    			value: "templates",
-    			label: t("templatesTab"),
-    			id: "buka-workflows-tab-templates",
-    			panelId: "buka-workflows-panel-templates"
-    		}]
-    	})), h("div", { className: "buka-workflows-toolbar" }, ...inTemplates ? selectedTemplate === null ? [] : [h("code", { className: "buka-workflows-inlineCode" }, selectedTemplate.id)] : selectedId === null ? [showArchived ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-toolbarButton buka-workflows-back",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 }),
-    		onClick: () => setShowArchived(false)
-    	}, t("archiveBack")) : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-toolbarButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenOutlineRegular, { size: 13 }),
-    		onClick: () => setShowArchived(true)
-    	}, list.archivedCount > 0 ? `${t("archiveView")} (${list.archivedCount})` : t("archiveView")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-toolbarButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutlineRegular, { size: 13 }),
-    		onClick: openSettingsDialog
-    	}, t("settings"))] : [
-    		typeof selectedRun?.archivedAt === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("archived")) : null,
-    		h("code", { className: "buka-workflows-inlineCode" }, selectedRun?.runId ?? selectedId),
-    		h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: statusTone(selectedRun?.status ?? "") }, statusLabel(t, selectedRun?.status ?? ""))
-    	], ...inTemplates ? [] : [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-toolbarButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
-    		onClick: reload
-    	}, t("refresh"))])))), h("div", { className: "buka-workflows-body" }, inTemplates ? selectedTemplateId === null ? renderTemplatesList() : renderTemplateDetail() : selectedId === null ? renderList() : renderDetail()), inTemplateDetail ? renderFooter(false) : !inTemplates && selectedId !== null ? renderFooter() : null, renderSettingsDialog(), renderRunNodeDrawer(), renderTemplateNodeDrawer(), renderEdgeDrawer(), renderAttachmentDrawer(), notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
-    		key: notice.seq,
-    		text: notice.text,
-    		...notice.kind === "success" ? { tone: "success" } : {},
-    		...notice.kind === "success" ? {} : { icon: h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}) },
-    		holdMs: 3200,
-    		onDone: () => setNotice(null)
-    	}), edgeTip === null ? null : h("div", {
-    		className: `buka-workflows-edgeTip${edgeTip.anchor ? " is-anchored" : ""}`,
-    		role: "tooltip",
-    		style: edgeTipPosition(edgeTip)
-    	}, edgeTip.text));
-    }
-    // .build/workflows/client/components/settings-dialog.js
-    /**
-    * 自动归档设置对话框。
-    */
-    /**
-    * 自动归档设置对话框：启用开关 + 归档 / 删除小时数 + 保存。打开时先读 Host
-    * 的当前设置，输入按整小时校验；读 / 存失败都留在框里说明原因。
-    *
-    * @returns React 元素
-    */
-    function renderSettingsDialog(page) {
-    	const { t, settingsOpen, settingsDraft, setSettingsDraft, settingsLoading, settingsSaving, settingsError, settingsValidationError, closeSettingsDialog, saveSettings } = page;
-    	const draft = settingsDraft;
-    	const validation = draft === null ? null : settingsValidationError(draft);
-    	const saving = settingsSaving;
-    	const canSave = !saving && !settingsLoading && draft !== null && validation === null;
-    	/** @param text 错误文案 */
-    	const formError = (text) => h("p", {
-    		className: "buka-workflows-formError",
-    		role: "alert"
-    	}, text);
-    	const body = [];
-    	if (settingsLoading) body.push(h("p", { className: "buka-workflows-hint" }, t("settingsLoading")));
-    	if (draft === null) {
-    		if (!settingsLoading && settingsError !== null) body.push(formError(settingsError));
-    	} else {
-    		body.push(h("div", { className: "buka-workflows-settingRow" }, h("div", { className: "buka-workflows-settingText" }, h("div", { className: "buka-workflows-settingHead" }, h("span", { className: "buka-workflows-settingTitle" }, t("archiveEnabled")), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: draft.enabled ? "success" : "neutral" }, draft.enabled ? t("settingsEnabled") : t("settingsDisabled"))), h("span", { className: "buka-workflows-settingDesc" }, t("archiveEnabledDesc"))), h("button", {
-    			type: "button",
-    			role: "switch",
-    			"aria-checked": draft.enabled,
-    			"aria-label": t("archiveEnabled"),
-    			className: `buka-workflows-switch${draft.enabled ? " is-on" : ""}`,
-    			disabled: saving,
-    			onClick: () => setSettingsDraft((current) => current === null ? current : {
-    				...current,
-    				enabled: !current.enabled
-    			})
-    		}, h("span", {
-    			className: "buka-workflows-switchThumb",
-    			"aria-hidden": true
-    		}))), h("div", { className: "buka-workflows-hoursField" }, h("span", { className: "buka-workflows-fieldLabel" }, t("archiveAfterHours")), h("div", { className: "buka-workflows-hoursControl" }, h(_deepseek_ai_dsh_client_ui_primitives.Input, {
-    			type: "number",
-    			min: 1,
-    			max: 720,
-    			step: 1,
-    			value: draft.archiveHours,
-    			disabled: saving || !draft.enabled,
-    			className: "buka-workflows-hoursInput",
-    			onChange: (event) => setSettingsDraft((current) => current === null ? current : {
-    				...current,
-    				archiveHours: String(event.target.value)
-    			})
-    		}), h("span", { className: "buka-workflows-hoursUnit" }, t("hoursUnit"))), h("span", { className: "buka-workflows-fieldHint" }, t("archiveAfterHoursHint"))), h("div", { className: "buka-workflows-hoursField" }, h("span", { className: "buka-workflows-fieldLabel" }, t("deleteAfterHours")), h("div", { className: "buka-workflows-hoursControl" }, h(_deepseek_ai_dsh_client_ui_primitives.Input, {
-    			type: "number",
-    			min: 2,
-    			max: 8760,
-    			step: 1,
-    			value: draft.deleteHours,
-    			disabled: saving || !draft.enabled,
-    			className: "buka-workflows-hoursInput",
-    			onChange: (event) => setSettingsDraft((current) => current === null ? current : {
-    				...current,
-    				deleteHours: String(event.target.value)
-    			})
-    		}), h("span", { className: "buka-workflows-hoursUnit" }, t("hoursUnit"))), h("span", { className: "buka-workflows-fieldHint" }, t("deleteAfterHoursHint"))), h("p", { className: "buka-workflows-hint" }, t("archiveDefaultsHint")));
-    		if (validation !== null) body.push(formError(validation));
-    		if (settingsError !== null) body.push(formError(settingsError));
-    	}
-    	return h(ClientModal, {
-    		open: settingsOpen,
-    		onClose: closeSettingsDialog,
-    		title: t("archiveSettingsTitle"),
-    		closeLabel: t("close"),
-    		footer: h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			variant: "outline",
-    			onClick: closeSettingsDialog,
-    			disabled: saving
-    		}, t("cancel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			variant: "primary",
-    			type: "button",
-    			onClick: saveSettings,
-    			disabled: !canSave
-    		}, saving ? t("saving") : t("save")))
-    	}, h("div", { className: "buka-workflows-dialogForm" }, ...body));
-    }
-    // .build/workflows/client/components/templates.js
-    /**
-    * 模板页签：模板列表、详情与共享数据。
-    */
-    /**
-    * 模板页签里的模板列表。
-    *
-    * @returns React 元素
-    */
-    function renderTemplatesList(page) {
-    	const { t, templates, setSelectedEdgeKey, setSelectedTemplateId, setSelectedTemplateNodeId } = page;
-    	if (templates.error !== null && templates.items.length === 0) return h("div", { className: "buka-workflows-templateList" }, h("p", {
-    		className: "buka-workflows-failure",
-    		role: "alert"
-    	}, `${t("loadFailed")} ${templates.error}`));
-    	if (templates.status === "loading" && templates.items.length === 0) return h("div", { className: "buka-workflows-templateList" }, h("p", {
-    		className: "buka-workflows-statusWithDot",
-    		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")));
-    	if (templates.items.length === 0) return h("div", { className: "buka-workflows-templateList" }, h("div", { className: "buka-workflows-emptyBox" }, h("p", { className: "buka-workflows-empty" }, t("templatesEmpty")), h("p", { className: "buka-workflows-hint" }, t("templatesHint"))));
-    	return h("div", { className: "buka-workflows-templateList" }, h("p", { className: "buka-workflows-hint" }, t("templatesHint")), ...templates.items.map((template) => h("button", {
-    		key: template.id,
-    		type: "button",
-    		className: "buka-workflows-templateCard",
-    		onClick: () => {
-    			setSelectedTemplateNodeId(null);
-    			setSelectedEdgeKey(null);
-    			setSelectedTemplateId(template.id);
-    		}
-    	}, h("span", { className: "buka-workflows-templateHead" }, h("span", { className: "buka-workflows-templateTitle" }, template.name), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, template.id), h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, {
-    		size: 14,
-    		className: "buka-workflows-templateChevron"
-    	})), h("p", { className: "buka-workflows-templateDesc" }, template.description))));
-    }
-    /**
-    * 模板详情的共享数据：详情主体与两个抽屉都从这里取。
-    *
-    * @returns
-    */
-    function templateDetailModel(page) {
-    	const { templates, selectedTemplateId } = page;
-    	if (selectedTemplateId === null) return null;
-    	const template = templates.items.find((item) => item.id === selectedTemplateId) ?? null;
-    	if (template === null) return null;
-    	const graph = template.graph !== null && typeof template.graph === "object" ? template.graph : null;
-    	return {
-    		template,
-    		graph,
-    		nodes: Array.isArray(graph?.nodes) ? graph.nodes : []
-    	};
-    }
-    /**
-    * 模板详情：名字 + 描述 + 分层二维图；节点信息和连线配置都在右侧抽屉里。
-    *
-    * @returns React 元素
-    */
-    function renderTemplateDetail(page) {
-    	const { t, setSelectedEdgeKey, setSelectedTemplateId, selectedTemplateNodeId, setSelectedTemplateNodeId, renderGraph, templateDetailModel } = page;
-    	const model = templateDetailModel();
-    	if (model === null) return h("p", { className: "buka-workflows-empty" }, t("templatesEmpty"));
-    	const { template, graph, nodes } = model;
-    	const activeNodeId = selectedTemplateNodeId !== null && nodes.some((node) => node.id === selectedTemplateNodeId) ? selectedTemplateNodeId : null;
-    	const graphBody = graph === null || nodes.length === 0 ? h("p", { className: "buka-workflows-empty" }, t("templatesNoFlow")) : renderGraph(graph, activeNodeId, (id) => setSelectedTemplateNodeId(id), { states: false });
-    	return h("div", { className: "buka-workflows-pageBody buka-workflows-detail buka-workflows-templateDetail" }, h("div", { className: "buka-workflows-templateHead" }, h("button", {
-    		type: "button",
-    		className: "buka-workflows-templateBackButton buka-workflows-back",
-    		"aria-label": t("templatesBack"),
-    		onClick: () => {
-    			setSelectedTemplateId(null);
-    			setSelectedTemplateNodeId(null);
-    			setSelectedEdgeKey(null);
-    		}
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 16 })), h("span", { className: "buka-workflows-templateTitle" }, template.name), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, template.id)), h("p", { className: "buka-workflows-templateDesc" }, template.description), graphBody);
-    }
-    // .build/workflows/client/drawers/attachment.js
-    /**
-    * 附件预览抽屉：预览正文、下载入口与关闭。
-    */
-    /**
-    * Markdown 预览里的链接不接管运行页：http(s) 在新窗口打开，其它协议直接
-    * 拦掉；无论哪种都不让页面跳走。
-    *
-    * @param event
-    */
-    function interceptAttachmentLink(_page, event) {
-    	event.preventDefault();
-    	const target = event.target;
-    	const anchor = target !== null && typeof target.closest === "function" ? target.closest("a[href]") : null;
-    	if (anchor === null) return;
-    	const href = anchor.getAttribute("href") ?? "";
-    	if (!/^https?:\/\//iu.test(href)) return;
-    	if (typeof window !== "undefined" && typeof window.open === "function") window.open(href, "_blank", "noopener,noreferrer");
-    }
-    /**
-    * 文字预览用的 labels：复制按钮，以及代码工具栏的代码 / 换行 / 不换行。
-    *
-    * @returns
-    */
-    function attachmentPreviewLabels(page) {
+    /** 失败态；`retry` 存在时给一个重试按钮。 */
+    function renderFailure(page, error, retry) {
     	const { t } = page;
-    	return { code: {
-    		copyLabel: t("copy"),
-    		copiedLabel: t("copied"),
-    		toolbarLabels: {
-    			codeLabel: t("code"),
-    			wrapLabel: t("wrap"),
-    			unwrapLabel: t("unwrap")
-    		}
-    	} };
-    }
-    /**
-    * 抽屉里的下载链接：与列表里的下载入口同一个路由，不带 mode。
-    *
-    * @param viewer
-    * @returns
-    */
-    function renderAttachmentDownload(page, viewer) {
-    	const { t } = page;
-    	return h("a", {
-    		className: "buka-workflows-drawerDownload",
-    		href: attachmentUrl(viewer),
-    		download: viewer.name
-    	}, typeof _deepseek_ai_dsh_client_ui_primitives.IconDownloadOutlineRegular === "function" ? h(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutlineRegular, withAria({
-    		size: 14,
-    		"aria-hidden": true
-    	})) : null, h("span", null, t("attachmentDownload")));
-    }
-    /**
-    * 抽屉正文：按 Host 返回的 `attachment.kind` 分成文字 / 图片 / PDF / 其它。
-    *
-    * @param viewer
-    * @returns
-    */
-    function renderAttachmentPreviewBody(page, viewer) {
-    	const { t, attachmentView, attachmentPreview, setAttachmentPreview, fetchAttachmentPreview, interceptAttachmentLink, attachmentPreviewLabels, renderAttachmentDownload } = page;
-    	const preview = attachmentPreview;
-    	if (preview.status === "idle") return [];
-    	if (preview.status === "loading") return [h("div", {
-    		className: "buka-workflows-drawerStatus",
-    		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), h("span", null, t("attachmentPreviewLoading")))];
-    	if (preview.status === "failed") return [h("p", {
-    		className: "buka-workflows-failure",
+    	return h("div", {
+    		className: "buka-workflows-failureBox",
     		role: "alert"
-    	}, preview.error ?? t("attachmentPreviewFailed")), h("div", { className: "buka-workflows-drawerActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	}, h("p", { className: "buka-workflows-failure" }, `${t("loadFailed")} ${error}`), retry === null || retry === void 0 ? null : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "outline",
     		size: "sm",
     		className: "buka-workflows-smallButton",
-    		onClick: () => fetchAttachmentPreview(attachmentView)
-    	}, t("attachmentPreviewRetry")), renderAttachmentDownload(viewer))];
-    	const data = preview.data !== null && typeof preview.data === "object" ? preview.data : {};
-    	if (data.kind === "image") return [h("img", {
-    		className: "buka-workflows-drawerImage",
-    		src: attachmentUrl(viewer, "inline"),
-    		alt: viewer.name,
-    		onError: () => setAttachmentPreview({
-    			status: "failed",
-    			data: null,
-    			error: t("attachmentPreviewImageFailed")
-    		})
-    	})];
-    	if (data.kind === "pdf") return [h("iframe", {
-    		className: "buka-workflows-drawerFrame",
-    		src: attachmentUrl(viewer, "inline"),
-    		title: viewer.name
-    	}), h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewPdfHint"))];
-    	if (data.kind === "text") {
-    		const text = typeof data.text === "string" ? data.text : "";
-    		const children = [];
-    		const markdownFile = /\.(md|markdown)$/iu.test(viewer.name);
-    		if (text === "") children.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewEmpty")));
-    		else if (markdownFile && typeof _deepseek_ai_dsh_client_ui_primitives.MarkdownText === "function") children.push(h("div", {
-    			className: "buka-workflows-drawerMarkdown",
-    			onClickCapture: interceptAttachmentLink
-    		}, h(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
-    			text,
-    			omitHtml: true,
-    			labels: attachmentPreviewLabels()
-    		})));
-    		else if (!markdownFile && typeof _deepseek_ai_dsh_client_ui_primitives.CodeBlock === "function" && typeof _deepseek_ai_dsh_client_ui_primitives.languageForPath === "function") children.push(h(_deepseek_ai_dsh_client_ui_primitives.CodeBlock, {
-    			code: text,
-    			lang: (0, _deepseek_ai_dsh_client_ui_primitives.languageForPath)(viewer.name),
-    			lineNumbers: true,
-    			showHeader: true,
-    			copyLabel: t("copy"),
-    			copiedLabel: t("copied"),
-    			className: "buka-workflows-drawerCode"
-    		}));
-    		else children.push(h("pre", { className: "buka-workflows-pre" }, text));
-    		if (data.truncated === true) children.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewTruncated")));
-    		return children;
-    	}
-    	if (data.kind === "binary") return [h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewBinary")), h("div", { className: "buka-workflows-drawerActions" }, renderAttachmentDownload(viewer))];
-    	return [h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewUnsupported")), h("div", { className: "buka-workflows-drawerActions" }, renderAttachmentDownload(viewer))];
+    		onClick: retry
+    	}, t("retry")));
+    }
+    /** 空态。 */
+    function renderEmpty(title, hint) {
+    	return h("div", { className: "buka-workflows-emptyBox" }, h("p", { className: "buka-workflows-empty" }, title), hint === null || hint === void 0 || hint === "" ? null : h("p", { className: "buka-workflows-hint" }, hint));
+    }
+    /** 状态标签（任务 / 作业通用）。 */
+    function renderStatusTag(t, status, kind = "task") {
+    	const label = kind === "workflow" ? t(workflowStatusKey(status)) : statusLabel(t, status);
+    	return h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: statusTone(status) }, label);
+    }
+    /** 键值行。 */
+    function renderKv(rows) {
+    	return h("div", { className: "buka-workflows-kv" }, ...rows.map(([key, value], index) => h("div", {
+    		key: `${key}-${index}`,
+    		className: "buka-workflows-kvRow"
+    	}, h("span", { className: "buka-workflows-kvKey" }, key), h("span", { className: "buka-workflows-kvValue" }, value))));
+    }
+    /** 区块：标题 + 内容。 */
+    function renderSection(title, children, extra) {
+    	return h("section", { className: "buka-workflows-section" }, h("div", { className: "buka-workflows-sectionHead" }, h("h3", { className: "buka-workflows-sectionTitle" }, title), extra ?? null), children);
+    }
+    /** 执行者展示：机器人 / 人 + 名字。 */
+    function renderExecutor(page, executor) {
+    	const { t } = page;
+    	if (!isRecord(executor)) return t("taskTypeUnset");
+    	if (executor.kind === "human") return t("actorHuman");
+    	const kind = executor.kind === "robot" ? t("actorRobot") : t("taskTypeUnset");
+    	const name = typeof executor.name === "string" && executor.name !== "" ? executor.name : "";
+    	return name === "" ? kind : `${kind} · ${name}`;
+    }
+    /** 只读展示一组 schema 字段。 */
+    function renderSchema(page, schema) {
+    	const { t } = page;
+    	const fields = schemaFields(schema);
+    	if (fields.length === 0) return h("p", { className: "buka-workflows-hint" }, t("schemaNoFields"));
+    	return h("ul", { className: "buka-workflows-schemaList" }, ...fields.map((field) => h("li", {
+    		key: field.name,
+    		className: "buka-workflows-schemaField"
+    	}, h("code", { className: "buka-workflows-inlineCode" }, field.name), h("span", { className: "buka-workflows-schemaType" }, schemaTypeLabel(field.schema)), field.required ? h("span", { className: "buka-workflows-required" }, t("schemaFieldRequired")) : null)));
+    }
+    /** 字段类型 → 展示文本。 */
+    function schemaTypeLabel(schema) {
+    	if (Array.isArray(schema.enum)) return `enum(${schema.enum.map(String).join(" | ")})`;
+    	if (schema.const !== void 0) return String(schema.const);
+    	const type = Array.isArray(schema.type) ? schema.type.join(" | ") : schema.type;
+    	return typeof type === "string" && type !== "" ? type : "any";
+    }
+    /** JSON 块；空值显示提示。 */
+    function renderJsonBlock(value, emptyText, maxHeight = false) {
+    	const text = jsonText(value);
+    	if (text === "") return h("p", { className: "buka-workflows-hint" }, emptyText);
+    	return h("pre", { className: `buka-workflows-pre${maxHeight ? " is-tall" : ""}` }, text);
+    }
+    /** 可点击的附件名按钮。 */
+    function renderAttachmentLink(page, attachment, onOpen) {
+    	const id = typeof attachment.id === "string" ? attachment.id : "";
+    	const name = typeof attachment.name === "string" ? attachment.name : "";
+    	if (id === "") return null;
+    	return h("button", {
+    		type: "button",
+    		className: "buka-workflows-attachmentLink",
+    		title: page.t("attachmentPreview"),
+    		onClick: () => onOpen(id, name)
+    	}, name === "" ? id : name);
+    }
+    /** 时间文本（null 显示 —）。 */
+    function timeText(value) {
+    	return formatTime(value);
+    }
+    // .build/workflows/client/components/attachments.js
+    /**
+    * 作业附件库与附件预览抽屉。
+    */
+    /**
+    * 附件库视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderAttachments(page) {
+    	const { t, state, actions } = page;
+    	const loaded = state.attachments;
+    	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
+    	if (loaded.status !== "ready" && loaded.data === null) return renderLoading(page);
+    	const items = loaded.data ?? [];
+    	if (items.length === 0) return renderEmpty(t("attachmentsEmpty"), t("attachmentsHint"));
+    	const jobId = jobIdOf$1(page);
+    	return h("div", { className: "buka-workflows-listPane" }, h("p", { className: "buka-workflows-hint" }, t("attachmentsHint")), h("ul", { className: "buka-workflows-attachmentList" }, ...items.map((attachment) => renderAttachmentRow(page, jobId, attachment))));
     }
     /**
-    * 右侧附件预览抽屉：头部是文件身份与下载 / 关闭，正文按预览状态分派。
+    * 附件库的一行。
     *
-    * @returns
+    * @param page
+    * @param jobId
+    * @param attachment
+    * @returns React 元素
+    */
+    function renderAttachmentRow(page, jobId, attachment) {
+    	const { t, actions, state } = page;
+    	const meta = [
+    		formatBytes(attachment.bytes),
+    		attachment.mime,
+    		formatTime(attachment.createdAt)
+    	].filter((part) => typeof part === "string" && part !== "");
+    	const sourcePosition = typeof attachment.sourcePositionId === "string" && attachment.sourcePositionId !== "" ? attachment.sourcePositionId : "";
+    	const sourceKnown = typeof attachment.sourceTaskId === "string" && attachment.sourceTaskId !== "" && (state.job.data?.tasks ?? []).some((task) => task.id === attachment.sourceTaskId);
+    	return h("li", {
+    		key: attachment.id,
+    		className: "buka-workflows-attachment"
+    	}, h("span", { className: "buka-workflows-attachmentMain" }, h("button", {
+    		type: "button",
+    		className: "buka-workflows-attachmentLink",
+    		title: t("attachmentPreview"),
+    		onClick: () => actions.openAttachment(attachment.id, attachment.name)
+    	}, attachment.name), sourceKnown ? h("button", {
+    		type: "button",
+    		className: "buka-workflows-attachmentSource",
+    		onClick: () => actions.openTask(typeof attachment.sourceTaskId === "string" ? attachment.sourceTaskId : "")
+    	}, `${t("attachmentSource")}: ${sourcePosition || attachment.sourceTaskId}`) : sourcePosition === "" ? null : h("span", { className: "buka-workflows-attachmentSource" }, `${t("attachmentSource")}: ${sourcePosition}`), typeof attachment.description === "string" && attachment.description !== "" ? h("span", { className: "buka-workflows-attachmentDescription" }, attachment.description) : null), h("span", { className: "buka-workflows-attachmentMeta" }, meta.join(" · ")), h("a", {
+    		className: "buka-workflows-attachmentDownload",
+    		href: attachmentUrl(jobId, attachment.id),
+    		download: attachment.name
+    	}, t("attachmentDownload")));
+    }
+    /**
+    * 附件预览抽屉：头部是文件身份与下载 / 关闭，正文按 Host 返回的 `kind` 分派。
+    *
+    * @param page
+    * @returns React 元素；没有打开附件时为 null
     */
     function renderAttachmentDrawer(page) {
-    	const { t, attachmentView, closeAttachment, renderAttachmentDownload, renderAttachmentPreviewBody, renderDrawerHead } = page;
-    	const viewer = attachmentView;
+    	const { t, state, actions } = page;
+    	const viewer = state.attachment;
     	if (viewer === null) return null;
-    	const meta = [formatBytes(viewer.bytes), viewer.description].filter((item) => typeof item === "string" && item !== "");
+    	const jobId = jobIdOf$1(page);
+    	const preview = viewer.data;
+    	const meta = [preview !== null && typeof preview.bytes === "number" ? formatBytes(preview.bytes) : "", preview !== null && typeof preview.mime === "string" ? preview.mime : ""].filter((part) => part !== "").join(" · ");
+    	const body = [];
+    	if (viewer.status === "loading") body.push(h("p", {
+    		className: "buka-workflows-statusWithDot",
+    		role: "status"
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("attachmentPreviewLoading")));
+    	else if (viewer.status === "failed") {
+    		body.push(h("p", {
+    			className: "buka-workflows-failure",
+    			role: "alert"
+    		}, viewer.error ?? t("attachmentPreviewFailed")));
+    		body.push(h("div", { className: "buka-workflows-drawerActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			variant: "outline",
+    			size: "sm",
+    			className: "buka-workflows-smallButton",
+    			onClick: () => actions.openAttachment(viewer.id, viewer.name)
+    		}, t("attachmentPreviewRetry"))));
+    	} else if (preview !== null) {
+    		if (preview.kind === "image") body.push(h("img", {
+    			className: "buka-workflows-drawerImage",
+    			src: attachmentUrl(jobId, viewer.id, "inline"),
+    			alt: viewer.name
+    		}));
+    		else if (preview.kind === "pdf") {
+    			body.push(h("iframe", {
+    				className: "buka-workflows-drawerFrame",
+    				src: attachmentUrl(jobId, viewer.id, "inline"),
+    				title: viewer.name
+    			}));
+    			body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewPdfHint")));
+    		} else if (preview.kind === "text") {
+    			const text = typeof preview.text === "string" ? preview.text : "";
+    			body.push(text === "" ? h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewEmpty")) : h("pre", { className: "buka-workflows-pre" }, text));
+    			if (preview.truncated === true) body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewTruncated")));
+    		} else if (preview.kind === "binary") body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewBinary")));
+    		else body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewUnsupported")));
+    	}
     	return h(ClientModal, {
     		open: true,
     		headless: true,
-    		onClose: closeAttachment,
+    		onClose: actions.closeAttachment,
     		title: viewer.name,
     		closeLabel: t("attachmentPreviewClose"),
     		backdropBlur: false,
     		className: "buka-workflows-drawer"
-    	}, renderDrawerHead({
-    		title: viewer.name,
-    		meta: meta.join(" · "),
-    		icon: typeof _deepseek_ai_dsh_client_ui_primitives.FileTypeIcon === "function" ? h(_deepseek_ai_dsh_client_ui_primitives.FileTypeIcon, {
-    			path: viewer.name,
-    			size: 18
-    		}) : null,
-    		actions: [renderAttachmentDownload(viewer)],
-    		closeLabel: t("attachmentPreviewClose"),
-    		onClose: closeAttachment
-    	}), h("div", { className: "buka-workflows-drawerBody" }, ...renderAttachmentPreviewBody(viewer)));
+    	}, h("div", { className: "buka-workflows-drawerHead" }, h("div", { className: "buka-workflows-drawerTitleRow" }, h("span", { className: "buka-workflows-drawerTitle" }, viewer.name)), meta === "" ? null : h("span", { className: "buka-workflows-drawerMeta" }, meta), h("div", { className: "buka-workflows-drawerActions" }, h("a", {
+    		className: "buka-workflows-drawerDownload",
+    		href: attachmentUrl(jobId, viewer.id),
+    		download: viewer.name
+    	}, t("attachmentDownload")), h("button", {
+    		type: "button",
+    		className: "buka-workflows-drawerClose",
+    		"aria-label": t("attachmentPreviewClose"),
+    		title: t("attachmentPreviewClose"),
+    		onClick: actions.closeAttachment
+    	}, h("span", { "aria-hidden": true }, "×")))), h("div", { className: "buka-workflows-drawerBody" }, ...body));
     }
-    // .build/workflows/client/drawers/edge.js
     /**
-    * 连线配置抽屉：合并规则的提示词 / 外观色与运行走过情况。
-    */
-    /**
-    * 一条边的原始配置规则：从定义快照 / 模板节点里找 `from` 节点的 `next` 中
-    * `to` 等于目标节点的全部规则。合并成一条线时逐条保留，不丢 prompt / tone。
+    * 当前作业 id。
     *
-    * @param edge
+    * @param page
+    * @returns
+    */
+    function jobIdOf$1(page) {
+    	if (page.state.route.kind === "job") return page.state.route.jobId;
+    	return page.state.job.data?.job?.id ?? "";
+    }
+    // .build/workflows/client/model.js
+    /**
+    * 页面数据模型：把 Host 返回的定义快照 / 任务记录收口成看板与流程图直接消费的形状。
+    *
+    * 服务端只给「岗位、边、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
+    */
+    /** 取当前工作流详情里的定义快照。 */
+    function currentDefinition(state) {
+    	const definition = state.workflow.data?.workflow?.definition;
+    	return isRecord(definition) ? definition : null;
+    }
+    /** 取当前作业绑定的定义快照（任务类型的唯一来源）。 */
+    function currentJobDefinition(state) {
+    	const detail = state.job.data;
+    	if (detail === null) return null;
+    	const definition = detail.definition;
+    	if (!isRecord(definition)) return null;
+    	return definition;
+    }
+    /** 把定义里的岗位归一化。 */
+    function positionsOf(definition) {
+    	const list = asArray(definition?.positions);
+    	const out = [];
+    	for (const position of list) {
+    		const id = typeof position?.id === "string" ? position.id : "";
+    		if (id === "") continue;
+    		out.push({
+    			id,
+    			label: typeof position.label === "string" && position.label !== "" ? position.label : id,
+    			description: typeof position.description === "string" ? position.description : "",
+    			executor: isRecord(position.executor) ? position.executor : {},
+    			taskTypes: asArray(position.taskTypes)
+    		});
+    	}
+    	return out;
+    }
+    /** 把定义里的边归一化。 */
+    function edgesOf(definition) {
+    	return asArray(definition?.edges).filter((edge) => typeof edge?.from === "string" && edge.from !== "" && typeof edge.to === "string" && edge.to !== "").map((edge) => ({
+    		from: edge.from,
+    		to: edge.to,
+    		types: asArray(edge.types).filter((type) => typeof type === "string"),
+    		back: edge.back === true
+    	}));
+    }
+    /**
+    * 图 / 看板里的岗位顺序：定义顺序优先；作业详情精简版只有岗位数组。
+    *
     * @param definition
     * @returns
     */
-    function edgeRulesFor(_page, edge, definition) {
-    	const node = definitionNode(definition, edge.from ?? "");
-    	return (Array.isArray(node?.next) ? node.next : []).filter((rule) => rule !== null && typeof rule === "object" && rule.to === edge.to);
+    function graphPositions(definition) {
+    	return positionsOf(definition).map((position) => ({
+    		id: position.id,
+    		label: position.label,
+    		executor: position.executor
+    	}));
     }
     /**
-    * 连线配置里的一条规则。
+    * 展开所有任务类型（跨岗位）并记下所属岗位。
     *
-    * @param rule
-    * @param key
-    * @returns React 元素
-    */
-    function renderEdgeRule(page, rule, key) {
-    	const { t } = page;
-    	const name = typeof rule.name === "string" ? rule.name.trim() : "";
-    	const label = typeof rule.label === "string" ? rule.label.trim() : "";
-    	const description = typeof rule.description === "string" ? rule.description.trim() : "";
-    	const tone = rule.tone === "success" || rule.tone === "failure" ? rule.tone : "";
-    	const prompt = truncateText(typeof rule.prompt === "string" ? rule.prompt : "", 4e3);
-    	return h("div", {
-    		key,
-    		className: "buka-workflows-edgeRule"
-    	}, h("div", { className: "buka-workflows-edgeRuleHead" }, name === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("edgeRoute")}: ${name}`), label === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, `${t("edgeOption")}: ${label}`), tone === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: tone === "success" ? "success" : "warning" }, t(tone === "success" ? "edgeToneSuccess" : "edgeToneFailure"))), description === "" ? null : h("span", { className: "buka-workflows-edgeRuleDesc" }, description), h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("edgePrompt")), prompt.text === "" ? h("p", { className: "buka-workflows-hint" }, t("edgeNoPrompt")) : h("pre", { className: "buka-workflows-pre" }, prompt.text), prompt.truncated ? h("p", { className: "buka-workflows-hint" }, t("promptTruncated")) : null, prompt.text === "" ? null : h("p", { className: "buka-workflows-hint" }, t("edgePromptHint"))));
-    }
-    /**
-    * 连线配置抽屉：来源 → 目标、每条合并规则的路由键 / 选项 / 说明 / 提示词 /
-    * 外观色，以及运行页面的走过情况。模板页不展示运行状态。
-    *
+    * @param definition
     * @returns
     */
-    function renderEdgeDrawer(page) {
-    	const { t, selectedId, selectedEdgeKey, setSelectedEdgeKey, selectedTemplateId, capsuleText, templateNodeLabel, runDetailModel, templateDetailModel, renderDrawerHead, edgeRulesFor, renderEdgeRule } = page;
-    	if (selectedEdgeKey === null) return null;
-    	if (selectedId === null && selectedTemplateId === null) return null;
-    	const templateModel = templateDetailModel();
-    	const runModel = templateModel === null ? runDetailModel() : null;
-    	const model = templateModel ?? runModel;
-    	if (model === null) return null;
-    	const graph = model.graph;
-    	if (graph === null) return null;
-    	const edge = graph.edges.find((item) => item.key === selectedEdgeKey) ?? null;
-    	if (edge === null) return null;
-    	const nodes = graph.nodes;
-    	const fromNode = nodes.find((node) => node.id === edge.from) ?? null;
-    	const toNode = nodes.find((node) => node.id === edge.to) ?? null;
-    	const labelOf = templateModel === null ? capsuleText : templateNodeLabel;
-    	const fromLabel = fromNode === null ? edge.from : labelOf(fromNode);
-    	const toLabel = toNode === null ? edge.to : labelOf(toNode);
-    	const rules = edgeRulesFor(edge, templateModel === null ? runModel === null ? null : runModel.definition : { definition: { nodes: templateModel.template.nodes ?? [] } });
-    	const fallback = rules.length > 0 || edge.prompt === "" && (!Array.isArray(edge.names) || edge.names.length === 0) && (!Array.isArray(edge.labels) || edge.labels.length === 0) && edge.tone === "" ? rules : [{
-    		name: Array.isArray(edge.names) ? edge.names.join(" / ") : "",
-    		label: Array.isArray(edge.labels) ? edge.labels.join(" / ") : "",
-    		description: "",
-    		prompt: typeof edge.prompt === "string" ? edge.prompt : "",
-    		tone: edge.tone
-    	}];
-    	const meta = `${fromLabel} → ${toLabel}${edge.loop === true ? ` · ${t("edgeLoop")}` : ""}`;
-    	const stateRows = templateModel !== null ? null : h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("edgeState")), h("div", { className: "buka-workflows-kv" }, kvRow(t("edgeTraversed"), edge.traversed === true ? t("yes") : t("no")), kvRow(t("edgeTraversals"), String(edge.traversals ?? 0))));
-    	return h(ClientModal, {
-    		open: true,
-    		headless: true,
-    		onClose: () => setSelectedEdgeKey(null),
-    		title: t("edgeDrawerTitle"),
-    		closeLabel: t("close"),
-    		backdropBlur: false,
-    		className: "buka-workflows-drawer"
-    	}, renderDrawerHead({
-    		title: t("edgeDrawerTitle"),
-    		meta,
-    		closeLabel: t("close"),
-    		onClose: () => setSelectedEdgeKey(null)
-    	}), h("div", { className: "buka-workflows-drawerBody" }, stateRows, h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("edgeRules")), fallback.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("edgeRulesEmpty")) : h("div", { className: "buka-workflows-edgeRules" }, ...fallback.map((rule, index) => renderEdgeRule(rule, `${edge.key}-${index}`))))));
+    function allTaskTypes(definition) {
+    	const out = [];
+    	for (const position of positionsOf(definition)) for (const type of position.taskTypes) if (typeof type?.id === "string" && type.id !== "") out.push({
+    		position,
+    		type
+    	});
+    	return out;
+    }
+    /**
+    * 找任务类型定义。作业详情精简版可能不含 `taskTypes`，此时回退到工作流完整定义。
+    *
+    * @param jobDefinition 作业详情里的定义
+    * @param workflowDefinition 工作流完整定义（可选）
+    * @param positionId 岗位 id
+    * @param typeId 任务类型 id
+    * @returns
+    */
+    function findTaskType(jobDefinition, workflowDefinition, positionId, typeId) {
+    	for (const definition of [jobDefinition, workflowDefinition]) {
+    		if (definition === null) continue;
+    		const position = positionsOf(definition).find((item) => item.id === positionId);
+    		if (position === void 0) continue;
+    		const found = position.taskTypes.find((type) => type.id === typeId);
+    		if (found !== void 0) return found;
+    	}
+    	return null;
+    }
+    /** 任务是否属于「人岗位」。 */
+    function isHumanPosition(definition, positionId) {
+    	const position = positionsOf(definition).find((item) => item.id === positionId);
+    	return position !== void 0 && position.executor.kind === "human";
+    }
+    /** 任务类型 → 该岗位的输出 schema。 */
+    function outputSchemaFor(jobDefinition, workflowDefinition, task) {
+    	if (task === null) return null;
+    	const type = findTaskType(jobDefinition, workflowDefinition, task.position, task.type);
+    	return isRecord(type?.output) ? type.output : null;
+    }
+    /** 当前作业里的任务；没有详情时给空数组。 */
+    function jobTasks(state) {
+    	const tasks = state.job.data?.tasks;
+    	return Array.isArray(tasks) ? tasks.filter((task) => typeof task?.id === "string") : [];
+    }
+    /**
+    * 任务摘要的展示顺序：创建时间升序，同一时间按 id 稳定排序。
+    *
+    * @param tasks
+    * @returns
+    */
+    function sortTasks(tasks) {
+    	return [...tasks].sort((left, right) => {
+    		const leftTime = typeof left.createdAt === "string" ? left.createdAt : "";
+    		const rightTime = typeof right.createdAt === "string" ? right.createdAt : "";
+    		if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+    		return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    	});
+    }
+    /**
+    * 看板行：开始 + 岗位（定义顺序）+ 结束。
+    *
+    * @param definition
+    * @param tasks
+    * @param builtin
+    * @returns
+    */
+    function boardRows(definition, tasks, builtin) {
+    	const positions = positionsOf(definition);
+    	const known = new Set(positions.map((position) => position.id));
+    	const startTasks = tasks.filter((task) => task.position === "start");
+    	const endTasks = tasks.filter((task) => task.position === "end");
+    	const rows = [
+    		{
+    			id: "start",
+    			kind: "start",
+    			label: builtin.start,
+    			executor: null,
+    			tasks: startTasks
+    		},
+    		...positions.map((position) => ({
+    			id: position.id,
+    			kind: "position",
+    			label: position.label,
+    			executor: position.executor,
+    			tasks: sortTasks(tasks.filter((task) => task.position === position.id))
+    		})),
+    		{
+    			id: "end",
+    			kind: "end",
+    			label: builtin.end,
+    			executor: null,
+    			tasks: endTasks
+    		}
+    	];
+    	const extras = tasks.filter((task) => task.position !== "start" && task.position !== "end" && (typeof task.position !== "string" || !known.has(task.position)));
+    	for (const task of sortTasks(extras)) {
+    		const id = typeof task.position === "string" ? task.position : "(unknown)";
+    		let row = rows.find((item) => item.id === id);
+    		if (row === void 0) {
+    			row = {
+    				id,
+    				kind: "position",
+    				label: id,
+    				executor: null,
+    				tasks: []
+    			};
+    			rows.splice(rows.length - 1, 0, row);
+    		}
+    		row.tasks.push(task);
+    	}
+    	return rows;
+    }
+    /**
+    * 作业看板里某一行的状态汇总（给流程图节点着色）。
+    *
+    * @param tasks
+    * @returns
+    */
+    function aggregateStatus(tasks) {
+    	if (tasks.length === 0) return "idle";
+    	if (tasks.some((task) => task.status === "running")) return "running";
+    	if (tasks.some((task) => task.status === "ready")) return "ready";
+    	if (tasks.some((task) => task.status === "failed" || task.status === "blocked")) return "failed";
+    	if (tasks.some((task) => task.status === "pending")) return "pending";
+    	if (tasks.every((task) => task.status === "completed")) return "completed";
+    	if (tasks.some((task) => task.status === "cancelled")) return "cancelled";
+    	return "completed";
+    }
+    /**
+    * 任务统计：看板卡片与作业列表共用。
+    *
+    * @param tasks
+    * @returns
+    */
+    function countTasks(tasks) {
+    	const counts = {
+    		pending: 0,
+    		ready: 0,
+    		running: 0,
+    		completed: 0,
+    		failed: 0,
+    		blocked: 0,
+    		cancelled: 0
+    	};
+    	for (const task of tasks) {
+    		const status = typeof task.status === "string" ? task.status : "pending";
+    		counts[status] = (counts[status] ?? 0) + 1;
+    	}
+    	return counts;
+    }
+    /**
+    * 作业摘要的一行统计文案。
+    *
+    * @param counts
+    * @param t
+    * @returns
+    */
+    function taskCountsText(counts, t) {
+    	if (counts === null) return "";
+    	const parts = [];
+    	if (counts.running) parts.push(`${t("statusRunning")} ${counts.running}`);
+    	if (counts.ready) parts.push(`${t("statusReady")} ${counts.ready}`);
+    	if (counts.pending) parts.push(`${t("statusPending")} ${counts.pending}`);
+    	if (counts.completed) parts.push(`${t("statusCompleted")} ${counts.completed}`);
+    	const problem = (counts.failed ?? 0) + (counts.blocked ?? 0) + (counts.cancelled ?? 0);
+    	if (problem > 0) parts.push(`${t("statusFailed")} ${problem}`);
+    	return parts.join(" · ");
+    }
+    /**
+    * 承办者的展示名。
+    *
+    * @param claimant
+    * @param t
+    * @returns
+    */
+    function claimantName(claimant, t) {
+    	if (!isRecord(claimant)) return "";
+    	const name = typeof claimant.name === "string" ? claimant.name : "";
+    	if (name !== "") return name;
+    	return typeof claimant.kind === "string" ? t(actorKindKeySafe(claimant.kind)) : "";
+    }
+    /**
+    * 承办者种类 → 词典 key（避免 format 与 model 相互依赖的重复）。
+    *
+    * @param kind
+    * @returns
+    */
+    function actorKindKeySafe(kind) {
+    	switch (kind) {
+    		case "robot": return "actorRobot";
+    		case "human": return "actorHuman";
+    		case "assistant": return "actorAssistant";
+    		default: return "unknown";
+    	}
+    }
+    /**
+    * 作业详情里的 `definition` 与工作流定义合并（作业精简版缺 taskTypes 时回退）。
+    *
+    * @param jobDefinition
+    * @param workflowDefinition
+    * @returns
+    */
+    function mergedDefinition(jobDefinition, workflowDefinition) {
+    	if (jobDefinition === null) return workflowDefinition;
+    	if (workflowDefinition === null) return jobDefinition;
+    	const byId = new Map(positionsOf(jobDefinition).map((position) => [position.id, position]));
+    	const merged = positionsOf(workflowDefinition).map((position) => {
+    		const fromJob = byId.get(position.id);
+    		return {
+    			id: position.id,
+    			label: fromJob?.label ?? position.label,
+    			description: position.description,
+    			executor: fromJob !== void 0 && Object.keys(fromJob.executor).length > 0 ? fromJob.executor : position.executor,
+    			taskTypes: position.taskTypes
+    		};
+    	});
+    	const jobEdges = Array.isArray(jobDefinition.edges) ? jobDefinition.edges : [];
+    	const start = jobDefinition.start ?? workflowDefinition.start;
+    	const end = jobDefinition.end ?? workflowDefinition.end;
+    	return {
+    		...workflowDefinition,
+    		positions: merged,
+    		...jobEdges.length > 0 ? { edges: jobEdges } : workflowDefinition.edges !== void 0 ? { edges: workflowDefinition.edges } : {},
+    		...start !== void 0 ? { start } : {},
+    		...end !== void 0 ? { end } : {}
+    	};
+    }
+    /**
+    * 任务详情里「是不是人任务」。
+    *
+    * @param state
+    * @param task
+    * @returns
+    */
+    function isHumanTask(state, task) {
+    	return isHumanPosition(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), task?.position);
+    }
+    /**
+    * 任务详情对应的任务类型定义（抽屉展示 assistant / mode / 产出 schema）。
+    *
+    * @param state
+    * @param task
+    * @returns
+    */
+    function taskTypeOf(state, task) {
+    	return findTaskType(currentJobDefinition(state), currentDefinition(state), task?.position, task?.type);
+    }
+    // .build/workflows/client/components/board.js
+    /**
+    * 作业看板：行 = 岗位（含开始 / 结束），列 = 排队 / 待认领 / 进行中 / 已完成 / 异常。
+    */
+    /** 看板列。 */
+    const COLUMNS = [
+    	{
+    		key: "pending",
+    		labelKey: "boardColumnPending"
+    	},
+    	{
+    		key: "ready",
+    		labelKey: "boardColumnReady"
+    	},
+    	{
+    		key: "running",
+    		labelKey: "boardColumnRunning"
+    	},
+    	{
+    		key: "completed",
+    		labelKey: "boardColumnCompleted"
+    	},
+    	{
+    		key: "error",
+    		labelKey: "boardColumnError"
+    	}
+    ];
+    /**
+    * 看板视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderBoard(page) {
+    	const { t, state } = page;
+    	const tasks = jobTasks(state);
+    	if (tasks.length === 0) return renderEmpty(t("boardEmpty"), t("boardEmptyHint"));
+    	const rows = boardRows(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), tasks, {
+    		start: t("boardStart"),
+    		end: t("boardEnd")
+    	});
+    	return h("div", { className: "buka-workflows-boardPane" }, h("p", { className: "buka-workflows-hint" }, t("boardHint")), h("div", { className: "buka-workflows-board" }, h("div", { className: "buka-workflows-boardGrid" }, h("div", {
+    		className: "buka-workflows-boardHeader",
+    		role: "row"
+    	}, h("div", { className: "buka-workflows-boardRowHead" }, ""), ...COLUMNS.map((column) => h("div", {
+    		key: column.key,
+    		className: "buka-workflows-boardColumnHead",
+    		role: "columnheader"
+    	}, t(column.labelKey)))), ...rows.map((row) => {
+    		const rowTasks = row.tasks;
+    		const counts = countTasks(rowTasks);
+    		const cellTasks = /* @__PURE__ */ new Map();
+    		for (const task of rowTasks) {
+    			const key = boardColumn(task.status);
+    			const list = cellTasks.get(key);
+    			if (list === void 0) cellTasks.set(key, [task]);
+    			else list.push(task);
+    		}
+    		return h("div", {
+    			key: row.id,
+    			className: `buka-workflows-boardRow is-${row.kind}`,
+    			role: "row"
+    		}, h("div", { className: "buka-workflows-boardRowHead" }, h("span", { className: "buka-workflows-boardRowTitle" }, row.label), row.executor === null ? null : h("span", { className: "buka-workflows-boardRowExecutor" }, renderExecutor(page, row.executor)), h("span", { className: "buka-workflows-boardRowMeta" }, rowTasks.length === 0 ? t("boardNoTasks") : fill(t, "taskCount", { n: rowTasks.length }) + (counts.running ? ` · ${t("statusRunning")} ${counts.running}` : ""))), ...COLUMNS.map((column) => {
+    			const list = cellTasks.get(column.key) ?? [];
+    			return h("div", {
+    				key: column.key,
+    				className: `buka-workflows-boardCell is-${column.key}`,
+    				role: "cell"
+    			}, ...list.map((task) => renderBoardCard(page, task)));
+    		}));
+    	}))));
+    }
+    /**
+    * 看板卡片。
+    *
+    * @param page
+    * @param task
+    * @returns React 元素
+    */
+    function renderBoardCard(page, task) {
+    	const { t, actions } = page;
+    	const meta = [];
+    	if (Array.isArray(task.deps) && task.deps.length > 0) meta.push(fill(t, "boardCardDeps", { n: task.deps.length }));
+    	if (typeof task.attemptCount === "number" && task.attemptCount > 1) meta.push(fill(t, "boardCardAttempts", { n: task.attemptCount }));
+    	if (typeof task.attachmentCount === "number" && task.attachmentCount > 0) meta.push(fill(t, "boardCardAttachments", { n: task.attachmentCount }));
+    	const claimant = claimantName(task.claimant, t);
+    	if (task.status === "ready" || task.status === "pending") {
+    		const waiting = formatWaiting(task.createdAt);
+    		if (waiting !== "") meta.push(fill(t, "boardCardWaiting", { duration: waiting }));
+    	}
+    	const summary = typeof task.resultSummary === "string" ? task.resultSummary : "";
+    	return h("button", {
+    		key: task.id,
+    		type: "button",
+    		className: `buka-workflows-taskCard is-${task.status ?? "pending"}`,
+    		onClick: () => actions.openTask(task.id)
+    	}, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), renderStatusTag(t, task.status, "task")), claimant === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, `${t("taskClaimant")}: ${claimant}`), summary === "" ? null : h("span", { className: "buka-workflows-taskCardSummary" }, summary), meta.length === 0 ? null : h("span", { className: "buka-workflows-taskCardMeta" }, meta.join(" · ")), h("span", { className: "buka-workflows-taskCardStatus" }, statusLabel(page.t, task.status)));
     }
     // .build/workflows/client/avatars.js
     /**
@@ -1947,1423 +1928,2361 @@ window.__ModuleLoader__.load({
     		"aria-hidden": true
     	}, preset.emoji);
     }
-    // .build/workflows/client/drawers/node.js
+    // .build/workflows/client/graph/layout.js
     /**
-    * 运行详情的节点抽屉内容。
-    */
-    /**
-    * 节点抽屉的内容：节点配置与按执行拆开的 Tab（输入 / 输出 / 会话 / 下一步）。
+    * 流程图布局：岗位 / 内建开始结束节点按层排布，连线绕行。
     *
-    * @param node
-    * @param definition
-    * @param graph
-    * @param steps
-    * @param fullResults
-    * @param run 运行记录
-    * @param [onClose] 关闭抽屉的回调
-    * @returns React 元素
+    * 这里不依赖宿主一半的 `src/graph.ts`：坐标全部在浏览器侧按定义快照计算，
+    * 服务端只给「岗位 + 边 + 任务状态」。
     */
-    function renderNodePanel(page, node, definition, graph, steps, fullResults, run, onClose = null) {
-    	const { t, executionIndex, setExecutionIndex, openAttachment, openSession, focusExecution, renderExecution } = page;
-    	if (node === null) return h("p", { className: "buka-workflows-hint" }, t("nodeNotRun"));
-    	const config = definitionNode(definition, node.id);
-    	const nodeSteps = steps.filter((step) => step.nodeId === node.id);
-    	const state = typeof node.state === "string" ? node.state : "idle";
-    	const rows = [];
-    	if (node.type === "robot") {
-    		rows.push(kvRow(t("nodeExecutor"), node.robot || "—"));
-    		if (typeof node.timeoutMs === "number") rows.push(kvRow(t("nodeTimeout"), formatMs(node.timeoutMs) || "—"));
-    		if (typeof node.maxVisits === "number") rows.push(kvRow(t("nodeMaxVisits"), String(node.maxVisits)));
-    	} else if (node.type === "user") {
-    		rows.push(kvRow(t("typeUser"), node.title || "—"));
-    		const pendingUser = run !== null && typeof run === "object" && run.pendingUser !== null && typeof run.pendingUser === "object" ? run.pendingUser : null;
-    		let detail = "";
-    		if (pendingUser !== null && pendingUser.nodeId === node.id && typeof pendingUser.detail === "string") detail = pendingUser.detail;
-    		if (detail === "" && typeof config?.detail === "string") detail = config.detail;
-    		if (detail === "" && typeof node.detail === "string") detail = node.detail;
-    		if (detail === "") {
-    			const lastUserStep = nodeSteps.filter((step) => step.type === "user").pop();
-    			if (typeof lastUserStep?.input === "string") detail = lastUserStep.input;
-    		}
-    		const detailText = detail.trim();
-    		if (detailText !== "") rows.push(kvRow(t("userDetail"), detailText));
-    	} else if (node.type === "end") rows.push(kvRow(t("nodeEndStatus"), statusLabel(t, node.endStatus ?? "completed")));
-    	const template = truncateText(config?.prompt, 4e3);
-    	const isStart = node.type === "start";
-    	const title = isStart ? t("typeStart") : nodeTitle(node, config);
-    	const current = (run !== null && Array.isArray(run.active) ? run.active.filter((entry) => entry !== null && typeof entry === "object") : run !== null && typeof run === "object" && run.current !== null && typeof run.current === "object" ? [run.current] : []).find((entry) => entry.nodeId === node.id) ?? null;
-    	const isLiveNode = current !== null && current.nodeId === node.id;
-    	const liveSession = isLiveNode && typeof current.sessionId === "string" ? current.sessionId : "";
-    	const nodeSessionIds = collectNodeSessionIds(node, nodeSteps, liveSession, run);
-    	const liveStartedAt = isLiveNode && typeof current.startedAt === "number" && Number.isFinite(current.startedAt) ? current.startedAt : null;
-    	const liveDuration = liveStartedAt === null ? "" : formatMs(Date.now() - liveStartedAt);
-    	const duration = liveDuration !== "" ? liveDuration : formatMs(node.durationMs);
-    	const recoveryAttempts = isLiveNode && typeof current.recoveryAttempts === "number" && Number.isFinite(current.recoveryAttempts) ? current.recoveryAttempts : 1;
-    	const recoveringText = isLiveNode && current.recovering === true ? String(t("sessionRecovering")).replace("{n}", String(recoveryAttempts)) : "";
-    	let finalStep = null;
-    	let finalText = "";
-    	let finalAttachments = [];
-    	if (node.type === "end" && node.state !== "idle") for (let index = steps.length - 1; index >= 0; index -= 1) {
-    		const candidate = steps[index];
-    		if (candidate === void 0 || candidate.type !== "robot") continue;
-    		const full = fullResults.get(`${String(candidate.seq)}:${candidate.nodeId}`) ?? null;
-    		const text = typeof full?.text === "string" && full.text !== "" ? full.text : typeof candidate.text === "string" ? candidate.text : "";
-    		const attachments = Array.isArray(full?.attachments) ? full.attachments : Array.isArray(candidate.attachments) ? candidate.attachments : [];
-    		if (text === "" && attachments.length === 0) continue;
-    		finalStep = candidate;
-    		finalText = text;
-    		finalAttachments = attachments;
-    		break;
+    /** 节点宽度。 */
+    const NODE_WIDTH = 208;
+    /** 节点高度。 */
+    const NODE_HEIGHT = 34;
+    /** 同层节点水平间距。 */
+    const GAP_X = 28;
+    /** 回边绕行需要的右侧额外空间。 */
+    const BACK_EXTRA = 72;
+    /**
+    * 计算分层坐标与连线路径。
+    *
+    * @param nodes 节点
+    * @param rawEdges 边
+    * @returns 布局结果
+    */
+    function layoutGraph(nodes, rawEdges) {
+    	const nodeIds = new Set(nodes.map((node) => node.id));
+    	const edges = rawEdges.filter((edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to));
+    	const layers = assignLayers(nodes, edges);
+    	const byLayer = /* @__PURE__ */ new Map();
+    	for (const node of nodes) {
+    		const layer = layers.get(node.id) ?? 0;
+    		const group = byLayer.get(layer);
+    		if (group === void 0) byLayer.set(layer, [node]);
+    		else group.push(node);
     	}
-    	const finalNode = finalStep === null ? null : (Array.isArray(graph?.nodes) ? graph.nodes : []).find((item) => item?.id === finalStep.nodeId) ?? null;
-    	const finalTitle = finalStep === null ? "" : finalNode === null ? finalStep.nodeId : nodeTitle(finalNode, definitionNode(definition, finalStep.nodeId));
-    	const finalVisit = finalStep !== null && typeof finalStep.visit === "number" ? finalStep.visit : 1;
-    	const activeIndex = nodeSteps.length === 0 ? -1 : executionIndex === null ? nodeSteps.length - 1 : Math.min(Math.max(executionIndex, 0), nodeSteps.length - 1);
-    	const activeStep = activeIndex === -1 ? null : nodeSteps[activeIndex] ?? null;
-    	const activeFull = activeStep === null ? null : fullResults.get(`${String(activeStep.seq)}:${String(activeStep.nodeId)}`) ?? null;
-    	const executions = nodeSteps.length === 0 || activeStep === null ? h("p", { className: "buka-workflows-hint" }, t("nodeNotRun")) : h("div", { className: "buka-workflows-executions" }, h("div", {
-    		className: "buka-workflows-tabs",
-    		role: "tablist",
-    		"aria-label": t("nodeExecutions")
-    	}, ...nodeSteps.map((step, index) => {
-    		const visit = typeof step.visit === "number" ? step.visit : index + 1;
-    		return h("button", {
-    			key: `${String(step.seq)}-${String(step.nodeId)}`,
-    			type: "button",
-    			role: "tab",
-    			"aria-selected": index === activeIndex,
-    			className: `buka-workflows-tab${index === activeIndex ? " is-active" : ""}`,
-    			title: `${t("execution")} ${visit} · ${statusLabel(t, step.status)}`,
-    			onClick: () => setExecutionIndex(index)
-    		}, h("span", {
-    			className: `buka-workflows-tabDot is-${stateClass(step.status)}`,
-    			"aria-hidden": true
-    		}), `#${visit}`);
-    	})), renderExecution(activeStep, activeFull, config, node, steps, definition, graph, run, nodeSessionIds));
-    	const sessionBar = node.type !== "robot" || nodeSessionIds.length === 0 ? null : h("div", { className: "buka-workflows-sessionBar" }, h("span", { className: "buka-workflows-label" }, t("nodeSession")), nodeSessionIds.length === 1 ? [
-    		h("code", {
-    			key: "session",
-    			className: "buka-workflows-inlineCode"
-    		}, nodeSessionIds[0]),
-    		liveSession !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
-    			key: "live",
-    			tone: "info"
-    		}, t("sessionLive")) : null,
-    		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			key: "open",
-    			variant: "outline",
-    			size: "sm",
-    			className: "buka-workflows-smallButton",
-    			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
-    			onClick: () => openSession({ sessionId: nodeSessionIds[0] })
-    		}, t("openSession"))
-    	] : [h("span", {
-    		key: "hint",
-    		className: "buka-workflows-hint"
-    	}, t("nodeSessionsLegacy")), h("span", {
-    		key: "list",
-    		className: "buka-workflows-sessionList"
-    	}, ...nodeSessionIds.map((sessionId) => h("span", {
-    		key: sessionId,
-    		className: "buka-workflows-sessionRow"
-    	}, h("code", { className: "buka-workflows-inlineCode" }, sessionId), sessionId === liveSession ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("sessionLive")) : null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
-    		onClick: () => openSession({ sessionId })
-    	}, t("openSession")))))]);
-    	return h("div", {
-    		className: "buka-workflows-inspector",
-    		role: "region",
-    		"aria-label": t("inspector")
-    	}, h("div", { className: "buka-workflows-inspectorHead" }, renderAvatar(node.avatar, 22, "buka-workflows-inspectorAvatar"), h("span", { className: "buka-workflows-inspectorTitle" }, title), title === node.id ? null : h("code", { className: "buka-workflows-inspectorId" }, node.id), node.id === graph?.start ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("nodeStart")) : null, isStart ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: typeTone(node.type) }, typeLabel(t, node.type)), node.type === "robot" && node.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("modePlan")) : null, isStart ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: statusTone(state) }, statusLabel(t, state)), recoveringText === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, recoveringText), node.visits > 1 ? h("span", { className: "buka-workflows-meta" }, `×${node.visits}`) : null, duration === "" ? null : h("span", { className: "buka-workflows-meta" }, duration), onClose === null ? null : h("button", {
-    		type: "button",
-    		className: "buka-workflows-inspectorClose buka-workflows-drawerClose",
-    		"aria-label": t("close"),
-    		title: t("close"),
-    		onClick: onClose
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutlineRegular, { size: 16 }))), rows.length === 0 ? null : h("div", { className: "buka-workflows-kv" }, ...rows), sessionBar, isStart ? h("p", { className: "buka-workflows-hint" }, t("startNodeHint")) : null, node.type === "end" && node.state !== "idle" ? h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("finalDeliverable")), finalStep === null ? h("p", { className: "buka-workflows-hint" }, t("finalDeliverableEmpty")) : finalText === "" ? h("p", { className: "buka-workflows-hint" }, t("executionOutputAttachmentsOnly")) : h("pre", { className: "buka-workflows-pre" }, finalText), finalStep === null ? null : renderAttachments(t, run, finalStep, finalAttachments, openAttachment), finalStep === null ? null : h("button", {
-    		type: "button",
-    		className: "buka-workflows-nextLink",
-    		title: `${finalTitle} #${String(finalVisit)}`,
-    		onClick: () => focusExecution(finalStep.nodeId, finalStep.seq)
-    	}, h("span", {
-    		className: "buka-workflows-nextArrow",
-    		"aria-hidden": true
-    	}, "←"), h("span", { className: "buka-workflows-nextTitle" }, `${t("finalDeliverableFrom")} ${finalTitle}`), h("span", { className: "buka-workflows-nextVisit" }, `#${String(finalVisit)}`))) : null, node.unreachable === true ? h("p", { className: "buka-workflows-hint" }, t("nodeUnreachable")) : null, nodeSteps.length === 0 && template.text !== "" ? h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("nodePrompt")), h("pre", { className: "buka-workflows-pre" }, template.text), template.truncated ? h("p", { className: "buka-workflows-hint" }, t("promptTruncated")) : null) : null, node.type === "end" || isStart ? null : h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("nodeExecutions")), executions));
-    }
-    // .build/workflows/client/drawers/node-drawers.js
-    /**
-    * 运行 / 模板详情的节点抽屉外壳。
-    */
-    /** 关闭运行详情的节点抽屉。 */
-    function closeRunNodeDrawer(page) {
-    	const { setSelectedNodeId, setExecutionIndex } = page;
-    	setSelectedNodeId(null);
-    	setExecutionIndex(null);
-    }
-    /** 关闭模板详情的节点抽屉。 */
-    function closeTemplateNodeDrawer(page) {
-    	const { setSelectedTemplateNodeId } = page;
-    	setSelectedTemplateNodeId(null);
-    }
-    /**
-    * 运行详情的节点抽屉：内容沿用原来的节点面板，关闭按钮放到面板标题行。
-    *
-    * @returns
-    */
-    function renderRunNodeDrawer(page) {
-    	const { t, selectedId, selectedNodeId, capsuleText, renderNodePanel, runDetailModel, closeRunNodeDrawer } = page;
-    	if (selectedId === null || selectedNodeId === null) return null;
-    	const model = runDetailModel();
-    	if (model === null) return null;
-    	const node = model.nodes.find((item) => item.id === selectedNodeId) ?? null;
-    	if (node === null) return null;
-    	return h(ClientModal, {
-    		open: true,
-    		headless: true,
-    		onClose: closeRunNodeDrawer,
-    		title: capsuleText(node),
-    		closeLabel: t("close"),
-    		backdropBlur: false,
-    		className: "buka-workflows-drawer buka-workflows-nodeDrawer"
-    	}, h("div", { className: "buka-workflows-drawerBody" }, renderNodePanel(node, model.definition, model.graph, model.steps, model.fullResults, model.run, closeRunNodeDrawer)));
-    }
-    /**
-    * 模板详情的节点抽屉。
-    *
-    * @returns
-    */
-    function renderTemplateNodeDrawer(page) {
-    	const { t, selectedTemplateId, selectedTemplateNodeId, templateNodeLabel, renderTemplateNodePanel, templateDetailModel, closeTemplateNodeDrawer } = page;
-    	if (selectedTemplateId === null || selectedTemplateNodeId === null) return null;
-    	const model = templateDetailModel();
-    	if (model === null) return null;
-    	const node = model.nodes.find((item) => item.id === selectedTemplateNodeId) ?? null;
-    	if (node === null) return null;
-    	return h(ClientModal, {
-    		open: true,
-    		headless: true,
-    		onClose: closeTemplateNodeDrawer,
-    		title: templateNodeLabel(node),
-    		closeLabel: t("close"),
-    		backdropBlur: false,
-    		className: "buka-workflows-drawer buka-workflows-nodeDrawer"
-    	}, h("div", { className: "buka-workflows-drawerBody" }, renderTemplateNodePanel(node, model.template, closeTemplateNodeDrawer)));
-    }
-    // .build/workflows/client/drawers/template-node.js
-    /**
-    * 模板详情的节点抽屉内容。
-    */
-    /**
-    * 模板节点抽屉的内容：说明这个节点「做什么 / 什么时候需要它」，并把它的出边
-    * 连同条件列成流转去向。
-    *
-    * @param node 图模型里的节点
-    * @param template 模板对象（含原始 nodes）
-    * @param [onClose] 关闭抽屉的回调
-    * @returns React 元素
-    */
-    function renderTemplateNodePanel(page, node, template, onClose = null) {
-    	const { t, templateNodeLabel } = page;
-    	if (node === null) return h("p", { className: "buka-workflows-hint" }, t("templatesNoFlow"));
-    	const rawNodes = Array.isArray(template?.nodes) ? template.nodes : [];
-    	const config = rawNodes.find((item) => item?.id === node.id) ?? null;
-    	const byId = new Map(rawNodes.map((item) => [item.id, item]));
-    	const rows = [];
-    	if (node.type === "robot") {
-    		rows.push(kvRow(t("templatesRole"), node.robot || "—"));
-    		if (typeof node.summary === "string" && node.summary !== "") rows.push(kvRow(t("templatesPurpose"), node.summary));
-    	} else if (node.type === "user") {
-    		if (typeof node.title === "string" && node.title !== "") rows.push(kvRow(t("typeUser"), node.title));
-    		if (typeof node.detail === "string" && node.detail !== "") rows.push(kvRow(t("templatesPurpose"), node.detail));
-    	} else if (node.type === "end") rows.push(kvRow(t("nodeEndStatus"), statusLabel(t, node.endStatus ?? "completed")));
-    	const transitions = (Array.isArray(config?.next) ? config.next : []).map((rule) => {
-    		const target = byId.get(rule.to);
-    		const label = typeof rule.label === "string" && rule.label !== "" ? rule.label : typeof rule.name === "string" && rule.name !== "" ? rule.name : "";
-    		const condition = typeof rule.description === "string" && rule.description !== "" ? rule.description : typeof rule.prompt === "string" && rule.prompt !== "" ? rule.prompt : "";
-    		const head = label === "" ? rule.to : `${label} → ${target === void 0 ? rule.to : templateNodeLabel(target)}`;
-    		return h("div", {
-    			key: `${String(rule.name ?? "")}-${String(rule.to)}`,
-    			className: "buka-workflows-templateTransition"
-    		}, h("span", { className: "buka-workflows-templateTransitionHead" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, head)), condition === "" ? null : h("span", { className: "buka-workflows-templateTransitionBody" }, condition));
+    	const layerKeys = [...byLayer.keys()].sort((left, right) => left - right);
+    	const width = Math.max(NODE_WIDTH, ...layerKeys.map((layer) => {
+    		const count = byLayer.get(layer)?.length ?? 0;
+    		return count * NODE_WIDTH + Math.max(0, count - 1) * GAP_X;
+    	})) + 40 + BACK_EXTRA;
+    	const height = layerKeys.length === 0 ? 74 : (layerKeys.length - 1) * 108 + NODE_HEIGHT + 40;
+    	const byId = /* @__PURE__ */ new Map();
+    	const laidOut = [];
+    	layerKeys.forEach((layer, index) => {
+    		const group = byLayer.get(layer) ?? [];
+    		const groupWidth = group.length * NODE_WIDTH + Math.max(0, group.length - 1) * GAP_X;
+    		const startX = (width - groupWidth) / 2;
+    		const y = 37 + index * 108;
+    		group.forEach((node, position) => {
+    			const x = startX + NODE_WIDTH / 2 + position * 236;
+    			const laid = {
+    				...node,
+    				x,
+    				y,
+    				layer,
+    				width: NODE_WIDTH,
+    				height: NODE_HEIGHT
+    			};
+    			laidOut.push(laid);
+    			byId.set(node.id, laid);
+    		});
     	});
-    	const title = templateNodeLabel(node);
-    	return h("div", {
-    		className: "buka-workflows-inspector",
-    		role: "region",
-    		"aria-label": t("inspector")
-    	}, h("div", { className: "buka-workflows-inspectorHead" }, h("span", { className: "buka-workflows-inspectorTitle" }, title), title === node.id ? null : h("code", { className: "buka-workflows-inspectorId" }, node.id), node.type === "start" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("nodeStart")) : null, node.type === "robot" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("templatesAbstractRole")) : null, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: typeTone(node.type) }, typeLabel(t, node.type)), onClose === null ? null : h("button", {
-    		type: "button",
-    		className: "buka-workflows-inspectorClose buka-workflows-drawerClose",
-    		"aria-label": t("close"),
-    		title: t("close"),
-    		onClick: onClose
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutlineRegular, { size: 16 }))), node.type === "start" ? h("p", { className: "buka-workflows-hint" }, t("startNodeHint")) : null, rows.length === 0 ? null : h("div", { className: "buka-workflows-kv" }, ...rows), h("div", { className: "buka-workflows-inspectorSection" }, h("span", { className: "buka-workflows-label" }, t("templatesTransitions")), transitions.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("templatesNoTransitions")) : h("div", { className: "buka-workflows-templateTransitions" }, ...transitions)));
+    	const laidOutEdges = [];
+    	const usedKeys = /* @__PURE__ */ new Map();
+    	for (const edge of edges) {
+    		const from = byId.get(edge.from);
+    		const to = byId.get(edge.to);
+    		if (from === void 0 || to === void 0) continue;
+    		const back = edge.back === true || to.layer <= from.layer;
+    		const baseKey = `${edge.from}->${edge.to}`;
+    		const seen = usedKeys.get(baseKey) ?? 0;
+    		usedKeys.set(baseKey, seen + 1);
+    		const key = seen === 0 ? baseKey : `${baseKey}#${seen}`;
+    		const types = Array.isArray(edge.types) ? edge.types.filter((type) => typeof type === "string") : [];
+    		const label = types.length > 0 ? types.join(", ") : back ? "" : "";
+    		laidOutEdges.push({
+    			key,
+    			from: edge.from,
+    			to: edge.to,
+    			kind: back ? "back" : "forward",
+    			label,
+    			...edgeGeometry(from, to, back)
+    		});
+    	}
+    	return {
+    		width,
+    		height,
+    		nodeWidth: NODE_WIDTH,
+    		nodeHeight: NODE_HEIGHT,
+    		nodes: laidOut,
+    		edges: laidOutEdges
+    	};
     }
-    // .build/workflows/client/graph/legend.js
     /**
-    * 节点图例：节点类型、节点状态与连线。
+    * 最长路径分层：开始节点固定第 0 层，结束节点固定最后一层；回边不参与分层。
+    *
+    * @param nodes
+    * @param edges
+    * @returns 节点 id → 层号
+    */
+    function assignLayers(nodes, edges) {
+    	const layers = /* @__PURE__ */ new Map();
+    	const first = nodes[0];
+    	if (nodes.some((node) => node.id === "start")) layers.set("start", 0);
+    	else if (first !== void 0) layers.set(first.id, 0);
+    	const forward = edges.filter((edge) => edge.back !== true);
+    	for (let pass = 0; pass < nodes.length + 1; pass += 1) {
+    		let changed = false;
+    		for (const edge of forward) {
+    			const fromLayer = layers.get(edge.from);
+    			if (fromLayer === void 0) continue;
+    			const next = fromLayer + 1;
+    			const current = layers.get(edge.to);
+    			if (current === void 0 || current < next) {
+    				layers.set(edge.to, next);
+    				changed = true;
+    			}
+    		}
+    		if (!changed) break;
+    	}
+    	if (nodes.some((node) => node.id === "end")) {
+    		let maxLayer = 0;
+    		for (const [id, layer] of layers) if (id !== "end") maxLayer = Math.max(maxLayer, layer);
+    		layers.set("end", maxLayer + 1);
+    	}
+    	for (const node of nodes) if (!layers.has(node.id)) layers.set(node.id, node.id === "start" ? 0 : 1);
+    	return layers;
+    }
+    /**
+    * 一条边的路径与箭头位置。
+    *
+    * @param from
+    * @param to
+    * @param back
+    * @returns
+    */
+    function edgeGeometry(from, to, back) {
+    	if (!back) {
+    		const x1 = from.x;
+    		const y1 = from.y + from.height / 2;
+    		const x2 = to.x;
+    		const y2 = to.y - to.height / 2;
+    		const control = Math.max(24, (y2 - y1) / 2);
+    		const p0 = {
+    			x: x1,
+    			y: y1
+    		};
+    		const p1 = {
+    			x: x1,
+    			y: y1 + control
+    		};
+    		const p2 = {
+    			x: x2,
+    			y: y2 - control
+    		};
+    		const p3 = {
+    			x: x2,
+    			y: y2
+    		};
+    		const point = cubicPoint(p0, p1, p2, p3, .55);
+    		const tangent = cubicTangent(p0, p1, p2, p3, .55);
+    		return {
+    			d: `M ${fmt(x1)} ${fmt(y1)} C ${fmt(p1.x)} ${fmt(p1.y)} ${fmt(p2.x)} ${fmt(p2.y)} ${fmt(x2)} ${fmt(y2)}`,
+    			arrow: {
+    				x: point.x,
+    				y: point.y,
+    				angle: angleOf(tangent)
+    			}
+    		};
+    	}
+    	const x1 = from.x + from.width / 2;
+    	const y1 = from.y;
+    	const x2 = to.x + to.width / 2;
+    	const y2 = to.y;
+    	const reach = Math.max(x1, x2) + 56;
+    	const p0 = {
+    		x: x1,
+    		y: y1
+    	};
+    	const p1 = {
+    		x: reach,
+    		y: y1
+    	};
+    	const p2 = {
+    		x: reach,
+    		y: y2
+    	};
+    	const p3 = {
+    		x: x2,
+    		y: y2
+    	};
+    	const point = cubicPoint(p0, p1, p2, p3, .5);
+    	const tangent = cubicTangent(p0, p1, p2, p3, .5);
+    	return {
+    		d: `M ${fmt(x1)} ${fmt(y1)} C ${fmt(p1.x)} ${fmt(p1.y)} ${fmt(p2.x)} ${fmt(p2.y)} ${fmt(x2)} ${fmt(y2)}`,
+    		arrow: {
+    			x: point.x,
+    			y: point.y,
+    			angle: angleOf(tangent)
+    		}
+    	};
+    }
+    /** 三次贝塞尔取点。 */
+    function cubicPoint(p0, p1, p2, p3, t) {
+    	const mt = 1 - t;
+    	return {
+    		x: mt ** 3 * p0.x + 3 * mt ** 2 * t * p1.x + 3 * mt * t ** 2 * p2.x + t ** 3 * p3.x,
+    		y: mt ** 3 * p0.y + 3 * mt ** 2 * t * p1.y + 3 * mt * t ** 2 * p2.y + t ** 3 * p3.y
+    	};
+    }
+    /** 三次贝塞尔切线。 */
+    function cubicTangent(p0, p1, p2, p3, t) {
+    	const mt = 1 - t;
+    	return {
+    		x: 3 * mt ** 2 * (p1.x - p0.x) + 6 * mt * t * (p2.x - p1.x) + 3 * t ** 2 * (p3.x - p2.x),
+    		y: 3 * mt ** 2 * (p1.y - p0.y) + 6 * mt * t * (p2.y - p1.y) + 3 * t ** 2 * (p3.y - p2.y)
+    	};
+    }
+    /** 切线 → 角度（度）。 */
+    function angleOf(vector) {
+    	return Math.atan2(vector.y, vector.x) * 180 / Math.PI;
+    }
+    /** 数字保留两位小数，减少 DOM 字符串抖动。 */
+    function fmt(value) {
+    	return Number.isInteger(value) ? String(value) : value.toFixed(2);
+    }
+    // .build/workflows/client/graph/render.js
+    /**
+    * 流程图渲染：SVG 连线 + 绝对定位的胶囊节点。
     */
     /**
-    * 图例：节点类型（胶囊颜色）、节点状态（胶囊左侧圆点）与连线。模板页没有执行状态，
-    * 传入 `{ states: false }` 时省略「节点状态」一组；连线也不再区分「已走过 / 未走过」，
-    * 只留一条「流程走向」的实线样例。
+    * 画一张流程图。节点是岗位 / 开始 / 结束，边是定义里的白名单与回边。
     *
-    * @param [options]
+    * @param page
+    * @param options
     * @returns React 元素
     */
-    function renderLegend(page, options = {}) {
+    function renderWorkflowGraph(page, options) {
     	const { t } = page;
-    	const states = [
-    		["done", t("legendDone")],
-    		["running", t("legendRunning")],
-    		["waiting", t("legendWaiting")],
-    		["failed", t("legendFailed")],
-    		["idle", t("legendIdle")]
+    	const layout = layoutGraph(options.nodes, options.edges);
+    	const selectedId = options.selectedId ?? null;
+    	const onNodeClick = options.onNodeClick ?? null;
+    	const idle = layout.nodes.every((node) => (node.status ?? "idle") === "idle");
+    	return h("div", { className: "buka-workflows-graphPane" }, h("div", {
+    		className: "buka-workflows-vgraph",
+    		style: {
+    			width: `${layout.width}px`,
+    			height: `${layout.height}px`
+    		},
+    		role: "group",
+    		"aria-label": t("graphAria")
+    	}, h("svg", {
+    		className: "buka-workflows-vgraphSvg",
+    		width: layout.width,
+    		height: layout.height,
+    		viewBox: `0 0 ${layout.width} ${layout.height}`
+    	}, ...layout.edges.map((edge) => h("path", {
+    		key: edge.key,
+    		className: `buka-workflows-edge is-${edge.kind}`,
+    		d: edge.d
+    	})), ...layout.edges.map((edge) => h("g", {
+    		key: `arrow-${edge.key}`,
+    		className: `buka-workflows-edgeArrow is-${edge.kind}`,
+    		transform: `translate(${edge.arrow.x} ${edge.arrow.y}) rotate(${edge.arrow.angle})`
+    	}, h("path", { d: "M-4,-3.6 L4,0 L-4,3.6 Z" })))), ...layout.nodes.map((node) => {
+    		const isSelected = selectedId === node.id;
+    		const status = node.status ?? "idle";
+    		const clickable = onNodeClick !== null;
+    		const tag = node.kind === "position" ? node.executor?.kind === "human" ? "is-human" : "is-robot" : node.kind === "start" ? "is-start" : "is-end";
+    		return h("div", {
+    			key: node.id,
+    			className: "buka-workflows-vgraphNode",
+    			style: {
+    				left: `${node.x - node.width / 2}px`,
+    				top: `${node.y - node.height / 2}px`,
+    				width: `${node.width}px`,
+    				height: `${node.height}px`
+    			}
+    		}, clickable ? h("button", {
+    			type: "button",
+    			className: `buka-workflows-capsule ${tag} is-${stateClass(status)}${idle ? " is-idle" : ""}${isSelected ? " is-selected" : ""}${typeof node.avatar === "string" && node.avatar !== "" ? " has-avatar" : ""}`,
+    			title: node.title ?? node.label,
+    			"aria-pressed": isSelected,
+    			onClick: () => onNodeClick(node.id)
+    		}, renderAvatar(node.avatar, 20, "buka-workflows-capsuleAvatar"), h("span", { className: "buka-workflows-capsuleText" }, h("span", { className: "buka-workflows-capsuleLabel" }, node.label), typeof node.meta === "string" && node.meta !== "" ? h("span", { className: "buka-workflows-capsuleMeta" }, node.meta) : null)) : h("span", {
+    			className: `buka-workflows-capsule ${tag} is-${stateClass(status)}${idle ? " is-idle" : ""}${typeof node.avatar === "string" && node.avatar !== "" ? " has-avatar" : ""}`,
+    			title: node.title ?? node.label
+    		}, renderAvatar(node.avatar, 20, "buka-workflows-capsuleAvatar"), h("span", { className: "buka-workflows-capsuleText" }, h("span", { className: "buka-workflows-capsuleLabel" }, node.label), typeof node.meta === "string" && node.meta !== "" ? h("span", { className: "buka-workflows-capsuleMeta" }, node.meta) : null)));
+    	})), options.caption === null || options.caption === void 0 ? null : h("p", { className: "buka-workflows-hint buka-workflows-graphCaption" }, options.caption), renderGraphLegend(page));
+    }
+    /**
+    * 图例：节点类型、任务状态、连线。
+    *
+    * @param page
+    * @returns
+    */
+    function renderGraphLegend(page) {
+    	const { t } = page;
+    	const types = [
+    		["is-start", t("graphStart")],
+    		["is-robot", t("graphRobot")],
+    		["is-human", t("graphHuman")],
+    		["is-end", t("graphEnd")]
     	];
-    	return h("div", { className: "buka-workflows-legend" }, h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("legendTypes")), ...[
-    		"start",
-    		"robot",
-    		"user",
-    		"join",
-    		"end"
-    	].map((type) => h("span", {
-    		key: type,
+    	const states = [
+    		["done", t("statusCompleted")],
+    		["running", t("statusRunning")],
+    		["waiting", t("statusReady")],
+    		["failed", t("statusFailed")],
+    		["idle", t("graphIdle")]
+    	];
+    	const edges = [["forward", t("graphEdgeForward")], ["back", t("graphEdgeBack")]];
+    	return h("div", { className: "buka-workflows-legend" }, h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("graphLegendTypes")), ...types.map(([kind, label]) => h("span", {
+    		key: kind,
     		className: "buka-workflows-legendItem"
     	}, h("span", {
-    		className: `buka-workflows-legendCapsule is-${type}`,
+    		className: `buka-workflows-legendCapsule ${kind}`,
     		"aria-hidden": true
-    	}), typeLabel(t, type)))), options.states === false ? null : h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("legendStates")), ...states.map(([kind, label]) => h("span", {
+    	}), label))), h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("graphLegendStates")), ...states.map(([kind, label]) => h("span", {
     		key: kind,
     		className: "buka-workflows-legendItem"
     	}, h("span", {
     		className: `buka-workflows-legendDot is-${kind}`,
     		"aria-hidden": true
-    	}), label))), h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("legendEdges")), ...options.states === false ? [h("span", {
-    		key: "flow",
+    	}), label))), h("span", { className: "buka-workflows-legendGroup" }, h("span", { className: "buka-workflows-legendTitle" }, t("graphLegendEdges")), ...edges.map(([kind, label]) => h("span", {
+    		key: kind,
     		className: "buka-workflows-legendItem"
     	}, h("span", {
-    		className: "buka-workflows-legendLine is-static",
+    		className: `buka-workflows-legendLine is-${kind}`,
     		"aria-hidden": true
-    	}), t("legendFlow"))] : ["traversed", ""].map((kind, index) => {
-    		const labels = [t("legendTraversed"), t("legendPending")];
-    		return h("span", {
-    			key: `${kind || "pending"}-${index}`,
-    			className: "buka-workflows-legendItem"
-    		}, h("span", {
-    			className: `buka-workflows-legendLine${kind === "" ? "" : ` is-${kind}`}`,
-    			"aria-hidden": true
-    		}), labels[index]);
-    	})));
+    	}), label))));
     }
-    // .build/workflows/client/graph/render-graph.js
+    // .build/workflows/client/components/job-graph.js
     /**
-    * 分层二维节点图：节点按坐标绝对定位，SVG 画可绕行的连线。
+    * 作业流程图：同一份任务数据按岗位汇总状态后画在定义图上。
     */
     /**
-    * 分层二维节点图：节点按坐标绝对定位（同一层的并行节点在同一排），SVG 画
-    * 从节点上 / 下端口进出、可向左右两侧绕行的连线。
+    * 作业流程图视图。
     *
-    * @param graph 路由返回的图模型（含节点坐标与连线）
-    * @param activeNodeId 当前选中 / 抽屉中的节点
-    * @param [onNodeSelect] 点胶囊时的回调；不传则回退到运行详情的选中逻辑
-    * @param [options] 传 `{ states: false }` 时按「没有执行状态」画：模板是参考流程，胶囊保持类型配色，不套「未运行」的灰虚线
+    * @param page
     * @returns React 元素
     */
-    function renderGraph(page, graph, activeNodeId, onNodeSelect = null, options = {}) {
-    	const { t, setSelectedNodeId, setExecutionIndex, edgeTip, setEdgeTip, selectedEdgeKey, setSelectedEdgeKey, setSelectedTemplateNodeId, capsuleText } = page;
-    	const showStates = options.states !== false;
-    	const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
-    	if (nodes.length === 0) return h("p", { className: "buka-workflows-empty" }, t("graphEmpty"));
-    	const edges = Array.isArray(graph.edges) ? graph.edges : [];
-    	const nodeWidth = typeof graph.nodeWidth === "number" ? graph.nodeWidth : 260;
-    	const nodeHeight = typeof graph.nodeHeight === "number" ? graph.nodeHeight : 28;
-    	const legacyRows = Array.isArray(graph.rows) ? graph.rows : [];
-    	const legacy = !Array.isArray(graph.positions) && legacyRows.length > 0;
-    	const legacyDotX = typeof graph.dotX === "number" ? graph.dotX : 14;
-    	const legacyRailWidth = typeof graph.width === "number" ? graph.width : legacyDotX;
-    	const positions = legacy ? legacyRows.map((row) => ({
-    		id: row.id ?? "",
-    		layer: typeof row.index === "number" ? row.index : 0,
-    		x: legacyRailWidth + nodeWidth / 2,
-    		y: typeof row.y === "number" ? row.y : 0
-    	})) : Array.isArray(graph.positions) ? graph.positions : [];
-    	const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    	const width = legacy ? legacyRailWidth + nodeWidth : typeof graph.width === "number" ? graph.width : 0;
-    	const height = typeof graph.height === "number" ? graph.height : 0;
-    	const hoveredEdgeKey = edgeTip === null ? null : edgeTip.key;
-    	const drawableEdges = edges.filter((edge) => typeof edge.d === "string" && edge.d !== "");
-    	const hoveredEdge = hoveredEdgeKey === null ? null : drawableEdges.find((edge) => edge.key === hoveredEdgeKey) ?? null;
-    	/**
-    	* 一条边的可见线 / 箭头的公共类名：保留运行状态、tone、选中与悬浮压暗。
-    	*
-    	* @param edge
-    	* @param extra
-    	* @returns
-    	*/
-    	function edgeClass(edge, extra = "") {
-    		return `buka-workflows-edge is-${edge.kind}${showStates ? "" : " is-static"}${edge.traversed === true ? " is-traversed" : ""}${edgeToneClass(edge)}${selectedEdgeKey === edge.key ? " is-selected" : ""}${extra}`;
+    function renderJobGraph(page) {
+    	const { t, state, actions } = page;
+    	const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state));
+    	const tasks = jobTasks(state);
+    	const positions = positionsOf(definition);
+    	/** 某个节点的任务。 */
+    	function tasksOf(positionId) {
+    		return tasks.filter((task) => task.position === positionId);
     	}
-    	/**
-    	* 点一条边：与节点抽屉互斥，关闭悬停名字，再打开 / 收起连线配置抽屉。
-    	*
-    	* @param edge
-    	*/
-    	function selectEdge(edge) {
-    		setEdgeTip(null);
-    		setSelectedNodeId(null);
-    		setExecutionIndex(null);
-    		setSelectedTemplateNodeId(null);
-    		setSelectedEdgeKey(selectedEdgeKey === edge.key ? null : edge.key);
+    	/** 节点徽标：已完成 / 总数。 */
+    	function metaOf(positionId) {
+    		const list = tasksOf(positionId);
+    		if (list.length === 0) return "";
+    		return `${list.filter((task) => task.status === "completed").length}/${list.length}`;
     	}
-    	return h("div", { className: "buka-workflows-graphPane" }, h("div", {
-    		className: "buka-workflows-vgraph",
-    		style: {
-    			width: `${width}px`,
-    			height: `${height}px`
-    		}
-    	}, h("svg", {
-    		className: "buka-workflows-vgraphSvg",
-    		width,
-    		height,
-    		viewBox: `0 0 ${width} ${height}`,
-    		role: "group",
-    		"aria-label": t("legendEdges")
-    	}, ...drawableEdges.filter((edge) => edge !== hoveredEdge).map((edge) => h("path", {
-    		key: edge.key,
-    		className: edgeClass(edge, hoveredEdge === null ? "" : " is-dimmed"),
-    		d: edge.d
-    	})), hoveredEdge === null ? null : h("path", {
-    		key: hoveredEdge.key,
-    		className: edgeClass(hoveredEdge, " is-hovered"),
-    		d: hoveredEdge.d
-    	}), ...edges.map((edge) => {
-    		const arrow = edge.arrow;
-    		if (arrow === null || typeof arrow !== "object") return null;
-    		if (typeof arrow.x !== "number" || typeof arrow.y !== "number") return null;
-    		const hovered = hoveredEdgeKey === edge.key;
-    		return h("g", {
-    			key: `arrow-${edge.key}`,
-    			className: `buka-workflows-edgeArrow is-${edge.kind}${showStates ? "" : " is-static"}${edge.traversed === true ? " is-traversed" : ""}${edgeToneClass(edge)}${selectedEdgeKey === edge.key ? " is-selected" : ""}${hovered ? " is-hovered" : ""}${hoveredEdge !== null && !hovered ? " is-dimmed" : ""}`,
-    			transform: `translate(${arrow.x} ${arrow.y}) rotate(${arrow.angle ?? 90})`
-    		}, h("path", { d: "M-3.5,-4 L3.5,0 L-3.5,4 Z" }));
-    	}), ...edges.map((edge) => {
-    		if (typeof edge.d !== "string" || edge.d === "") return null;
-    		const label = edgeLabel(edge);
-    		const fromNode = nodeById.get(edge.from) ?? null;
-    		const toNode = nodeById.get(edge.to) ?? null;
-    		const show = label === "" ? null : (event) => {
-    			const arrow = edge.arrow;
-    			const anchor = arrow !== null && typeof arrow === "object" && typeof arrow.x === "number" && typeof arrow.y === "number" ? edgeTipAnchor(event.currentTarget, arrow) : null;
-    			setEdgeTip({
-    				key: edge.key,
-    				kind: edge.kind,
-    				text: label,
-    				x: event.clientX,
-    				y: event.clientY,
-    				anchor
-    			});
-    		};
-    		return h("path", {
-    			key: `hit-${edge.key}`,
-    			className: "buka-workflows-edgeHit",
-    			d: edge.d,
-    			"data-edge-key": edge.key,
-    			role: "button",
-    			tabIndex: 0,
-    			"aria-label": String(t("edgeAriaLabel")).replace("{from}", fromNode === null ? edge.from : capsuleText(fromNode)).replace("{to}", toNode === null ? edge.to : capsuleText(toNode)),
-    			onClick: () => selectEdge(edge),
-    			onKeyDown: (event) => {
-    				if (event.key !== "Enter" && event.key !== " ") return;
-    				event.preventDefault();
-    				selectEdge(edge);
-    			},
-    			onMouseEnter: show ?? void 0,
-    			onMouseLeave: label === "" ? void 0 : () => setEdgeTip((current) => current !== null && current.key === edge.key ? null : current)
-    		});
-    	}), ...positions.map((position) => {
-    		const node = nodeById.get(position.id);
-    		if (node === void 0) return null;
-    		return h("circle", {
-    			key: `dot-${position.id}`,
-    			className: `buka-workflows-vgraphDot is-${stateClass(node.state)}`,
-    			cx: legacy ? legacyDotX : position.x - nodeWidth / 2 - 10,
-    			cy: position.y,
-    			r: 4
-    		});
-    	})), ...positions.map((position) => {
-    		const node = nodeById.get(position.id);
-    		if (node === void 0) return null;
-    		const state = typeof node.state === "string" ? node.state : "idle";
-    		const kind = stateClass(state);
-    		const selected = activeNodeId === node.id;
-    		return h("div", {
-    			key: node.id,
-    			className: "buka-workflows-vgraphNode",
-    			style: {
-    				left: `${position.x - nodeWidth / 2}px`,
-    				top: `${position.y - nodeHeight / 2}px`,
-    				width: `${nodeWidth}px`,
-    				height: `${nodeHeight}px`
-    			}
-    		}, h("button", {
-    			type: "button",
-    			className: `buka-workflows-capsule is-${node.type}${showStates && kind === "idle" ? " is-idle" : ""}${showStates && kind === "running" ? " is-running" : ""}${selected ? " is-selected" : ""}${typeof node.avatar === "string" && node.avatar !== "" ? " has-avatar" : ""}`,
-    			title: showStates ? `${node.id} · ${typeLabel(t, node.type)} · ${statusLabel(t, state)}` : `${node.id} · ${typeLabel(t, node.type)}`,
-    			"aria-pressed": selected,
-    			onClick: () => {
-    				setEdgeTip(null);
-    				setSelectedEdgeKey(null);
-    				if (onNodeSelect !== null) onNodeSelect(node.id);
-    				else {
-    					setSelectedNodeId(node.id);
-    					setExecutionIndex(null);
-    				}
-    			}
-    		}, renderAvatar(node.avatar, 20, "buka-workflows-capsuleAvatar"), h("span", { className: "buka-workflows-capsuleText" }, capsuleText(node))), node.visits > 1 ? h("span", {
-    			className: "buka-workflows-visitBadge",
-    			title: `${t("visitsLabel")}: ${node.visits}`
-    		}, `×${node.visits}`) : null);
-    	})));
-    }
-    // .build/workflows/client/state/use-attachments.js
-    /**
-    * 附件预览抽屉的 effect 与动作：打开 / 关闭、拉取预览。
-    */
-    /**
-    * 抽屉预览的进行中请求。只用模块级的一个变量保存：页面只挂一份，它不参与
-    * 渲染，新的请求先中止旧的，关闭抽屉时也中止。
-    */
-    let attachmentAbort = null;
-    /**
-    * 附件预览的 effect 与动作。
-    *
-    * @param state 页面状态
-    * @param t 词典翻译函数
-    * @returns 附件预览动作
-    */
-    function useAttachmentsEffects(state, t) {
-    	const { attachmentView, setAttachmentView, setAttachmentPreview, selectedId } = state;
-    	const { view } = state;
-    	/**
-    	* 中止抽屉里进行中的预览请求（如果有）。
-    	*/
-    	function abortAttachmentPreview() {
-    		if (attachmentAbort === null) return;
-    		attachmentAbort.abort();
-    		attachmentAbort = null;
-    	}
-    	/**
-    	* 在右侧抽屉里打开附件预览。同一个附件重复点击也会重新拉取一次。
-    	*
-    	* @param run
-    	* @param step
-    	* @param attachment
-    	*/
-    	function openAttachment(run, step, attachment) {
-    		const runId = typeof run?.runId === "string" ? run.runId : "";
-    		const name = typeof attachment?.name === "string" ? attachment.name : "";
-    		if (runId === "" || name === "") return;
-    		setAttachmentView({
-    			runId,
-    			seq: step?.seq ?? null,
-    			nodeId: typeof step?.nodeId === "string" ? step.nodeId : "",
-    			name,
-    			bytes: typeof attachment?.bytes === "number" ? attachment.bytes : null,
-    			description: typeof attachment?.description === "string" ? attachment.description : ""
-    		});
-    		setAttachmentPreview({
-    			status: "loading",
-    			data: null,
-    			error: null
-    		});
-    	}
-    	/** 关闭附件预览抽屉：中止进行中的请求并恢复空闲状态。 */
-    	function closeAttachment() {
-    		abortAttachmentPreview();
-    		setAttachmentView(null);
-    		setAttachmentPreview({
-    			status: "idle",
-    			data: null,
-    			error: null
-    		});
-    	}
-    	/**
-    	* 拉取一次附件预览。新的请求先中止旧的；被中止的请求不再写状态。
-    	*
-    	* @param viewer
-    	*/
-    	function fetchAttachmentPreview(viewer) {
-    		if (viewer === null || typeof viewer !== "object") return;
-    		abortAttachmentPreview();
-    		const controller = typeof AbortController === "function" ? new AbortController() : null;
-    		attachmentAbort = controller;
-    		setAttachmentPreview((previous) => ({
-    			status: "loading",
-    			data: previous?.status === "ready" ? previous.data : null,
-    			error: null
-    		}));
-    		const init = { headers: { accept: "application/json" } };
-    		if (controller !== null) init.signal = controller.signal;
-    		fetch(attachmentUrl(viewer, "preview"), init).then(async (response) => {
-    			const parsed = await response.json().catch(() => null);
-    			const body = isRecord(parsed) ? parsed : null;
-    			if (!response.ok || body === null || body.ok !== true) {
-    				const failure = new Error(typeof body?.message === "string" ? body.message : `HTTP ${response.status}`);
-    				failure.code = body?.code;
-    				throw failure;
-    			}
-    			return body;
-    		}).then((body) => {
-    			if (controller?.signal.aborted) return;
-    			const attachment = body.attachment;
-    			if (!isRecord(attachment)) {
-    				setAttachmentPreview({
-    					status: "failed",
-    					data: null,
-    					error: t("attachmentPreviewFailed")
-    				});
+    	/** 点节点：打开该岗位最近活动的任务。 */
+    	function openFirst(positionId) {
+    		const list = tasksOf(positionId);
+    		for (const status of [
+    			"running",
+    			"ready",
+    			"pending",
+    			"failed",
+    			"blocked",
+    			"completed",
+    			"cancelled"
+    		]) {
+    			const found = list.find((task) => task.status === status);
+    			if (found !== void 0) {
+    				actions.openTask(found.id);
     				return;
     			}
-    			setAttachmentPreview({
-    				status: "ready",
-    				data: attachment,
-    				error: null
-    			});
-    		}).catch((failure) => {
-    			if (controller?.signal.aborted) return;
-    			setAttachmentPreview({
-    				status: "failed",
-    				data: null,
-    				error: `${t("attachmentPreviewFailed")} ${messageOf(failure)}`
-    			});
-    		}).finally(() => {
-    			if (attachmentAbort === controller) attachmentAbort = null;
+    		}
+    	}
+    	return renderWorkflowGraph(page, {
+    		nodes: [
+    			{
+    				id: "start",
+    				label: t("boardStart"),
+    				kind: "start",
+    				status: aggregateStatus(tasksOf("start")),
+    				meta: metaOf("start")
+    			},
+    			...positions.map((position) => {
+    				const id = position.id;
+    				const avatar = position.executor.avatar;
+    				return {
+    					id,
+    					label: position.label,
+    					kind: "position",
+    					executor: position.executor,
+    					...typeof avatar === "string" && avatar !== "" ? { avatar } : {},
+    					status: aggregateStatus(tasksOf(id)),
+    					meta: metaOf(id),
+    					title: `${id} · ${t("tasksTablePosition")}`
+    				};
+    			}),
+    			{
+    				id: "end",
+    				label: t("boardEnd"),
+    				kind: "end",
+    				status: aggregateStatus(tasksOf("end")),
+    				meta: metaOf("end")
+    			}
+    		],
+    		edges: edgesOf(definition).map((edge) => ({
+    			from: edge.from,
+    			to: edge.to,
+    			types: edge.types,
+    			back: edge.back
+    		})),
+    		onNodeClick: openFirst,
+    		caption: t("jobGraphHint")
+    	});
+    }
+    // .build/workflows/client/components/task-list.js
+    /**
+    * 作业的任务列表视图。
+    */
+    /**
+    * 任务列表视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderTaskList(page) {
+    	const { t, state, actions } = page;
+    	const tasks = sortTasks(jobTasks(state));
+    	if (tasks.length === 0) return renderEmpty(t("tasksEmpty"), t("boardEmptyHint"));
+    	const positions = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state)));
+    	const positionLabel = (id) => {
+    		if (id === "start") return t("boardStart");
+    		if (id === "end") return t("boardEnd");
+    		const found = positions.find((position) => position.id === id);
+    		return found === void 0 ? String(id ?? "") : found.label;
+    	};
+    	return h("div", { className: "buka-workflows-tablePane" }, h("p", { className: "buka-workflows-hint" }, t("tasksHint")), h("table", { className: "buka-workflows-table" }, h("thead", null, h("tr", null, h("th", null, t("tasksTableType")), h("th", null, t("tasksTablePosition")), h("th", null, t("tasksTableStatus")), h("th", null, t("tasksTableClaimant")), h("th", null, t("tasksTableCreated")))), h("tbody", null, ...tasks.map((task) => h("tr", {
+    		key: task.id,
+    		className: "buka-workflows-tableRow",
+    		tabIndex: 0,
+    		onClick: () => actions.openTask(task.id),
+    		onKeyDown: (event) => {
+    			if (event.key !== "Enter" && event.key !== " ") return;
+    			event.preventDefault();
+    			actions.openTask(task.id);
+    		}
+    	}, h("td", null, task.typeLabel ?? task.type ?? task.id), h("td", null, task.position === void 0 ? "" : positionLabel(task.position)), h("td", null, renderStatusTag(t, task.status, "task")), h("td", null, claimantName(task.claimant, t) || statusLabel(t, "unknown")), h("td", { className: "buka-workflows-tableTime" }, formatTime(task.createdAt)))))));
+    }
+    // .build/workflows/client/components/timeline.js
+    /**
+    * 作业时间线：由作业与任务的时间戳派生（不额外请求事件表）。
+    */
+    /**
+    * 时间线视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderTimeline(page) {
+    	const { t, state } = page;
+    	const job = state.job.data?.job;
+    	const tasks = jobTasks(state);
+    	const positions = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state)));
+    	const positionLabel = (id) => {
+    		if (id === "start") return t("boardStart");
+    		if (id === "end") return t("boardEnd");
+    		const found = positions.find((position) => position.id === id);
+    		return found === void 0 ? String(id ?? "") : found.label;
+    	};
+    	const events = [];
+    	/**
+    	* @param key
+    	* @param value 时间
+    	* @param label
+    	* @param detail
+    	* @param tone
+    	*/
+    	function push(key, value, label, detail, tone = "neutral") {
+    		const date = toDate(value);
+    		if (date === null) return;
+    		events.push({
+    			key,
+    			at: date.getTime(),
+    			label,
+    			detail,
+    			tone
     		});
     	}
-    	react.default.useEffect(() => {
-    		if (attachmentView === null) return void 0;
-    		fetchAttachmentPreview(attachmentView);
-    		return () => {
-    			abortAttachmentPreview();
-    		};
-    	}, [attachmentView]);
-    	react.default.useEffect(() => {
-    		if (attachmentView === null) return;
-    		if (view === "runs" && selectedId !== null && selectedId === attachmentView.runId) return;
-    		closeAttachment();
-    	}, [
-    		selectedId,
-    		view,
-    		attachmentView
-    	]);
+    	push("job-created", job?.createdAt, t("timelineJobCreated"), t("jobTitle"), "info");
+    	for (const task of tasks) {
+    		const name = `${task.typeLabel ?? task.type ?? task.id} · ${positionLabel(task.position)}`;
+    		push(`task-created-${task.id}`, task.createdAt, t("timelineTaskCreated"), name);
+    		push(`task-started-${task.id}`, task.startedAt, t("timelineTaskStarted"), name, "info");
+    		if (task.status === "failed" || task.status === "blocked") push(`task-failed-${task.id}`, task.finishedAt, t("timelineTaskFailed"), name, "warning");
+    		else if (task.status === "cancelled") push(`task-cancelled-${task.id}`, task.finishedAt, t("timelineTaskCancelled"), name, "warning");
+    		else push(`task-finished-${task.id}`, task.finishedAt, t("timelineTaskFinished"), name, "success");
+    	}
+    	push("job-updated", job?.updatedAt, t("timelineJobUpdated"), "", "neutral");
+    	events.sort((left, right) => left.at - right.at || left.key.localeCompare(right.key));
+    	if (events.length === 0) return renderEmpty(t("timelineEmpty"));
+    	return h("ol", { className: "buka-workflows-timeline" }, ...events.map((event) => h("li", {
+    		key: event.key,
+    		className: `buka-workflows-timelineItem is-${event.tone}`
+    	}, h("span", {
+    		className: "buka-workflows-timelineDot",
+    		"aria-hidden": true
+    	}), h("div", { className: "buka-workflows-timelineBody" }, h("div", { className: "buka-workflows-timelineHead" }, h("span", { className: "buka-workflows-timelineLabel" }, event.label), h("span", { className: "buka-workflows-timelineTime" }, formatTime(event.at))), event.detail === "" ? null : h("span", { className: "buka-workflows-timelineDetail" }, event.detail)))));
+    }
+    // .build/workflows/client/components/job-detail.js
+    /**
+    * 作业详情：头部摘要 + 看板 / 流程图 / 任务 / 附件库 / 时间线五个视图。
+    */
+    /**
+    * 作业详情视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderJobDetail(page) {
+    	const { t, state, actions } = page;
+    	const loaded = state.job;
+    	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
+    	if (loaded.data === null) return renderLoading(page);
+    	const job = loaded.data.job;
+    	if (job === void 0) return renderEmpty(t("notFound"));
+    	const tasks = jobTasks(state);
+    	const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state));
+    	const needsDeliveryRetry = job.status === "running" && tasks.some((task) => task.position === "end" && task.status === "ready");
+    	const starter = isRecord(job.starter) ? job.starter : null;
+    	return h("div", { className: "buka-workflows-detail" }, h("div", { className: "buka-workflows-jobHead" }, h("div", { className: "buka-workflows-jobTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("h2", { className: "buka-workflows-jobTitle" }, job.workflowName ?? job.workflowId ?? t("jobTitle")), typeof job.workflowVersion === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `v${job.workflowVersion}`) : null, renderStatusTag(t, job.status, "job")), h("div", { className: "buka-workflows-jobMeta" }, `${t("jobCreatedAt")} ${formatTime(job.createdAt)}`, ` · ${t("jobUpdatedAt")} ${formatTime(job.updatedAt)}`, starter === null ? "" : ` · ${t("starter")}: ${starter.kind === "session" ? `${t("starterSession")}${typeof starter.sessionId === "string" ? ` ${starter.sessionId}` : ""}` : t("starterHuman")}`), starter !== null && starter.kind === "session" && typeof starter.sessionId === "string" && starter.sessionId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => void actions.openSession(starter.sessionId)
+    	}, t("openStarterSession")) : null), needsDeliveryRetry ? h("div", {
+    		className: "buka-workflows-deliveryNotice",
+    		role: "status"
+    	}, h("p", { className: "buka-workflows-warn" }, t("deliveryRetryHint")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
+    		onClick: () => void actions.retryDelivery(),
+    		disabled: state.busy === "retry-delivery"
+    	}, t("retryDelivery"))) : null, job.error === null || job.error === void 0 ? null : renderSection(t("jobErrorTitle"), h("pre", { className: "buka-workflows-pre" }, jsonText(job.error))), renderSection(t("jobInput"), h("pre", { className: "buka-workflows-pre is-tall" }, jsonText(job.input ?? {}))), h("div", { className: "buka-workflows-viewTabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    		size: "sm",
+    		className: "buka-workflows-tabList",
+    		label: t("jobViewsAria"),
+    		value: state.jobView,
+    		onChange: (value) => actions.setJobView(value),
+    		items: [
+    			{
+    				value: "board",
+    				labelKey: "boardTab"
+    			},
+    			{
+    				value: "graph",
+    				labelKey: "graphTab"
+    			},
+    			{
+    				value: "tasks",
+    				labelKey: "tasksTab"
+    			},
+    			{
+    				value: "attachments",
+    				labelKey: "attachmentsTab"
+    			},
+    			{
+    				value: "timeline",
+    				labelKey: "timelineTab"
+    			}
+    		].map((tab) => ({
+    			value: tab.value,
+    			label: t(tab.labelKey),
+    			id: `buka-workflows-tab-${tab.value}`,
+    			panelId: `buka-workflows-panel-${tab.value}`
+    		}))
+    	})), h("div", { className: "buka-workflows-viewBody" }, state.jobView === "board" ? renderBoard(page) : state.jobView === "graph" ? renderJobGraph(page) : state.jobView === "tasks" ? renderTaskList(page) : state.jobView === "attachments" ? renderAttachments(page) : renderTimeline(page)), definition === null ? h("p", { className: "buka-workflows-hint" }, t("definitionMissing")) : null);
+    }
+    // .build/workflows/client/components/new-job-dialog.js
+    /**
+    * 新建作业对话框：人启动 = 原始输入 + 结构化输入。
+    */
+    /**
+    * 新建作业对话框。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderNewJobDialog(page) {
+    	const { t, state, actions } = page;
+    	const dialog = state.newJob;
+    	const start = currentDefinition(state)?.start?.task;
+    	const rawSchema = isRecord(start?.payload) ? start.payload : null;
+    	const structuredSchema = isRecord(start?.output) ? start.output : null;
+    	const rawHasFields = schemaFields(rawSchema).length > 0;
+    	const structuredHasFields = schemaFields(structuredSchema).length > 0;
+    	const body = [
+    		h("p", { className: "buka-workflows-hint" }, t("newJobHint")),
+    		h("div", { className: "buka-workflows-field" }, h("span", { className: "buka-workflows-fieldLabel" }, t("newJobRawTitle")), h("p", { className: "buka-workflows-fieldHint" }, t("newJobRawHint"))),
+    		...rawHasFields ? renderSchemaFields(page, {
+    			schema: rawSchema,
+    			values: dialog.raw,
+    			onChange: actions.setNewJobRaw,
+    			idPrefix: "buka-workflows-newjob-raw"
+    		}) : [h("div", {
+    			key: "raw-fallback",
+    			className: "buka-workflows-field"
+    		}, h("label", {
+    			className: "buka-workflows-fieldLabel",
+    			htmlFor: "buka-workflows-newjob-raw-request"
+    		}, t("newJobRawFallback")), h("textarea", {
+    			id: "buka-workflows-newjob-raw-request",
+    			className: "buka-workflows-textarea",
+    			rows: 3,
+    			value: dialog.raw.request ?? "",
+    			onChange: (event) => actions.setNewJobRaw("request", event.target.value)
+    		}))],
+    		h("div", { className: "buka-workflows-field" }, h("span", { className: "buka-workflows-fieldLabel" }, t("newJobStructuredTitle")), h("p", { className: "buka-workflows-fieldHint" }, t("newJobStructuredHint"))),
+    		...structuredHasFields ? renderSchemaFields(page, {
+    			schema: structuredSchema,
+    			values: dialog.structured,
+    			onChange: actions.setNewJobStructured,
+    			idPrefix: "buka-workflows-newjob-structured"
+    		}) : [renderJsonFallback(page, dialog.structured.__json ?? "", (next) => actions.setNewJobStructured("__json", next), "buka-workflows-newjob-structured-json")],
+    		dialog.error === null ? null : h("p", {
+    			className: "buka-workflows-formError",
+    			role: "alert"
+    		}, dialog.error)
+    	];
+    	return h(ClientModal, {
+    		open: dialog.open,
+    		onClose: actions.closeNewJob,
+    		title: t("newJobTitle"),
+    		closeLabel: t("close"),
+    		footer: h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			variant: "outline",
+    			onClick: actions.closeNewJob,
+    			disabled: dialog.submitting
+    		}, t("cancel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			variant: "primary",
+    			type: "button",
+    			onClick: actions.submitNewJob,
+    			disabled: dialog.submitting
+    		}, dialog.submitting ? t("newJobSubmitting") : t("newJobSubmit")))
+    	}, h("div", { className: "buka-workflows-dialogForm" }, ...body));
+    }
+    // .build/workflows/client/components/task-form.js
+    /**
+    * 任务结果表单：按任务类型的 `output` schema 渲染（人任务 / 认领后提交共用）。
+    */
+    /**
+    * 渲染结果表单：schema 字段 + 说明 + 错误提示。
+    *
+    * @param page
+    * @param task
+    * @returns React 元素数组
+    */
+    function renderTaskForm(page, task) {
+    	const { t, state, actions } = page;
+    	const workflowDefinition = currentDefinition(state);
+    	const schema = outputSchemaFor(mergedDefinition(currentJobDefinition(state), workflowDefinition), workflowDefinition, task);
+    	const form = state.taskForm;
+    	const elements = [];
+    	if (schemaFields(schema).length > 0) elements.push(...renderSchemaFields(page, {
+    		schema,
+    		values: form.values,
+    		onChange: actions.setTaskField,
+    		idPrefix: `buka-workflows-task-${task.id}`
+    	}));
+    	else elements.push(h("p", {
+    		className: "buka-workflows-hint",
+    		key: "no-schema"
+    	}, t("actionFormNoSchema")), renderJsonFallback(page, form.values.__json ?? "", (next) => actions.setTaskField("__json", next), `buka-workflows-task-${task.id}-json`));
+    	elements.push(h("div", {
+    		key: "text",
+    		className: "buka-workflows-field"
+    	}, h("label", {
+    		className: "buka-workflows-fieldLabel",
+    		htmlFor: `buka-workflows-task-${task.id}-text`
+    	}, t("actionTextLabel")), h("textarea", {
+    		id: `buka-workflows-task-${task.id}-text`,
+    		className: "buka-workflows-textarea",
+    		rows: 2,
+    		value: form.text,
+    		onChange: (event) => actions.setTaskText(event.target.value)
+    	})));
+    	if (form.error !== null) elements.push(h("p", {
+    		key: "error",
+    		className: "buka-workflows-formError",
+    		role: "alert"
+    	}, form.error));
+    	return elements;
+    }
+    // .build/workflows/client/components/task-drawer.js
+    /**
+    * 任务抽屉：payload、依赖、执行记录、结果、附件与按 `allowedActions` 展示的操作。
+    */
+    /**
+    * 任务详情抽屉。
+    *
+    * @param page
+    * @returns React 元素；没有打开任务时为 null
+    */
+    function renderTaskDrawer(page) {
+    	const { t, state, actions } = page;
+    	if (state.taskId === null) return null;
+    	const loaded = state.task;
+    	const body = [];
+    	if (loaded.error !== null && loaded.data === null) body.push(renderFailure(page, loaded.error, actions.refresh));
+    	else if (loaded.data === null) body.push(renderLoading(page));
+    	else body.push(...renderTaskBody(page, loaded.data));
+    	const task = loaded.data;
+    	const title = task === null ? t("taskDrawerTitle") : `${task.typeLabel ?? task.type ?? task.id}`;
+    	return h(ClientModal, {
+    		open: true,
+    		headless: true,
+    		onClose: actions.closeTask,
+    		title,
+    		closeLabel: t("close"),
+    		backdropBlur: false,
+    		className: "buka-workflows-drawer"
+    	}, h("div", { className: "buka-workflows-drawerHead" }, h("div", { className: "buka-workflows-drawerTitleRow" }, h("span", { className: "buka-workflows-drawerTitle" }, title), task === null ? null : renderStatusTag(t, task.status, "task")), task === null ? null : h("span", { className: "buka-workflows-drawerMeta" }, `${t("taskId")}: ${task.id}`), h("div", { className: "buka-workflows-drawerActions" }, task === null ? null : renderSessionButton(page, task), h("button", {
+    		type: "button",
+    		className: "buka-workflows-drawerClose",
+    		"aria-label": t("close"),
+    		title: t("close"),
+    		onClick: actions.closeTask
+    	}, h("span", { "aria-hidden": true }, "×")))), h("div", { className: "buka-workflows-drawerBody" }, ...body));
+    }
+    /**
+    * 抽屉正文。
+    *
+    * @param page
+    * @param task
+    * @returns
+    */
+    function renderTaskBody(page, task) {
+    	const { t, state, actions } = page;
+    	const positionLabel = typeof task.positionLabel === "string" && task.positionLabel !== "" ? task.positionLabel : task.position ?? "";
+    	const typeDefinition = taskTypeOf(state, task);
+    	const claimant = claimantName(task.claimant, t);
+    	const allowed = Array.isArray(task.allowedActions) ? task.allowedActions : [];
+    	const human = isHumanTask(state, task);
+    	const canClaim = allowed.includes("claim") && task.status === "ready";
+    	const canComplete = allowed.includes("complete");
+    	const showForm = human && (task.status === "ready" || task.status === "running") && allowed.length > 0;
+    	const elements = [];
+    	elements.push(renderKv([
+    		[t("taskPosition"), positionLabel === "" ? t("taskTypeUnset") : positionLabel],
+    		[t("taskType"), task.typeLabel ?? task.type ?? t("taskTypeUnset")],
+    		[t("taskStatus"), statusLabel(t, task.status)],
+    		[t("taskClaimant"), claimant === "" ? t("taskTypeUnset") : claimant],
+    		[t("taskCreatedAt"), formatTime(task.createdAt)],
+    		[t("taskStartedAt"), formatTime(task.startedAt)],
+    		[t("taskFinishedAt"), formatTime(task.finishedAt)],
+    		[t("taskTypeAssistant"), isRecord(typeDefinition) && typeof typeDefinition.assistant === "string" ? typeDefinition.assistant : t("taskTypeUnset")]
+    	]));
+    	if (typeof task.typeDescription === "string" && task.typeDescription !== "") elements.push(h("p", {
+    		key: "type-desc",
+    		className: "buka-workflows-hint"
+    	}, task.typeDescription));
+    	const deps = Array.isArray(task.deps) ? task.deps : [];
+    	elements.push(renderSection(t("taskDepsTitle"), deps.length === 0 ? renderEmpty(t("taskDepsEmpty")) : h("ul", { className: "buka-workflows-depList" }, ...deps.map((dep) => h("li", {
+    		key: dep.id,
+    		className: "buka-workflows-depRow"
+    	}, h("button", {
+    		type: "button",
+    		className: "buka-workflows-depLink",
+    		onClick: () => actions.openTask(dep.id)
+    	}, dep.typeLabel ?? dep.type ?? dep.id), renderStatusTag(t, dep.status, "task"), dep.resultSummary === null || dep.resultSummary === void 0 ? null : h("span", { className: "buka-workflows-depSummary" }, dep.resultSummary))))));
+    	elements.push(renderSection(t("taskPayloadTitle"), renderJsonBlock(task.payload ?? null, t("taskPayloadEmpty"))));
+    	const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+    	elements.push(renderSection(t("taskAttemptsTitle"), attempts.length === 0 ? renderEmpty(t("taskAttemptsEmpty")) : h("ul", { className: "buka-workflows-attemptList" }, ...attempts.map((attempt) => renderAttempt(page, attempt)))));
+    	elements.push(renderSection(t("taskResultTitle"), renderTaskResult(page, task)));
+    	const actionsList = [];
+    	if (canClaim) actionsList.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "claim",
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.runTaskAction("claim"),
+    		disabled: state.taskForm.submitting
+    	}, t("actionClaim")));
+    	if (allowed.includes("retry")) actionsList.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "retry",
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.runTaskAction("retry"),
+    		disabled: state.taskForm.submitting
+    	}, t("actionRetry")));
+    	if (allowed.includes("cancel")) actionsList.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "cancel",
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => {
+    			if (typeof window !== "undefined" && typeof window.confirm === "function") {
+    				if (!window.confirm(t("actionCancelConfirm"))) return;
+    			}
+    			actions.runTaskAction("cancel");
+    		},
+    		disabled: state.taskForm.submitting
+    	}, t("actionCancel")));
+    	const actionBlock = [];
+    	if (showForm) actionBlock.push(renderSection(t("actionFormTitle"), h("div", { className: "buka-workflows-taskForm" }, h("p", { className: "buka-workflows-hint" }, t("actionFormHint")), ...renderTaskForm(page, task), h("div", { className: "buka-workflows-formActions" }, ...actionsList, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.runTaskAction("complete"),
+    		disabled: state.taskForm.submitting || !canComplete
+    	}, state.taskForm.submitting ? t("actionSubmitting") : t("actionSubmitComplete"))))));
+    	else if (actionsList.length > 0) actionBlock.push(renderSection(t("taskActionsTitle"), h("div", { className: "buka-workflows-formActions" }, ...actionsList)));
+    	else if (allowed.includes("complete")) actionBlock.push(renderSection(t("taskActionsTitle"), h("div", { className: "buka-workflows-formActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.runTaskAction("complete"),
+    		disabled: state.taskForm.submitting
+    	}, t("actionSubmitComplete")))));
+    	else actionBlock.push(renderSection(t("taskActionsTitle"), renderEmpty(t("taskActionsEmpty"))));
+    	elements.push(...actionBlock);
+    	if (task.position === "end") elements.unshift(renderSection(t("finalDeliverableTitle"), renderJsonBlock(task.payload ?? null, t("taskPayloadEmpty"))));
+    	if (typeof task.claimant?.sessionId === "string" && task.claimant.sessionId !== "") elements.unshift(h("div", {
+    		key: "session",
+    		className: "buka-workflows-sessionBar"
+    	}, h("span", { className: "buka-workflows-label" }, t("sessionLabel")), h("code", { className: "buka-workflows-inlineCode" }, task.claimant.sessionId), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => void actions.openSession(task.claimant?.sessionId)
+    	}, t("openSession"))));
+    	return elements;
+    }
+    /**
+    * 执行记录的一行。
+    *
+    * @param page
+    * @param attempt
+    * @returns
+    */
+    function renderAttempt(page, attempt) {
+    	const { t, actions } = page;
+    	const meta = [formatTime(attempt.startedAt), attempt.finishedAt === null || attempt.finishedAt === void 0 ? "" : formatTime(attempt.finishedAt)].filter((part) => part !== "");
+    	const error = attempt.error === null || attempt.error === void 0 ? "" : jsonText(attempt.error);
+    	return h("li", {
+    		key: attempt.id,
+    		className: "buka-workflows-attempt"
+    	}, h("div", { className: "buka-workflows-attemptHead" }, h("code", { className: "buka-workflows-inlineCode" }, attempt.id), renderStatusTag(t, attempt.status, "task"), attempt.stopReason === null || attempt.stopReason === void 0 ? null : h("span", { className: "buka-workflows-attemptMeta" }, `${t("taskAttemptStopReason")}: ${String(attempt.stopReason)}`), h("span", { className: "buka-workflows-attemptMeta" }, meta.join(" · "))), typeof attempt.sessionId === "string" && attempt.sessionId !== "" ? h("div", { className: "buka-workflows-sessionRow" }, h("span", { className: "buka-workflows-attemptMeta" }, `${t("sessionLabel")}: ${attempt.sessionId}`), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => void actions.openSession(attempt.sessionId)
+    	}, t("openSession"))) : null, error === "" ? null : h("p", { className: "buka-workflows-failure" }, `${t("taskAttemptError")}: ${error}`));
+    }
+    /**
+    * 结果区：文本 + 结构化产出 + 附件。
+    *
+    * @param page
+    * @param task
+    * @returns
+    */
+    function renderTaskResult(page, task) {
+    	const { t, actions } = page;
+    	const result = isRecord(task.result) ? task.result : null;
+    	if (result === null) return renderEmpty(t("taskResultEmpty"));
+    	const text = typeof result.text === "string" ? result.text : "";
+    	const output = result.output;
+    	const attachments = Array.isArray(result.attachments) ? result.attachments : [];
+    	return h("div", { className: "buka-workflows-result" }, text === "" ? null : renderSection(t("taskResultText"), h("pre", { className: "buka-workflows-pre" }, text)), output === void 0 || output === null ? null : renderSection(t("taskResultOutput"), renderJsonBlock(output, t("taskResultEmpty"))), attachments.length === 0 ? null : renderSection(t("taskResultAttachments"), h("ul", { className: "buka-workflows-attachmentList" }, ...attachments.map((attachment) => {
+    		const name = typeof attachment.name === "string" ? attachment.name : String(attachment.id);
+    		return h("li", {
+    			key: String(attachment.id),
+    			className: "buka-workflows-attachment"
+    		}, renderAttachmentLink(page, attachment, actions.openAttachment), h("span", { className: "buka-workflows-attachmentMeta" }, [formatBytes(attachment.bytes), attachment.mime].filter(Boolean).join(" · ")), typeof attachment.description === "string" && attachment.description !== "" ? h("span", { className: "buka-workflows-attachmentDescription" }, attachment.description) : null, h("a", {
+    			className: "buka-workflows-attachmentDownload",
+    			href: attachmentUrl(jobIdOf(page), attachment.id),
+    			download: name
+    		}, t("attachmentDownload")));
+    	}))));
+    }
+    /**
+    * 任务抽屉头部右侧的会话入口（承办者会话）。
+    *
+    * @param page
+    * @param task
+    * @returns
+    */
+    function renderSessionButton(page, task) {
+    	const sessionId = task.claimant?.sessionId;
+    	if (typeof sessionId !== "string" || sessionId === "") return null;
+    	return h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => void page.actions.openSession(sessionId)
+    	}, page.t("openSession"));
+    }
+    /**
+    * 当前作业 id。
+    *
+    * @param page
+    * @returns
+    */
+    function jobIdOf(page) {
+    	if (page.state.route.kind === "job") return page.state.route.jobId;
+    	return page.state.job.data?.job?.id ?? "";
+    }
+    // .build/workflows/client/components/workflow-detail.js
+    /**
+    * 工作流详情：流程图 + 岗位 / 任务类型 / 边 / 开始结束契约 / 预算 + 作业列表。
+    */
+    /**
+    * 工作流详情视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderWorkflowDetail(page) {
+    	const { t, state, actions } = page;
+    	const loaded = state.workflow;
+    	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
+    	if (loaded.data === null) return renderLoading(page);
+    	const detail = loaded.data;
+    	const workflow = detail.workflow;
+    	if (workflow === void 0) return renderEmpty(t("notFound"), t("definitionMissing"));
+    	const definition = workflow.definition ?? null;
+    	const graphPositionsList = Array.isArray(detail.graph?.positions) ? detail.graph.positions : graphPositions(definition);
+    	const graphEdges = Array.isArray(detail.graph?.edges) ? detail.graph.edges : definition?.edges;
+    	const nodes = [
+    		{
+    			id: "start",
+    			label: detail.graph?.start?.label ?? t("graphStart"),
+    			kind: "start",
+    			status: "idle"
+    		},
+    		...graphPositionsList.filter((position) => typeof position?.id === "string" && position.id !== "").map((position) => ({
+    			id: position.id,
+    			label: typeof position.label === "string" && position.label !== "" ? position.label : position.id,
+    			kind: "position",
+    			executor: position.executor ?? null,
+    			...typeof position.executor?.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
+    			status: "idle",
+    			meta: renderExecutor(page, position.executor)
+    		})),
+    		{
+    			id: "end",
+    			label: detail.graph?.end?.label ?? t("graphEnd"),
+    			kind: "end",
+    			status: "idle"
+    		}
+    	];
+    	const edges = (Array.isArray(graphEdges) ? graphEdges : []).map((edge) => ({
+    		from: typeof edge.from === "string" ? edge.from : "",
+    		to: typeof edge.to === "string" ? edge.to : "",
+    		types: Array.isArray(edge.types) ? edge.types.filter((type) => typeof type === "string") : [],
+    		back: edge.back === true
+    	}));
+    	const jobs = Array.isArray(detail.jobs) ? detail.jobs : [];
+    	const allTypes = allTaskTypes(definition);
+    	return h("div", { className: "buka-workflows-detail" }, h("div", { className: "buka-workflows-workflowHead" }, h("div", { className: "buka-workflows-workflowTitleGroup" }, h("h2", { className: "buka-workflows-workflowTitle" }, typeof workflow.name === "string" && workflow.name !== "" ? workflow.name : workflow.id), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `v${workflow.version ?? 0}`), renderStatusTag(t, workflow.status, "workflow")), typeof workflow.description === "string" && workflow.description !== "" ? h("p", { className: "buka-workflows-workflowDesc" }, workflow.description) : null), renderSection(t("graphTitle"), nodes.length === 0 ? renderEmpty(t("definitionMissing")) : renderWorkflowGraph(page, {
+    		nodes,
+    		edges
+    	})), renderSection(`${t("positionsTitle")} / ${t("taskTypesTitle")}`, positionsOf(definition).length === 0 ? renderEmpty(t("positionsEmpty")) : h("div", { className: "buka-workflows-positionList" }, ...positionsOf(definition).map((position) => h("article", {
+    		key: position.id,
+    		className: "buka-workflows-positionCard"
+    	}, h("div", { className: "buka-workflows-positionHead" }, h("code", { className: "buka-workflows-inlineCode" }, position.id), h("span", { className: "buka-workflows-positionLabel" }, position.label), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, renderExecutor(page, position.executor))), position.description === "" ? null : h("p", { className: "buka-workflows-positionDesc" }, position.description), position.taskTypes.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("taskTypesTitle")) : h("div", { className: "buka-workflows-typeList" }, ...position.taskTypes.map((type) => h("details", {
+    		key: String(type.id),
+    		className: "buka-workflows-typeCard"
+    	}, h("summary", { className: "buka-workflows-typeHead" }, h("code", { className: "buka-workflows-inlineCode" }, String(type.id)), h("span", { className: "buka-workflows-typeLabel" }, type.label ?? String(type.id)), typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${type.assistant}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null), typeof type.description === "string" && type.description !== "" ? h("p", { className: "buka-workflows-typeDesc" }, type.description) : null, h("div", { className: "buka-workflows-typeColumns" }, h("div", { className: "buka-workflows-typeColumn" }, h("span", { className: "buka-workflows-fieldLabel" }, t("taskTypePayload")), renderSchema(page, type.payload)), h("div", { className: "buka-workflows-typeColumn" }, h("span", { className: "buka-workflows-fieldLabel" }, t("taskTypeOutput")), renderSchema(page, type.output))), Array.isArray(type.requires) && type.requires.length > 0 ? h("div", { className: "buka-workflows-requiresRow" }, h("span", { className: "buka-workflows-fieldLabel" }, t("taskTypeRequires")), ...type.requires.map((require$1, index) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
+    		key: `${index}`,
+    		tone: "neutral"
+    	}, (Array.isArray(require$1?.types) ? require$1.types : []).join(" / ")))) : null)))))), h("span", { className: "buka-workflows-hint" }, `${allTypes.length} ${t("taskTypesTitle")}`)), renderSection(t("edgesTitle"), edgesOf(definition).length === 0 ? renderEmpty(t("edgesEmpty")) : h("ul", { className: "buka-workflows-edgeList" }, ...edgesOf(definition).map((edge, index) => h("li", {
+    		key: `${edge.from}-${edge.to}-${index}`,
+    		className: "buka-workflows-edgeRow"
+    	}, h("code", { className: "buka-workflows-inlineCode" }, edge.from), h("span", {
+    		className: "buka-workflows-edgeArrowText",
+    		"aria-hidden": true
+    	}, "→"), h("code", { className: "buka-workflows-inlineCode" }, edge.to), edge.types.length === 0 ? h("span", { className: "buka-workflows-hint" }, t("edgeAllTypes")) : h("span", { className: "buka-workflows-edgeTypes" }, ...edge.types.map((type) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
+    		key: type,
+    		tone: "neutral"
+    	}, type))), edge.back ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("edgeBack")) : null)))), h("div", { className: "buka-workflows-contractGrid" }, renderSection(t("startContractTitle"), h("div", { className: "buka-workflows-contractBody" }, h("p", { className: "buka-workflows-hint" }, t("startContractHint")), h("div", { className: "buka-workflows-typeColumns" }, h("div", { className: "buka-workflows-typeColumn" }, h("span", { className: "buka-workflows-fieldLabel" }, t("taskTypePayload")), renderSchema(page, definition?.start?.task?.payload)), h("div", { className: "buka-workflows-typeColumn" }, h("span", { className: "buka-workflows-fieldLabel" }, t("taskTypeOutput")), renderSchema(page, definition?.start?.task?.output))))), renderSection(t("endContractTitle"), h("div", { className: "buka-workflows-contractBody" }, h("p", { className: "buka-workflows-hint" }, t("endContractHint")), renderSchema(page, definition?.end?.task?.payload)))), renderSection(t("budgetsTitle"), renderKv([[t("budgetMaxTasks"), typeof definition?.budgets?.maxTasks === "number" ? String(definition.budgets.maxTasks) : t("budgetUnset")], [t("budgetMaxDuration"), typeof definition?.budgets?.maxDurationHours === "number" ? `${definition.budgets.maxDurationHours} ${t("budgetHours")}` : t("budgetUnset")]])), renderSection(t("workflowJobsTitle"), jobs.length === 0 ? renderEmpty(t("workflowJobsEmpty"), t("workflowJobsEmptyHint")) : h("ul", { className: "buka-workflows-cards" }, ...jobs.map((job) => h("li", { key: job.id }, h("button", {
+    		type: "button",
+    		className: "buka-workflows-card",
+    		onClick: () => actions.openJob(workflowIdOf(page), job.id)
+    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("span", { className: "buka-workflows-cardTitle" }, job.inputSummary ?? job.id)), h("span", { className: "buka-workflows-cardTags" }, renderStatusTag(t, job.status, "job"))), h("span", { className: "buka-workflows-meta" }, [taskCountsText(job.taskCounts ?? null, t), timeText(job.createdAt)].filter((part) => part !== "").join(" · "))))))));
+    }
+    /**
+    * 当前工作流 id。
+    *
+    * @param page
+    * @returns
+    */
+    function workflowIdOf(page) {
+    	if (page.state.route.kind === "workflow") return page.state.route.workflowId;
+    	return page.state.workflow.data?.workflow?.id ?? "";
+    }
+    // .build/workflows/client/components/workflow-list.js
+    /**
+    * 工作流列表：名称、描述、版本、状态与作业数。
+    */
+    /**
+    * 工作流列表视图。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderWorkflowList(page) {
+    	const { t, state, actions } = page;
+    	const workflows = state.workflows;
+    	if (workflows.error !== null && workflows.data === null) return renderFailure(page, workflows.error, actions.refresh);
+    	if (workflows.status !== "ready" && workflows.data === null) return renderLoading(page);
+    	const items = workflows.data ?? [];
+    	if (items.length === 0) return renderEmpty(t("workflowsEmpty"), t("workflowsEmptyHint"));
+    	return h("div", { className: "buka-workflows-listPane" }, h("p", { className: "buka-workflows-hint" }, t("workflowsHint")), h("ul", { className: "buka-workflows-cards" }, ...items.map((workflow) => h("li", { key: workflow.id }, h("button", {
+    		type: "button",
+    		className: "buka-workflows-card",
+    		onClick: () => actions.openWorkflow(workflow.id)
+    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-cardTitle" }, typeof workflow.name === "string" && workflow.name !== "" ? workflow.name : workflow.id), typeof workflow.version === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `v${workflow.version}`) : null), h("span", { className: "buka-workflows-cardTags" }, renderStatusTag(t, workflow.status, "workflow"))), typeof workflow.description === "string" && workflow.description !== "" ? h("span", { className: "buka-workflows-cardDesc" }, workflow.description) : null, h("span", { className: "buka-workflows-meta" }, [fill(t, "jobCount", { n: typeof workflow.jobCount === "number" ? workflow.jobCount : 0 }), typeof workflow.updatedAt === "string" && workflow.updatedAt !== "" ? `${t("updatedAt")} ${formatTime(workflow.updatedAt)}` : ""].filter((part) => part !== "").join(" · ")))))));
+    }
+    // .build/workflows/client/components/page-shell.js
+    /**
+    * 页面外壳：面包屑返回、标题、工具栏、内容区、页脚、Toast 与抽屉 / 对话框。
+    */
+    /**
+    * 页面外壳。
+    *
+    * @param page
+    * @returns React 元素
+    */
+    function renderPage(page) {
+    	const { t, state, actions } = page;
+    	const route = state.route;
+    	const backButton = route.kind === "workflows" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-toolbarButton buka-workflows-back",
+    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 }),
+    		onClick: route.kind === "workflow" ? actions.backToWorkflows : actions.backToWorkflow
+    	}, route.kind === "workflow" ? t("backToWorkflows") : t("backToWorkflow"));
+    	const title = route.kind === "workflows" ? t("title") : route.kind === "workflow" ? state.workflow.data?.workflow?.name ?? route.workflowId : fill(t, "jobSeq", { seq: state.job.data?.job?.seq ?? 0 });
+    	const workflowStatus = state.workflow.data?.workflow?.status;
+    	const jobStatus = state.job.data?.job?.status;
+    	const live = jobStatus === "running";
+    	return h("div", { className: `buka-workflows-page${route.kind === "job" ? " is-wide" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, h("div", { className: "buka-workflows-titleRow" }, h("div", { className: "buka-workflows-titleGroup" }, backButton, h("h1", { className: "buka-workflows-title" }, title)), h("div", { className: "buka-workflows-toolbar" }, ...route.kind === "workflow" ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "activate",
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-toolbarButton",
+    		onClick: () => void actions.activateWorkflow(workflowStatus !== "active"),
+    		disabled: state.busy === "activate" || workflowStatus === void 0
+    	}, workflowStatus === "active" ? t("deactivate") : t("activate")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "new-job",
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workflows-toolbarButton",
+    		onClick: actions.openNewJob,
+    		disabled: workflowStatus !== "active"
+    	}, t("newJob"))] : [], ...route.kind === "job" ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		key: "cancel-job",
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-toolbarButton",
+    		onClick: () => {
+    			if (typeof window !== "undefined" && typeof window.confirm === "function") {
+    				if (!window.confirm(t("cancelJobConfirm"))) return;
+    			}
+    			actions.cancelJob();
+    		},
+    		disabled: state.busy === "cancel-job" || jobStatus !== "running"
+    	}, t("cancelJob"))] : [], h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-toolbarButton",
+    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
+    		onClick: actions.refresh
+    	}, t("refresh")))))), h("div", { className: `buka-workflows-body${route.kind === "job" ? " is-wide" : ""}` }, route.kind === "workflows" ? renderWorkflowList(page) : route.kind === "workflow" ? renderWorkflowDetail(page) : renderJobDetail(page)), h("footer", { className: "buka-workflows-footer" }, h("p", {
+    		className: "buka-workflows-statusWithDot",
+    		role: "status"
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: live ? "ongoing" : "idle" }), live ? t("autoRefreshLive") : t("autoRefreshIdle"))), renderNewJobDialog(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
+    		key: state.notice.seq,
+    		text: state.notice.text,
+    		...state.notice.kind === "success" ? { tone: "success" } : {},
+    		...state.notice.kind === "success" ? {} : { icon: h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}) },
+    		holdMs: 3200,
+    		onDone: actions.dismissNotice
+    	}));
+    }
+    // .build/workflows/client/state/use-actions.js
+    /**
+    * 页面动作：导航、取数后的写回、工作流激活、作业启停、任务动作、会话与附件。
+    *
+    * 所有异步动作都走函数式 `setState`；动作失败只写页面错误 / Toast，不抛出去。
+    */
+    /**
+    * 创建页面动作。
+    *
+    * @param store 状态与 setter
+    * @param deps 词典、Service 取值器与 Toast
+    * @returns 动作集合
+    */
+    function createActions(store, deps) {
+    	const { t, getService } = deps;
+    	const { state, setState } = store;
+    	/** 当前作业 id（作业详情路由或已加载的作业详情）。 */
+    	function jobIdOf(current = state) {
+    		if (current.route.kind === "job") return current.route.jobId;
+    		return current.job.data?.job?.id ?? "";
+    	}
+    	/** 当前工作流 id。 */
+    	function workflowIdOf(current = state) {
+    		if (current.route.kind === "workflow") return current.route.workflowId;
+    		if (current.route.kind === "job") return current.route.workflowId;
+    		return current.workflow.data?.workflow?.id ?? "";
+    	}
+    	/** 用 Toast 显示一次操作结果。 */
+    	function flash(kind, text) {
+    		setState((current) => ({
+    			...current,
+    			notice: {
+    				kind,
+    				text,
+    				seq: Date.now() + Math.random()
+    			}
+    		}));
+    	}
+    	/** 手动刷新：递增 tick 触发所有数据 effect。 */
+    	function refresh() {
+    		setState((current) => ({
+    			...current,
+    			tick: current.tick + 1
+    		}));
+    	}
     	return {
-    		openAttachment,
-    		closeAttachment,
-    		fetchAttachmentPreview
+    		t,
+    		getService,
+    		flash,
+    		refresh,
+    		dismissNotice: () => setState((current) => ({
+    			...current,
+    			notice: null
+    		})),
+    		openWorkflow(workflowId) {
+    			setState((current) => ({
+    				...current,
+    				route: {
+    					kind: "workflow",
+    					workflowId
+    				},
+    				workflow: {
+    					status: "loading",
+    					data: null,
+    					error: null
+    				},
+    				job: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				taskId: null,
+    				task: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				attachment: null,
+    				tick: current.tick + 1
+    			}));
+    		},
+    		backToWorkflows() {
+    			setState((current) => ({
+    				...current,
+    				route: { kind: "workflows" },
+    				workflow: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				job: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				taskId: null,
+    				task: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				attachment: null,
+    				tick: current.tick + 1
+    			}));
+    		},
+    		openJob(workflowId, jobId) {
+    			setState((current) => ({
+    				...current,
+    				route: {
+    					kind: "job",
+    					workflowId,
+    					jobId
+    				},
+    				job: {
+    					status: "loading",
+    					data: null,
+    					error: null
+    				},
+    				jobView: "board",
+    				taskId: null,
+    				task: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				attachment: null,
+    				tick: current.tick + 1
+    			}));
+    		},
+    		backToWorkflow() {
+    			const workflowId = workflowIdOf();
+    			if (workflowId === "") {
+    				setState((current) => ({
+    					...current,
+    					route: { kind: "workflows" }
+    				}));
+    				return;
+    			}
+    			setState((current) => ({
+    				...current,
+    				route: {
+    					kind: "workflow",
+    					workflowId
+    				},
+    				job: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				taskId: null,
+    				task: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				attachment: null,
+    				tick: current.tick + 1
+    			}));
+    		},
+    		setJobView(view) {
+    			setState((current) => ({
+    				...current,
+    				jobView: view
+    			}));
+    		},
+    		async activateWorkflow(active) {
+    			const workflowId = workflowIdOf();
+    			if (workflowId === "") return;
+    			setState((current) => ({
+    				...current,
+    				busy: "activate"
+    			}));
+    			try {
+    				await postJson(WORKFLOW_ACTIVATE_ROUTE, {
+    					id: workflowId,
+    					active
+    				});
+    				setState((current) => {
+    					const detail = current.workflow.data;
+    					const status = active ? "active" : "retired";
+    					const nextDetail = detail === null || detail.workflow === void 0 ? current.workflow : {
+    						...current.workflow,
+    						data: {
+    							...detail,
+    							workflow: {
+    								...detail.workflow,
+    								status
+    							}
+    						}
+    					};
+    					const nextWorkflows = current.workflows.data === null ? current.workflows : {
+    						...current.workflows,
+    						data: current.workflows.data.map((item) => item.id === workflowId ? {
+    							...item,
+    							status
+    						} : item)
+    					};
+    					return {
+    						...current,
+    						busy: null,
+    						tick: current.tick + 1,
+    						workflow: nextDetail,
+    						workflows: nextWorkflows
+    					};
+    				});
+    				flash("success", t("activateDone"));
+    			} catch (failure) {
+    				setState((current) => ({
+    					...current,
+    					busy: null
+    				}));
+    				flash("error", `${t("activateFailed")} ${messageOf(failure)}`);
+    			}
+    		},
+    		openNewJob() {
+    			setState((current) => ({
+    				...current,
+    				newJob: {
+    					open: true,
+    					raw: {},
+    					structured: {},
+    					error: null,
+    					submitting: false
+    				}
+    			}));
+    		},
+    		closeNewJob() {
+    			setState((current) => ({
+    				...current,
+    				newJob: {
+    					open: false,
+    					raw: {},
+    					structured: {},
+    					error: null,
+    					submitting: false
+    				}
+    			}));
+    		},
+    		setNewJobRaw(name, value) {
+    			setState((current) => ({
+    				...current,
+    				newJob: {
+    					...current.newJob,
+    					raw: {
+    						...current.newJob.raw,
+    						[name]: value
+    					},
+    					error: null
+    				}
+    			}));
+    		},
+    		setNewJobStructured(name, value) {
+    			setState((current) => ({
+    				...current,
+    				newJob: {
+    					...current.newJob,
+    					structured: {
+    						...current.newJob.structured,
+    						[name]: value
+    					},
+    					error: null
+    				}
+    			}));
+    		},
+    		async submitNewJob() {
+    			const current = state;
+    			const definition = currentDefinition(current);
+    			const workflowId = workflowIdOf(current);
+    			if (workflowId === "") return;
+    			const start = definition?.start?.task;
+    			const rawSchema = isRecord(start?.payload) ? start.payload : null;
+    			const structuredSchema = isRecord(start?.output) ? start.output : null;
+    			const draft = current.newJob;
+    			let rawInput;
+    			if (schemaFields(rawSchema).length > 0) {
+    				const parsed = parseSchemaValues(rawSchema, draft.raw, t);
+    				if ("error" in parsed) {
+    					setState((now) => ({
+    						...now,
+    						newJob: {
+    							...now.newJob,
+    							error: parsed.error
+    						}
+    					}));
+    					return;
+    				}
+    				rawInput = parsed.value;
+    			} else {
+    				const request = (draft.raw.request ?? "").trim();
+    				if (request === "") {
+    					setState((now) => ({
+    						...now,
+    						newJob: {
+    							...now.newJob,
+    							error: fill(t, "fieldRequired", { name: t("newJobRawFallback") })
+    						}
+    					}));
+    					return;
+    				}
+    				rawInput = { request };
+    			}
+    			let structuredInput;
+    			if (schemaFields(structuredSchema).length > 0) {
+    				const parsed = parseSchemaValues(structuredSchema, draft.structured, t);
+    				if ("error" in parsed) {
+    					setState((now) => ({
+    						...now,
+    						newJob: {
+    							...now.newJob,
+    							error: parsed.error
+    						}
+    					}));
+    					return;
+    				}
+    				structuredInput = parsed.value;
+    			} else {
+    				const text = (draft.structured.__json ?? "").trim();
+    				if (text === "") structuredInput = {};
+    				else {
+    					const parsed = parseJson(text);
+    					if (!isRecord(parsed)) {
+    						setState((now) => ({
+    							...now,
+    							newJob: {
+    								...now.newJob,
+    								error: `${t("newJobJsonInvalid")} ${text.slice(0, 120)}`
+    							}
+    						}));
+    						return;
+    					}
+    					structuredInput = parsed;
+    				}
+    			}
+    			setState((now) => ({
+    				...now,
+    				newJob: {
+    					...now.newJob,
+    					submitting: true,
+    					error: null
+    				}
+    			}));
+    			try {
+    				const body = await postJson(JOB_START_ROUTE, {
+    					workflowId,
+    					rawInput,
+    					structuredInput
+    				});
+    				const jobId = typeof body.jobId === "string" ? body.jobId : "";
+    				setState((now) => ({
+    					...now,
+    					newJob: {
+    						open: false,
+    						raw: {},
+    						structured: {},
+    						error: null,
+    						submitting: false
+    					},
+    					route: jobId === "" ? now.route : {
+    						kind: "job",
+    						workflowId,
+    						jobId
+    					},
+    					job: {
+    						status: "loading",
+    						data: null,
+    						error: null
+    					},
+    					jobView: "board",
+    					tick: now.tick + 1
+    				}));
+    				flash("success", t("newJobStarted"));
+    			} catch (failure) {
+    				setState((now) => ({
+    					...now,
+    					newJob: {
+    						...now.newJob,
+    						submitting: false,
+    						error: `${t("newJobFailed")} ${messageOf(failure)}`
+    					}
+    				}));
+    			}
+    		},
+    		async cancelJob() {
+    			const jobId = jobIdOf();
+    			if (jobId === "") return;
+    			setState((current) => ({
+    				...current,
+    				busy: "cancel-job"
+    			}));
+    			try {
+    				await postJson(JOB_ACTION_ROUTE, {
+    					jobId,
+    					action: "cancel"
+    				});
+    				setState((current) => ({
+    					...current,
+    					busy: null,
+    					tick: current.tick + 1
+    				}));
+    			} catch (failure) {
+    				setState((current) => ({
+    					...current,
+    					busy: null
+    				}));
+    				flash("error", `${t("taskActionFailed")} ${messageOf(failure)}`);
+    			}
+    		},
+    		async retryDelivery() {
+    			const jobId = jobIdOf();
+    			if (jobId === "") return;
+    			setState((current) => ({
+    				...current,
+    				busy: "retry-delivery"
+    			}));
+    			try {
+    				await postJson(JOB_ACTION_ROUTE, {
+    					jobId,
+    					action: "retry-delivery"
+    				});
+    				setState((current) => ({
+    					...current,
+    					busy: null,
+    					tick: current.tick + 1
+    				}));
+    				flash("success", t("deliveryRetryStarted"));
+    			} catch (failure) {
+    				setState((current) => ({
+    					...current,
+    					busy: null
+    				}));
+    				flash("error", `${t("taskActionFailed")} ${messageOf(failure)}`);
+    			}
+    		},
+    		openTask(taskId) {
+    			setState((current) => ({
+    				...current,
+    				taskId,
+    				task: {
+    					status: "loading",
+    					data: null,
+    					error: null
+    				},
+    				taskForm: {
+    					values: {},
+    					text: "",
+    					error: null,
+    					submitting: false
+    				}
+    			}));
+    		},
+    		closeTask() {
+    			setState((current) => ({
+    				...current,
+    				taskId: null,
+    				task: {
+    					status: "idle",
+    					data: null,
+    					error: null
+    				},
+    				taskForm: {
+    					values: {},
+    					text: "",
+    					error: null,
+    					submitting: false
+    				}
+    			}));
+    		},
+    		setTaskField(name, value) {
+    			setState((current) => ({
+    				...current,
+    				taskForm: {
+    					...current.taskForm,
+    					values: {
+    						...current.taskForm.values,
+    						[name]: value
+    					},
+    					error: null
+    				}
+    			}));
+    		},
+    		setTaskText(text) {
+    			setState((current) => ({
+    				...current,
+    				taskForm: {
+    					...current.taskForm,
+    					text,
+    					error: null
+    				}
+    			}));
+    		},
+    		async runTaskAction(action) {
+    			const current = state;
+    			const task = current.task.data;
+    			if (task === null) return;
+    			const jobId = typeof task.jobId === "string" ? task.jobId : jobIdOf(current);
+    			if (jobId === "") return;
+    			const taskId = task.id;
+    			let output = null;
+    			if (action === "complete") {
+    				const workflowDefinition = currentDefinition(current);
+    				const schema = outputSchemaFor(mergedDefinition(currentJobDefinition(current), workflowDefinition), workflowDefinition, task);
+    				const form = current.taskForm;
+    				if (schemaFields(schema).length > 0) {
+    					const parsed = parseSchemaValues(schema, form.values, t);
+    					if ("error" in parsed) {
+    						setState((now) => ({
+    							...now,
+    							taskForm: {
+    								...now.taskForm,
+    								error: parsed.error
+    							}
+    						}));
+    						return;
+    					}
+    					output = parsed.value;
+    				} else {
+    					const text = (form.values.__json ?? "").trim();
+    					if (text === "") {
+    						setState((now) => ({
+    							...now,
+    							taskForm: {
+    								...now.taskForm,
+    								error: fill(t, "fieldRequired", { name: t("actionFormTitle") })
+    							}
+    						}));
+    						return;
+    					}
+    					const parsed = parseJson(text);
+    					if (!isRecord(parsed)) {
+    						setState((now) => ({
+    							...now,
+    							taskForm: {
+    								...now.taskForm,
+    								error: `${t("actionJsonInvalid")} ${text}`
+    							}
+    						}));
+    						return;
+    					}
+    					output = parsed;
+    				}
+    			}
+    			setState((now) => ({
+    				...now,
+    				taskForm: {
+    					...now.taskForm,
+    					submitting: true,
+    					error: null
+    				}
+    			}));
+    			try {
+    				const body = {
+    					jobId,
+    					taskId,
+    					action
+    				};
+    				if (output !== null) body.output = output;
+    				if (action === "complete" && current.taskForm.text.trim() !== "") body.text = current.taskForm.text.trim();
+    				await postJson(TASK_ACTION_ROUTE, body);
+    				setState((now) => ({
+    					...now,
+    					taskForm: {
+    						...now.taskForm,
+    						submitting: false,
+    						error: null
+    					},
+    					task: {
+    						...now.task,
+    						status: "loading"
+    					},
+    					tick: now.tick + 1
+    				}));
+    				flash("success", t("taskActionDone"));
+    			} catch (failure) {
+    				setState((now) => ({
+    					...now,
+    					taskForm: {
+    						...now.taskForm,
+    						submitting: false,
+    						error: `${t("taskActionFailed")} ${messageOf(failure)}`
+    					}
+    				}));
+    			}
+    		},
+    		async openSession(sessionId) {
+    			const id = typeof sessionId === "string" ? sessionId : "";
+    			if (id === "") return;
+    			const uiWorkspace = service(getService, "uiWorkspace");
+    			if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") {
+    				flash("error", t("noUiWorkspace"));
+    				return;
+    			}
+    			try {
+    				await refreshSessionsIfUnknown(getService, id);
+    				uiWorkspace.openSession(id);
+    			} catch (failure) {
+    				flash("error", `${t("openSessionFailed")} ${messageOf(failure)}`);
+    			}
+    		},
+    		openAttachment(attachmentId, name) {
+    			setState((current) => ({
+    				...current,
+    				attachment: {
+    					id: attachmentId,
+    					name,
+    					status: "loading",
+    					data: null,
+    					error: null
+    				}
+    			}));
+    		},
+    		closeAttachment() {
+    			setState((current) => ({
+    				...current,
+    				attachment: null
+    			}));
+    		}
     	};
+    }
+    /**
+    * 取一个 DSH Client Service；不存在时返回 null。
+    *
+    * @param getService
+    * @param name
+    * @returns
+    */
+    function service(getService, name) {
+    	try {
+    		const found = getService(name);
+    		return isRecord(found) ? found : null;
+    	} catch {
+    		return null;
+    	}
+    }
+    /**
+    * 客户端会话列表里还没有这个会话时，先做一次全量刷新（与旧页面一致）。
+    *
+    * @param getService
+    * @param sessionId
+    * @returns
+    */
+    async function refreshSessionsIfUnknown(getService, sessionId) {
+    	const sessions = service(getService, "sessions");
+    	if (sessions === null || typeof sessions.refresh !== "function") return;
+    	let known = false;
+    	try {
+    		const list = sessions.list;
+    		const getSnapshot = isRecord(list) ? list.getSnapshot : void 0;
+    		const snapshot = typeof getSnapshot === "function" ? getSnapshot() : null;
+    		const byId = isRecord(snapshot) && isRecord(snapshot.byId) ? snapshot.byId : null;
+    		known = byId !== null && byId[sessionId] !== void 0;
+    	} catch {
+    		known = false;
+    	}
+    	if (known) return;
+    	try {
+    		await sessions.refresh();
+    	} catch (failure) {
+    		console.warn("buka-workflows: refreshing the session list failed:", failure);
+    	}
+    }
+    // .build/workflows/client/state/use-effects.js
+    /**
+    * 页面数据 effect：工作流目录、工作流详情、作业详情、任务详情、附件库、预览与轮询。
+    *
+    * 轮询沿用旧页面风格：有 `running` 作业时 1.5 秒一次，否则 5 秒一次。所有请求
+    * 都可取消（路由切换 / 卸载时不再写状态）。
+    */
+    /**
+    * 挂载全部取数与轮询 effect。
+    *
+    * @param store 页面状态
+    */
+    function useWorkflowEffects(store) {
+    	const { state, setState } = store;
+    	const route = state.route;
+    	const tick = state.tick;
+    	const live = state.job.data?.job?.status === "running";
+    	react.default.useEffect(() => {
+    		const interval = setInterval(() => setState((current) => ({
+    			...current,
+    			tick: current.tick + 1
+    		})), live ? LIVE_REFRESH_MS : REFRESH_MS);
+    		return () => clearInterval(interval);
+    	}, [live]);
+    	react.default.useEffect(() => {
+    		let cancelled = false;
+    		setState((current) => ({
+    			...current,
+    			workflows: {
+    				...current.workflows,
+    				status: current.workflows.data === null ? "loading" : current.workflows.status
+    			}
+    		}));
+    		requestJson(WORKFLOWS_ROUTE).then((body) => {
+    			if (cancelled) return;
+    			const list = Array.isArray(body.workflows) ? body.workflows : [];
+    			setState((current) => ({
+    				...current,
+    				workflows: {
+    					status: "ready",
+    					data: list,
+    					error: null
+    				}
+    			}));
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				workflows: {
+    					...current.workflows,
+    					status: "ready",
+    					error: messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [tick]);
+    	const workflowId = route.kind === "workflows" ? "" : route.workflowId;
+    	react.default.useEffect(() => {
+    		if (workflowId === "") return void 0;
+    		let cancelled = false;
+    		setState((current) => ({
+    			...current,
+    			workflow: {
+    				...current.workflow,
+    				status: current.workflow.data === null ? "loading" : current.workflow.status
+    			}
+    		}));
+    		requestJson(`${WORKFLOW_ROUTE}?id=${encodeURIComponent(workflowId)}`).then((body) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				workflow: {
+    					status: "ready",
+    					data: body,
+    					error: null
+    				}
+    			}));
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				workflow: {
+    					...current.workflow,
+    					status: "ready",
+    					error: messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [workflowId, tick]);
+    	const jobId = route.kind === "job" ? route.jobId : "";
+    	react.default.useEffect(() => {
+    		if (jobId === "") return void 0;
+    		let cancelled = false;
+    		setState((current) => ({
+    			...current,
+    			job: {
+    				...current.job,
+    				status: current.job.data === null ? "loading" : current.job.status
+    			}
+    		}));
+    		requestJson(`${JOB_ROUTE}?id=${encodeURIComponent(jobId)}`).then((body) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				job: {
+    					status: "ready",
+    					data: body,
+    					error: null
+    				}
+    			}));
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				job: {
+    					...current.job,
+    					status: "ready",
+    					error: messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [jobId, tick]);
+    	react.default.useEffect(() => {
+    		if (route.kind !== "workflow") return void 0;
+    		let cancelled = false;
+    		requestJson(`${JOBS_ROUTE}?workflowId=${encodeURIComponent(route.workflowId)}`).then((body) => {
+    			if (cancelled) return;
+    			const jobs = Array.isArray(body.jobs) ? body.jobs : [];
+    			setState((current) => {
+    				const detail = current.workflow.data;
+    				if (detail === null) return current;
+    				return {
+    					...current,
+    					workflow: {
+    						...current.workflow,
+    						data: {
+    							...detail,
+    							jobs
+    						}
+    					}
+    				};
+    			});
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				workflow: {
+    					...current.workflow,
+    					error: current.workflow.error ?? messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [route, tick]);
+    	const taskId = state.taskId;
+    	react.default.useEffect(() => {
+    		if (taskId === null || jobId === "") return void 0;
+    		let cancelled = false;
+    		setState((current) => ({
+    			...current,
+    			task: {
+    				...current.task,
+    				status: current.task.data === null ? "loading" : current.task.status
+    			}
+    		}));
+    		requestJson(`${TASK_ROUTE}?jobId=${encodeURIComponent(jobId)}&taskId=${encodeURIComponent(taskId)}`).then((body) => {
+    			if (cancelled) return;
+    			if (!isRecord(body?.task)) return;
+    			setState((current) => ({
+    				...current,
+    				task: {
+    					status: "ready",
+    					data: body.task,
+    					error: null
+    				}
+    			}));
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				task: {
+    					...current.task,
+    					status: "ready",
+    					error: messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [
+    		taskId,
+    		jobId,
+    		tick
+    	]);
+    	const attachmentsView = state.jobView === "attachments" && jobId !== "";
+    	react.default.useEffect(() => {
+    		if (!attachmentsView) return void 0;
+    		let cancelled = false;
+    		setState((current) => ({
+    			...current,
+    			attachments: {
+    				...current.attachments,
+    				status: current.attachments.data === null ? "loading" : current.attachments.status
+    			}
+    		}));
+    		requestJson(`${ATTACHMENTS_ROUTE}?jobId=${encodeURIComponent(jobId)}`).then((body) => {
+    			if (cancelled) return;
+    			const list = Array.isArray(body.attachments) ? body.attachments : [];
+    			setState((current) => ({
+    				...current,
+    				attachments: {
+    					status: "ready",
+    					data: list,
+    					error: null
+    				}
+    			}));
+    		}, (failure) => {
+    			if (cancelled) return;
+    			setState((current) => ({
+    				...current,
+    				attachments: {
+    					...current.attachments,
+    					status: "ready",
+    					error: messageOf(failure)
+    				}
+    			}));
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, [
+    		attachmentsView,
+    		jobId,
+    		tick
+    	]);
+    	const attachmentId = state.attachment?.id ?? null;
+    	const attachmentLoading = state.attachment?.status === "loading";
+    	react.default.useEffect(() => {
+    		if (attachmentId === null || !attachmentLoading) return void 0;
+    		const controller = typeof AbortController === "function" ? new AbortController() : null;
+    		const init = { headers: { accept: "application/json" } };
+    		if (controller !== null) init.signal = controller.signal;
+    		fetch(attachmentUrl(jobId, attachmentId, "preview"), init).then(async (response) => {
+    			const parsed = await response.json().catch(() => null);
+    			if (!response.ok || !isRecord(parsed) || parsed.ok !== true) throw new Error(isRecord(parsed) && typeof parsed.message === "string" ? parsed.message : `HTTP ${response.status}`);
+    			const attachment = parsed.attachment;
+    			if (!isRecord(attachment)) throw new Error("invalid attachment preview");
+    			return attachment;
+    		}).then((preview) => {
+    			setState((current) => {
+    				if (current.attachment === null || current.attachment.id !== attachmentId) return current;
+    				return {
+    					...current,
+    					attachment: {
+    						...current.attachment,
+    						status: "ready",
+    						data: preview,
+    						error: null
+    					}
+    				};
+    			});
+    		}, (failure) => {
+    			if (controller?.signal.aborted === true) return;
+    			setState((current) => {
+    				if (current.attachment === null || current.attachment.id !== attachmentId) return current;
+    				return {
+    					...current,
+    					attachment: {
+    						...current.attachment,
+    						status: "failed",
+    						data: null,
+    						error: `${messageOf(failure)}`
+    					}
+    				};
+    			});
+    		});
+    		return () => {
+    			controller?.abort();
+    		};
+    	}, [
+    		attachmentId,
+    		attachmentLoading,
+    		jobId
+    	]);
     }
     // .build/workflows/client/state/use-page-state.js
     /**
-    * 页面全部 useState 的声明。
+    * 页面全部状态的声明与初值。
     *
-    * 集中在一处，保证 useState 的调用顺序与页面演进历史一致（既有的渲染冒烟测试
-    * 按这个顺序注入状态）；effects / actions 由其它模块接收这份状态。
+    * 页面只用**一个** `useState` 装下整个状态对象：这样渲染冒烟测试注入一份
+    * 状态即可覆盖任意页面，不需要按 hook 调用顺序对表；异步动作全部走函数式
+    * `setState`，也不会丢更新。
     */
     /**
-    * 声明页面的全部 useState。
+    * 页面初始状态。
     *
-    * @returns 页面状态
+    * @returns 可以交给 `useState` 的状态对象
+    */
+    function createInitialState() {
+    	return {
+    		route: { kind: "workflows" },
+    		workflows: {
+    			status: "idle",
+    			data: null,
+    			error: null
+    		},
+    		workflow: {
+    			status: "idle",
+    			data: null,
+    			error: null
+    		},
+    		job: {
+    			status: "idle",
+    			data: null,
+    			error: null
+    		},
+    		jobView: "board",
+    		attachments: {
+    			status: "idle",
+    			data: null,
+    			error: null
+    		},
+    		taskId: null,
+    		task: {
+    			status: "idle",
+    			data: null,
+    			error: null
+    		},
+    		taskForm: {
+    			values: {},
+    			text: "",
+    			error: null,
+    			submitting: false
+    		},
+    		newJob: {
+    			open: false,
+    			raw: {},
+    			structured: {},
+    			error: null,
+    			submitting: false
+    		},
+    		attachment: null,
+    		busy: null,
+    		notice: null,
+    		tick: 0
+    	};
+    }
+    /**
+    * 声明页面状态。
+    *
+    * @returns 状态与 setter
     */
     function usePageState() {
-    	/** 列表状态。 */
-    	const [list, setList] = react.default.useState({
-    		status: "loading",
-    		runs: [],
-    		archivedCount: 0,
-    		error: null
-    	});
-    	/** 当前查看的 runId；null 表示列表视图。 */
-    	const [selectedId, setSelectedId] = react.default.useState(null);
-    	/** 详情状态。 */
-    	const [detail, setDetail] = react.default.useState({
-    		status: "idle",
-    		data: null,
-    		error: null
-    	});
-    	/** 手动刷新与定时刷新都递增它。 */
-    	const [tick, setTick] = react.default.useState(0);
-    	/** Toast 文案。 */
-    	const [notice, setNotice] = react.default.useState(null);
-    	/** 节点图里打开抽屉的节点 id；null 表示节点抽屉关闭。 */
-    	const [selectedNodeId, setSelectedNodeId] = react.default.useState(null);
-    	/** 详情里选中的第几次执行；null 表示默认看最近一次。 */
-    	const [executionIndex, setExecutionIndex] = react.default.useState(null);
-    	/**
-    	* 鼠标悬停的边名字：`{ key, kind, text, x, y }`。悬停只显示名字；点击边
-    	* 打开连线配置抽屉。
-    	*/
-    	const [edgeTip, setEdgeTip] = react.default.useState(null);
-    	/** 列表是否只看已归档的运行。 */
-    	const [showArchived, setShowArchived] = react.default.useState(false);
-    	/** 自动归档设置对话框是否打开。 */
-    	const [settingsOpen, setSettingsOpen] = react.default.useState(false);
-    	/** 设置草稿；小时存字符串，输入框直接绑它。null 表示还没读到设置。 */
-    	const [settingsDraft, setSettingsDraft] = react.default.useState(null);
-    	/** 正在读取设置。 */
-    	const [settingsLoading, setSettingsLoading] = react.default.useState(false);
-    	/** 正在保存设置。 */
-    	const [settingsSaving, setSettingsSaving] = react.default.useState(false);
-    	/** 设置相关的错误文案。 */
-    	const [settingsError, setSettingsError] = react.default.useState(null);
-    	/** 页面顶部的页签：运行 / 模板。 */
-    	const [view, setView] = react.default.useState("runs");
-    	/** 模板目录状态。 */
-    	const [templates, setTemplates] = react.default.useState({
-    		status: "loading",
-    		items: [],
-    		error: null
-    	});
-    	/** 模板页里选中的模板 id；null 表示模板列表。 */
-    	const [selectedTemplateId, setSelectedTemplateId] = react.default.useState(null);
-    	/** 模板详情里打开抽屉的节点 id；null 表示节点抽屉关闭。 */
-    	const [selectedTemplateNodeId, setSelectedTemplateNodeId] = react.default.useState(null);
-    	/**
-    	* 右侧附件预览抽屉正在看的附件：
-    	* `{ runId, seq, nodeId, name, bytes, description }`；null 表示抽屉关闭。
-    	* 放在所有既有 hook 之后追加，避免打乱测试与既有状态的顺序。
-    	*/
-    	const [attachmentView, setAttachmentView] = react.default.useState(null);
-    	/** 抽屉里的预览请求状态；`data` 是 Host 返回的 attachment 对象。 */
-    	const [attachmentPreview, setAttachmentPreview] = react.default.useState({
-    		status: "idle",
-    		data: null,
-    		error: null
-    	});
-    	/**
-    	* 连线配置抽屉里选中的边 key；null 表示连线抽屉关闭。与节点抽屉互斥。
-    	* 仍放在所有既有 hook 之后追加，避免打乱测试与既有状态的顺序。
-    	*/
-    	const [selectedEdgeKey, setSelectedEdgeKey] = react.default.useState(null);
+    	const [state, setState] = react.default.useState(createInitialState);
     	return {
-    		list,
-    		setList,
-    		selectedId,
-    		setSelectedId,
-    		detail,
-    		setDetail,
-    		tick,
-    		setTick,
-    		notice,
-    		setNotice,
-    		selectedNodeId,
-    		setSelectedNodeId,
-    		executionIndex,
-    		setExecutionIndex,
-    		edgeTip,
-    		setEdgeTip,
-    		showArchived,
-    		setShowArchived,
-    		settingsOpen,
-    		setSettingsOpen,
-    		settingsDraft,
-    		setSettingsDraft,
-    		settingsLoading,
-    		setSettingsLoading,
-    		settingsSaving,
-    		setSettingsSaving,
-    		settingsError,
-    		setSettingsError,
-    		view,
-    		setView,
-    		templates,
-    		setTemplates,
-    		selectedTemplateId,
-    		setSelectedTemplateId,
-    		selectedTemplateNodeId,
-    		setSelectedTemplateNodeId,
-    		attachmentView,
-    		setAttachmentView,
-    		attachmentPreview,
-    		setAttachmentPreview,
-    		selectedEdgeKey,
-    		setSelectedEdgeKey
-    	};
-    }
-    // .build/workflows/client/state/use-runs.js
-    /**
-    * 运行列表 / 详情 / 模板目录的加载与定时刷新。
-    */
-    /**
-    * 运行列表、选中运行详情与模板目录的加载 / 定时刷新。
-    *
-    * @param state 页面状态
-    */
-    function useRunsEffects(state) {
-    	const { tick, setTick, showArchived, selectedId, list, detail, setList, setDetail, setTemplates } = state;
-    	react.default.useEffect(() => {
-    		let cancelled = false;
-    		setList((previous) => ({
-    			...previous,
-    			status: previous.runs.length > 0 ? previous.status : "loading"
-    		}));
-    		requestJson(RUNS_ROUTE + (showArchived ? "?archived=1" : "")).then((body) => {
-    			if (cancelled) return;
-    			setList({
-    				status: "ready",
-    				runs: Array.isArray(body.runs) ? body.runs : [],
-    				archivedCount: typeof body.archivedCount === "number" ? body.archivedCount : 0,
-    				error: null
-    			});
-    		}, (failure) => {
-    			if (cancelled) return;
-    			setList((previous) => ({
-    				...previous,
-    				status: "ready",
-    				error: messageOf(failure)
-    			}));
-    		});
-    		return () => {
-    			cancelled = true;
-    		};
-    	}, [tick, showArchived]);
-    	react.default.useEffect(() => {
-    		if (selectedId === null) {
-    			setDetail({
-    				status: "idle",
-    				data: null,
-    				error: null
-    			});
-    			return;
-    		}
-    		let cancelled = false;
-    		setDetail((previous) => ({
-    			status: previous.data === null ? "loading" : previous.status,
-    			data: previous.data,
-    			error: null
-    		}));
-    		requestJson(`${RUN_ROUTE}?runId=${encodeURIComponent(selectedId)}`).then((body) => {
-    			if (cancelled) return;
-    			setDetail({
-    				status: "ready",
-    				data: asRunDetail(body),
-    				error: null
-    			});
-    		}, (failure) => {
-    			if (cancelled) return;
-    			setDetail((previous) => ({
-    				...previous,
-    				status: "ready",
-    				error: messageOf(failure)
-    			}));
-    		});
-    		return () => {
-    			cancelled = true;
-    		};
-    	}, [selectedId, tick]);
-    	react.default.useEffect(() => {
-    		let cancelled = false;
-    		requestJson(TEMPLATES_ROUTE).then((body) => {
-    			if (cancelled) return;
-    			setTemplates({
-    				status: "ready",
-    				items: Array.isArray(body.templates) ? body.templates : [],
-    				error: null
-    			});
-    		}, (failure) => {
-    			if (cancelled) return;
-    			setTemplates({
-    				status: "ready",
-    				items: [],
-    				error: messageOf(failure)
-    			});
-    		});
-    		return () => {
-    			cancelled = true;
-    		};
-    	}, []);
-    	const live = Array.isArray(list.runs) && list.runs.some((run) => run?.status === "running" || run?.status === "waiting") || detail.data?.run?.status === "running" || detail.data?.run?.status === "waiting";
-    	react.default.useEffect(() => {
-    		const timer = setInterval(() => setTick((value) => value + 1), live ? LIVE_REFRESH_MS : REFRESH_MS);
-    		return () => clearInterval(timer);
-    	}, [live]);
-    }
-    /**
-    * 运行列表的刷新动作。
-    *
-    * @param state 页面状态
-    * @returns 刷新动作
-    */
-    function createRunsActions(state) {
-    	return { reload() {
-    		state.setTick((value) => value + 1);
-    	} };
-    }
-    // .build/workflows/client/state/use-sessions.js
-    /**
-    * 节点会话入口：打开 DSH 会话，必要时先刷新客户端会话列表。
-    */
-    /**
-    * 节点会话的打开入口。
-    *
-    * @param deps DSH Client Service 取值器、词典与 Toast
-    * @returns 会话动作
-    */
-    function createSessionActions({ getService, t, flash }) {
-    	/**
-    	* 取一个 DSH Client Service；不存在时返回 null。
-    	*
-    	* @param serviceName
-    	* @returns
-    	*/
-    	function service(serviceName) {
-    		try {
-    			const found = getService(serviceName);
-    			return isRecord(found) ? found : null;
-    		} catch {
-    			return null;
-    		}
-    	}
-    	/**
-    	* 客户端会话列表里还没有这个会话时，先做一次全量刷新。
-    	*
-    	* 宿主释放机器人 agent 后会给客户端发 `api-session/removed`，旧版本留下的
-    	* 记录、或补通告失败时，这个节点会话可能已经不在客户端列表里；此时
-    	* `uiWorkspace.openSession()` 会抛 `sessions.retain: unknown session`。
-    	* 这里补一次 `sessions.refresh()`，把宿主仍然持久化的会话重新拉回来。
-    	*
-    	* @param sessionId
-    	* @returns
-    	*/
-    	async function refreshSessionsIfUnknown(sessionId) {
-    		const sessions = service("sessions");
-    		if (sessions === null || typeof sessions.refresh !== "function") return;
-    		let known = false;
-    		try {
-    			const list = sessions.list;
-    			const getSnapshot = isRecord(list) ? list.getSnapshot : void 0;
-    			const state = typeof getSnapshot === "function" ? getSnapshot() : null;
-    			const byId = isRecord(state) && isRecord(state.byId) ? state.byId : null;
-    			known = byId !== null && byId[sessionId] !== void 0;
-    		} catch {
-    			known = false;
-    		}
-    		if (known) return;
-    		try {
-    			await sessions.refresh();
-    		} catch (failure) {
-    			console.warn("buka-workflows: refreshing the session list failed:", failure);
-    		}
-    	}
-    	/**
-    	* 打开某个节点会话。
-    	*
-    	* @param step
-    	* @returns
-    	*/
-    	async function openSession(step) {
-    		const sessionId = typeof step?.sessionId === "string" ? step.sessionId : "";
-    		if (sessionId === "") return;
-    		const uiWorkspace = service("uiWorkspace");
-    		if (uiWorkspace === null || typeof uiWorkspace.openSession !== "function") {
-    			flash("error", t("noUiWorkspace"));
-    			return;
-    		}
-    		try {
-    			await refreshSessionsIfUnknown(sessionId);
-    			uiWorkspace.openSession(sessionId);
-    		} catch (failure) {
-    			flash("error", `${t("openSessionFailed")} ${messageOf(failure)}`);
-    		}
-    	}
-    	return { openSession };
-    }
-    // .build/workflows/client/state/use-settings.js
-    /**
-    * 自动归档设置对话框的动作：校验、读取与保存。
-    */
-    /**
-    * 自动归档设置对话框的读写动作。
-    *
-    * @param state 页面状态
-    * @param deps 词典、Toast 与列表刷新
-    * @returns 设置对话框动作
-    */
-    function createSettingsActions(state, { t, flash, reload }) {
-    	const { settingsSaving, setSettingsOpen, setSettingsError, setSettingsDraft, setSettingsLoading, settingsDraft, setSettingsSaving } = state;
-    	/**
-    	* 校验设置草稿里的两个小时数：必须是整数、落在范围内，且删除晚于归档。
-    	*
-    	* @param draft
-    	* @returns 错误文案；null 表示通过
-    	*/
-    	function settingsValidationError(draft) {
-    		const archiveText = String(draft.archiveHours ?? "").trim();
-    		const deleteText = String(draft.deleteHours ?? "").trim();
-    		if (!/^\d+$/u.test(archiveText)) return t("archiveInvalid");
-    		const archiveHours = Number(archiveText);
-    		if (archiveHours < 1 || archiveHours > 720) return t("archiveInvalid");
-    		if (!/^\d+$/u.test(deleteText)) return t("deleteInvalid");
-    		const deleteHours = Number(deleteText);
-    		if (deleteHours < 2 || deleteHours > 8760) return t("deleteInvalid");
-    		if (deleteHours <= archiveHours) return t("deleteBeforeArchive");
-    		return null;
-    	}
-    	/**
-    	* 打开自动归档设置对话框：先清空草稿，再读 Host 的当前设置。读失败时留在
-    	* 对话框里说明原因；读取期间显示 loading。
-    	*/
-    	async function openSettingsDialog() {
-    		setSettingsOpen(true);
-    		setSettingsError(null);
-    		setSettingsDraft(null);
-    		setSettingsLoading(true);
-    		try {
-    			const body = await requestJson(SETTINGS_ROUTE);
-    			const settings = isRecord(body.settings) ? body.settings : {};
-    			setSettingsDraft({
-    				enabled: settings.enabled === true,
-    				archiveHours: String(settings.archiveAfterHours ?? 24),
-    				deleteHours: String(settings.deleteAfterHours ?? 168)
-    			});
-    		} catch (failure) {
-    			setSettingsError(`${t("settingsLoadFailed")} ${messageOf(failure)}`);
-    		} finally {
-    			setSettingsLoading(false);
-    		}
-    	}
-    	/** 关闭设置对话框；保存中不响应关闭。 */
-    	function closeSettingsDialog() {
-    		if (settingsSaving) return;
-    		setSettingsOpen(false);
-    		setSettingsError(null);
-    		setSettingsDraft(null);
-    	}
-    	/**
-    	* 保存自动归档设置：校验通过后写回 Host，成功后关闭对话框并刷新列表（归档
-    	* 结果可能刚刚变化）。
-    	*/
-    	async function saveSettings() {
-    		const draft = settingsDraft;
-    		if (draft === null || settingsValidationError(draft) !== null) return;
-    		setSettingsSaving(true);
-    		setSettingsError(null);
-    		try {
-    			const response = await fetch(SETTINGS_ROUTE, {
-    				method: "POST",
-    				headers: {
-    					"content-type": "application/json",
-    					accept: "application/json"
-    				},
-    				body: JSON.stringify({
-    					enabled: draft.enabled,
-    					archiveAfterHours: Number(draft.archiveHours),
-    					deleteAfterHours: Number(draft.deleteHours)
-    				})
-    			});
-    			const parsed = await response.json().catch(() => null);
-    			const body = isRecord(parsed) ? parsed : null;
-    			if (!response.ok || body === null || body.ok !== true) {
-    				const error = new Error(typeof body?.message === "string" ? body.message : `HTTP ${response.status}`);
-    				error.code = body?.code;
-    				throw error;
-    			}
-    			setSettingsOpen(false);
-    			setSettingsDraft(null);
-    			flash("success", t("saved"));
-    			reload();
-    		} catch (failure) {
-    			setSettingsError(`${t("settingsSaveFailed")} ${messageOf(failure)}`);
-    		} finally {
-    			setSettingsSaving(false);
-    		}
-    	}
-    	return {
-    		settingsValidationError,
-    		openSettingsDialog,
-    		closeSettingsDialog,
-    		saveSettings
-    	};
-    }
-    // .build/workflows/client/state/use-ui.js
-    /**
-    * 页面交互 effect 与动作：Toast、页签切换与执行聚焦。
-    */
-    /**
-    * 页面交互 effect：换运行收起抽屉、滚动 / 尺寸变化收起悬浮边名字。
-    *
-    * @param state 页面状态
-    */
-    function useUiEffects(state) {
-    	const { selectedId, edgeTip, setSelectedNodeId, setExecutionIndex, setEdgeTip, setSelectedEdgeKey } = state;
-    	react.default.useEffect(() => {
-    		setSelectedNodeId(null);
-    		setExecutionIndex(null);
-    		setEdgeTip(null);
-    		setSelectedEdgeKey(null);
-    	}, [selectedId]);
-    	const hasEdgeTip = edgeTip !== null;
-    	react.default.useEffect(() => {
-    		if (!hasEdgeTip) return void 0;
-    		const hide = () => setEdgeTip(null);
-    		window.addEventListener("scroll", hide, true);
-    		window.addEventListener("resize", hide);
-    		return () => {
-    			window.removeEventListener("scroll", hide, true);
-    			window.removeEventListener("resize", hide);
-    		};
-    	}, [hasEdgeTip]);
-    }
-    /**
-    * 页面交互动作。
-    *
-    * @param state 页面状态
-    * @returns 交互动作
-    */
-    function createUiActions(state) {
-    	const { setNotice, setSelectedNodeId, setExecutionIndex, detail, view, setView, setSelectedTemplateId, setSelectedTemplateNodeId, setSelectedEdgeKey, setSelectedId } = state;
-    	/**
-    	* 用 Toast 显示一次操作结果。
-    	*
-    	* @param kind
-    	* @param text
-    	*/
-    	function flash(kind, text) {
-    		setNotice({
-    			kind,
-    			text,
-    			seq: Date.now() + Math.random()
-    		});
-    	}
-    	/** 切换运行 / 模板页签；从详情页切回列表时也清掉选中项。 */
-    	const switchView = (next) => {
-    		if (next === view) return;
-    		setNotice(null);
-    		setSelectedTemplateNodeId(null);
-    		setSelectedEdgeKey(null);
-    		if (next === "templates") setSelectedTemplateId(null);
-    		else setSelectedId(null);
-    		setView(next);
-    	};
-    	/**
-    	* 聚焦到一次执行（或一个没有执行记录的节点）：选中目标节点，并打开它的
-    	* 那一次执行；终止节点没有执行记录，就只切换节点。
-    	*
-    	* @param nodeId
-    	* @param [seq] 目标执行的 seq
-    	*/
-    	function focusExecution(nodeId, seq = null) {
-    		const list = stepsOf(detail.data?.run).filter((other) => other.nodeId === nodeId);
-    		const index = seq === null ? -1 : list.findIndex((other) => other?.seq === seq);
-    		setSelectedNodeId(nodeId);
-    		setExecutionIndex(index < 0 ? null : index);
-    	}
-    	return {
-    		switchView,
-    		focusExecution,
-    		flash
+    		state,
+    		setState
     	};
     }
     // .build/workflows/client/page.js
     /**
-    * 侧边栏「工作流」页面：装配状态 hooks 与渲染函数，页面本身只做组装。
+    * 侧边栏「工作流」页面：装配状态、数据 effect 与动作，渲染只做分发。
+    *
+    * 导航只有一条链：工作流列表 → 工作流详情（图 + 岗位 / 类型 / 边 + 作业列表）
+    * → 作业详情（看板 / 流程图 / 任务 / 附件库 / 时间线）。不存在跨工作流的作业
+    * 列表。
     */
     /**
     * 侧边栏「工作流」页面。
     *
-    * @param props
+    * @param props 词典与 Client Service 取值器
     * @returns React 元素
     */
     function WorkflowsPage(props) {
     	const t = props.t;
     	const getService = typeof props.getService === "function" ? props.getService : () => null;
-    	const state = usePageState();
-    	useRunsEffects(state);
-    	useUiEffects(state);
-    	const attachments = useAttachmentsEffects(state, t);
-    	const runs = createRunsActions(state);
-    	const ui = createUiActions(state);
-    	const settings = createSettingsActions(state, {
+    	const store = usePageState();
+    	useWorkflowEffects(store);
+    	const actions = createActions(store, {
     		t,
-    		flash: ui.flash,
-    		reload: runs.reload
+    		getService
     	});
-    	const sessions = createSessionActions({
-    		getService,
-    		t,
-    		flash: ui.flash
-    	});
-    	const model = {};
-    	Object.assign(model, state, runs, ui, settings, sessions, attachments, {
+    	return renderPage({
     		t,
     		getService,
-    		capsuleText: (node) => capsuleText(t, node),
-    		templateNodeLabel: (node) => templateNodeLabel(t, node),
-    		renderLegend: (options) => renderLegend(model, options),
-    		renderGraph: (graph, activeNodeId, onNodeSelect, options) => renderGraph(model, graph, activeNodeId, onNodeSelect, options),
-    		renderExecution: renderExecution.bind(null, model),
-    		renderNodePanel: renderNodePanel.bind(null, model),
-    		renderList: () => renderList(model),
-    		renderUserNotice: (run) => renderUserNotice(model, run),
-    		renderInteractionNotice: (run) => renderInteractionNotice(model, run),
-    		runDetailModel: () => runDetailModel(model),
-    		renderDetail: () => renderDetail(model),
-    		renderTemplatesList: () => renderTemplatesList(model),
-    		renderTemplateNodePanel: renderTemplateNodePanel.bind(null, model),
-    		templateDetailModel: () => templateDetailModel(model),
-    		renderTemplateDetail: () => renderTemplateDetail(model),
-    		renderFooter: (withStates) => renderFooter(model, withStates),
-    		renderSettingsDialog: () => renderSettingsDialog(model),
-    		interceptAttachmentLink: interceptAttachmentLink.bind(null, model),
-    		attachmentPreviewLabels: () => attachmentPreviewLabels(model),
-    		renderAttachmentDownload: (viewer) => renderAttachmentDownload(model, viewer),
-    		renderAttachmentPreviewBody: (viewer) => renderAttachmentPreviewBody(model, viewer),
-    		renderDrawerHead: renderDrawerHead.bind(null, model),
-    		renderAttachmentDrawer: () => renderAttachmentDrawer(model),
-    		closeRunNodeDrawer: () => closeRunNodeDrawer(model),
-    		closeTemplateNodeDrawer: () => closeTemplateNodeDrawer(model),
-    		renderRunNodeDrawer: () => renderRunNodeDrawer(model),
-    		renderTemplateNodeDrawer: () => renderTemplateNodeDrawer(model),
-    		edgeRulesFor: edgeRulesFor.bind(null, model),
-    		renderEdgeRule: renderEdgeRule.bind(null, model),
-    		renderEdgeDrawer: () => renderEdgeDrawer(model)
+    		state: store.state,
+    		actions
     	});
-    	return renderPage(model);
     }
     // .build/workflows/client/styles.js
     /**
-    * 页面样式：沿用 Robots / Skills 页的标题行 + 960px 内容区 + 卡片结构。
+    * 页面样式：沿用 Robots / Skills 页的标题行 + 内容区 + 卡片结构，并补上
+    * v4 的看板、流程图、任务抽屉、附件库与时间线。
     */
-    /** 页面样式：沿用 Robots / Skills 页的标题行 + 960px 内容区 + 卡片结构。 */
+    /** 页面样式。 */
     const CSS = `
     .buka-workflows-page{--buka-workflows-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-workflows-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden}
     @media (width<=767px){.buka-workflows-page{--buka-workflows-inset:20px}}
     .buka-workflows-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-workflows-inset));max-width:none;margin-inline:calc(-1 * var(--buka-workflows-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-workflows-inset) 0;background:var(--dsw-alias-bg-base);z-index:1;position:sticky;top:0}
     .buka-workflows-headInner{width:100%;max-width:960px;margin-inline:auto}
-    .buka-workflows-titleRow{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:center;gap:16px;min-width:0}
-    .buka-workflows-toolbar{flex:none;display:flex;align-items:center;gap:8px}
-    .buka-workflows-body{box-sizing:border-box;width:100%;max-width:960px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;overscroll-behavior:contain;display:flex;flex-direction:column;padding:32px 0 24px}
-    .buka-workflows-pageBody{display:flex;flex-direction:column;gap:20px}
-    .buka-workflows-detail{display:flex;flex-direction:column;gap:28px}
-    .buka-workflows-status,.buka-workflows-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
-    .buka-workflows-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
-    .buka-workflows-emptyBox{display:flex;flex-direction:column;gap:10px;padding:8px 0}
+    .buka-workflows-page.is-wide .buka-workflows-headInner{max-width:1280px}
+    .buka-workflows-titleRow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px 16px;min-width:0}
+    .buka-workflows-titleGroup{display:flex;align-items:center;gap:10px;min-width:0}
+    .buka-workflows-title{font-size:16px;font-weight:600;line-height:24px;margin:0;overflow-wrap:anywhere}
+    .buka-workflows-toolbar{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+    .buka-workflows-body{box-sizing:border-box;width:100%;max-width:960px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;overscroll-behavior:contain;display:flex;flex-direction:column;padding:24px 0 24px}
+    .buka-workflows-body.is-wide{max-width:1280px}
+    .buka-workflows-footer{box-sizing:border-box;width:100%;max-width:1280px;margin-inline:auto;flex:none;display:flex;align-items:center;padding:10px 0 20px;border-top:0.5px solid var(--dsw-alias-border-l1)}
+    .buka-workflows-back svg{transform:rotate(180deg)}
+    .buka-workflows-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin:0}
+    .buka-workflows-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
+    .buka-workflows-emptyBox{display:flex;flex-direction:column;gap:8px;padding:8px 0}
     .buka-workflows-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
     .buka-workflows-failure{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px;overflow-wrap:anywhere}
+    .buka-workflows-failureBox{display:flex;flex-direction:column;align-items:flex-start;gap:10px}
     .buka-workflows-warn{color:var(--dsw-alias-state-warn-primary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-cards{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
-    .buka-workflows-listPane{display:flex;flex-direction:column;gap:16px}
+    .buka-workflows-label{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
+    .buka-workflows-inlineCode{font-family:var(--ds-font-family-code);font-size:11px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-secondary);padding:1px 5px;overflow-wrap:anywhere;word-break:break-all}
+    .buka-workflows-pre{margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-family:var(--ds-font-family-code);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;width:100%;box-sizing:border-box}
+    .buka-workflows-pre.is-tall{max-height:360px}
+    .buka-workflows-smallButton{border-radius:var(--dsw-radius-md);height:28px;padding:0 10px;font-size:12px;line-height:18px}
+    .buka-workflows-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
+    .buka-workflows-cards{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+    .buka-workflows-listPane{display:flex;flex-direction:column;gap:14px}
     .buka-workflows-card{display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;text-align:left;border:0;background:0 0;border-radius:var(--dsw-radius-xl);padding:12px 8px;margin:0 -8px;font:inherit;color:inherit;cursor:pointer}
     @media (hover:hover){.buka-workflows-card:hover{background:var(--dsw-alias-interactive-bg-hover)}}
     .buka-workflows-card:active{background:var(--dsw-alias-interactive-bg-active)}
-    .buka-workflows-card:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+    .buka-workflows-card:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
     .buka-workflows-cardHead{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+    .buka-workflows-cardTitleGroup{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
     .buka-workflows-cardTitle{font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere;min-width:0}
-    .buka-workflows-cardTitleGroup{display:flex;align-items:center;gap:6px;min-width:0}
-    .buka-workflows-cardTags{display:flex;align-items:center;gap:6px;flex:none}
+    .buka-workflows-cardDesc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-cardTags{display:flex;align-items:center;gap:6px;flex:none;flex-wrap:wrap}
     .buka-workflows-seq{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-tertiary);padding:1px 5px}
     .buka-workflows-meta{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-label{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
-    .buka-workflows-steps{display:flex;flex-direction:column;gap:12px;margin:0;padding:0;list-style:none}
-    .buka-workflows-step{display:flex;flex-direction:column;gap:8px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);padding:12px}
-    .buka-workflows-stepHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-node{font-family:var(--ds-font-family-code);font-size:13px;line-height:20px;overflow-wrap:anywhere}
-    .buka-workflows-stepMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin-left:auto;overflow-wrap:anywhere}
-    .buka-workflows-stepActions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-    .buka-workflows-inlineCode{font-family:var(--ds-font-family-code);font-size:11px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-secondary);padding:1px 5px;overflow-wrap:anywhere;word-break:break-all}
-    .buka-workflows-pre{margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-family:var(--ds-font-family-code);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;width:100%;box-sizing:border-box}
-    .buka-workflows-smallButton{border-radius:var(--dsw-radius-md);height:28px;padding:0 10px;font-size:12px;line-height:18px}
-    .buka-workflows-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font-size:13px;line-height:20px}
-    .buka-workflows-back svg{transform:rotate(180deg)}
-    .buka-workflows-graphPane{flex:none;min-width:0;width:max-content;max-width:none;margin-inline:auto}
-    .buka-workflows-vgraph{position:relative;flex:none}
+    .buka-workflows-detail{display:flex;flex-direction:column;gap:20px;min-width:0}
+    .buka-workflows-section{display:flex;flex-direction:column;gap:10px;min-width:0}
+    .buka-workflows-sectionHead{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+    .buka-workflows-sectionTitle{font-size:13px;font-weight:600;line-height:20px;margin:0;color:var(--dsw-alias-label-primary)}
+    .buka-workflows-kv{display:flex;flex-direction:column;gap:4px}
+    .buka-workflows-kvRow{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:12px;line-height:18px}
+    .buka-workflows-kvKey{color:var(--dsw-alias-label-tertiary);min-width:88px}
+    .buka-workflows-kvValue{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;min-width:0}
+    .buka-workflows-workflowHead,.buka-workflows-jobHead{display:flex;flex-direction:column;gap:8px}
+    .buka-workflows-workflowTitleGroup,.buka-workflows-jobTitleGroup{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .buka-workflows-workflowTitle,.buka-workflows-jobTitle{font-size:18px;font-weight:600;line-height:26px;margin:0;overflow-wrap:anywhere}
+    .buka-workflows-workflowDesc{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+    .buka-workflows-jobMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-deliveryNotice{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:10px 12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 8%,transparent)}
+    .buka-workflows-positionList{display:flex;flex-direction:column;gap:10px}
+    .buka-workflows-positionCard{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}
+    .buka-workflows-positionHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .buka-workflows-positionLabel{font-size:14px;font-weight:500;line-height:20px}
+    .buka-workflows-positionDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-typeList{display:flex;flex-direction:column;gap:6px}
+    .buka-workflows-typeCard{padding:8px 10px;border-radius:var(--dsw-radius-sm);border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base)}
+    .buka-workflows-typeHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;min-width:0}
+    .buka-workflows-typeLabel{font-size:13px;font-weight:500;line-height:20px}
+    .buka-workflows-typeDesc{margin:6px 0 0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-typeColumns{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:8px}
+    .buka-workflows-typeColumn{display:flex;flex-direction:column;gap:6px;min-width:0}
+    .buka-workflows-requiresRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}
+    .buka-workflows-schemaList{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none}
+    .buka-workflows-schemaField{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;line-height:18px}
+    .buka-workflows-schemaType{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code);font-size:11px}
+    .buka-workflows-required{color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:16px}
+    .buka-workflows-edgeList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+    .buka-workflows-edgeRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;line-height:18px;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}
+    .buka-workflows-edgeArrowText{color:var(--dsw-alias-label-tertiary)}
+    .buka-workflows-edgeTypes{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+    .buka-workflows-contractGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+    .buka-workflows-contractBody{display:flex;flex-direction:column;gap:8px}
+    .buka-workflows-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+    .buka-workflows-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
+    .buka-workflows-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:11px;line-height:16px;overflow-wrap:anywhere}
+    .buka-workflows-input{width:100%}
+    .buka-workflows-textarea,.buka-workflows-select{box-sizing:border-box;width:100%;padding:6px 8px;border-radius:var(--dsw-radius-sm);border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:inherit;font:inherit;font-size:12px;line-height:18px;resize:vertical}
+    .buka-workflows-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-formActions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:4px}
+    .buka-workflows-dialogForm{display:flex;flex-direction:column;gap:12px}
+    .buka-workflows-viewTabs{display:flex;align-items:center;min-width:0}
+    .buka-workflows-tabList{width:fit-content;min-width:280px}
+    .buka-workflows-viewBody{display:flex;flex-direction:column;gap:12px;min-width:0}
+    .buka-workflows-boardPane{display:flex;flex-direction:column;gap:10px;min-width:0}
+    .buka-workflows-board{width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding-bottom:8px}
+    .buka-workflows-boardGrid{display:grid;grid-template-columns:156px repeat(5,minmax(168px,1fr));gap:6px;min-width:1020px}
+    .buka-workflows-boardHeader{display:contents}
+    .buka-workflows-boardRowHead{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);min-width:0}
+    .buka-workflows-boardHeader>.buka-workflows-boardRowHead{background:transparent;padding-top:0}
+    .buka-workflows-boardColumnHead{font-size:11px;font-weight:600;line-height:16px;color:var(--dsw-alias-label-tertiary);text-transform:uppercase;letter-spacing:.04em;padding:0 2px 4px}
+    .buka-workflows-boardRow{display:contents}
+    .buka-workflows-boardRowTitle{font-size:12px;font-weight:600;line-height:18px;overflow-wrap:anywhere}
+    .buka-workflows-boardRowExecutor{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px;overflow-wrap:anywhere}
+    .buka-workflows-boardRowMeta{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px}
+    .buka-workflows-boardRow.is-start .buka-workflows-boardRowHead,.buka-workflows-boardRow.is-end .buka-workflows-boardRowHead{border-left:2px solid var(--dsw-alias-border-l2)}
+    .buka-workflows-boardCell{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:52px;padding:4px;border-radius:var(--dsw-radius-sm);border:0.5px dashed var(--dsw-alias-border-l1)}
+    .buka-workflows-taskCard{display:flex;flex-direction:column;gap:4px;width:100%;box-sizing:border-box;text-align:left;padding:8px 9px;border-radius:var(--dsw-radius-sm);border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font:inherit;color:inherit;cursor:pointer}
+    @media (hover:hover){.buka-workflows-taskCard:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+    .buka-workflows-taskCard:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
+    .buka-workflows-taskCard.is-running{border-color:var(--dsw-alias-brand-primary)}
+    .buka-workflows-taskCard.is-failed,.buka-workflows-taskCard.is-blocked{border-color:var(--dsw-alias-state-warn-primary)}
+    .buka-workflows-taskCardHead{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;min-width:0}
+    .buka-workflows-taskCardType{font-size:12px;font-weight:500;line-height:18px;overflow-wrap:anywhere;min-width:0}
+    .buka-workflows-taskCardMeta{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px;overflow-wrap:anywhere}
+    .buka-workflows-taskCardSummary{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .buka-workflows-taskCardStatus{display:none}
+    .buka-workflows-tablePane{display:flex;flex-direction:column;gap:10px;min-width:0}
+    .buka-workflows-table{width:100%;border-collapse:collapse;font-size:12px;line-height:18px}
+    .buka-workflows-table th{text-align:left;font-size:11px;font-weight:600;color:var(--dsw-alias-label-tertiary);padding:6px 8px;border-bottom:0.5px solid var(--dsw-alias-border-l2);white-space:nowrap}
+    .buka-workflows-table td{padding:7px 8px;border-bottom:0.5px solid var(--dsw-alias-border-l1);vertical-align:middle;overflow-wrap:anywhere}
+    .buka-workflows-tableRow{cursor:pointer}
+    .buka-workflows-tableRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
+    .buka-workflows-tableRow:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:-1px}
+    .buka-workflows-tableTime{color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+    .buka-workflows-attachmentList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+    .buka-workflows-attachment{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-size:12px;line-height:18px}
+    .buka-workflows-attachmentMain{display:flex;flex-direction:column;gap:2px;min-width:160px;flex:1 1 auto}
+    .buka-workflows-attachmentLink{display:inline;max-width:100%;margin:0;padding:0;border:0;background:0 0;color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code);font-size:11px;line-height:18px;text-align:left;text-decoration:none;overflow-wrap:anywhere;cursor:pointer;border-radius:var(--dsw-radius-sm)}
+    @media (hover:hover){.buka-workflows-attachmentLink:hover{text-decoration:underline}}
+    .buka-workflows-attachmentSource{margin:0;padding:0;border:0;background:0 0;color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px;text-align:left;cursor:pointer;overflow-wrap:anywhere}
+    .buka-workflows-attachmentMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:none}
+    .buka-workflows-attachmentDescription{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:1 1 auto;min-width:120px;overflow-wrap:anywhere}
+    .buka-workflows-attachmentDownload{margin-left:auto;color:var(--dsw-alias-brand-primary);text-decoration:none;font-size:11px;flex:none}
+    .buka-workflows-attachmentDownload:hover{text-decoration:underline}
+    .buka-workflows-timeline{display:flex;flex-direction:column;gap:0;margin:0;padding:0;list-style:none}
+    .buka-workflows-timelineItem{display:flex;gap:10px;padding:0 0 14px;position:relative}
+    .buka-workflows-timelineItem::before{content:'';position:absolute;left:4px;top:12px;bottom:0;width:1px;background:var(--dsw-alias-border-l2)}
+    .buka-workflows-timelineItem:last-child::before{display:none}
+    .buka-workflows-timelineDot{flex:none;width:9px;height:9px;margin-top:4px;border-radius:50%;background:var(--dsw-alias-state-idle-primary);z-index:1}
+    .buka-workflows-timelineItem.is-success .buka-workflows-timelineDot{background:var(--dsw-alias-state-success-primary)}
+    .buka-workflows-timelineItem.is-warning .buka-workflows-timelineDot{background:var(--dsw-alias-state-error-primary)}
+    .buka-workflows-timelineItem.is-info .buka-workflows-timelineDot{background:var(--dsw-alias-brand-primary)}
+    .buka-workflows-timelineBody{display:flex;flex-direction:column;gap:2px;min-width:0}
+    .buka-workflows-timelineHead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+    .buka-workflows-timelineLabel{font-size:12px;font-weight:500;line-height:18px}
+    .buka-workflows-timelineTime{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .buka-workflows-timelineDetail{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+    .buka-workflows-depList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+    .buka-workflows-depRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;line-height:18px}
+    .buka-workflows-depLink{margin:0;padding:0;border:0;background:0 0;color:var(--dsw-alias-brand-primary);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+    .buka-workflows-depLink:hover{text-decoration:underline}
+    .buka-workflows-depSummary{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;flex:1 1 100%;overflow-wrap:anywhere}
+    .buka-workflows-attemptList{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}
+    .buka-workflows-attempt{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
+    .buka-workflows-attemptHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .buka-workflows-attemptMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+    .buka-workflows-sessionRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .buka-workflows-sessionBar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
+    .buka-workflows-result{display:flex;flex-direction:column;gap:12px}
+    .buka-workflows-taskForm{display:flex;flex-direction:column;gap:10px}
+    .buka-workflows-graphPane{display:flex;flex-direction:column;gap:10px;min-width:0;align-items:center}
+    .buka-workflows-vgraph{position:relative;flex:none;margin-inline:auto}
     .buka-workflows-vgraphSvg{position:absolute;left:0;top:0;z-index:1;pointer-events:none;overflow:visible}
     .buka-workflows-vgraphNode{position:absolute;z-index:2;display:flex;align-items:center}
-    .buka-workflows-capsule{flex:1 1 auto;display:inline-flex;align-items:center;width:100%;height:100%;box-sizing:border-box;margin:0;padding:3px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;cursor:pointer;overflow:hidden;white-space:nowrap}
-    .buka-workflows-capsuleText{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
-    .buka-workflows-vgraphNode .buka-workflows-visitBadge{position:absolute;right:-6px;top:50%;transform:translateY(-50%);margin-left:0;padding-left:4px;background:var(--dsw-alias-bg-base)}
-    .buka-workflows-vgraphNode .buka-workflows-capsule.is-selected{outline-offset:1px}
-    .buka-workflows-capsule.is-robot{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+    .buka-workflows-capsule{flex:1 1 auto;display:inline-flex;align-items:center;width:100%;height:100%;box-sizing:border-box;margin:0;padding:3px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;overflow:hidden;white-space:nowrap}
+    button.buka-workflows-capsule{cursor:pointer}
     .buka-workflows-capsule.has-avatar{padding-left:4px}
-    .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
     .buka-workflows-capsuleAvatar{margin-right:6px}
-    .buka-workflows-inspectorAvatar{margin-right:2px}
-    .buka-workflows-capsule.is-user{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-state-warn-primary)}
+    .buka-workflows-capsuleText{flex:1 1 auto;display:flex;align-items:center;gap:6px;min-width:0}
+    .buka-workflows-capsuleLabel{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+    .buka-workflows-capsuleMeta{flex:none;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code);font-size:10.5px;line-height:16px}
+    .buka-workflows-capsule.is-start,.buka-workflows-capsule.is-end{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}
+    .buka-workflows-capsule.is-robot{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+    .buka-workflows-capsule.is-human{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-capsule.is-end{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-capsule.is-join{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}
-    .buka-workflows-capsule.is-start{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}
-    .buka-workflows-capsule.is-idle{border-color:var(--dsw-alias-border-l2);border-style:dashed;color:var(--dsw-alias-label-tertiary)}
+    .buka-workflows-capsule.is-idle{border-style:dashed}
     .buka-workflows-capsule.is-running{animation:buka-workflows-pulse 1.8s ease-out infinite}
-    .buka-workflows-visitBadge{flex:none;margin-left:6px;color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code);font-size:11px;line-height:16px}
-    @media (hover:hover){.buka-workflows-capsule:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-workflows-capsule:focus-visible,.buka-workflows-capsule.is-selected{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
+    .buka-workflows-capsule.is-selected{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
+    @media (hover:hover){button.buka-workflows-capsule:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+    button.buka-workflows-capsule:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
     @keyframes buka-workflows-pulse{0%{box-shadow:0 0 0 0 var(--dsw-alias-brand-primary)}70%{box-shadow:0 0 0 5px transparent}100%{box-shadow:0 0 0 0 transparent}}
     @media (prefers-reduced-motion:reduce){.buka-workflows-capsule.is-running{animation:none}}
-    .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.25;stroke-dasharray:4 4;stroke-linecap:round;opacity:.6;transition:stroke-width .16s ease,opacity .16s ease,stroke .16s ease}
-    .buka-workflows-edge.is-static{stroke:var(--dsw-alias-label-tertiary);stroke-width:1.5;stroke-dasharray:none;opacity:.85}
-    .buka-workflows-edge.is-traversed{stroke:var(--dsw-alias-brand-primary);stroke-width:1.75;stroke-dasharray:none;opacity:1}
-    .buka-workflows-edge.is-selected{stroke:var(--dsw-alias-brand-primary);stroke-width:2.5;stroke-dasharray:none;opacity:1}
-    .buka-workflows-edge.is-hovered{stroke-width:2.5;opacity:1;stroke-dasharray:none}
-    .buka-workflows-edge.is-next.is-hovered{stroke:var(--dsw-alias-brand-primary)}
-    .buka-workflows-edge.is-success{stroke:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-edge.is-failure{stroke:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-edge.is-success.is-hovered{stroke:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-edge.is-failure.is-hovered{stroke:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-edge.is-dimmed:not(.is-hovered){opacity:.5}
-    .buka-workflows-edgeHit{fill:none;stroke:transparent;stroke-width:14;stroke-linecap:round;pointer-events:stroke;cursor:pointer}
-    .buka-workflows-edgeHit:focus-visible{stroke:var(--dsw-alias-brand-primary);stroke-width:4;opacity:.25;outline:none}
-    .buka-workflows-edgeTip{position:fixed;z-index:1000;max-width:240px;box-sizing:border-box;padding:4px 9px;border-radius:var(--dsw-radius-md);border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:11.5px;line-height:16px;font-weight:500;box-shadow:0 4px 12px rgba(17,20,28,.12);pointer-events:none;overflow-wrap:anywhere}
-    .buka-workflows-edgeTip.is-anchored{transform:translateY(-50%)}
-    .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.7;transition:opacity .16s ease,fill .16s ease}
-    .buka-workflows-edgeArrow.is-static{fill:var(--dsw-alias-label-tertiary);opacity:.85}
-    .buka-workflows-edgeArrow.is-traversed{fill:var(--dsw-alias-brand-primary);opacity:1}
-    .buka-workflows-edgeArrow.is-selected{fill:var(--dsw-alias-brand-primary);opacity:1}
-    .buka-workflows-edgeArrow.is-hovered{opacity:1}
-    .buka-workflows-edgeArrow.is-next.is-hovered{fill:var(--dsw-alias-brand-primary)}
-    .buka-workflows-edgeArrow.is-success{fill:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-edgeArrow.is-failure{fill:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-edgeArrow.is-success.is-hovered{fill:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-edgeArrow.is-failure.is-hovered{fill:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-edgeArrow.is-dimmed:not(.is-hovered){opacity:.5}
-    .buka-workflows-vgraphDot{stroke:var(--dsw-alias-bg-layer-1);stroke-width:1.5;fill:var(--dsw-alias-state-idle-primary)}
-    .buka-workflows-vgraphDot.is-running{fill:var(--dsw-alias-brand-primary)}
-    .buka-workflows-vgraphDot.is-waiting{fill:var(--dsw-alias-state-warn-primary)}
-    .buka-workflows-vgraphDot.is-done{fill:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-vgraphDot.is-failed{fill:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-footer{box-sizing:border-box;width:100%;max-width:960px;margin-inline:auto;flex:none;display:flex;flex-direction:column;gap:10px;padding:14px 0 24px;border-top:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base)}
-    .buka-workflows-footer .buka-workflows-hint{margin:0}
-    .buka-workflows-legend{display:flex;flex-wrap:wrap;gap:10px 24px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-    .buka-workflows-legendGroup{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
+    .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
+    .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.75}
+    .buka-workflows-edge.is-back{stroke:var(--dsw-alias-state-warn-primary);stroke-dasharray:4 4;opacity:.8}
+    .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8}
+    .buka-workflows-edgeArrow.is-back{fill:var(--dsw-alias-state-warn-primary)}
+    .buka-workflows-graphCaption{text-align:center}
+    .buka-workflows-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 20px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;width:100%}
+    .buka-workflows-legendGroup{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
     .buka-workflows-legendTitle{color:var(--dsw-alias-label-secondary);font-weight:500}
     .buka-workflows-legendItem{display:inline-flex;align-items:center;gap:5px}
     .buka-workflows-legendCapsule{box-sizing:border-box;width:26px;height:11px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2)}
     .buka-workflows-legendCapsule.is-robot{border-color:var(--dsw-alias-brand-primary)}
-    .buka-workflows-legendCapsule.is-user{border-color:var(--dsw-alias-state-warn-primary)}
+    .buka-workflows-legendCapsule.is-human{border-color:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-legendCapsule.is-end{border-color:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-legendCapsule.is-join{border-color:var(--dsw-alias-state-business-primary)}
-    .buka-workflows-legendCapsule.is-start{border-color:var(--dsw-alias-border-l2)}
     .buka-workflows-legendDot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-idle-primary)}
     .buka-workflows-legendDot.is-done{background:var(--dsw-alias-state-success-primary)}
     .buka-workflows-legendDot.is-running{background:var(--dsw-alias-brand-primary)}
     .buka-workflows-legendDot.is-waiting{background:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-legendDot.is-failed{background:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-legendLine{box-sizing:border-box;width:18px;height:0;border-top:1.5px solid var(--dsw-alias-label-caption);border-top-style:dashed}
-    .buka-workflows-legendLine.is-static{border-top-color:var(--dsw-alias-label-tertiary);border-top-style:solid}
-    .buka-workflows-legendLine.is-traversed{border-top-color:var(--dsw-alias-brand-primary);border-top-style:solid}
-    .buka-workflows-inspector{display:flex;flex-direction:column;gap:14px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);padding:14px 16px}
-    .buka-workflows-inspectorHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-inspectorTitle{flex:1 1 auto;min-width:0;font-size:15px;font-weight:500;line-height:22px;overflow-wrap:anywhere}
-    .buka-workflows-inspectorId{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-markdown-code-block);border-radius:var(--dsw-radius-sm);padding:1px 5px;overflow-wrap:anywhere}
-    .buka-workflows-inspectorClose{margin-left:auto}
-    .buka-workflows-inspectorSection{display:flex;flex-direction:column;gap:8px}
-    .buka-workflows-nodeDrawer .buka-workflows-inspector{border:0;background:0 0;padding:0}
-    .buka-workflows-edgeRules{display:flex;flex-direction:column;gap:8px}
-    .buka-workflows-edgeRule{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
-    .buka-workflows-edgeRuleHead{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}
-    .buka-workflows-edgeRuleDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-edgeRule .buka-workflows-pre{max-height:200px;margin-top:6px}
-    .buka-workflows-attachmentList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
-    .buka-workflows-attachment{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-size:12px;line-height:18px}
-    .buka-workflows-attachmentLink{display:inline;max-width:100%;margin:0;padding:0;border:0;background:0 0;color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code);font-size:11px;line-height:18px;text-align:left;text-decoration:none;overflow-wrap:anywhere;cursor:pointer;border-radius:var(--dsw-radius-sm)}
-    @media (hover:hover){.buka-workflows-attachmentLink:hover{text-decoration:underline}}
-    .buka-workflows-attachmentLink:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
-    .buka-workflows-attachmentMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:none}
-    .buka-workflows-attachmentDescription{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:1;min-width:120px}
-    .buka-workflows-attachmentDownload{margin-left:auto;color:var(--dsw-alias-brand-primary);text-decoration:none;font-size:11px;flex:none}
-    .buka-workflows-attachmentDownload:hover{text-decoration:underline}
-    .buka-workflows-executions{display:flex;flex-direction:column;gap:12px}
-    .buka-workflows-tabs{display:flex;flex-wrap:wrap;gap:6px}
-    .buka-workflows-tab{display:inline-flex;align-items:center;gap:6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;padding:2px 10px;cursor:pointer}
-    @media (hover:hover){.buka-workflows-tab:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-workflows-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
-    .buka-workflows-tab.is-active{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-base)}
-    .buka-workflows-tabDot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-idle-primary)}
-    .buka-workflows-tabDot.is-done{background:var(--dsw-alias-state-success-primary)}
-    .buka-workflows-tabDot.is-failed{background:var(--dsw-alias-state-error-primary)}
-    .buka-workflows-tabDot.is-running{background:var(--dsw-alias-brand-primary)}
-    .buka-workflows-tabDot.is-waiting{background:var(--dsw-alias-state-warn-primary)}
-    .buka-workflows-tabPanel{display:flex;flex-direction:column;gap:12px;border:0.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md);padding:12px}
-    .buka-workflows-tabMeta{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-    .buka-workflows-kv{display:flex;flex-direction:column;gap:4px}
-    .buka-workflows-kvRow{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:12px;line-height:18px}
-    .buka-workflows-sessionBar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
-    .buka-workflows-sessionBar .buka-workflows-inlineCode{font-size:12px}
-    .buka-workflows-sessionList{display:flex;flex-direction:column;gap:6px;width:100%;min-width:0}
-    .buka-workflows-sessionRow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-interactionNotice{display:flex;flex-direction:column;gap:8px;box-sizing:border-box;width:100%;padding:12px 14px;border:0.5px solid var(--dsw-alias-state-warn-primary);border-left:3px solid var(--dsw-alias-state-warn-primary);border-radius:var(--dsw-radius-md);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
-    .buka-workflows-interactionHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-interactionTitle{flex:1 1 auto;min-width:0;color:var(--dsw-alias-state-warn-primary);font-size:13px;font-weight:500;line-height:20px;overflow-wrap:anywhere}
-    .buka-workflows-interactionBody{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:pre-wrap;overflow-wrap:anywhere}
-    .buka-workflows-interactionActions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-    .buka-workflows-userNotice{display:flex;flex-direction:column;gap:8px}
-    .buka-workflows-userNoticeGroup{display:flex;flex-direction:column;gap:6px}
-    .buka-workflows-userChoiceList,.buka-workflows-userQuestionList{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
-    .buka-workflows-userChoice,.buka-workflows-userQuestion{display:flex;flex-direction:column;gap:2px;padding:6px 8px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-userChoiceLabel,.buka-workflows-userQuestionHeader{color:var(--dsw-alias-label-primary);font-weight:500}
-    .buka-workflows-userChoiceDesc{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;overflow-wrap:anywhere}
-    .buka-workflows-userQuestionText{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-kvKey{color:var(--dsw-alias-label-tertiary);min-width:72px}
-    .buka-workflows-kvValue{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;min-width:0}
-    .buka-workflows-executionNav{margin-top:14px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-secondary);display:flex;justify-content:space-between;gap:16px}
-    .buka-workflows-navSide{display:flex;flex-direction:column;gap:6px;min-width:0;flex:1}
-    .buka-workflows-navSide.is-next{align-items:flex-end;text-align:right}
-    .buka-workflows-navSide .buka-workflows-hint{margin:0}
-    .buka-workflows-prevLink,.buka-workflows-nextLink{display:inline-flex;align-items:center;gap:6px;padding:0;border:0;background:none;font:inherit;font-size:12px;line-height:18px;color:var(--dsw-alias-brand-primary);cursor:pointer;border-radius:var(--dsw-radius-sm);max-width:100%}
-    .buka-workflows-prevLink:hover,.buka-workflows-nextLink:hover{text-decoration:underline}
-    .buka-workflows-prevLink:focus-visible,.buka-workflows-nextLink:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-    .buka-workflows-prevArrow,.buka-workflows-nextArrow{color:var(--dsw-alias-label-tertiary)}
-    .buka-workflows-prevTitle,.buka-workflows-nextTitle{font-size:12px;font-weight:500}
-    .buka-workflows-prevVisit,.buka-workflows-nextVisit{color:var(--dsw-alias-label-secondary)}
-    .buka-workflows-dialogForm{display:flex;flex-direction:column;gap:16px}
-    .buka-workflows-settingRow{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:2px 0}
-    .buka-workflows-settingText{display:flex;flex-direction:column;gap:4px;min-width:0}
-    .buka-workflows-settingHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-    .buka-workflows-settingTitle{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
-    .buka-workflows-settingDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-switch{box-sizing:border-box;flex:none;width:36px;height:20px;padding:2px;margin:2px 0 0;border:0;border-radius:999px;background:var(--dsw-alias-border-l4);cursor:pointer;display:inline-flex;align-items:center;transition:background .16s ease}
-    .buka-workflows-switch.is-on{background:var(--dsw-alias-brand-primary)}
-    .buka-workflows-switch:disabled{cursor:default;opacity:.6}
-    .buka-workflows-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
-    .buka-workflows-switchThumb{width:16px;height:16px;border-radius:999px;background:var(--dsw-alias-bg-base);box-shadow:0 1px 2px rgba(17,20,28,.24);transition:transform .16s ease}
-    .buka-workflows-switch.is-on .buka-workflows-switchThumb{transform:translateX(16px)}
-    @media (prefers-reduced-motion:reduce){.buka-workflows-switch,.buka-workflows-switchThumb{transition:none}}
-    .buka-workflows-hoursField{display:flex;flex-direction:column;gap:6px}
-    .buka-workflows-hoursControl{display:flex;align-items:center;gap:8px}
-    .buka-workflows-hoursInput{width:88px}
-    .buka-workflows-hoursUnit{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
-    .buka-workflows-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:500;line-height:20px}
-    .buka-workflows-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px;overflow-wrap:anywhere}
-    .buka-workflows-tabbar{flex:1 1 auto;min-width:0}
-    .buka-workflows-tabList{width:fit-content;min-width:240px}
-    @media (width<=372px){.buka-workflows-tabList{min-width:0}}
-    .buka-workflows-templateList{display:flex;flex-direction:column;gap:16px}
-    .buka-workflows-templateCard{display:flex;flex-direction:column;gap:8px;width:100%;box-sizing:border-box;text-align:left;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:var(--dsw-radius-md);padding:14px 16px;font:inherit;color:inherit;cursor:pointer}
-    @media (hover:hover){.buka-workflows-templateCard:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-workflows-templateCard:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
-    .buka-workflows-templateHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-templateTitle{font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere;min-width:0}
-    .buka-workflows-templateChevron{flex:none;margin-left:auto;color:var(--dsw-alias-label-tertiary)}
-    .buka-workflows-templateDesc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-templateDetail{display:flex;flex-direction:column;gap:20px}
-    .buka-workflows-flow{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
-    .buka-workflows-flowStep{display:flex;flex-direction:column;gap:6px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);padding:10px 12px}
-    .buka-workflows-flowHead{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-    .buka-workflows-flowIndex{flex:none;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
-    .buka-workflows-flowSummary{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-flowTransitions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-    .buka-workflows-templateBackButton{flex:none;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:0;background:0 0;color:var(--dsw-alias-label-caption);cursor:pointer;border-radius:var(--dsw-radius-sm);padding:0;margin-left:-4px}
-    @media (hover:hover){.buka-workflows-templateBackButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
-    .buka-workflows-templateBackButton:active{background:var(--dsw-alias-interactive-bg-active)}
-    .buka-workflows-templateBackButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-    .buka-workflows-detailBackButton{align-self:flex-start}
-    .buka-workflows-templateTransitions{display:flex;flex-direction:column;gap:8px}
-    .buka-workflows-templateTransition{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2)}
-    .buka-workflows-templateTransitionHead{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}
-    .buka-workflows-templateTransitionBody{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(560px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
+    .buka-workflows-legendLine{box-sizing:border-box;width:18px;height:0;border-top:1.5px solid var(--dsw-alias-label-caption)}
+    .buka-workflows-legendLine.is-back{border-top-color:var(--dsw-alias-state-warn-primary);border-top-style:dashed}
+    .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(600px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
     @keyframes buka-workflows-drawer-in{from{transform:translateX(16px);opacity:0}to{transform:translateX(0);opacity:1}}
     @media (prefers-reduced-motion:reduce){.buka-workflows-drawer.buka-workflows-drawer{animation:none}}
     @media (width<=767px){.buka-workflows-drawer.buka-workflows-drawer{width:100vw}}
@@ -3371,17 +4290,12 @@ window.__ModuleLoader__.load({
     .buka-workflows-drawerTitleRow{display:flex;align-items:center;gap:8px;min-width:0}
     .buka-workflows-drawerTitle{flex:1 1 auto;min-width:0;font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere}
     .buka-workflows-drawerMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-    .buka-workflows-drawerActions{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
+    .buka-workflows-drawerActions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
     .buka-workflows-drawerDownload{display:inline-flex;align-items:center;gap:4px;color:var(--dsw-alias-brand-primary);font-size:12px;line-height:18px;text-decoration:none;border-radius:var(--dsw-radius-sm)}
     .buka-workflows-drawerDownload:hover{text-decoration:underline}
-    .buka-workflows-drawerDownload:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
-    .buka-workflows-drawerClose{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+    .buka-workflows-drawerClose{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-tertiary);font-size:18px;line-height:1;cursor:pointer}
     @media (hover:hover){.buka-workflows-drawerClose:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
-    .buka-workflows-drawerClose:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
-    .buka-workflows-drawerBody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:10px;overflow:auto;overscroll-behavior:contain;padding:16px 18px 24px}
-    .buka-workflows-drawerStatus{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
-    .buka-workflows-drawerMarkdown{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
-    .buka-workflows-drawerCode{margin:0}
+    .buka-workflows-drawerBody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:16px;overflow:auto;overscroll-behavior:contain;padding:16px 18px 28px}
     .buka-workflows-drawerImage{max-width:100%;height:auto;object-fit:contain;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}
     .buka-workflows-drawerFrame{display:block;width:100%;min-height:420px;height:100%;border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}
     `;
@@ -3389,19 +4303,20 @@ window.__ModuleLoader__.load({
     /**
     * `@buka/dsh-plugin-workflows` 的浏览器一半：侧边栏的「工作流」页面。
     *
-    * 这一半只做**只读观测**：workflow 由编排 preset（默认 `workflow-orchestrator`）
-    * 的会话现场创建，没有可复用的流程列表，也没有“从这里启动流程”的入口。页面
-    * 展示落盘的运行记录：
+    * 页面只做一条链：工作流列表 → 工作流详情 → 作业详情。
     *
-    * - 列表：最近运行的状态、目标、runId、开始时间；
-    * - 详情：分层二维节点图占据页面主体，并行的节点在同一排；点节点从右侧抽屉看
-    *   节点详情（按「第几次执行」拆成 Tab），点连线从右侧抽屉看这条边的配置；
-    * - 每个节点可以「打开会话」，复用 DSH 的 `uiWorkspace.openSession(sessionId)`；
-    *   客户端会话列表里还没有这个会话时先补一次 `sessions.refresh()`。
+    * - 工作流列表：名称、描述、版本、状态与作业数；
+    * - 工作流详情：流程图（岗位 + 内建开始 / 结束）、岗位 / 任务类型 / 边 /
+    *   开始结束契约 / 预算的只读展示、作业列表，以及激活 / 停用与新建作业；
+    * - 作业详情：默认看板（行 = 岗位含开始 / 结束，列 = 排队 / 待认领 / 进行中 /
+    *   已完成 / 异常），另有流程图、任务列表、附件库与时间线；点卡片从右侧抽屉看
+    *   任务（payload、依赖、执行记录、结果、附件与允许的操作），人任务按产出
+    *   schema 填表提交；
+    * - 作业有 `running` 时每 1.5 秒刷新一次，否则 5 秒。
     *
-    * 运行记录由 Host 的 `/buka-workflows/runs` 与 `/buka-workflows/run` 两条只读
-    * 路由提供，附件下载走 `/buka-workflows/attachment`；有运行在跑时每 1.5 秒刷新一次（否则 5 秒），后台运行也能看到进度。
-    *
+    * 数据来自 Host 的 `/buka-workflows/*` 只读路由；附件下载 / 预览走
+    * `/buka-workflows/attachment`。会话入口复用 `uiWorkspace.openSession(sessionId)`，
+    * 客户端会话列表里还没有这个会话时先补一次 `sessions.refresh()`。
     *
     * 本文件只导出 `inject` 与 `apply`：`window.__ModuleLoader__.load({ id, factory })`
     * 那层外壳由构建脚本 `scripts/build-clients.ts` 生成，源码里不写死包名。

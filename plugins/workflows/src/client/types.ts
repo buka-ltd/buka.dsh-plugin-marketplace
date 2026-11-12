@@ -1,9 +1,12 @@
 /**
- * 浏览器一半的共享类型与常量：Host 路由响应形状、页面状态、路由与刷新间隔。
+ * 浏览器一半的共享类型与常量。
+ *
+ * 这里的形状全部是**客户端本地定义**：按 `.tmp/workflow-v4-api.md` 的 HTTP
+ * 契约声明，不 import 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
+ *
+ * 契约字段一律按「可能缺失」处理（响应来自新版 / 旧版 Host 都可能），页面
+ * 只做防御式读取，不做完整校验。
  */
-
-import type { RunGraphLayout, RunGraphNode } from '../graph.ts'
-import type { WorkflowRunRecord, WorkflowStep } from '../run-store.ts'
 
 /** 词典翻译函数。 */
 export type Translate = (key: string) => string
@@ -11,141 +14,317 @@ export type Translate = (key: string) => string
 /** Host 路由返回的 JSON 对象。 */
 export type JsonRecord = Record<string, unknown>
 
-/** 定义快照里的一条出边。 */
-export interface ClientEdge {
-  [key: string]: unknown
-  to?: string
+/** 侧边栏条目的词典命名空间，也是 `main` 插槽的 locale。 */
+export const NS = 'buka-workflows'
+
+/** 侧边栏条目 id；与 `main` 插槽的 key 必须相同。 */
+export const PANEL_ID = 'buka-workflows'
+
+/** 工作流列表。 */
+export const WORKFLOWS_ROUTE = '/buka-workflows/workflows'
+
+/** 工作流详情（定义快照 + 图 + 作业列表）。 */
+export const WORKFLOW_ROUTE = '/buka-workflows/workflow'
+
+/** 激活 / 停用工作流。 */
+export const WORKFLOW_ACTIVATE_ROUTE = '/buka-workflows/workflow/activate'
+
+/** 某个工作流下的作业列表。 */
+export const JOBS_ROUTE = '/buka-workflows/jobs'
+
+/** 作业详情（含任务摘要）。 */
+export const JOB_ROUTE = '/buka-workflows/job'
+
+/** 页面人启动作业。 */
+export const JOB_START_ROUTE = '/buka-workflows/job/start'
+
+/** 作业动作：cancel / retry-delivery。 */
+export const JOB_ACTION_ROUTE = '/buka-workflows/job/action'
+
+/** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
+export const TASK_ROUTE = '/buka-workflows/task'
+
+/** 任务动作：cancel / retry / claim / complete。 */
+export const TASK_ACTION_ROUTE = '/buka-workflows/task/action'
+
+/** 作业附件库。 */
+export const ATTACHMENTS_ROUTE = '/buka-workflows/attachments'
+
+/** 单个附件的下载 / 预览 / 内联地址。 */
+export const ATTACHMENT_ROUTE = '/buka-workflows/attachment'
+
+/** 有运行中作业时的刷新间隔（沿用旧页面风格）。 */
+export const LIVE_REFRESH_MS = 1500
+
+/** 没有运行中作业时的刷新间隔。 */
+export const REFRESH_MS = 5000
+
+/** 工作流状态。 */
+export type WorkflowStatus = 'draft' | 'active' | 'retired'
+
+/** 作业状态。 */
+export type JobStatus = 'running' | 'completed' | 'failed' | 'cancelled'
+
+/** 任务状态。 */
+export type TaskStatus =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'blocked'
+  | 'cancelled'
+
+/** 岗位执行者：机器人或人。 */
+export interface Executor {
+  kind?: string
   name?: string
-  label?: string
-  prompt?: string
-  description?: string
-  tone?: string
+  /** 机器人头像 id（Host 若给出就画）。 */
+  avatar?: string
+  /** 机器人驱动：agent / program（只读展示用）。 */
+  driver?: string
 }
 
-/** 定义快照里的一个节点。 */
-export interface ClientNode {
-  [key: string]: unknown
+/** 受限 JSON Schema 子集（与 `src/output.ts` 的规则一致，这里只做展示与表单）。 */
+export interface JsonSchema {
+  type?: string | string[]
+  properties?: Record<string, JsonSchema>
+  required?: string[]
+  additionalProperties?: boolean
+  items?: JsonSchema
+  enum?: unknown[]
+  const?: unknown
+  oneOf?: JsonSchema[]
+}
+
+/** 任务类型定义（工作流定义快照里的一份）。 */
+export interface TaskTypeDefinition {
   id?: string
-  type?: string
-  robot?: string
-  summary?: string
-  prompt?: string
-  title?: string
-  detail?: string
-  next?: ClientEdge[]
-  questions?: Array<Record<string, unknown>>
-  inputs?: string[]
-  mode?: string
-  timeoutMs?: number
-  maxVisits?: number
-  status?: string
+  label?: string
+  description?: string
+  payload?: JsonSchema
+  output?: JsonSchema
+  requires?: Array<{ types?: string[] }>
+  assistant?: string | null
+  mode?: string | null
 }
 
-/** 定义快照。 */
-export interface ClientDefinition {
-  [key: string]: unknown
-  plan?: { nodes?: Record<string, ClientNode>; order?: string[]; start?: string }
-  definition?: { nodes?: ClientNode[]; start?: string }
+/** 岗位定义（工作流定义快照里的一份）。 */
+export interface PositionDefinition {
+  id?: string
+  label?: string
+  description?: string
+  executor?: Executor
+  taskTypes?: TaskTypeDefinition[]
 }
 
-/** Host 返回的图模型（布局坐标 + 节点 + 兼容旧版的 rows / dotX 布局）。 */
-export type ClientGraph = RunGraphLayout & {
-  nodes: RunGraphNode[]
-  order: string[]
-  start: string | null
-  rows?: Array<{ id?: string; index?: number; y?: number }>
-  dotX?: number
+/** 边定义。`from` / `to` 是岗位 id 或内建的 `start` / `end`。 */
+export interface EdgeDefinition {
+  from?: string
+  to?: string
+  types?: string[]
+  back?: boolean
 }
 
-/** 页面读取的执行记录：Host 一定写入了这几个字段。 */
-export type ClientStep = WorkflowStep & {
-  seq: number
-  nodeId: string
-  status: string
-  type: string
+/** 开始节点契约。 */
+export interface StartDefinition {
+  task?: {
+    payload?: JsonSchema
+    output?: JsonSchema
+  }
+  next?: Array<{
+    position?: string
+    type?: string
+    payload?: Record<string, unknown>
+    dependsOn?: string[]
+  }>
 }
 
-/** 运行记录里的 steps；空记录时返回空数组。 */
-export function stepsOf(run: WorkflowRunRecord | null | undefined): ClientStep[] {
-  return Array.isArray(run?.steps) ? (run.steps as ClientStep[]) : []
+/** 结束节点契约。 */
+export interface EndDefinition {
+  task?: {
+    payload?: JsonSchema
+  }
 }
 
-/** 运行列表里的一条摘要。 */
-export interface ClientRunSummary {
-  [key: string]: unknown
-  runId: string
-  seq?: number
-  status: string
-  goal?: string
-  createdAt?: number
-  archivedAt?: number | null
-  error?: string | null
-  waitingForUser?: boolean
+/** 工作流定义快照。 */
+export interface WorkflowDefinition {
+  version?: number
+  name?: string
+  description?: string
+  budgets?: { maxTasks?: number; maxDurationHours?: number }
+  start?: StartDefinition
+  end?: EndDefinition
+  positions?: PositionDefinition[]
+  edges?: EdgeDefinition[]
 }
 
-/** 运行详情响应。 */
-export interface ClientRunDetail {
-  [key: string]: unknown
-  run: WorkflowRunRecord | null
-  definition: ClientDefinition | null
-  nodeResults: Array<Record<string, unknown>>
-  graph: ClientGraph | null
-}
-
-/** 模板目录里的一份模板（带 Host 算好的图）。 */
-export interface ClientTemplate {
-  [key: string]: unknown
+/** 工作流列表里的一条。 */
+export interface WorkflowSummary {
   id: string
   name?: string
   description?: string
-  nodes?: ClientNode[]
-  graph?: ClientGraph | null
+  version?: number
+  status?: string
+  jobCount?: number
+  updatedAt?: string | null
 }
 
-/** 列表状态。 */
-export interface ListState {
-  status: string
-  runs: ClientRunSummary[]
-  archivedCount: number
-  error: string | null
+/** 作业列表里的一条。 */
+export interface JobSummary {
+  id: string
+  seq?: number
+  status?: string
+  inputSummary?: string
+  taskCounts?: Partial<Record<TaskStatus, number>>
+  createdAt?: string
+  updatedAt?: string
 }
 
-/** 详情状态。 */
-export interface DetailState {
-  status: string
-  data: ClientRunDetail | null
-  error: string | null
+/** 承办者（人 / 助理机器人 / 执行机器人）。 */
+export interface Claimant {
+  kind?: string
+  name?: string
+  sessionId?: string | null
 }
 
-/** 模板目录状态。 */
-export interface TemplatesState {
-  status: string
-  items: ClientTemplate[]
-  error: string | null
+/** 启动者：人，或某个会话。 */
+export interface Starter {
+  kind?: string
+  sessionId?: string | null
 }
 
-/** 右侧附件预览抽屉正在看的附件。 */
-export interface AttachmentViewer {
-  runId: string
-  seq: unknown
-  nodeId: string
+/** 任务摘要（看板 / 列表用的轻记录）。 */
+export interface TaskSummary {
+  id: string
+  position?: string
+  type?: string
+  typeLabel?: string
+  status?: string
+  deps?: string[]
+  createdAt?: string
+  startedAt?: string | null
+  finishedAt?: string | null
+  claimant?: Claimant | null
+  attemptCount?: number
+  attachmentCount?: number
+  resultSummary?: string | null
+}
+
+/** 一次执行记录。 */
+export interface Attempt {
+  id: string
+  sessionId?: string | null
+  status?: string
+  stopReason?: string | null
+  startedAt?: string
+  finishedAt?: string | null
+  error?: unknown
+}
+
+/** 附件元数据。 */
+export interface AttachmentMeta {
+  id: string
   name: string
-  bytes?: number | null
+  bytes?: number
+  mime?: string
+  sha256?: string
   description?: string
+  sourceTaskId?: string
+  sourcePositionId?: string
+  createdBy?: string
+  createdAt?: string
 }
 
-/** 附件预览请求状态。 */
-export interface AttachmentPreviewState {
-  status: string
-  data: Record<string, unknown> | null
+/** 任务结果。 */
+export interface TaskResult {
+  text?: string
+  output?: unknown
+  attachments?: AttachmentMeta[]
+}
+
+/** 任务详情。 */
+export interface TaskDetail {
+  id: string
+  jobId?: string
+  position?: string
+  positionLabel?: string
+  type?: string
+  typeLabel?: string
+  typeDescription?: string
+  status?: string
+  payload?: Record<string, unknown>
+  deps?: TaskSummary[]
+  createdAt?: string
+  startedAt?: string | null
+  finishedAt?: string | null
+  claimant?: Claimant | null
+  attempts?: Attempt[]
+  result?: TaskResult | null
+  allowedActions?: string[]
+}
+
+/** 工作流详情响应。 */
+export interface WorkflowDetail {
+  workflow?: {
+    id?: string
+    name?: string
+    description?: string
+    version?: number
+    status?: string
+    definition?: WorkflowDefinition
+  }
+  graph?: {
+    positions?: Array<{ id?: string; label?: string; executor?: Executor }>
+    edges?: EdgeDefinition[]
+    start?: { label?: string }
+    end?: { label?: string }
+  }
+  jobs?: JobSummary[]
+}
+
+/** 作业详情里的图（服务端只给结构，坐标由客户端算）。 */
+export interface JobDefinition {
+  name?: string
+  positions?: Array<{ id?: string; label?: string; executor?: Executor }>
+  edges?: EdgeDefinition[]
+  start?: { label?: string }
+  end?: { label?: string }
+}
+
+/** 作业详情响应。 */
+export interface JobDetail {
+  job?: {
+    id?: string
+    seq?: number
+    status?: string
+    workflowId?: string
+    workflowName?: string
+    workflowVersion?: number
+    starter?: Starter | null
+    input?: Record<string, unknown>
+    createdAt?: string
+    updatedAt?: string
+    error?: unknown
+  }
+  definition?: JobDefinition
+  tasks?: TaskSummary[]
+}
+
+/** 作业详情页的视图页签。 */
+export type JobView = 'board' | 'graph' | 'tasks' | 'attachments' | 'timeline'
+
+/** 页面路由：工作流列表 → 工作流详情 → 作业详情。 */
+export type Route =
+  | { kind: 'workflows' }
+  | { kind: 'workflow'; workflowId: string }
+  | { kind: 'job'; workflowId: string; jobId: string }
+
+/** 一次异步读取的状态。 */
+export interface Loadable<T> {
+  status: 'idle' | 'loading' | 'ready'
+  data: T | null
   error: string | null
-}
-
-/** 设置草稿；小时存字符串，输入框直接绑它。 */
-export interface SettingsDraft {
-  enabled: boolean
-  archiveHours: string
-  deleteHours: string
 }
 
 /** Toast 文案。 */
@@ -155,25 +334,62 @@ export interface Notice {
   seq: number
 }
 
-/** 鼠标悬停的边名字。 */
-export interface EdgeTipState {
-  key: string
-  kind: string
+/** 人任务表单的草稿。 */
+export interface TaskFormState {
+  values: Record<string, string>
   text: string
-  x: number
-  y: number
-  anchor: { left: number; top: number } | null
+  error: string | null
+  submitting: boolean
 }
 
-/** 页面顶部的页签。 */
-export type ClientView = 'runs' | 'templates'
-
-/** 带 code 的请求错误。 */
-export interface ClientError extends Error {
-  code?: unknown
+/** 新建作业表单的草稿。 */
+export interface NewJobState {
+  open: boolean
+  raw: Record<string, string>
+  structured: Record<string, string>
+  error: string | null
+  submitting: boolean
 }
 
-/** 页面 props。 */
+/** 附件预览抽屉的状态。`data` 是 Host preview 响应的 `attachment` 对象。 */
+export interface AttachmentViewState {
+  id: string
+  name: string
+  status: 'loading' | 'ready' | 'failed'
+  data: JobAttachmentPreview | null
+  error: string | null
+}
+
+/** 附件预览（沿用旧附件路由的 `kind` 语义）。 */
+export interface JobAttachmentPreview {
+  name?: string
+  bytes?: number
+  kind?: 'text' | 'image' | 'pdf' | 'binary'
+  mime?: string
+  text?: string
+  truncated?: boolean
+}
+
+/** 页面全部状态。 */
+export interface PageState {
+  route: Route
+  workflows: Loadable<WorkflowSummary[]>
+  workflow: Loadable<WorkflowDetail>
+  job: Loadable<JobDetail>
+  jobView: JobView
+  /** 作业附件库；进入附件库视图时读取。 */
+  attachments: Loadable<AttachmentMeta[]>
+  taskId: string | null
+  task: Loadable<TaskDetail>
+  taskForm: TaskFormState
+  newJob: NewJobState
+  attachment: AttachmentViewState | null
+  busy: string | null
+  notice: Notice | null
+  tick: number
+}
+
+/** 页面 props（由 `index.ts` 的 `main` 插槽注入）。 */
 export interface WorkflowsPageProps {
   t: Translate
   getService?: ((name: string) => unknown) | null
@@ -184,29 +400,12 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** 把 Host 返回的 JSON 收口成页面读取的形状（只读展示，不再校验输入）。 */
-export function asRunDetail(body: JsonRecord): ClientRunDetail {
-  return body as unknown as ClientRunDetail
+/** 安全数组。 */
+export function asArray<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : []
 }
 
-/** 词典命名空间。 */
-export const NS = 'buka-workflows'
-
-/** 侧边栏条目 id 与 `main` 的 key 必须相同。 */
-export const PANEL_ID = 'buka-workflows'
-
-/** 与 Host 一半（`lib/index.js`）的路由常量保持一致。 */
-export const RUNS_ROUTE = '/buka-workflows/runs'
-export const RUN_ROUTE = '/buka-workflows/run'
-export const SETTINGS_ROUTE = '/buka-workflows/settings'
-export const TEMPLATES_ROUTE = '/buka-workflows/templates'
-
-/** 自动归档默认值：运行结束 24 小时后归档、168 小时后删除。 */
-export const DEFAULT_ARCHIVE_HOURS = 24
-export const DEFAULT_DELETE_HOURS = 168
-
-/** 页面刷新间隔：正在跑的运行也能看到节点进度。 */
-export const REFRESH_MS = 5000
-
-/** 有运行在跑时缩短的刷新间隔：后台调度时这张图是唯一的观测点。 */
-export const LIVE_REFRESH_MS = 1500
+/** 安全字符串。 */
+export function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
