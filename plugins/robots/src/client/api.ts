@@ -69,6 +69,14 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errMissingDirectory')
     case 'registry-unreadable':
       return t('errRegistryUnreadable')
+    case 'program-robot':
+      return t('errProgramRobot')
+    case 'builtin-robot':
+      return t('errBuiltinRobot')
+    case 'invalid-assistant':
+      return t('errInvalidAssistant')
+    case 'invalid-driver':
+      return t('errInvalidDriver')
     case 'too-large':
       return t('errTooLarge')
     case 'invalid-content':
@@ -94,6 +102,11 @@ export function failureText(t: Translate, failure: unknown): string {
  */
 export function countBadge(count: number, t: (arg0: string) => string): string {
   return String(t('skillsBadge')).replace('{n}', String(count))
+}
+
+/** 是否 program 型机器人（只读、没有目录与会话）。 */
+export function isProgramRobot(robot: Robot): boolean {
+  return robot?.driver === 'program'
 }
 
 /**

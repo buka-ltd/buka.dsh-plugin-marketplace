@@ -36,8 +36,16 @@ export const PLUGIN_CACHE_DIR = 'dsh-plugin-robots'
 /** 登记文件名；固定放在机器人根目录的父目录里。 */
 export const ROBOT_REGISTRY_FILE = 'robots.json'
 
-/** 登记文件格式版本。 */
-export const ROBOT_REGISTRY_VERSION = 1
+/**
+ * 登记文件格式版本。
+ *
+ * version 2 新增 `driver`（agent / program）与 `assistant`；读旧版（version 1）
+ * 登记表时按 agent / false 迁移，下一次写入落盘成 version 2。
+ */
+export const ROBOT_REGISTRY_VERSION = 2
+
+/** 仍可读取的旧版登记表版本；读入时迁移到当前版本。 */
+export const ROBOT_REGISTRY_LEGACY_VERSIONS: readonly number[] = [1]
 
 /**
  * 机器人名称的合法字符集：字母、数字（含汉字等 Unicode 字母/数字）开头，

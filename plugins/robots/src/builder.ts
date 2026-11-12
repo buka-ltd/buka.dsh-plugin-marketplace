@@ -26,6 +26,7 @@ import {
   AGENTS_MAX_WRITE_BYTES,
   addRobot,
   ensureClaudeLink,
+  isBuiltinRobotName,
   isValidRobotName,
   normalizeRobotDescription,
   ROBOT_DESCRIPTION_MAX_LENGTH,
@@ -46,6 +47,8 @@ export const BUILD_ERROR_CODES = Object.freeze({
   agentsTooLarge: 'agents-too-large',
   registryUnreadable: 'registry-unreadable',
   robotExists: 'robot-exists',
+  builtinRobot: 'builtin-robot',
+  programRobot: 'program-robot',
   unknownRobot: 'unknown-robot',
   nameTaken: 'name-taken',
   missingDirectory: 'missing-directory',
@@ -299,7 +302,15 @@ export async function buildRobot({
     | null
     | undefined
 } = {}): Promise<{
-  robot: { name: string; path: string; avatar: string; description: string; createdAt: string }
+  robot: {
+    name: string
+    driver: 'agent'
+    path: string
+    avatar: string
+    description: string
+    createdAt: string
+    assistant: boolean
+  }
   created: boolean
   updated: boolean
   renamed: boolean
@@ -311,6 +322,21 @@ export async function buildRobot({
 }> {
   const request = normalizeBuildRequest({ name, avatar, description, agents, update, newName })
 
+  // v1 的 program 机器人只有内建 clock：不可创建、不可当改名目标。
+  // 构建工具只创建 / 修改 agent 型机器人。
+  if (isBuiltinRobotName(request.name)) {
+    throw buildError(
+      BUILD_ERROR_CODES.builtinRobot,
+      `"${request.name}" is a built-in program robot and cannot be created, changed or removed; program robots are registered by the plugin.`,
+    )
+  }
+  if (request.newName !== '' && isBuiltinRobotName(request.newName)) {
+    throw buildError(
+      BUILD_ERROR_CODES.builtinRobot,
+      `"${request.newName}" is a built-in program robot name and cannot be used as a new robot name.`,
+    )
+  }
+
   const registry = await readRobotRegistry({ file })
   if (registry.corrupt) {
     throw buildError(
@@ -320,6 +346,12 @@ export async function buildRobot({
   }
 
   const existing = registry.robots.find((robot) => robot.name === request.name)
+  if (existing !== undefined && existing.driver !== 'agent') {
+    throw buildError(
+      BUILD_ERROR_CODES.programRobot,
+      `"${request.name}" is a program robot: program robots are read-only and cannot be changed by this tool.`,
+    )
+  }
   if (existing !== undefined && !request.update) {
     throw buildError(
       BUILD_ERROR_CODES.robotExists,
@@ -397,10 +429,12 @@ export async function buildRobot({
   return {
     robot: {
       name: robot.name,
+      driver: 'agent',
       path: robot.path,
       avatar: robot.avatar,
       description: robot.description ?? '',
       createdAt: robot.createdAt,
+      assistant: robot.assistant === true,
     },
     created,
     updated,

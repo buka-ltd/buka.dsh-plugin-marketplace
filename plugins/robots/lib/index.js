@@ -1,10 +1,10 @@
-import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { constants, promises } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 // .build/robots/access.js
 /**
 * 判断某个 agent 能否看到 / 调用机器人构建工具。
@@ -135,6 +135,8 @@ const AGENTS_MAX_WRITE_BYTES = 524288;
 const PLUGIN_CACHE_DIR = "dsh-plugin-robots";
 /** 登记文件名；固定放在机器人根目录的父目录里。 */
 const ROBOT_REGISTRY_FILE = "robots.json";
+/** 仍可读取的旧版登记表版本；读入时迁移到当前版本。 */
+const ROBOT_REGISTRY_LEGACY_VERSIONS = [1];
 /**
 * 机器人名称的合法字符集：字母、数字（含汉字等 Unicode 字母/数字）开头，
 * 后面可以跟 `._-`。点开头、路径分隔符与 NUL 都被这个正则排除。
@@ -507,6 +509,61 @@ function robotAgentsTemplate(name, robotPath) {
 - 动手前先读仓库里已有的文档、脚本与测试。
 - 提交信息用 Conventional Commits；一个 commit 只做一件事。
 `;
+}
+// .build/robots/store/builtin.js
+/**
+* 内建 program 型机器人。
+*
+* program 型机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
+* 项目 skills；v1 只有内建 `clock`，由 workflows 插件执行驱动。它们登记在
+* robots 插件里、在页面上只读展示，用户不能创建或删除。
+*
+* 本模块只依赖类型与常量，可被 `node --test` 直接 import。
+*
+* @module @buka/dsh-plugin-robots/store/builtin
+*/
+/** 内建定时机器人的名字，也是它的 program id。 */
+const CLOCK_ROBOT_NAME = "clock";
+/**
+* 内建 program 机器人清单（按登记顺序）。
+*
+* `createdAt` 是固定的登记时刻：内建机器人不随安装时间变化，重复补写也不会
+* 让它看起来是新的。
+*/
+const BUILTIN_ROBOTS = Object.freeze([{
+	name: CLOCK_ROBOT_NAME,
+	driver: "program",
+	path: "",
+	program: CLOCK_ROBOT_NAME,
+	createdAt: "2026-11-12T00:00:00.000Z",
+	avatar: "",
+	description: "到点完成任务的定时机器人：任务 payload 带 until，到点后自动完成。",
+	assistant: false
+}]);
+/** 按名字取内建程序机器人；不是内建机器人时返回 undefined。 */
+function builtinRobot(name) {
+	if (typeof name !== "string") return void 0;
+	const trimmed = name.trim();
+	return BUILTIN_ROBOTS.find((robot) => robot.name === trimmed);
+}
+/** 名字是否属于内建（不可创建 / 删除 / 改动的）程序机器人。 */
+function isBuiltinRobotName(name) {
+	return builtinRobot(name) !== void 0;
+}
+/**
+* 把登记表里缺的内建机器人补到末尾。
+*
+* 只影响内存里的视图：页面与 `list()` 用它保证内建机器人总是可见；写回由
+* `ensureBuiltinRobots` 负责。
+*/
+function withBuiltinRobots(robots) {
+	const names = new Set(robots.map((robot) => robot.name));
+	return [...robots, ...BUILTIN_ROBOTS.filter((robot) => !names.has(robot.name))];
+}
+/** 生成「内建机器人不可改动」错误。 */
+function builtinRobotError(name) {
+	const error = /* @__PURE__ */ new Error(`内建机器人不可创建、修改或删除：${String(name)}`);
+	return Object.assign(error, { code: "builtin-robot" });
 }
 // .build/robots/avatar.js
 /**
@@ -1161,20 +1218,79 @@ async function writeJsonAtomic(file, value, options = {}) {
 }
 // .build/robots/store/registry.js
 /**
-* 机器人登记表：读写、原子写、条目增删与描述规范化。
+* 机器人登记表：读写、迁移、原子写、条目增删与描述规范化。
 *
 * 登记文件是插件唯一的机器人清单；写操作遇到损坏的登记文件必须拒绝，绝不覆盖
 * 用户文件。新建的机器人目录由 `agents.ts` 的 `ensureRobotDirectory` 补模板。
 *
+* 格式为 version 2（`driver` / `assistant`）；读 version 1 旧表时在内存里迁移，
+* 下一次写入落盘成新格式。内建 program 机器人（clock）由 `BUILTIN_ROBOTS`
+* 提供：读旧表时补到视图里，写回前由 `ensureBuiltinRobots` 落盘一次。
+*
 * @module @buka/dsh-plugin-robots/store/registry
 */
+/** 登记表里能读到的版本：当前版本 + 仍需要迁移的旧版本。 */
+const READABLE_VERSIONS = /* @__PURE__ */ new Set([2, ...ROBOT_REGISTRY_LEGACY_VERSIONS]);
+/** 判断值是不是普通对象（不是数组 / null）。 */
+function isRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+/**
+* 读登记表里的一个条目并迁移成当前形状；不合法时返回 undefined。
+*
+* - `driver` 缺失（version 1 旧条目）或取值写坏时按 `agent` 处理；
+* - program 条目必须有非空 `program` id，agent 条目必须有非空 `path`；
+* - `assistant` 只对 agent 生效：program 机器人不能被标记成助理。
+*/
+function readEntry(entry) {
+	if (!isValidRobotName(entry.name)) return void 0;
+	const name = entry.name.trim();
+	const driver = entry.driver === "program" ? "program" : "agent";
+	const program = driver === "program" && typeof entry.program === "string" ? entry.program.trim() : "";
+	if (driver === "program" && program === "") return void 0;
+	const robotPath = typeof entry.path === "string" ? entry.path.trim() : "";
+	if (driver === "agent" && robotPath === "") return void 0;
+	return {
+		name,
+		driver,
+		path: robotPath,
+		program,
+		createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
+		avatar: typeof entry.avatar === "string" ? entry.avatar.trim() : "",
+		description: normalizeRobotDescription(entry.description).slice(0, 500),
+		assistant: driver === "agent" && entry.assistant === true
+	};
+}
+/**
+* 把一条待写入记录规范化成完整记录；缺省字段按当前格式补齐。
+*
+* - `driver` 缺省按 `agent`；
+* - agent 记录补 `path`、清空 `program`；program 记录补 `program`、清空 `path`；
+* - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐）；
+* - 描述折叠空白并截断；`assistant` 只对 agent 生效。
+*/
+function normalizeRecord(robot) {
+	const driver = robot.driver === "program" ? "program" : "agent";
+	return {
+		name: robot.name,
+		driver,
+		path: driver === "agent" && typeof robot.path === "string" ? robot.path : "",
+		program: driver === "program" && typeof robot.program === "string" ? robot.program.trim() : "",
+		createdAt: robot.createdAt,
+		avatar: resolveAvatar(robot.avatar, robot.name),
+		description: normalizeRobotDescription(robot.description).slice(0, 500),
+		assistant: driver === "agent" && robot.assistant === true
+	};
+}
 /**
 * 读机器人登记表。
 *
-* - 文件不存在：`{ version: 1, robots: [], file }`；
-* - 读不了 / 不是合法 JSON / 版本不是 1 / `robots` 不是数组：`corrupt: true`
+* - 文件不存在：`{ version: 2, robots: [], file }`（内建机器人由调用方合并）；
+* - 读不了 / 不是合法 JSON / 版本不可读 / `robots` 不是数组：`corrupt: true`
 *   且 `robots: []`（写操作必须据此拒绝，绝不覆盖原文件）；
-* - 条目必须同时有合法 `name` 与非空 `path`，否则过滤掉；同名条目只保留第一个。
+* - version 1 旧表按 `driver: "agent"`、`assistant: false` 迁移；
+* - 条目必须同时有合法 `name`（agent 还要有非空 `path`，program 要有 `program`），
+*   否则过滤掉；同名条目只保留第一个。
 * - `avatar` 是预设头像 id；旧登记表没有这个字段（或在别处被改坏）时留空，
 *   展示 / 写入时由 `resolveAvatar` 按名字兜底成一个确定的预设。
 *
@@ -1186,12 +1302,12 @@ async function readRobotRegistry({ file } = {}) {
 		text = await promises.readFile(target, "utf8");
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return {
-			version: 1,
+			version: 2,
 			robots: [],
 			file: target
 		};
 		return {
-			version: 1,
+			version: 2,
 			robots: [],
 			corrupt: true,
 			file: target
@@ -1202,20 +1318,20 @@ async function readRobotRegistry({ file } = {}) {
 		parsed = JSON.parse(text);
 	} catch {
 		return {
-			version: 1,
+			version: 2,
 			robots: [],
 			corrupt: true,
 			file: target
 		};
 	}
-	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {
-		version: 1,
+	if (!isRecord(parsed)) return {
+		version: 2,
 		robots: [],
 		corrupt: true,
 		file: target
 	};
-	if (!("version" in parsed) || parsed.version !== 1 || !("robots" in parsed) || !Array.isArray(parsed.robots)) return {
-		version: 1,
+	if (typeof parsed.version !== "number" || !READABLE_VERSIONS.has(parsed.version) || !Array.isArray(parsed.robots)) return {
+		version: 2,
 		robots: [],
 		corrupt: true,
 		file: target
@@ -1223,22 +1339,14 @@ async function readRobotRegistry({ file } = {}) {
 	const robots = [];
 	const seen = /* @__PURE__ */ new Set();
 	for (const entry of parsed.robots) {
-		if (entry === null || typeof entry !== "object") continue;
-		if (!isValidRobotName(entry.name)) continue;
-		const name = entry.name.trim();
-		if (typeof entry.path !== "string" || entry.path.trim() === "") continue;
-		if (seen.has(name)) continue;
-		seen.add(name);
-		robots.push({
-			name,
-			path: entry.path,
-			createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
-			avatar: typeof entry.avatar === "string" ? entry.avatar.trim() : "",
-			description: normalizeRobotDescription(entry.description).slice(0, 500)
-		});
+		if (!isRecord(entry)) continue;
+		const robot = readEntry(entry);
+		if (robot === void 0 || seen.has(robot.name)) continue;
+		seen.add(robot.name);
+		robots.push(robot);
 	}
 	return {
-		version: 1,
+		version: 2,
 		robots,
 		file: target
 	};
@@ -1246,22 +1354,59 @@ async function readRobotRegistry({ file } = {}) {
 /**
 * 原子写机器人登记表（临时文件 + rename，权限 0600）。
 *
-* 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。
+* 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。写入总是
+* 落成当前版本（version 2），旧记录缺的 `driver` / `assistant` 在这里补齐。
 *
 */
 async function writeRobotRegistry({ file, robots } = {}) {
 	const target = requireRegistryFile(file);
 	await writeJsonAtomic(target, {
-		version: 1,
-		robots: (Array.isArray(robots) ? robots : []).map((robot) => ({
-			name: robot.name,
-			path: robot.path,
-			createdAt: robot.createdAt,
-			avatar: resolveAvatar(robot.avatar, robot.name),
-			description: normalizeRobotDescription(robot.description).slice(0, 500)
-		}))
+		version: 2,
+		robots: (Array.isArray(robots) ? robots : []).map((entry) => {
+			const robot = normalizeRecord(entry);
+			if (robot.driver === "program") return {
+				name: robot.name,
+				driver: robot.driver,
+				program: robot.program,
+				createdAt: robot.createdAt,
+				avatar: robot.avatar,
+				description: robot.description,
+				assistant: false
+			};
+			return {
+				name: robot.name,
+				driver: robot.driver,
+				path: robot.path,
+				createdAt: robot.createdAt,
+				avatar: robot.avatar,
+				description: robot.description,
+				assistant: robot.assistant
+			};
+		})
 	});
 	return { file: target };
+}
+/**
+* 把内建 program 机器人补进登记表（幂等）。
+*
+* 只补缺的条目，不动已有条目与顺序；登记表损坏时拒绝写入、返回 `corrupt`。
+*
+*/
+async function ensureBuiltinRobots({ file } = {}) {
+	const target = requireRegistryFile(file);
+	const registry = await readRobotRegistry({ file: target });
+	if (registry.corrupt) return {
+		added: [],
+		corrupt: true
+	};
+	const names = new Set(registry.robots.map((robot) => robot.name));
+	const missing = BUILTIN_ROBOTS.filter((robot) => !names.has(robot.name));
+	if (missing.length === 0) return { added: [] };
+	await writeRobotRegistry({
+		file: target,
+		robots: [...registry.robots, ...missing]
+	});
+	return { added: missing.map((robot) => robot.name) };
 }
 /**
 * 生成「名称不合法」错误。
@@ -1278,6 +1423,22 @@ function invalidNameError(name) {
 function invalidDescriptionError(description) {
 	const error = /* @__PURE__ */ new Error(`机器人描述不合法：需要不超过 500 个字符的单行文本（收到 ${String(description)}）`);
 	return Object.assign(error, { code: "invalid-description" });
+}
+/**
+* 生成「助理标记不合法」错误。
+*
+*/
+function invalidAssistantError(assistant) {
+	const error = /* @__PURE__ */ new Error(`助理标记不合法：需要布尔值（收到 ${String(assistant)}）`);
+	return Object.assign(error, { code: "invalid-assistant" });
+}
+/**
+* 生成「program 机器人只读」错误。
+*
+*/
+function programRobotError(name) {
+	const error = /* @__PURE__ */ new Error(`program 型机器人只读，不能修改或打开会话：${String(name)}`);
+	return Object.assign(error, { code: "program-robot" });
 }
 /**
 * 规范化机器人描述：把换行 / 连续空白折叠成一个空格并 trim。描述是给工作流
@@ -1314,14 +1475,16 @@ function unknownRobotError(name) {
 	return Object.assign(error, { code: "unknown-robot" });
 }
 /**
-* 新建（或复用）一个机器人：建目录、补 AGENTS.md 模板、把条目插到登记表最前。
+* 新建（或复用）一个 agent 型机器人：建目录、补 AGENTS.md 模板、把条目插到
+* 登记表最前。
 *
+* - 内建 program 机器人（clock）不可创建，program 条目不可被同名复用；
 * - 头像：传入合法 id 就用它，否则按名字挑一个还被占用的预设；新建的机器人
 *   一定带头像；
 * - 描述可选，存成一行摘要（空白折叠）；新建时写进条目，同名已登记时保留原描述；
 * - 同名已登记：不重复建条目，`created: false`；目录被外部删掉时重新建目录；
-* - 名称不合法抛 `code = 'invalid-name'`；登记文件损坏抛
-*   `code = 'registry-unreadable'`（不覆盖原文件）；
+* - 名称不合法抛 `code = 'invalid-name'`；内建名抛 `code = 'builtin-robot'`；
+*   登记文件损坏抛 `code = 'registry-unreadable'`（不覆盖原文件）；
 * - 新条目的 `path` 是创建后的规范绝对路径（`fs.realpath`，失败回退解析值），
 *   这样和工作区注册表里的路径能直接对齐。
 *
@@ -1329,6 +1492,7 @@ function unknownRobotError(name) {
 async function addRobot({ robotsDir, file, name, avatar, description } = {}) {
 	const registryFile = requireRegistryFile(file);
 	if (!isValidRobotName(name)) throw invalidNameError(name);
+	if (isBuiltinRobotName(name)) throw builtinRobotError(name);
 	const rawDescription = description === void 0 || description === null ? "" : description;
 	if (typeof rawDescription !== "string") throw invalidDescriptionError(rawDescription);
 	const cleanDescription = normalizeRobotDescription(rawDescription);
@@ -1338,6 +1502,7 @@ async function addRobot({ robotsDir, file, name, avatar, description } = {}) {
 	const trimmed = name.trim();
 	const existing = registry.robots.find((robot) => robot.name === trimmed);
 	if (existing !== void 0) {
+		if (existing.driver !== "agent") throw programRobotError(trimmed);
 		await ensureRobotDirectory(existing.path, trimmed);
 		return {
 			robot: {
@@ -1353,10 +1518,13 @@ async function addRobot({ robotsDir, file, name, avatar, description } = {}) {
 	const used = registry.robots.map((robot) => resolveAvatar(robot.avatar, robot.name));
 	const robot = {
 		name: trimmed,
+		driver: "agent",
 		path: canonical,
+		program: "",
 		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
 		avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(trimmed, used),
-		description: cleanDescription
+		description: cleanDescription,
+		assistant: false
 	};
 	await writeRobotRegistry({
 		file: registryFile,
@@ -1368,10 +1536,11 @@ async function addRobot({ robotsDir, file, name, avatar, description } = {}) {
 	};
 }
 /**
-* 改一个机器人的头像：只动登记表里的 `avatar` 字段，不碰目录与工作区。
+* 改一个 agent 机器人的头像：只动登记表里的 `avatar` 字段，不碰目录与工作区。
 *
 * - 头像 id 不属于预设集合抛 `code = 'invalid-avatar'`；
 * - 名字不在登记表里抛 `code = 'unknown-robot'`；
+* - program 机器人只读，抛 `code = 'program-robot'`；
 * - 登记文件损坏抛 `code = 'registry-unreadable'`。
 *
 */
@@ -1384,6 +1553,7 @@ async function setRobotAvatar({ file, name, avatar } = {}) {
 	const trimmed = name.trim();
 	const current = registry.robots.find((robot) => robot.name === trimmed);
 	if (current === void 0) throw unknownRobotError(trimmed);
+	if (current.driver !== "agent") throw programRobotError(trimmed);
 	const robot = {
 		...current,
 		avatar
@@ -1395,10 +1565,11 @@ async function setRobotAvatar({ file, name, avatar } = {}) {
 	return { robot };
 }
 /**
-* 改一个机器人的描述：只动登记表里的 `description` 字段，不碰目录与工作区。
+* 改一个 agent 机器人的描述：只动登记表里的 `description` 字段，不碰目录与工作区。
 *
 * 描述是给工作流选择机器人看的一行摘要（类似 skill 的 description），存储前
 * 会折叠空白；空串表示清空。超过上限抛 `code = 'invalid-description'`。
+* program 机器人只读，抛 `code = 'program-robot'`。
 *
 */
 async function setRobotDescription({ file, name, description } = {}) {
@@ -1412,6 +1583,7 @@ async function setRobotDescription({ file, name, description } = {}) {
 	const trimmed = name.trim();
 	const current = registry.robots.find((robot) => robot.name === trimmed);
 	if (current === void 0) throw unknownRobotError(trimmed);
+	if (current.driver !== "agent") throw programRobotError(trimmed);
 	const robot = {
 		...current,
 		description: clean
@@ -1423,10 +1595,39 @@ async function setRobotDescription({ file, name, description } = {}) {
 	return { robot };
 }
 /**
-* 从登记表移除一个机器人：**目录不删**（目录、文件与会话都保留）。
+* 设置 / 取消一个 agent 机器人的助理标记。
 *
-* 登记文件损坏抛 `code = 'registry-unreadable'`；未知名字返回
-* `{ removed: false }`，不写文件。
+* 只有 agent 型机器人可以是助理（人任务的承办者）；program 机器人只读，抛
+* `code = 'program-robot'`。`assistant` 必须是布尔值，否则抛
+* `code = 'invalid-assistant'`。
+*
+*/
+async function setRobotAssistant({ file, name, assistant } = {}) {
+	const registryFile = requireRegistryFile(file);
+	if (!isValidRobotName(name)) throw invalidNameError(name);
+	if (typeof assistant !== "boolean") throw invalidAssistantError(assistant);
+	const registry = await readRobotRegistry({ file: registryFile });
+	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
+	const trimmed = name.trim();
+	const current = registry.robots.find((robot) => robot.name === trimmed);
+	if (current === void 0) throw unknownRobotError(trimmed);
+	if (current.driver !== "agent") throw programRobotError(trimmed);
+	const robot = {
+		...current,
+		assistant
+	};
+	await writeRobotRegistry({
+		file: registryFile,
+		robots: registry.robots.map((entry) => entry.name === trimmed ? robot : entry)
+	});
+	return { robot };
+}
+/**
+* 从登记表移除一个 agent 机器人：**目录不删**（目录、文件与会话都保留）。
+*
+* - 内建 program 机器人（clock）与其它 program 机器人只读，拒绝移除；
+* - 登记文件损坏抛 `code = 'registry-unreadable'`；未知名字返回
+*   `{ removed: false }`，不写文件。
 *
 */
 async function removeRobot({ file, name } = {}) {
@@ -1434,11 +1635,13 @@ async function removeRobot({ file, name } = {}) {
 	const registry = await readRobotRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
 	const trimmed = typeof name === "string" ? name.trim() : "";
-	const remaining = registry.robots.filter((robot) => robot.name !== trimmed);
-	if (remaining.length === registry.robots.length) return { removed: false };
+	const current = registry.robots.find((robot) => robot.name === trimmed);
+	if (current === void 0) return { removed: false };
+	if (isBuiltinRobotName(trimmed)) throw builtinRobotError(trimmed);
+	if (current.driver !== "agent") throw programRobotError(trimmed);
 	await writeRobotRegistry({
 		file: registryFile,
-		robots: remaining
+		robots: registry.robots.filter((robot) => robot.name !== trimmed)
 	});
 	return { removed: true };
 }
@@ -1449,11 +1652,24 @@ async function removeRobot({ file, name } = {}) {
 * 「挂载」按规范路径比较：工作区路径用 `path.resolve`（DSH 记录本身就是
 * realpath 规范值），机器人路径用 `fs.realpath`（失败回退 `path.resolve`）。
 *
+* program 型机器人没有目录：不扫描 skills / AGENTS.md，`exists` 为 false，
+* 页面按 `driver` 只读展示。内建 program 机器人在视图里补上，即使登记表还没
+* 落盘也能看到。
+*
 * @module @buka/dsh-plugin-robots/store/list
 */
+/** 没有目录的机器人（program 型）的 CLAUDE.md 摘要。 */
+function emptyClaude() {
+	return {
+		exists: false,
+		symlink: false,
+		mode: "missing",
+		target: ""
+	};
+}
 /**
 * 汇总登记表里的机器人：目录是否存在、是否已挂到 DSH 工作区，以及每个
-* 机器人自己的项目级 skills 与 AGENTS.md。
+* agent 型机器人自己的项目级 skills 与 AGENTS.md。
 *
 * 「挂载」按规范路径比较：工作区路径用 `path.resolve`（DSH 记录本身就是
 * realpath 规范值），机器人路径用 `fs.realpath`（失败回退 `path.resolve`）。
@@ -1472,57 +1688,65 @@ async function listRobots({ file, workspaceRegistry, robotsDir } = {}) {
 	};
 	const workspaceByPath = await indexWorkspaces(workspaceRegistry);
 	const robots = [];
-	for (const entry of registry.robots) {
-		const canonical = await realpathOr(entry.path, path.resolve(entry.path));
-		const workspace = workspaceByPath.get(canonical) ?? workspaceByPath.get(path.resolve(entry.path));
-		const exists = await isDirectory(canonical);
-		let skills = [];
-		try {
-			skills = (await scanProjectSkills(canonical)).skills;
-		} catch {
-			skills = [];
+	for (const entry of withBuiltinRobots(registry.robots)) {
+		if (entry.driver === "program") {
+			robots.push(programEntry(entry));
+			continue;
 		}
-		let agents = emptyAgentsFile();
-		try {
-			agents = await readAgentsFile(canonical);
-		} catch {
-			agents = emptyAgentsFile();
-		}
-		let claude = {
-			exists: false,
-			symlink: false,
-			mode: "missing",
-			target: ""
-		};
-		try {
-			claude = exists && agents.exists ? await ensureClaudeLink(canonical) : await readClaudeLink(canonical);
-		} catch {
-			claude = {
-				exists: false,
-				symlink: false,
-				mode: "missing",
-				target: ""
-			};
-		}
-		robots.push({
-			name: entry.name,
-			path: entry.path,
-			createdAt: entry.createdAt,
-			avatar: resolveAvatar(entry.avatar, entry.name),
-			description: entry.description,
-			exists,
-			mounted: workspace !== void 0,
-			workspaceId: workspace === void 0 ? null : String(workspace.id),
-			skills,
-			agents,
-			claude
-		});
+		robots.push(await agentEntry(entry, workspaceByPath));
 	}
 	return {
 		root,
 		registry: registryFile,
 		corrupt: false,
 		robots
+	};
+}
+/** program 型机器人：没有目录、skills 与 AGENTS.md。 */
+function programEntry(entry) {
+	return {
+		...entry,
+		avatar: resolveAvatar(entry.avatar, entry.name),
+		exists: false,
+		mounted: false,
+		workspaceId: null,
+		skills: [],
+		agents: emptyAgentsFile(),
+		claude: emptyClaude()
+	};
+}
+/** agent 型机器人：目录 / 挂载 / skills / AGENTS.md 汇总。 */
+async function agentEntry(entry, workspaceByPath) {
+	const canonical = await realpathOr(entry.path, path.resolve(entry.path));
+	const workspace = workspaceByPath.get(canonical) ?? workspaceByPath.get(path.resolve(entry.path));
+	const exists = await isDirectory(canonical);
+	let skills = [];
+	try {
+		skills = (await scanProjectSkills(canonical)).skills;
+	} catch {
+		skills = [];
+	}
+	let agents = emptyAgentsFile();
+	try {
+		agents = await readAgentsFile(canonical);
+	} catch {
+		agents = emptyAgentsFile();
+	}
+	let claude = emptyClaude();
+	try {
+		claude = exists && agents.exists ? await ensureClaudeLink(canonical) : await readClaudeLink(canonical);
+	} catch {
+		claude = emptyClaude();
+	}
+	return {
+		...entry,
+		avatar: resolveAvatar(entry.avatar, entry.name),
+		exists,
+		mounted: workspace !== void 0,
+		workspaceId: workspace === void 0 ? null : String(workspace.id),
+		skills,
+		agents,
+		claude
 	};
 }
 /**
@@ -1591,6 +1815,8 @@ async function renameRobot({ robotsDir, file, name, newName } = {}) {
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
 	const current = registry.robots.find((robot) => robot.name === trimmed);
 	if (current === void 0) throw unknownRobotError(trimmed);
+	if (current.driver !== "agent") throw programRobotError(trimmed);
+	if (isBuiltinRobotName(nextName)) throw builtinRobotError(nextName);
 	if (nextName === current.name) return {
 		robot: {
 			...current,
@@ -1666,6 +1892,116 @@ async function renameRobot({ robotsDir, file, name, newName } = {}) {
 		agentsRewritten
 	};
 }
+/**
+* 复用 web 组合的信任栅栏；被拒绝时已经写好响应。
+*
+*/
+function rejected(webCtx, req, res) {
+	let rejection;
+	try {
+		rejection = webCtx.connection.requestRejection(req);
+	} catch {
+		rejection = 500;
+	}
+	if (rejection === void 0) return false;
+	res.statusCode = rejection;
+	res.end();
+	return true;
+}
+/**
+* 读取并解析 JSON 请求体。
+*
+* 失败时（content-type 不对、超过大小上限、不是合法 JSON）已经写好响应，
+* 返回 `undefined` 让调用方直接返回；`null` 是合法 JSON，原样返回。
+*
+*/
+async function readJsonBody(req, res) {
+	if (String(req.headers["content-type"] ?? "").split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+		sendError(res, 415, "invalid-content-type", "content-type 必须是 application/json");
+		return;
+	}
+	const text = await readBoundedBody(req);
+	if (text === null) {
+		sendError(res, 413, "too-large", "请求体过大");
+		return;
+	}
+	try {
+		return JSON.parse(text);
+	} catch {
+		sendError(res, 400, "invalid-json", "请求体不是合法 JSON");
+		return;
+	}
+}
+/**
+* 读取有上限的请求体；超过上限时丢弃剩余流并返回 null。
+*
+*/
+async function readBoundedBody(req) {
+	const chunks = [];
+	let size = 0;
+	for await (const chunk of req) {
+		size += chunk.byteLength;
+		if (size > 1048576) {
+			req.resume();
+			return null;
+		}
+		chunks.push(chunk);
+	}
+	return Buffer.concat(chunks, size).toString("utf8");
+}
+/**
+* 读带错误码的错误；HTTP 路由按 `code` 映射状态码。
+*
+*/
+function errorCode(error) {
+	if (error === null || typeof error !== "object") return void 0;
+	const code = error.code;
+	return typeof code === "string" ? code : void 0;
+}
+/**
+* 把任意错误转成可以展示的文本。
+*
+*/
+function describeError$2(error) {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+/**
+* 发送 JSON 响应；数据是实时事实，不缓存。
+*
+*/
+function sendJson(res, status, payload) {
+	res.statusCode = status;
+	res.setHeader("content-type", "application/json; charset=utf-8");
+	res.setHeader("cache-control", "no-store");
+	res.end(JSON.stringify(payload));
+}
+/**
+* 统一的失败响应：`{ ok: false, code, message }`。
+*
+*/
+function sendError(res, status, code, message) {
+	sendJson(res, status, {
+		ok: false,
+		code,
+		message
+	});
+}
+/**
+* 405 并带上唯一支持的方法。
+*
+*/
+function sendMethodNotAllowed(res, allow) {
+	res.statusCode = 405;
+	res.setHeader("allow", allow);
+	res.setHeader("content-type", "application/json; charset=utf-8");
+	res.setHeader("cache-control", "no-store");
+	res.end(JSON.stringify({
+		ok: false,
+		code: "method-not-allowed",
+		message: `只支持 ${allow}`
+	}));
+}
 // .build/robots/builder.js
 /**
 * 「机器人构建」preset 的写操作：创建 / 修改机器人，并把它挂到工作区。
@@ -1696,6 +2032,8 @@ const BUILD_ERROR_CODES = Object.freeze({
 	agentsTooLarge: "agents-too-large",
 	registryUnreadable: "registry-unreadable",
 	robotExists: "robot-exists",
+	builtinRobot: "builtin-robot",
+	programRobot: "program-robot",
 	unknownRobot: "unknown-robot",
 	nameTaken: "name-taken",
 	missingDirectory: "missing-directory",
@@ -1824,7 +2162,7 @@ async function mountRobot({ workspaceRegistry, robotPath } = {}) {
 		return {
 			mounted: false,
 			workspaceId: null,
-			mountError: describeError$2(error)
+			mountError: describeError$1(error)
 		};
 	}
 }
@@ -1851,9 +2189,12 @@ async function buildRobot({ robotsDir, file, name, avatar, description, agents, 
 		update,
 		newName
 	});
+	if (isBuiltinRobotName(request.name)) throw buildError(BUILD_ERROR_CODES.builtinRobot, `"${request.name}" is a built-in program robot and cannot be created, changed or removed; program robots are registered by the plugin.`);
+	if (request.newName !== "" && isBuiltinRobotName(request.newName)) throw buildError(BUILD_ERROR_CODES.builtinRobot, `"${request.newName}" is a built-in program robot name and cannot be used as a new robot name.`);
 	const registry = await readRobotRegistry({ file });
 	if (registry.corrupt) throw buildError(BUILD_ERROR_CODES.registryUnreadable, `the robot registry is unreadable: ${String(file)}. Fix or remove that file, then try again.`);
 	const existing = registry.robots.find((robot) => robot.name === request.name);
+	if (existing !== void 0 && existing.driver !== "agent") throw buildError(BUILD_ERROR_CODES.programRobot, `"${request.name}" is a program robot: program robots are read-only and cannot be changed by this tool.`);
 	if (existing !== void 0 && !request.update) throw buildError(BUILD_ERROR_CODES.robotExists, `robot "${request.name}" already exists; pass update: true only when the user asked to change that robot.`);
 	let activeName = request.name;
 	let renamed = false;
@@ -1915,10 +2256,12 @@ async function buildRobot({ robotsDir, file, name, avatar, description, agents, 
 	return {
 		robot: {
 			name: robot.name,
+			driver: "agent",
 			path: robot.path,
 			avatar: robot.avatar,
 			description: robot.description ?? "",
-			createdAt: robot.createdAt
+			createdAt: robot.createdAt,
+			assistant: robot.assistant === true
 		},
 		created,
 		updated,
@@ -1932,7 +2275,7 @@ async function buildRobot({ robotsDir, file, name, avatar, description, agents, 
 * 把任意错误转成可以展示的文本。
 *
 */
-function describeError$2(error) {
+function describeError$1(error) {
 	if (error instanceof Error) return error.message;
 	return String(error);
 }
@@ -1995,116 +2338,6 @@ async function revealDirectory(target) {
 		child.once("spawn", () => settle());
 	});
 }
-/**
-* 复用 web 组合的信任栅栏；被拒绝时已经写好响应。
-*
-*/
-function rejected(webCtx, req, res) {
-	let rejection;
-	try {
-		rejection = webCtx.connection.requestRejection(req);
-	} catch {
-		rejection = 500;
-	}
-	if (rejection === void 0) return false;
-	res.statusCode = rejection;
-	res.end();
-	return true;
-}
-/**
-* 读取并解析 JSON 请求体。
-*
-* 失败时（content-type 不对、超过大小上限、不是合法 JSON）已经写好响应，
-* 返回 `undefined` 让调用方直接返回；`null` 是合法 JSON，原样返回。
-*
-*/
-async function readJsonBody(req, res) {
-	if (String(req.headers["content-type"] ?? "").split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
-		sendError(res, 415, "invalid-content-type", "content-type 必须是 application/json");
-		return;
-	}
-	const text = await readBoundedBody(req);
-	if (text === null) {
-		sendError(res, 413, "too-large", "请求体过大");
-		return;
-	}
-	try {
-		return JSON.parse(text);
-	} catch {
-		sendError(res, 400, "invalid-json", "请求体不是合法 JSON");
-		return;
-	}
-}
-/**
-* 读取有上限的请求体；超过上限时丢弃剩余流并返回 null。
-*
-*/
-async function readBoundedBody(req) {
-	const chunks = [];
-	let size = 0;
-	for await (const chunk of req) {
-		size += chunk.byteLength;
-		if (size > 1048576) {
-			req.resume();
-			return null;
-		}
-		chunks.push(chunk);
-	}
-	return Buffer.concat(chunks, size).toString("utf8");
-}
-/**
-* 读带错误码的错误；HTTP 路由按 `code` 映射状态码。
-*
-*/
-function errorCode(error) {
-	if (error === null || typeof error !== "object") return void 0;
-	const code = error.code;
-	return typeof code === "string" ? code : void 0;
-}
-/**
-* 把任意错误转成可以展示的文本。
-*
-*/
-function describeError$1(error) {
-	if (error instanceof Error) return error.message;
-	return String(error);
-}
-/**
-* 发送 JSON 响应；数据是实时事实，不缓存。
-*
-*/
-function sendJson(res, status, payload) {
-	res.statusCode = status;
-	res.setHeader("content-type", "application/json; charset=utf-8");
-	res.setHeader("cache-control", "no-store");
-	res.end(JSON.stringify(payload));
-}
-/**
-* 统一的失败响应：`{ ok: false, code, message }`。
-*
-*/
-function sendError(res, status, code, message) {
-	sendJson(res, status, {
-		ok: false,
-		code,
-		message
-	});
-}
-/**
-* 405 并带上唯一支持的方法。
-*
-*/
-function sendMethodNotAllowed(res, allow) {
-	res.statusCode = 405;
-	res.setHeader("allow", allow);
-	res.setHeader("content-type", "application/json; charset=utf-8");
-	res.setHeader("cache-control", "no-store");
-	res.end(JSON.stringify({
-		ok: false,
-		code: "method-not-allowed",
-		message: `只支持 ${allow}`
-	}));
-}
 // .build/robots/routes/target.js
 /**
 * 按 name 解析机器人并确认目录仍在。
@@ -2144,6 +2377,11 @@ async function resolveRobot(registryFile, name) {
 		code: "unknown-robot",
 		message: `没有找到这个机器人：${trimmed}`
 	} };
+	if (robot.driver === "program") return { error: {
+		status: 409,
+		code: "program-robot",
+		message: `program 型机器人只读，不能执行这个操作：${trimmed}`
+	} };
 	let stat;
 	try {
 		stat = await promises.stat(robot.path);
@@ -2161,9 +2399,12 @@ async function resolveRobot(registryFile, name) {
 /**
 * 「机器人」页面的机器人相关 HTTP 路由。
 *
-* 负责登记表与目录的机器人管理接口：列表、创建、头像、描述、重命名、移除、
-* 写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
+* 负责登记表与目录的机器人管理接口：列表、创建、头像、描述、助理标记、重命名、
+* 移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
 * 浏览器一半走 DSH Client Service，这里只处理磁盘事实。
+*
+* program 型机器人（内建 clock）只读：创建 / 删除 / 改名 / 改字段都会被拒绝，
+* 助理标记只对 agent 型机器人开放。
 *
 * @module @buka/dsh-plugin-robots/routes/robots
 */
@@ -2175,6 +2416,8 @@ const CREATE_ROUTE = "/buka-robots/create";
 const AVATAR_ROUTE = "/buka-robots/avatar";
 /** 页面编辑机器人描述用的路由。 */
 const DESCRIPTION_ROUTE = "/buka-robots/description";
+/** 页面标记 / 取消助理（只有 agent 机器人可设）用的路由。 */
+const ASSISTANT_ROUTE = "/buka-robots/assistant";
 /** 页面重命名机器人（改目录 + 重建工作区）用的路由。 */
 const RENAME_ROUTE = "/buka-robots/rename";
 /** 页面删除机器人（只删登记）用的路由。 */
@@ -2213,8 +2456,8 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 					})
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 读取机器人列表失败：%s", describeError$1(error));
-				sendError(res, 500, "list-failed", `读取机器人列表失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 读取机器人列表失败：%s", describeError$2(error));
+				sendError(res, 500, "list-failed", `读取机器人列表失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: GET ${LIST_ROUTE}`);
@@ -2232,6 +2475,10 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 			const name = typeof body?.name === "string" ? body.name.trim() : "";
 			if (!isValidRobotName(name)) {
 				sendError(res, 400, "invalid-name", "机器人名称不合法：需要 1–64 个字符，不能以点开头，只能包含字母、数字、汉字与 ._-。");
+				return;
+			}
+			if (body?.driver !== void 0 && body.driver !== "agent") {
+				sendError(res, 400, "invalid-driver", "只能创建 agent 型机器人；program 型机器人由插件内建登记，不能创建。");
 				return;
 			}
 			const avatar = typeof body?.avatar === "string" ? body.avatar.trim() : "";
@@ -2256,7 +2503,7 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 				});
 			} catch (error) {
 				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+					sendError(res, 400, "invalid-name", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "invalid-description") {
@@ -2264,11 +2511,15 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 					return;
 				}
 				if (errorCode(error) === "registry-unreadable") {
-					sendError(res, 409, "registry-unreadable", describeError$1(error));
+					sendError(res, 409, "registry-unreadable", describeError$2(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-robots: 创建机器人失败：%s", describeError$1(error));
-				sendError(res, 500, "create-failed", `创建机器人失败：${describeError$1(error)}`);
+				if (errorCode(error) === "builtin-robot" || errorCode(error) === "program-robot") {
+					sendError(res, 409, String(errorCode(error)), describeError$2(error));
+					return;
+				}
+				webCtx.logger?.warn?.("buka-robots: 创建机器人失败：%s", describeError$2(error));
+				sendError(res, 500, "create-failed", `创建机器人失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${CREATE_ROUTE}`);
@@ -2302,23 +2553,27 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 				});
 			} catch (error) {
 				if (errorCode(error) === "invalid-avatar") {
-					sendError(res, 400, "invalid-avatar", describeError$1(error));
+					sendError(res, 400, "invalid-avatar", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+					sendError(res, 400, "invalid-name", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "unknown-robot") {
-					sendError(res, 404, "unknown-robot", describeError$1(error));
+					sendError(res, 404, "unknown-robot", describeError$2(error));
+					return;
+				}
+				if (errorCode(error) === "program-robot") {
+					sendError(res, 409, "program-robot", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "registry-unreadable") {
-					sendError(res, 409, "registry-unreadable", describeError$1(error));
+					sendError(res, 409, "registry-unreadable", describeError$2(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-robots: 修改机器人头像失败：%s", describeError$1(error));
-				sendError(res, 500, "avatar-failed", `修改机器人头像失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 修改机器人头像失败：%s", describeError$2(error));
+				sendError(res, 500, "avatar-failed", `修改机器人头像失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${AVATAR_ROUTE}`);
@@ -2360,22 +2615,80 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 					return;
 				}
 				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+					sendError(res, 400, "invalid-name", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "unknown-robot") {
-					sendError(res, 404, "unknown-robot", describeError$1(error));
+					sendError(res, 404, "unknown-robot", describeError$2(error));
+					return;
+				}
+				if (errorCode(error) === "program-robot") {
+					sendError(res, 409, "program-robot", describeError$2(error));
 					return;
 				}
 				if (errorCode(error) === "registry-unreadable") {
-					sendError(res, 409, "registry-unreadable", describeError$1(error));
+					sendError(res, 409, "registry-unreadable", describeError$2(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-robots: 更新机器人描述失败：%s", describeError$1(error));
-				sendError(res, 500, "description-failed", `更新机器人描述失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 更新机器人描述失败：%s", describeError$2(error));
+				sendError(res, 500, "description-failed", `更新机器人描述失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${DESCRIPTION_ROUTE}`);
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
+		path: ASSISTANT_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "POST") {
+				sendMethodNotAllowed(res, "POST");
+				return;
+			}
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const name = typeof body?.name === "string" ? body.name.trim() : "";
+			if (!isValidRobotName(name)) {
+				sendError(res, 400, "invalid-name", `机器人名称不合法：${String(body?.name)}`);
+				return;
+			}
+			const assistant = body?.assistant;
+			if (typeof assistant !== "boolean") {
+				sendError(res, 400, "invalid-assistant", "assistant 必须是布尔值");
+				return;
+			}
+			try {
+				const result = await serializeRegistry(() => setRobotAssistant({
+					file: registryFile,
+					name,
+					assistant
+				}));
+				webCtx.logger?.info?.("buka-robots: 机器人 %s 的助理标记改为 %s", name, String(assistant));
+				sendJson(res, 200, {
+					ok: true,
+					robot: result.robot
+				});
+			} catch (error) {
+				switch (errorCode(error)) {
+					case "invalid-name":
+					case "invalid-assistant":
+						sendError(res, 400, String(errorCode(error)), describeError$2(error));
+						return;
+					case "unknown-robot":
+						sendError(res, 404, "unknown-robot", describeError$2(error));
+						return;
+					case "program-robot":
+						sendError(res, 409, "program-robot", describeError$2(error));
+						return;
+					case "registry-unreadable":
+						sendError(res, 409, "registry-unreadable", describeError$2(error));
+						return;
+					default:
+						webCtx.logger?.warn?.("buka-robots: 修改助理标记失败：%s", describeError$2(error));
+						sendError(res, 500, "assistant-failed", `修改助理标记失败：${describeError$2(error)}`);
+				}
+			}
+		}
+	}), `buka-robots: POST ${ASSISTANT_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: RENAME_ROUTE,
@@ -2425,29 +2738,35 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 			} catch (error) {
 				switch (errorCode(error)) {
 					case "invalid-name":
-						sendError(res, 400, "invalid-name", describeError$1(error));
+						sendError(res, 400, "invalid-name", describeError$2(error));
 						return;
 					case "invalid-update":
-						sendError(res, 400, "invalid-update", describeError$1(error));
+						sendError(res, 400, "invalid-update", describeError$2(error));
 						return;
 					case "unknown-robot":
-						sendError(res, 404, "unknown-robot", describeError$1(error));
+						sendError(res, 404, "unknown-robot", describeError$2(error));
 						return;
 					case "name-taken":
-						sendError(res, 409, "name-taken", describeError$1(error));
+						sendError(res, 409, "name-taken", describeError$2(error));
 						return;
 					case "missing-directory":
-						sendError(res, 409, "missing-directory", describeError$1(error));
+						sendError(res, 409, "missing-directory", describeError$2(error));
 						return;
 					case "path-outside-root":
-						sendError(res, 409, "path-outside-root", describeError$1(error));
+						sendError(res, 409, "path-outside-root", describeError$2(error));
 						return;
 					case "registry-unreadable":
-						sendError(res, 409, "registry-unreadable", describeError$1(error));
+						sendError(res, 409, "registry-unreadable", describeError$2(error));
+						return;
+					case "builtin-robot":
+						sendError(res, 409, "builtin-robot", describeError$2(error));
+						return;
+					case "program-robot":
+						sendError(res, 409, "program-robot", describeError$2(error));
 						return;
 					default:
-						webCtx.logger?.warn?.("buka-robots: 重命名机器人失败：%s", describeError$1(error));
-						sendError(res, 500, "rename-failed", `重命名机器人失败：${describeError$1(error)}`);
+						webCtx.logger?.warn?.("buka-robots: 重命名机器人失败：%s", describeError$2(error));
+						sendError(res, 500, "rename-failed", `重命名机器人失败：${describeError$2(error)}`);
 				}
 			}
 		}
@@ -2481,11 +2800,15 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 				});
 			} catch (error) {
 				if (errorCode(error) === "registry-unreadable") {
-					sendError(res, 409, "registry-unreadable", describeError$1(error));
+					sendError(res, 409, "registry-unreadable", describeError$2(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-robots: 移除机器人失败：%s", describeError$1(error));
-				sendError(res, 500, "remove-failed", `移除机器人失败：${describeError$1(error)}`);
+				if (errorCode(error) === "builtin-robot" || errorCode(error) === "program-robot") {
+					sendError(res, 409, String(errorCode(error)), describeError$2(error));
+					return;
+				}
+				webCtx.logger?.warn?.("buka-robots: 移除机器人失败：%s", describeError$2(error));
+				sendError(res, 500, "remove-failed", `移除机器人失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${REMOVE_ROUTE}`);
@@ -2523,8 +2846,8 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 					claude
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 写入 AGENTS.md 失败：%s", describeError$1(error));
-				sendError(res, 500, "write-failed", `写入 AGENTS.md 失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 写入 AGENTS.md 失败：%s", describeError$2(error));
+				sendError(res, 500, "write-failed", `写入 AGENTS.md 失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${AGENTS_ROUTE}`);
@@ -2552,8 +2875,8 @@ function registerRobotRoutes(hostCtx, webCtx, deps) {
 					path: resolved.robot.path
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 打开机器人目录失败：%s", describeError$1(error));
-				sendError(res, 500, "reveal-failed", `打开机器人目录失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 打开机器人目录失败：%s", describeError$2(error));
+				sendError(res, 500, "reveal-failed", `打开机器人目录失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${REVEAL_ROUTE}`);
@@ -2714,8 +3037,8 @@ function registerSkillRoutes(webCtx, deps) {
 					installed: scanned.skills.map((skill) => skill.name)
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 读取 skill 清单失败：%s", describeError$1(error));
-				sendError(res, 500, "available-failed", `读取 skill 清单失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 读取 skill 清单失败：%s", describeError$2(error));
+				sendError(res, 500, "available-failed", `读取 skill 清单失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${AVAILABLE_ROUTE}`);
@@ -2769,8 +3092,8 @@ function registerSkillRoutes(webCtx, deps) {
 					claude
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 安装 skill 失败：%s", describeError$1(error));
-				sendError(res, 500, "install-failed", `安装 skill 失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 安装 skill 失败：%s", describeError$2(error));
+				sendError(res, 500, "install-failed", `安装 skill 失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${INSTALL_ROUTE}`);
@@ -2818,8 +3141,8 @@ function registerSkillRoutes(webCtx, deps) {
 					skills: scanned.skills
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-robots: 移除 skill 失败：%s", describeError$1(error));
-				sendError(res, 500, "remove-failed", `移除 skill 失败：${describeError$1(error)}`);
+				webCtx.logger?.warn?.("buka-robots: 移除 skill 失败：%s", describeError$2(error));
+				sendError(res, 500, "remove-failed", `移除 skill 失败：${describeError$2(error)}`);
 			}
 		}
 	}), `buka-robots: POST ${SKILL_REMOVE_ROUTE}`);
@@ -2903,7 +3226,7 @@ async function seedPresetRobots({ robotsDir, file, workspaceRegistry } = {}) {
 		corrupt: true,
 		seeded: []
 	};
-	if (registry.robots.length > 0) return {
+	if (registry.robots.filter((robot) => robot.driver === "agent").length > 0) return {
 		corrupt: false,
 		seeded: []
 	};
@@ -2948,7 +3271,7 @@ function seedRobotsOnStartup({ ctx, robotsDir, registryFile, serializeRegistry, 
 	}).then((result) => {
 		if (result.seeded.length > 0) ctx.logger?.info?.("buka-robots: 已初始化预设机器人：%s", result.seeded.join("、"));
 	})).catch((error) => {
-		ctx.logger?.warn?.("buka-robots: 初始化预设机器人失败：%s", describeError$1(error));
+		ctx.logger?.warn?.("buka-robots: 初始化预设机器人失败：%s", describeError$2(error));
 	});
 }
 // .build/robots/engine/errors.js
@@ -2969,111 +3292,6 @@ var RobotSessionStop = class extends Error {
 		this.kind = kind;
 	}
 };
-// .build/robots/engine/result.js
-/** 提交结构化结果时使用的工具名（由本服务注册 scoped 工具）。 */
-const STRUCTURED_OUTPUT_TOOL = "structured_output";
-/** 没有给 `outputSchema` 时的宽松对象 schema：仍要求交回一个 JSON 对象。 */
-const DEFAULT_OUTPUT_SCHEMA = {
-	type: "object",
-	additionalProperties: true
-};
-/**
-* 机器人没有交回结构化 JSON 结果时，注入原会话的重试提示：说清这次的问题
-* （缺 JSON / 缺 `next` / `next` 不是合法路由 / 结果不匹配 output / abort 形态
-* 不合法），列出合法路由名，并在允许主动终止时再次给出 `abort` 出口。
-*
-*/
-function resultRetryPrompt(attempt, maxAttempts, options = {}) {
-	const toolName = typeof options.toolName === "string" ? options.toolName : STRUCTURED_OUTPUT_TOOL;
-	const routes = routeNames(options.routes);
-	const abortable = options.abortable === true;
-	const reason = typeof options.reason === "string" ? options.reason : "missing-json";
-	const detail = typeof options.detail === "string" ? options.detail.trim() : "";
-	let text = `The workflow orchestrator expected the final result of this node as a single JSON object, but ${reason === "missing-next" ? "your last JSON result did not include the required `next` route" : reason === "invalid-next" ? "the `next` route in your last JSON result is not one of the routes this node can follow" : reason === "invalid-output" ? "the JSON object in your last result does not match the output schema declared for this node" : reason === "invalid-abort" ? "the `abort` field in your last JSON result must be a non-empty string explaining why you cannot complete the task" : reason === "ambiguous-result" ? "your last JSON result included both `next` and `abort`; submit exactly one of them" : "your last answer did not provide a structured JSON result"}. Do not reply with plain text again: finish now by calling the ${toolName} tool with a single JSON object that answers the assigned task.`;
-	if (detail !== "") text += ` Problem: ${detail}.`;
-	if (routes.length > 0) {
-		const routeList = routes.map((route) => `"${route}"`).join(", ");
-		text += abortable ? ` When this node has outgoing routes, include exactly one of \`next\` (one of ${routeList}) and \`abort\`.` : ` When this node has outgoing routes, the object MUST include \`next\` set to exactly one of these route names: ${routeList}.`;
-	}
-	if (abortable) text += " If you cannot complete this node's task, do not pick a route you do not believe in: set `abort` to a short non-empty reason instead; the workflow ends and the run is recorded as failed.";
-	text += ` This is retry ${attempt}/${maxAttempts}.`;
-	return text;
-}
-/**
-* 重试用尽后的错误文案。
-*
-*/
-function resultFailureMessage(retries) {
-	return `the robot session did not submit a structured JSON result${retries > 0 ? ` after ${retries} retr${retries === 1 ? "y" : "ies"} in the same session` : ""}`;
-}
-/**
-* 从会话的最后一条回复里解析 JSON 对象；支持 ```json 代码块。
-*
-*/
-function parseStructuredText(text) {
-	if (typeof text !== "string") return void 0;
-	let body = text.trim();
-	if (body === "") return void 0;
-	const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/iu.exec(body);
-	if (fenced !== null) body = fenced[1]?.trim() ?? "";
-	if (!body.startsWith("{")) return void 0;
-	try {
-		const value = JSON.parse(body);
-		if (typeof value === "object" && value !== null && !Array.isArray(value)) return value;
-	} catch {}
-}
-/**
-* 会话里是否已经成功提交过结构化结果（根据 `structured_output` 的调用与结果事件）。
-*
-*/
-function structuredSubmittedSince(session, startSeq = 0) {
-	const events = typeof session?.ownEvents === "function" ? session.ownEvents() : [];
-	const callIds = /* @__PURE__ */ new Set();
-	for (const event of events) {
-		if (typeof event?.seq === "number" && event.seq < startSeq) continue;
-		if (event?.type !== "tool/call") continue;
-		if (event?.data?.name !== "structured_output") continue;
-		if (typeof event.data.callId === "string") callIds.add(event.data.callId);
-	}
-	if (callIds.size === 0) return false;
-	for (const event of events) {
-		if (typeof event?.seq === "number" && event.seq < startSeq) continue;
-		if (event?.type !== "tool/result") continue;
-		const data = event.data;
-		const message = data?.message;
-		const callId = typeof message?.toolCallId === "string" ? message.toolCallId : typeof data?.toolCallId === "string" ? data.toolCallId : typeof message?.source?.callId === "string" ? message.source.callId : "";
-		if (callId === "" || !callIds.has(callId)) continue;
-		if (message?.isError === true) continue;
-		return true;
-	}
-	return false;
-}
-/**
-* 调用方给的 `outputSchema` 直接作为 `structured_output` 的 parameters；没给
-* （或不是对象）时退回宽松对象 schema，仍然要求交回一个 JSON 对象。
-*
-*/
-function normalizeOutputSchema(schema) {
-	if (schema !== null && typeof schema === "object" && !Array.isArray(schema)) return schema;
-	return DEFAULT_OUTPUT_SCHEMA;
-}
-/**
-* 规范化路由名列表：只保留非空字符串并去重。
-*
-*/
-function routeNames(routes) {
-	if (!Array.isArray(routes)) return [];
-	const names = [];
-	const seen = /* @__PURE__ */ new Set();
-	for (const route of routes) {
-		if (typeof route !== "string") continue;
-		const name = route.trim();
-		if (name === "" || seen.has(name)) continue;
-		seen.add(name);
-		names.push(name);
-	}
-	return names;
-}
 // .build/robots/engine/session-events.js
 /**
 * 机器人会话日志的读取。
@@ -3124,17 +3342,6 @@ function readSessionTurn(session, sinceSeq = 0) {
 	};
 }
 /**
-* 从会话日志里取最后一次 assistant 文本与 turn 结束原因。
-*
-*/
-function readSessionOutcome(session, startSeq = 0) {
-	const turn = readSessionTurn(session, startSeq);
-	return {
-		text: turn.text,
-		stopReason: turn.stopReason
-	};
-}
-/**
 * 从会话日志读 plan 模式状态。
 *
 * DSH 的 plan 模式把状态记成 `plan/mode` 事件（整值替换），最后一条就是当前
@@ -3176,10 +3383,10 @@ function seqOf(agent) {
 }
 // .build/robots/engine/session-runtime.js
 /**
-* 机器人会话的运行时小工具：等轮次结束、等取消落定、组装消息、合并模型路由。
+* 机器人会话的运行时小工具：等取消落定、组装消息、合并模型路由。
 *
-* 超时 / 取消统一用 `RobotSessionStop` 表达；这些函数不读写服务状态，只操作
-* 传进来的 live agent。
+* 服务是非阻塞的：不再等轮次结束（观察者订阅会话事件），这里只保留真正被
+* 调用到的函数；这些函数不读写服务状态，只操作传进来的 live agent。
 *
 * @module @buka/dsh-plugin-robots/engine/session-runtime
 */
@@ -3219,93 +3426,6 @@ function followupMessage(text, sourceKind = "buka-robot") {
 		}],
 		source: { kind: sourceKind }
 	};
-}
-/**
-* 等待 agent 空闲；超时 / 取消时抛 `RobotSessionStop`。
-*
-*/
-function waitForIdle(agent, timeoutMs, signal) {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		let timer;
-		const cleanup = () => {
-			if (timer !== void 0) clearTimeout(timer);
-			signal?.removeEventListener?.("abort", onAbort);
-		};
-		const finish = (error) => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			if (error === void 0) resolve();
-			else reject(error);
-		};
-		const onAbort = () => finish(new RobotSessionStop("aborted", "robot session was cancelled"));
-		signal?.addEventListener?.("abort", onAbort, { once: true });
-		if (signal?.aborted === true) {
-			onAbort();
-			return;
-		}
-		if (Number.isInteger(timeoutMs) && timeoutMs > 0) timer = setTimeout(() => finish(new RobotSessionStop("timeout", `robot session timed out after ${timeoutMs}ms`)), timeoutMs);
-		Promise.resolve(agent.whenIdle()).then(() => finish(void 0), (error) => finish(new RobotSessionStop("aborted", describeError(error))));
-	});
-}
-/**
-* 等这一轮真正结束（`turn/end`），而不是仅仅等 agent 空闲。
-*
-* 续接会话时 agent 在 followup 之前就是 idle 的，单等 `whenIdle()` 可能在
-* 新一轮还没开起来时立刻返回，读到上一轮的旧文本。先挂事件监听、再投递消息，
-* 就能拿到这一轮的结束事件；没有事件源（测试替身 / 老运行时）时退回 `whenIdle()`。
-*
-*/
-function waitForTurnEnd(agent, startSeq, timeoutMs, signal) {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		let timer;
-		let off;
-		const cleanup = () => {
-			if (timer !== void 0) clearTimeout(timer);
-			signal?.removeEventListener?.("abort", onAbort);
-			try {
-				off?.();
-			} catch {}
-		};
-		const finish = (error) => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			if (error === void 0) resolve();
-			else reject(error);
-		};
-		const onAbort = () => finish(new RobotSessionStop("aborted", "robot session was cancelled"));
-		const hasTurnEnd = () => {
-			try {
-				const events = typeof agent?.session?.ownEvents === "function" ? agent.session.ownEvents() : [];
-				for (const event of events) if (event?.type === "turn/end" && typeof event.seq === "number" && event.seq >= startSeq) return true;
-			} catch {}
-			return false;
-		};
-		signal?.addEventListener?.("abort", onAbort, { once: true });
-		if (signal?.aborted === true) {
-			onAbort();
-			return;
-		}
-		if (Number.isInteger(timeoutMs) && timeoutMs > 0) timer = setTimeout(() => finish(new RobotSessionStop("timeout", `robot session timed out after ${timeoutMs}ms`)), timeoutMs);
-		if (hasTurnEnd()) {
-			finish(void 0);
-			return;
-		}
-		if (typeof agent?.ctx?.on === "function") try {
-			off = agent.ctx.on("session/event", (session, event) => {
-				if (session !== void 0 && agent?.session !== void 0 && session !== agent.session) return;
-				if (event?.type !== "turn/end") return;
-				if (typeof event.seq === "number" && event.seq < startSeq) return;
-				finish(void 0);
-			});
-		} catch {
-			off = void 0;
-		}
-		if (off === void 0) waitForIdle(agent, timeoutMs, signal).then(() => finish(void 0), (error) => finish(error instanceof RobotSessionStop ? error : new RobotSessionStop("aborted", describeError(error))));
-	});
 }
 /**
 * 取消后给 agent 一点时间落定 turn/end，避免读不到最后的文本。
@@ -3351,11 +3471,6 @@ function mergeAgentOptions(defaults, overrides) {
 }
 /**
 */
-function positive(value) {
-	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : void 0;
-}
-/**
-*/
 function describeError(error) {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -3368,11 +3483,18 @@ function describeError(error) {
 /**
 * 机器人列表里的一行：去掉 AGENTS.md 正文等大字段，只保留编排需要的摘要。
 *
+* `driver` / `assistant` / `program` 是工作流的执行者契约：agent 型可以开会话，
+* program 型（clock）由工作流按 `program` 驱动、不建会话。program 型没有目录，
+* `exists` / `mounted` 恒为 false，`skills` 为空。
+*
 */
 function summarizeRobot(robot) {
 	const agents = robot?.agents ?? {};
 	return {
 		name: robot?.name ?? "",
+		driver: robot?.driver === "program" ? "program" : "agent",
+		program: typeof robot?.program === "string" ? robot.program : "",
+		assistant: robot?.assistant === true,
 		path: robot?.path ?? "",
 		createdAt: robot?.createdAt ?? null,
 		avatar: resolveAvatar(robot?.avatar, robot?.name),
@@ -3395,40 +3517,35 @@ function summarizeRobot(robot) {
 /**
 * `@buka/dsh-plugin-robots` 对外提供的 Host Service：`ctx.bukaRobots`。
 *
-* 目前的能力，供工作流插件（以及将来的编排器）使用：
+* 能力（工作流插件与将来的编排器使用）：
 *
-* - `list()`：机器人登记表 + 目录状态 + 挂载状态 + 已装 skills；
+* - `list()`：机器人登记表 + 目录状态 + 挂载状态 + 已装 skills，摘要里带
+*   `driver`（agent / program）/ `assistant` / `program`；
 * - `avatarMap()`：机器人名 → 预设头像 id（只读登记表，工作流节点图用它）；
-* - `startSession(request)`：在机器人目录下开一个会话（或按 `sessionId` 续接已有
-*   会话，续接前先 compact），投递一段提示词；新会话是挂到机器人工作区的普通
-*   顶层会话（侧边栏可见），等它结束或空闲后返回最终文本与结构化结果。
-*   每个机器人会话都要求交回**一个 JSON 对象**（调用 scoped 的
-*   `structured_output` 工具，回复正文里的 JSON 也算）；没交回时就在**同一个
-*   会话**里补一条消息要求按格式重新回复（最多 `resultRetries` 次），只有重试
-*   用尽仍没有结果时节点才失败。`outputSchema` 约束这个对象的结构（例如工作流
-*   节点要求 `next` 取出口路由名之一）。
-*   审批默认按部署策略（`approval` 省略 / `'ask'`）；只有显式传 `'never'` 时才
-*   强制拒绝需要审批的操作。
+* - `dispatchSession(request)`：在机器人目录下**新开**一条会话并投递一段提示词，
+*   立即返回观测句柄；不在服务里等待这一轮结束，也不设默认超时；
+* - `openSession(request)`：只续接（resume / attach）一条已有会话，不发 prompt；
+*   观察者恢复时先用它检查上一轮是否其实已经结束，确认要继续时再调句柄的
+*   `send`。
+*
+* 一个任务一条新会话：`dispatchSession` 不复用上一条任务的会话；`openSession`
+* 只续接同一条会话，**不压缩**。压缩、结构化结果校验与结果追问都在工作流侧
+* （`buka_task_complete`），本服务不再注册 `structured_output` 工具。
+*
+* program 型机器人（clock）没有会话：`dispatchSession` / `openSession` 会拒绝
+* 它们，执行由工作流按 `driver` + `program` 驱动。
 *
 * 唯一的会话后端是普通顶层会话：`cwd` 是机器人目录，机器人自己的 AGENTS.md /
 * 项目 skills 照常生效，会话挂到机器人工作区并出现在 DSH 侧边栏。创建或续接
 * 失败时直接抛错，不退回 subagent 子会话，也不另开新会话。
 *
 * 通过 `ctx.provide('bukaRobots', new RobotSessionService(...))` 注册，消费方
-* 用 `inject: ['bukaRobots']` 或 `ctx.get('bukaRobots')` 获取。`defineTool`
-* 由入口注入，这样本模块可以脱离 DSH 依赖被 `node --test` 直接 import。
+* 用 `inject: ['bukaRobots']` 或 `ctx.get('bukaRobots')` 获取。
 *
 * @module @buka/dsh-plugin-robots/service
 */
 /** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaRobots`。 */
 const SERVICE_NAME = "bukaRobots";
-/**
-* 会话里补装的 `structured_output` 工具说明（也是唯一的输出契约）。
-*
-* 新会话和续接都由本服务注册同名工具；续接走 `agents.resume()` 时运行时不知道
-* 这次调用的 outputSchema，所以每次进入都补上。
-*/
-const STRUCTURED_OUTPUT_INSTRUCTION = `Every robot workflow node must finish by submitting its final result as a single JSON object. When your answer is complete, call the \`${STRUCTURED_OUTPUT_TOOL}\` tool with arguments matching its parameter schema exactly. If this workflow node has outgoing routes, that JSON object must include \`next\` set to the route name you choose. Do not finish with a plain text answer: only the tool call counts as your result.`;
 /** plan 模式入口不可用时给用户看的错误文案。 */
 const PLAN_MODE_UNAVAILABLE = "plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a robot node with mode \"plan\"";
 /**
@@ -3448,16 +3565,12 @@ function commandFailure(execution) {
 */
 const ANNOUNCE_SESSION_TIMEOUT_MS = 2e3;
 var RobotSessionService = class {
-	/** Host 上下文：取 agents / approval / compaction 等可选服务。 */
+	/** Host 上下文：取 agents / approval 等可选服务。 */
 	ctx;
 	/** 机器人根目录。 */
 	robotsDir;
 	/** 登记文件绝对路径。 */
 	registryFile;
-	/** 入口注入的工具定义函数（真实签名来自 `@deepseek-ai/dsh-tools`）。 */
-	defineTool;
-	/** 机器人没有交回结构化结果时在原会话里重试的次数上限。 */
-	resultRetries;
 	/** 能力标志：本版本支持在 dispatch / resume 时切换 DSH plan 模式。 */
 	supportsPlanMode;
 	/**
@@ -3466,9 +3579,6 @@ var RobotSessionService = class {
 		this.ctx = options.ctx;
 		this.robotsDir = options.robotsDir;
 		this.registryFile = options.registryFile;
-		this.defineTool = options.defineTool;
-		const retries = options.resultRetries;
-		this.resultRetries = typeof retries === "number" && Number.isInteger(retries) && retries >= 0 ? retries : 2;
 		/**
 		* 能力标志：本版本支持在 dispatch / resume 时切换 DSH plan 模式。工作流的
 		* plan 节点在启动前用它判断是否需要提示用户升级 robots 插件；旧版本没有
@@ -3497,77 +3607,34 @@ var RobotSessionService = class {
 	* 机器人名 → 头像 id。给工作流这类只关心「谁在执行」的消费方用：只读登记表，
 	* 不扫描每个机器人目录里的 skills / AGENTS.md，所以可以频繁调用。
 	*
-	* 旧登记表里缺头像的机器人按名字兜底成一个确定的预设。登记表损坏时返回空表。
+	* 内建 program 机器人（clock）也在这里，工作流把它画在节点上。旧登记表里
+	* 缺头像的机器人按名字兜底成一个确定的预设。登记表损坏时返回空表。
 	*
 	*/
 	async avatarMap() {
 		const registry = await readRobotRegistry({ file: this.registryFile });
 		const map = {};
-		if (!registry.corrupt) for (const robot of registry.robots) map[robot.name] = resolveAvatar(robot.avatar, robot.name);
+		if (!registry.corrupt) for (const robot of withBuiltinRobots(registry.robots)) map[robot.name] = resolveAvatar(robot.avatar, robot.name);
 		return map;
 	}
 	/**
-	* 在机器人目录下开一个会话并执行一段提示词；传 `sessionId` 时改为续接
-	* 同一个会话（先 compact 历史，再发新的 prompt）。
+	* 非阻塞地把一段 prompt 投进一条**新的**机器人会话，返回一个可观测句柄；
+	* 不在服务里等待这一轮结束，也不设默认超时。工作流观察者负责订阅
+	* `session/event` 并在 `turn/end` 后读结果、决定路由；会话异常终止时由观察者
+	* 重新 open/dispatch。硬超时由调用方（观察者）自己计时后调用句柄的 `cancel()`。
 	*
-	* 返回的 `result` 在会话空闲（或超时 / 取消）后落定，不会 reject；调用方
-	* 根据 `stopReason` 判断结果。会话在读取完结果后自动 dispose，日志保留。
-	*
-	*/
-	async startSession(request = {}) {
-		if (request.wait === false) return await this.dispatchSession(request);
-		if (request.planMode !== void 0) throw new Error("planMode is only supported by dispatchSession/openSession (and startSession({ wait: false })); the blocking startSession disposes the agent after one turn and cannot leave a session in plan mode");
-		if (typeof request.prompt !== "string" || request.prompt.trim() === "") throw new Error("startSession requires a non-empty prompt");
-		const robot = await this.#resolveRobot(request.robot, request);
-		const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions);
-		if (typeof agentOptions.provider !== "string" || typeof agentOptions.model !== "string") throw new Error("no model route is available for the robot session: pass agentOptions.provider/model or configure a default model");
-		const signal = request.signal;
-		signal?.throwIfAborted?.();
-		const sessionId = typeof request.sessionId === "string" ? request.sessionId.trim() : "";
-		if (sessionId !== "") return await this.#continueSession({
-			request,
-			robot,
-			agentOptions,
-			signal,
-			sessionId
-		});
-		return {
-			...await this.#startNewSession({
-				request,
-				robot,
-				agentOptions,
-				signal
-			}),
-			resumed: false
-		};
-	}
-	/**
-	* 非阻塞地把一段 prompt 投进机器人会话，返回一个可观测句柄；不在服务里等待
-	* 这一轮结束，也不设默认超时。工作流观察者负责订阅 `session/event` 并在
-	* `turn/end` 后读结果、决定路由；会话异常终止时由观察者重新 open/dispatch。
-	* 注意：`dispatchSession` / `startSession({ wait: false })` 不解释 `timeoutMs`，
-	* 硬超时由调用方（观察者）自己计时后调用句柄的 `cancel()`。
-	*
-	* 句柄里的 `readResult` / `send` / `retryReport` / `cancel` 只操作这一个
-	* dispatch 对应的 live agent；持久会话本身由 DSH 保存，`dispose` 只释放 agent。
+	* 一个任务一条新会话：这里不接受 `sessionId`，恢复只能走 `openSession`。
 	*
 	*/
 	async dispatchSession(request = {}) {
 		if (typeof request.prompt !== "string" || request.prompt.trim() === "") throw new Error("dispatchSession requires a non-empty prompt");
+		if ("sessionId" in request && request.sessionId !== void 0) throw new Error("dispatchSession always starts a new robot session; use openSession() to resume an existing session");
 		this.#assertPlanModeRequest(request);
-		const robot = await this.#resolveRobot(request.robot, request);
+		const robot = await this.#resolveRobot(request.robot);
 		const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions);
 		if (typeof agentOptions.provider !== "string" || typeof agentOptions.model !== "string") throw new Error("no model route is available for the robot session: pass agentOptions.provider/model or configure a default model");
 		const signal = request.signal;
 		signal?.throwIfAborted?.();
-		const sessionId = typeof request.sessionId === "string" ? request.sessionId.trim() : "";
-		if (sessionId !== "") return await this.#continueDispatch({
-			request,
-			robot,
-			agentOptions,
-			signal,
-			sessionId
-		});
 		return await this.#startDispatch({
 			request,
 			robot,
@@ -3576,15 +3643,15 @@ var RobotSessionService = class {
 		});
 	}
 	/**
-	* 只打开（resume / attach）一个已有机器人会话，不发 prompt。观察者恢复时先用
-	* 它检查上一轮是否其实已经结束；确认要继续时再调句柄的 `send`。
+	* 只打开（resume / attach）一条已有机器人会话，不发 prompt、不压缩。观察者
+	* 恢复时先用它检查上一轮是否其实已经结束；确认要继续时再调句柄的 `send`。
 	*
 	*/
 	async openSession(request = {}) {
 		const sessionId = typeof request.sessionId === "string" ? request.sessionId.trim() : "";
 		if (sessionId === "") throw new Error("openSession requires a sessionId");
 		this.#assertPlanModeRequest(request);
-		const robot = await this.#resolveRobot(request.robot, request);
+		const robot = await this.#resolveRobot(request.robot);
 		const agentOptions = mergeAgentOptions(this.#defaultAgentOptions(), request.agentOptions);
 		if (typeof agentOptions.provider !== "string" || typeof agentOptions.model !== "string") throw new Error("no model route is available for the robot session: pass agentOptions.provider/model or configure a default model");
 		const signal = request.signal;
@@ -3606,35 +3673,12 @@ var RobotSessionService = class {
 		}
 		return this.#observeHandle({
 			agent: prepared.agent,
-			state: prepared.state,
 			handle: prepared.handle,
+			sessionId: prepared.sessionId,
 			robot,
-			request,
 			resumed: true,
-			compacted: false,
-			compactionError: void 0,
 			startSeq: seqOf(prepared.agent)
 		});
-	}
-	/**
-	* 新开一个会话。
-	*
-	* 创建**普通顶层会话**：它会挂到机器人自己的工作区，因此侧边栏能看到、
-	* 能像普通对话一样打开。创建失败直接抛错；不会退回 subagent 子会话（DSH
-	* 侧边栏不显示这类会话），也不会用别的会话替代。
-	*
-	*/
-	async #startNewSession({ request, robot, agentOptions, signal }) {
-		try {
-			return await this.#startVisibleSession({
-				request,
-				robot,
-				agentOptions,
-				signal
-			});
-		} catch (error) {
-			throw this.#creationError(robot, error, signal);
-		}
 	}
 	/**
 	* 把创建失败包装成给用户看的错误：说明没有隐藏兜底、也没有替代会话。
@@ -3643,59 +3687,6 @@ var RobotSessionService = class {
 	#creationError(robot, error, signal) {
 		if (signal?.aborted === true) return error instanceof Error ? error : new Error(describeError(error));
 		return new Error(`could not create a visible robot session for robot "${robot.name}": ${describeError(error)}; refusing to fall back to a hidden subagent or a replacement session`, { cause: error });
-	}
-	/**
-	* 在已有机器人会话上继续：先 compact 压缩历史，再把这一次的 prompt 发进去。
-	*
-	* 与「新开会话」不同，这里通过 `ctx.agents.resume()` 把会话重新加载成 live
-	* agent，因此能直接调用 `ctx.compaction.compactNow()`；结束一轮后再释放
-	* agent，会话本身留在持久化存储里，供下一次进入继续使用。
-	*
-	* 续接失败直接抛错：不新开会话、不退回 subagent。调用方（工作流）会把节点
-	* 和整个运行按失败结束，并把原因展示给用户。
-	*
-	*/
-	async #continueSession({ request, robot, agentOptions, signal, sessionId }) {
-		let prepared;
-		try {
-			prepared = await this.#resumeAgent({
-				request,
-				robot,
-				agentOptions,
-				signal,
-				sessionId
-			});
-		} catch (error) {
-			if (signal?.aborted === true) throw new RobotSessionStop("aborted", "robot session was cancelled");
-			throw new Error(`could not resume robot session "${sessionId}" for robot "${robot.name}": ${describeError(error)}; refusing to start a new robot session`, { cause: error });
-		}
-		const { agent, state, handle } = prepared;
-		const timeoutMs = positive(request.timeoutMs) ?? 0;
-		return {
-			id: sessionId,
-			robot: robot.name,
-			cwd: robot.path,
-			resumed: true,
-			result: this.#runSessionTurn({
-				agent,
-				robot,
-				request,
-				state,
-				timeoutMs,
-				signal,
-				compactFirst: true,
-				dispose: () => this.#releaseAgent(handle, sessionId)
-			}),
-			cancel(reason) {
-				try {
-					agent.cancel({
-						kind: "hook",
-						reason: typeof reason === "string" && reason !== "" ? reason : "robot session cancelled"
-					}, { keepInbox: true });
-				} catch {}
-			},
-			dispose: () => this.#releaseAgent(handle, sessionId)
-		};
 	}
 	/**
 	* 用调用方给的 `title` 给机器人会话命名。
@@ -3723,14 +3714,13 @@ var RobotSessionService = class {
 		}
 	}
 	/**
-	* 给新会话 / 续接会话装上机器人自己的工作 preset，并补一个 scoped 的
-	* `structured_output` 工具：每个机器人节点都必须交回一个 JSON 对象。
+	* 给新会话 / 续接会话装上机器人自己的工作 preset。
 	*
 	* 普通顶层会话和 `agents.resume()` 都不会自动套 composition，所以由服务显式
-	* 挂载；结构化工具也一样，运行时不知道这次调用的 outputSchema，由服务补上。
+	* 挂载；结果契约（结构化输出）已移到工作流侧，这里不再注册任何工具。
 	*
 	*/
-	async #composeSession(childCtx, agent, request, state, { resume }) {
+	async #composeSession(childCtx, agent, request, { resume }) {
 		const presets = childCtx?.get?.("agentPresets") ?? childCtx?.agentPresets;
 		if (presets !== void 0 && presets !== null) {
 			const recorded = resume && typeof presets.presetForSession === "function" ? presets.presetForSession(agent?.session) : null;
@@ -3739,200 +3729,6 @@ var RobotSessionService = class {
 			if (preset !== "" && typeof presets.mount === "function") await presets.mount(childCtx, preset);
 			else if (typeof presets.composeFrom === "function" && request.agent?.ctx !== void 0) presets.composeFrom(childCtx, request.agent.ctx);
 		}
-		this.#installStructuredTool(childCtx, state, request.outputSchema, { abortable: request.abortable === true });
-	}
-	/**
-	* 在会话上安装结构化结果工具。`outputSchema` 直接作为工具的 `parameters`
-	* （例如工作流节点要求 `next` 取某个枚举值）；没给时退回宽松对象 schema，
-	* 但仍然要求交回一个 JSON 对象。`abortable` 为 true 时，工具说明和系统提示
-	* 都会告诉节点：确实无法完成时可以交回 `abort` 主动终止，而不是随便选一条
-	* route。
-	*
-	*/
-	#installStructuredTool(childCtx, state, schema, options = {}) {
-		const tools = childCtx?.get?.("tools") ?? childCtx?.tools;
-		if (typeof tools?.register !== "function") return;
-		const abortText = options.abortable === true ? " If you cannot complete this task, submit a single \"abort\" string with a short reason instead of picking a route; the workflow ends and the run is recorded as failed." : "";
-		tools.register({
-			name: STRUCTURED_OUTPUT_TOOL,
-			description: "Report the final structured JSON result of this node. Call this exactly once, when your answer is complete; the arguments must match this tool's parameter schema exactly." + abortText,
-			parameters: normalizeOutputSchema(schema),
-			output: {
-				schema: {
-					type: "object",
-					additionalProperties: false,
-					properties: { recorded: {
-						type: "boolean",
-						const: true
-					} },
-					required: ["recorded"]
-				},
-				render: () => [{
-					type: "text",
-					text: "Structured output recorded."
-				}]
-			},
-			execute(args, exec) {
-				if (state.reported.value !== void 0) throw new Error("structured output already recorded");
-				state.reported.value = args;
-				try {
-					exec?.concludeTurn?.();
-				} catch {}
-				return { recorded: true };
-			}
-		});
-		const systemPrompt = childCtx?.get?.("systemPrompt") ?? childCtx?.systemPrompt;
-		if (typeof systemPrompt?.section === "function") try {
-			systemPrompt.section({
-				name: `tool:${STRUCTURED_OUTPUT_TOOL}`,
-				order: typeof systemPrompt.getSectionOrder === "function" ? systemPrompt.getSectionOrder("STRUCTURED_OUTPUT") : 9900,
-				text: `${STRUCTURED_OUTPUT_INSTRUCTION}${abortText}`
-			});
-		} catch {}
-	}
-	/**
-	* 在续接会话上执行一轮：compact → followup → 等空闲 → 读结果（没交回 JSON
-	* 时在同会话内补问，重试有上限）。
-	*
-	*/
-	async #runSessionTurn({ agent, robot, request, state, timeoutMs, signal, compactFirst, dispose }) {
-		const deadline = typeof timeoutMs === "number" && Number.isInteger(timeoutMs) && timeoutMs > 0 ? Date.now() + timeoutMs : null;
-		const remaining = () => deadline === null ? 0 : Math.max(1, deadline - Date.now());
-		let compacted = false;
-		let compactionError;
-		let stopped = null;
-		let errorMessage;
-		let text = "";
-		let stopReason = "completed";
-		let retries = 0;
-		let structured;
-		let turnStartSeq = 0;
-		try {
-			if (compactFirst) {
-				const preparation = await this.#compactSession(agent, signal);
-				compacted = preparation.compacted;
-				compactionError = preparation.compactionError;
-			}
-			const startSeq = seqOf(agent);
-			turnStartSeq = startSeq;
-			const firstTurn = waitForTurnEnd(agent, startSeq, remaining(), signal);
-			agent.followup(followupMessage(request.prompt ?? ""));
-			await firstTurn;
-			let outcome = readSessionOutcome(agent.session, startSeq);
-			text = outcome.text;
-			stopReason = outcome.stopReason;
-			structured = state.reported.value;
-			while (structured === void 0) {
-				structured = parseStructuredText(text);
-				if (structured !== void 0) break;
-				if (retries >= this.resultRetries) break;
-				retries += 1;
-				const retrySeq = seqOf(agent);
-				const retryTurn = waitForTurnEnd(agent, retrySeq, remaining(), signal);
-				try {
-					agent.followup(followupMessage(resultRetryPrompt(retries, this.resultRetries, {
-						toolName: STRUCTURED_OUTPUT_TOOL,
-						routes: request.routes,
-						abortable: request.abortable === true
-					})));
-					await retryTurn;
-				} catch (error) {
-					if (error instanceof RobotSessionStop) throw error;
-					this.ctx?.logger?.warn?.(`buka-robots: could not ask the robot session for its structured result: ${describeError(error)}`);
-					retries -= 1;
-					break;
-				}
-				outcome = readSessionOutcome(agent.session, retrySeq);
-				text = outcome.text;
-				stopReason = outcome.stopReason;
-				structured = state.reported.value ?? parseStructuredText(text);
-			}
-			if (structured === void 0) {
-				errorMessage = resultFailureMessage(retries);
-				if (stopReason === "completed") stopReason = "error";
-			}
-		} catch (error) {
-			if (error instanceof RobotSessionStop) {
-				stopped = error;
-				try {
-					agent.cancel({
-						kind: "hook",
-						reason: error.message
-					}, { keepInbox: true });
-				} catch {}
-				await waitForSettle(agent);
-				try {
-					text = readSessionOutcome(agent.session, turnStartSeq).text;
-				} catch {}
-				stopReason = stopped.kind;
-				errorMessage = stopped.message;
-			} else {
-				stopReason = "error";
-				errorMessage = describeError(error);
-			}
-		} finally {
-			await dispose();
-		}
-		return {
-			sessionId: agent.id ?? null,
-			robot: robot.name,
-			text,
-			...structured === void 0 ? {} : { structured },
-			resultRetries: retries,
-			stopReason,
-			...errorMessage === void 0 ? {} : { error: errorMessage },
-			resumed: compactFirst,
-			compacted,
-			...compactionError === void 0 ? {} : { compactionError }
-		};
-	}
-	/**
-	* 创建一个普通顶层会话：`cwd` 是机器人目录，composition 用机器人自己的工作
-	* preset，并挂到机器人自己的工作区，所以侧边栏能看到、点开就是普通对话。
-	*
-	* 这是唯一的会话后端；创建失败直接抛错，不会退回 subagent。
-	*
-	*/
-	async #startVisibleSession({ request, robot, agentOptions, signal }) {
-		const { agent, state, handle, sessionId } = await this.#createVisibleAgent({
-			request,
-			robot,
-			agentOptions,
-			signal
-		});
-		const timeoutMs = positive(request.timeoutMs) ?? 0;
-		let disposed = false;
-		const dispose = async () => {
-			if (disposed) return;
-			disposed = true;
-			await this.#releaseAgent(handle, sessionId);
-		};
-		return {
-			id: sessionId,
-			robot: robot.name,
-			cwd: robot.path,
-			resumed: false,
-			visible: true,
-			result: this.#runSessionTurn({
-				agent,
-				robot,
-				request,
-				state,
-				timeoutMs,
-				signal,
-				compactFirst: false,
-				dispose
-			}),
-			cancel(reason) {
-				try {
-					agent.cancel({
-						kind: "hook",
-						reason: typeof reason === "string" && reason !== "" ? reason : "robot session cancelled"
-					}, { keepInbox: true });
-				} catch {}
-			},
-			dispose
-		};
 	}
 	/**
 	* 新建一个普通顶层机器人会话并完成标题、审批策略、工作区挂载；不发送 prompt。
@@ -3941,7 +3737,6 @@ var RobotSessionService = class {
 	async #createVisibleAgent({ request, robot, agentOptions, signal }) {
 		const agents = optionalService(this.ctx, "agents");
 		if (typeof agents?.create !== "function") throw new Error("the agent service is unavailable, so a robot session cannot be created");
-		const state = { reported: { value: void 0 } };
 		const requestedSessionId = typeof request.newSessionId === "string" ? request.newSessionId.trim() : "";
 		const sessionId = requestedSessionId !== "" ? requestedSessionId : randomUUID();
 		const requestedPreset = typeof request.agentPreset === "string" ? request.agentPreset.trim() : "";
@@ -3954,7 +3749,7 @@ var RobotSessionService = class {
 			agentOptions,
 			signal,
 			setup: async (childCtx, agent) => {
-				await this.#composeSession(childCtx, agent, request, state, { resume: false });
+				await this.#composeSession(childCtx, agent, request, { resume: false });
 			}
 		});
 		const agent = handle.agent;
@@ -3967,13 +3762,12 @@ var RobotSessionService = class {
 		return {
 			sessionId,
 			agent,
-			state,
 			handle
 		};
 	}
 	/**
-	* resume 一个已有机器人会话并完成标题、审批策略、工作区挂载；不发 prompt、
-	* 不 compact。调用方决定是走阻塞的一轮，还是交给观察者。
+	* resume 一条已有机器人会话并完成标题、审批策略、工作区挂载；不发 prompt、
+	* 不压缩（一个任务一条会话，恢复只续接同一条）。
 	*
 	* 续接出来的会话是**运行时根会话**：DSH 的人类交互要求根 agent，所以这里
 	* 不传 `parentAgent`（与 `agents.create` 的顶层会话一致）。历史会话如果是
@@ -3983,15 +3777,20 @@ var RobotSessionService = class {
 	async #resumeAgent({ request, robot, agentOptions, signal, sessionId }) {
 		const agents = optionalService(this.ctx, "agents");
 		if (typeof agents?.resume !== "function") throw new Error("the agent service cannot resume a robot session in this composition");
-		const state = { reported: { value: void 0 } };
-		const handle = await agents.resume({
-			resumeSessionId: sessionId,
-			agentOptions,
-			signal,
-			setup: async (childCtx, agent) => {
-				await this.#composeSession(childCtx, agent, request, state, { resume: true });
-			}
-		});
+		let handle;
+		try {
+			handle = await agents.resume({
+				resumeSessionId: sessionId,
+				agentOptions,
+				signal,
+				setup: async (childCtx, agent) => {
+					await this.#composeSession(childCtx, agent, request, { resume: true });
+				}
+			});
+		} catch (error) {
+			if (signal?.aborted === true) throw new RobotSessionStop("aborted", "robot session was cancelled");
+			throw new Error(`could not resume robot session "${sessionId}" for robot "${robot.name}": ${describeError(error)}; refusing to start a new robot session`, { cause: error });
+		}
 		const agent = handle.agent;
 		await this.#assertVisibleAgent(agent, handle);
 		this.#titleSession(agent, request.title);
@@ -4002,7 +3801,6 @@ var RobotSessionService = class {
 		return {
 			sessionId,
 			agent,
-			state,
 			handle
 		};
 	}
@@ -4107,69 +3905,21 @@ var RobotSessionService = class {
 		prepared.agent.followup(followupMessage(request.prompt ?? ""));
 		return this.#observeHandle({
 			agent: prepared.agent,
-			state: prepared.state,
 			handle: prepared.handle,
 			sessionId: prepared.sessionId,
 			robot,
-			request,
 			resumed: false,
-			compacted: false,
-			compactionError: void 0,
 			startSeq
 		});
 	}
 	/**
-	* 续接会话的非阻塞 dispatch：resume → compact → 投 prompt → 返回句柄。
-	* 续接失败直接抛错，不新开会话。
+	* 把一次非阻塞 dispatch / open 包装成观察者句柄。句柄只持有这一个 live agent
+	* 的操作，不负责等待；`readResult` 从会话日志读，`cancel` 只取消当前轮。
 	*
 	*/
-	async #continueDispatch({ request, robot, agentOptions, signal, sessionId }) {
-		let prepared;
-		try {
-			prepared = await this.#resumeAgent({
-				request,
-				robot,
-				agentOptions,
-				signal,
-				sessionId
-			});
-		} catch (error) {
-			if (signal?.aborted === true) throw new RobotSessionStop("aborted", "robot session was cancelled");
-			throw new Error(`could not resume robot session "${sessionId}" for robot "${robot.name}": ${describeError(error)}; refusing to start a new robot session`, { cause: error });
-		}
-		const compaction = await this.#compactSession(prepared.agent, signal);
-		try {
-			await this.#applyPlanMode(prepared.agent, request, signal);
-		} catch (error) {
-			try {
-				await prepared.handle?.dispose?.();
-			} catch {}
-			throw error;
-		}
-		const startSeq = seqOf(prepared.agent);
-		prepared.agent.followup(followupMessage(request.prompt ?? ""));
-		return this.#observeHandle({
-			agent: prepared.agent,
-			state: prepared.state,
-			handle: prepared.handle,
-			sessionId: prepared.sessionId,
-			robot,
-			request,
-			resumed: true,
-			compacted: compaction.compacted,
-			compactionError: compaction.compactionError,
-			startSeq
-		});
-	}
-	/**
-	* 把一次非阻塞 dispatch 包装成观察者句柄。句柄只持有这一个 live agent 的
-	* 操作，不负责等待；`readResult` 从会话日志读，`cancel` 只取消当前轮。
-	*
-	*/
-	#observeHandle({ agent, state, handle, sessionId, robot, request, resumed, compacted, compactionError, startSeq }) {
+	#observeHandle({ agent, handle, sessionId, robot, resumed, startSeq }) {
 		const service = this;
 		let disposed = false;
-		let retries = 0;
 		const dispose = async () => {
 			if (disposed) return;
 			disposed = true;
@@ -4181,8 +3931,6 @@ var RobotSessionService = class {
 			robot: robot.name,
 			cwd: robot.path,
 			resumed,
-			compacted,
-			...compactionError === void 0 ? {} : { compactionError },
 			startSeq,
 			/**
 			* 从日志读这一轮的结果；`sinceSeq` 之前的轮次不算。
@@ -4190,51 +3938,26 @@ var RobotSessionService = class {
 			*/
 			readResult({ sinceSeq = observer.startSeq } = {}) {
 				const turn = readSessionTurn(agent?.session, sinceSeq);
-				const structured = state?.reported?.value !== void 0 ? state.reported.value : parseStructuredText(turn.text);
 				return {
 					sessionId: observer.sessionId,
 					text: turn.text,
 					stopReason: turn.stopReason,
 					turnEnded: turn.turnEnded,
-					...turn.turnEndSeq === null ? {} : { turnEndSeq: turn.turnEndSeq },
-					...structured === void 0 ? {} : { structured },
-					reportSubmitted: state?.reported?.value !== void 0 || structuredSubmittedSince(agent?.session, sinceSeq)
+					startSeq: sinceSeq,
+					...turn.turnEndSeq === null ? {} : { turnEndSeq: turn.turnEndSeq }
 				};
 			},
 			/**
-			* 在同一会话里再发一条消息（结构化结果重试 / 恢复续跑用）。返回新的起点 seq。
+			* 在同一会话里再发一条消息（恢复续跑 / plan 审阅跟进用）。返回新的起点 seq。
+			* 不再有压缩：续接就是往同一条会话里继续投消息。
 			*
 			*/
-			async send(text, { compactFirst = true } = {}) {
+			async send(text) {
 				if (typeof text !== "string" || text.trim() === "") throw new Error("send requires a non-empty prompt");
-				if (compactFirst) {
-					const compaction = await service.#compactSession(agent, request.signal);
-					observer.compacted = compaction.compacted || observer.compacted;
-					if (compaction.compactionError !== void 0) observer.compactionError = compaction.compactionError;
-				}
-				if (state?.reported !== void 0) state.reported.value = void 0;
 				const next = seqOf(agent);
 				agent.followup(followupMessage(text));
 				observer.startSeq = next;
 				return next;
-			},
-			/**
-			* 没交回结构化结果时，按调用方给的 `routes` / `reason` 取下一条追问；
-			* 没有额度时返回 `null`。工作流 supervisor 在缺 JSON、缺 `next`、
-			* `next` 不合法、结果不匹配 output 或 abort 形态不合法时调用它。
-			*
-			*/
-			retryReport(options = {}) {
-				const max = service.resultRetries;
-				if (!Number.isInteger(max) || max <= 0 || retries >= max) return null;
-				retries += 1;
-				return resultRetryPrompt(retries, max, {
-					toolName: STRUCTURED_OUTPUT_TOOL,
-					routes: options?.routes ?? request.routes,
-					abortable: typeof options?.abortable === "boolean" ? options.abortable : request.abortable === true,
-					reason: typeof options?.reason === "string" ? options.reason : void 0,
-					detail: typeof options?.detail === "string" ? options.detail : void 0
-				});
 			},
 			/**
 			* 读当前 live agent 的 plan 模式状态：从会话日志的 `plan/mode` 事件折叠，
@@ -4290,33 +4013,6 @@ var RobotSessionService = class {
 			dispose
 		};
 		return observer;
-	}
-	/**
-	* 续接前压缩会话历史；失败不阻断，把原因交给调用方展示。
-	*
-	*/
-	async #compactSession(agent, signal) {
-		const compaction = optionalService(this.ctx, "compaction");
-		if (typeof compaction?.compactNow !== "function") {
-			const message = "the host compaction service is unavailable; enable @deepseek-ai/dsh-compaction-basic to compact reused robot sessions";
-			this.ctx?.logger?.warn?.(`buka-robots: continuing robot session without compaction: ${message}`);
-			return {
-				compacted: false,
-				compactionError: message
-			};
-		}
-		try {
-			const result = await compaction.compactNow(agent, signal ?? new AbortController().signal);
-			return { compacted: result !== null && result !== void 0 };
-		} catch (error) {
-			if (signal?.aborted === true) throw new RobotSessionStop("aborted", "robot session was cancelled");
-			const message = describeError(error);
-			this.ctx?.logger?.warn?.(`buka-robots: compacting robot session failed; continuing without it: ${message}`);
-			return {
-				compacted: false,
-				compactionError: message
-			};
-		}
 	}
 	/**
 	* 释放一次 dispatch / 续接对应的 live agent，并把这个仍然持久化的会话补通告
@@ -4395,14 +4091,18 @@ var RobotSessionService = class {
 	/**
 	* 解析机器人名称并在登记表 / 磁盘上确认。
 	*
+	* program 型机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
+	* 这里直接拒绝，让调用方知道该走 program 路径。
+	*
 	*/
-	async #resolveRobot(name, _request = {}) {
+	async #resolveRobot(name) {
 		const trimmed = typeof name === "string" ? name.trim() : "";
 		if (!isValidRobotName(trimmed)) throw new Error(`invalid robot name: ${String(name)}`);
 		const registry = await readRobotRegistry({ file: this.registryFile });
 		if (!registry.corrupt) {
 			const robot = registry.robots.find((entry) => entry.name === trimmed);
 			if (robot !== void 0) {
+				if (robot.driver === "program") throw new Error(`robot "${robot.name}" is a program robot and has no session; drive it by its "program" id instead of dispatching a session`);
 				let stat;
 				try {
 					stat = await promises.stat(robot.path);
@@ -4460,7 +4160,7 @@ function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAccess } 
 	const avatars = Array.isArray(avatarIds) && avatarIds.length > 0 ? avatarIds.join(", ") : "";
 	return defineTool({
 		name: ROBOT_BUILD_TOOL_NAME,
-		description: `Create, update or rename one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. To rename that existing robot, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the robot — confirm the new name with the user first. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ${avatars}.`,
+		description: `Create, update or rename one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. To rename that existing robot, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the robot — confirm the new name with the user first. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ${avatars}. Robots created here are agent robots; the assistant flag starts false and can be turned on for an agent robot on the Robots page.`,
 		parameters: {
 			name: {
 				type: "string",
@@ -4513,6 +4213,11 @@ function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAccess } 
 						type: "string",
 						required: true,
 						description: "One-sentence description stored for the robot; empty when none was set."
+					},
+					assistant: {
+						type: "boolean",
+						required: true,
+						description: "Whether the robot is marked as an assistant. Robots created by this tool are agent robots and start with false."
 					},
 					created: {
 						type: "boolean",
@@ -4582,6 +4287,7 @@ function createRobotBuildTool({ defineTool, avatarIds, runBuild, assertAccess } 
 				path: result.robot.path,
 				avatar: result.robot.avatar,
 				description: result.robot.description,
+				assistant: result.robot.assistant === true,
 				created: result.created,
 				updated: result.updated,
 				renamed: result.renamed === true,
@@ -4622,7 +4328,7 @@ function createRobotsListTool({ defineTool, listRobots, registryFile, robotsDir,
 	if (typeof listRobots !== "function") throw new TypeError("createRobotsListTool: listRobots is required");
 	return defineTool({
 		name: ROBOTS_LIST_TOOL_NAME,
-		description: "List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node, and the orchestrator sees that statement only, without the robot's skill list. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md; skills are reported only to callers whose preset may see them. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.",
+		description: "List the subjects a workflow can delegate a node to: agent robots created by the Buka Robots page and the built-in program robots (v1: clock). An agent robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace; a program robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear. Each robot reports its driver (agent or program), whether it is an assistant (agent robots only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which robot should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which robots exist, which are mounted, which are assistants, what a robot is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build; program robots (clock) cannot be created or removed. Removing robots, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Robots page.",
 		parameters: {},
 		output: {
 			schema: {
@@ -4666,6 +4372,22 @@ function createRobotsListTool({ defineTool, listRobots, registryFile, robotsDir,
 									type: "string",
 									required: true,
 									description: "One-sentence description of what the robot does and when to use it; empty when none was set."
+								},
+								driver: {
+									type: "string",
+									required: true,
+									description: "How the robot runs: \"agent\" is a DSH session with a directory and skills, \"program\" is a fixed program (no directory, no session; v1 only clock).",
+									enum: ["agent", "program"]
+								},
+								assistant: {
+									type: "boolean",
+									required: true,
+									description: "Whether this agent robot is an assistant that can take over human tasks. Program robots are never assistants."
+								},
+								program: {
+									required: true,
+									description: "Program id for a program robot (for example \"clock\"); empty string for agent robots.",
+									oneOf: [{ type: "string" }, { type: "null" }]
 								},
 								mounted: {
 									type: "boolean",
@@ -4718,6 +4440,11 @@ function createRobotsListTool({ defineTool, listRobots, registryFile, robotsDir,
 						const description = typeof robot.description === "string" && robot.description !== "" ? robot.description : "(no description)";
 						const location = typeof robot.path === "string" && robot.path !== "" ? ` (${robot.path})` : "";
 						const parts = [`- ${robot.name} — ${description}${location}`];
+						if (robot.driver === "program") {
+							const program = typeof robot.program === "string" && robot.program !== "" ? `: ${robot.program}` : "";
+							parts.push(`program${program}`);
+						}
+						if (robot.assistant === true) parts.push("assistant");
 						if (Array.isArray(robot.skills)) {
 							const count = robot.skills.length;
 							parts.push(count === 1 ? "1 skill" : `${count} skills`);
@@ -4740,6 +4467,9 @@ function createRobotsListTool({ defineTool, listRobots, registryFile, robotsDir,
 					name: robot.name,
 					path: robot.path,
 					description: robot.description ?? "",
+					driver: robot.driver === "program" ? "program" : "agent",
+					assistant: robot.assistant === true,
+					program: robot.driver === "program" && robot.program !== "" ? robot.program : null,
 					mounted: robot.mounted,
 					workspaceId: robot.workspaceId,
 					agentsFile: robot.agents.exists
@@ -4880,6 +4610,7 @@ function registerRobotTools(ctx, deps) {
 * | `POST /buka-robots/create` | 建目录 + AGENTS.md 模板，并把机器人（含可选描述）插到登记表最前 |
 * | `POST /buka-robots/avatar` | 只改登记表里的头像 id |
 * | `POST /buka-robots/description` | 只改登记表里的一行描述（工作流用它选机器人） |
+* | `POST /buka-robots/assistant` | 标记 / 取消 agent 机器人的助理身份（program 只读） |
 * | `POST /buka-robots/rename` | 改机器人目录名 + 更新登记表 + 按新路径重建 DSH 工作区 |
 * | `POST /buka-robots/remove` | 从登记表移除（目录、文件与会话保留） |
 * | `POST /buka-robots/agents` | 写入某机器人的 AGENTS.md，并补 CLAUDE.md 链接 |
@@ -4898,10 +4629,12 @@ function registerRobotTools(ctx, deps) {
 * `lib/access.js`）。删除机器人、安装 skills、页面上的编辑仍然只留给用户。
 *
 * 另通过 `ctx.provide('bukaRobots', ...)` 对外提供一个 Host Service（见
-* `lib/service.js`）：`list()` 列出机器人，`avatarMap()` 给出机器人头像，
-* `startSession()` 在机器人目录下开一个会话（或按 sessionId 续接已有会话）并返回结果。工作流插件用它
-* 把每个节点交给一个机器人、并在节点图上画出机器人头像；
-* 注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面路由与工具。
+* `lib/service.js`）：`list()` 列出机器人（含内建 program 机器人 clock 的
+* `driver` / `assistant` / `program`），`avatarMap()` 给出机器人头像，
+* `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
+* 会话（不压缩）。工作流插件用它把每个任务交给一个机器人、并在节点图上画出
+* 机器人头像；注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面
+* 路由与工具。
 *
 * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
 * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -4927,7 +4660,6 @@ const DEFAULT_BUILDER_PRESETS = ["robot-builder"];
 */
 const Config = z.object({
 	robotsDir: z.string().default(DEFAULT_ROBOTS_DIR).description("机器人根目录：机器人目录建在插件全局目录下；登记文件固定为该目录同级的 robots.json，支持 ~ 前缀。"),
-	resultRetries: z.number().step(1).min(0).max(5).default(2).description("所有机器人节点都必须交回一个 JSON 结果（工作流节点用 outputSchema 约束其结构）；没有交回时，在原会话里要求它按格式重新回复的次数上限；0 表示不重试。"),
 	builderPresets: z.array(z.string()).default(DEFAULT_BUILDER_PRESETS).description("能看到并调用 buka_robot_build（创建 / 修改机器人）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `robot-builder`。"),
 	seedPresets: z.boolean().default(true).description("全新安装（登记表为空）时是否自动补上「软件工程师」与「质量保障工程师」两个预设机器人；设为 false 则不初始化预设。")
 });
@@ -4941,9 +4673,7 @@ function apply(ctx, config) {
 	ctx.provide(SERVICE_NAME, new RobotSessionService({
 		ctx,
 		robotsDir,
-		registryFile,
-		defineTool,
-		resultRetries: config?.resultRetries
+		registryFile
 	}));
 	let registryQueue = Promise.resolve();
 	function serializeRegistry(work) {
@@ -4951,6 +4681,12 @@ function apply(ctx, config) {
 		registryQueue = run.then(() => void 0, () => void 0);
 		return run;
 	}
+	serializeRegistry(() => ensureBuiltinRobots({ file: registryFile })).then((result) => {
+		if (result.corrupt) ctx.logger?.warn?.("buka-robots: 登记文件损坏，跳过内建机器人登记：%s", registryFile);
+		else if (result.added.length > 0) ctx.logger?.info?.("buka-robots: 已登记内建机器人：%s", result.added.join("、"));
+	}).catch((error) => {
+		ctx.logger?.warn?.("buka-robots: 登记内建机器人失败：%s", describeError$2(error));
+	});
 	seedRobotsOnStartup({
 		ctx,
 		robotsDir,

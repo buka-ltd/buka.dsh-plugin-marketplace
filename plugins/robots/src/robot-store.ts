@@ -5,7 +5,9 @@
  *
  * - `store/paths.ts`：插件全局目录、路径展开、名称校验与 fs 小工具；
  * - `store/types.ts`：登记表 / 列表 / 文件摘要的数据结构；
- * - `store/registry.ts`：登记表读写与条目增删（原子写、权限 0600、损坏拒绝写）；
+ * - `store/builtin.ts`：内建 program 机器人（clock）的登记数据；
+ * - `store/registry.ts`：登记表读写与条目增删（version 2、旧表迁移、原子写、
+ *   权限 0600、损坏拒绝写、内建机器人补写）；
  * - `store/agents.ts`：AGENTS.md 读写、模板与 CLAUDE.md 链接；
  * - `store/rename.ts`：重命名（改目录 + 就地更新登记表）；
  * - `store/list.ts`：列表汇总（目录 / 挂载状态 / skills / AGENTS.md）；
@@ -23,6 +25,13 @@ export {
   readClaudeLink,
   writeAgentsFile,
 } from './store/agents.ts'
+export {
+  BUILTIN_ROBOTS,
+  builtinRobot,
+  CLOCK_ROBOT_NAME,
+  isBuiltinRobotName,
+  withBuiltinRobots,
+} from './store/builtin.ts'
 export { listRobots } from './store/list.ts'
 export {
   AGENTS_FILE,
@@ -35,6 +44,7 @@ export {
   pluginCacheDir,
   ROBOT_DESCRIPTION_MAX_LENGTH,
   ROBOT_REGISTRY_FILE,
+  ROBOT_REGISTRY_LEGACY_VERSIONS,
   ROBOT_REGISTRY_VERSION,
   resolveRobotRegistryFile,
   resolveRobotsDir,
@@ -43,10 +53,12 @@ export {
 export { parseFrontmatter, scanProjectSkills } from './store/project-skills.ts'
 export {
   addRobot,
+  ensureBuiltinRobots,
   isValidRobotDescription,
   normalizeRobotDescription,
   readRobotRegistry,
   removeRobot,
+  setRobotAssistant,
   setRobotAvatar,
   setRobotDescription,
   writeRobotRegistry,
@@ -55,6 +67,7 @@ export { renameRobot } from './store/rename.ts'
 export type {
   AgentsFileInfo,
   ClaudeLinkInfo,
+  RobotDriver,
   RobotListEntry,
   RobotRecord,
   RobotRecordInput,

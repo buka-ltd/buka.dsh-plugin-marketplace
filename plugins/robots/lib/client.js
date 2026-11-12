@@ -333,6 +333,10 @@ window.__ModuleLoader__.load({
     		case "path-outside-root": return t("errPathOutsideRoot");
     		case "missing-directory": return t("errMissingDirectory");
     		case "registry-unreadable": return t("errRegistryUnreadable");
+    		case "program-robot": return t("errProgramRobot");
+    		case "builtin-robot": return t("errBuiltinRobot");
+    		case "invalid-assistant": return t("errInvalidAssistant");
+    		case "invalid-driver": return t("errInvalidDriver");
     		case "too-large": return t("errTooLarge");
     		case "invalid-content": return t("errInvalidContent");
     		case "invalid-source": return t("errInvalidSource");
@@ -349,6 +353,10 @@ window.__ModuleLoader__.load({
     */
     function countBadge(count, t) {
     	return String(t("skillsBadge")).replace("{n}", String(count));
+    }
+    /** 是否 program 型机器人（只读、没有目录与会话）。 */
+    function isProgramRobot(robot) {
+    	return robot?.driver === "program";
     }
     /**
     * 机器人的 skills 列表；Host 字段缺失时回退空数组，避免渲染期抛错。
@@ -420,6 +428,7 @@ window.__ModuleLoader__.load({
     const RENAME_ROUTE = "/buka-robots/rename";
     const AVATAR_ROUTE = "/buka-robots/avatar";
     const DESCRIPTION_ROUTE = "/buka-robots/description";
+    const ASSISTANT_ROUTE = "/buka-robots/assistant";
     const REMOVE_ROUTE = "/buka-robots/remove";
     const AGENTS_ROUTE = "/buka-robots/agents";
     const REVEAL_ROUTE = "/buka-robots/reveal";
@@ -646,6 +655,10 @@ window.__ModuleLoader__.load({
     	*
     	*/
     	async function openRobot(robot) {
+    		if (isProgramRobot(robot)) {
+    			flash("error", t("programReadOnly"));
+    			return;
+    		}
     		if (robot.mounted !== true || typeof robot.workspaceId !== "string" || robot.workspaceId === "") {
     			flash("error", t("openUnmounted"));
     			return;
@@ -672,6 +685,10 @@ window.__ModuleLoader__.load({
     	*/
     	async function revealRobot(robot) {
     		if (mutating) return;
+    		if (isProgramRobot(robot)) {
+    			flash("error", t("programReadOnly"));
+    			return;
+    		}
     		setBusy(`reveal:${robot.name}`);
     		try {
     			await requestJson(REVEAL_ROUTE, {
@@ -691,6 +708,10 @@ window.__ModuleLoader__.load({
     	*
     	*/
     	async function mountRobot(robot) {
+    		if (isProgramRobot(robot)) {
+    			flash("error", t("programReadOnly"));
+    			return;
+    		}
     		const workspaces = service("workspaces");
     		if (workspaces === null || typeof workspaces.create !== "function") {
     			flash("error", t("noWorkspacesCreate"));
@@ -781,6 +802,10 @@ window.__ModuleLoader__.load({
     	*
     	*/
     	async function removeRobot(robot) {
+    		if (isProgramRobot(robot)) {
+    			flash("error", t("programReadOnly"));
+    			return;
+    		}
     		setBusy(`delete:${robot.name}`);
     		try {
     			if (robot.mounted === true && typeof robot.workspaceId === "string" && robot.workspaceId !== "") {
@@ -821,6 +846,10 @@ window.__ModuleLoader__.load({
     	*/
     	async function saveAgents(robot) {
     		if (agentsSaving) return;
+    		if (isProgramRobot(robot)) {
+    			flash("error", t("programReadOnly"));
+    			return;
+    		}
     		const content = agentsDraft;
     		if (content === agentsOf(robot).content) return;
     		setAgentsSaving(true);
@@ -847,6 +876,30 @@ window.__ModuleLoader__.load({
     			setAgentsSaving(false);
     		}
     	}
+    	/**
+    	* 标记 / 取消助理：只有 agent 型机器人可以设（program 机器人由服务端拒绝）。
+    	*
+    	*/
+    	async function toggleAssistant(robot) {
+    		if (mutating || isProgramRobot(robot)) return;
+    		const next = robot.assistant !== true;
+    		setBusy(`assistant:${robot.name}`);
+    		try {
+    			const saved = (await requestJson(ASSISTANT_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({
+    					name: robot.name,
+    					assistant: next
+    				})
+    			}))?.robot?.assistant;
+    			patchRobot(robot.name, { assistant: typeof saved === "boolean" ? saved : next });
+    			flash("success", next ? t("assistantSet") : t("assistantCleared"));
+    		} catch (failure) {
+    			flash("error", `${t("assistantSaveFailed")} ${failureText(t, failure)}`);
+    		} finally {
+    			setBusy(null);
+    		}
+    	}
     	return {
     		openRobot,
     		revealRobot,
@@ -855,7 +908,8 @@ window.__ModuleLoader__.load({
     		closeCreateDialog,
     		createRobot,
     		removeRobot,
-    		saveAgents
+    		saveAgents,
+    		toggleAssistant
     	};
     }
     // .build/robots/client/actions/skills.js
@@ -1160,6 +1214,8 @@ window.__ModuleLoader__.load({
     	});
     	/** Toast 文案；同一时刻只保留最后一条。 */
     	const [notice, setNotice] = react.default.useState(null);
+    	/** 列表筛选：只看带 `assistant` 标记的机器人。 */
+    	const [assistantOnly, setAssistantOnly] = react.default.useState(false);
     	react.default.useEffect(() => {
     		let cancelled = false;
     		setList((prev) => ({
@@ -1255,6 +1311,7 @@ window.__ModuleLoader__.load({
     	*
     	*/
     	function openDetail(robot) {
+    		if (robot.driver === "program") return;
     		setSelectedName(robot.name);
     		setTab("agents");
     		setAgentsDraft(agentsOf(robot).content);
@@ -1362,6 +1419,8 @@ window.__ModuleLoader__.load({
     		setFavourites,
     		notice,
     		setNotice,
+    		assistantOnly,
+    		setAssistantOnly,
     		data,
     		robots,
     		registry,
@@ -1542,9 +1601,10 @@ window.__ModuleLoader__.load({
     *
     */
     function PageHeader({ t, state, actions, detail }) {
-    	const { selectedRobot, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } = state;
+    	const { selectedRobot, mutating, corrupt, list, busy, tab, reload, switchTab, backToList, assistantOnly, setAssistantOnly } = state;
     	const { openCreateDialog, openRobot, revealRobot } = actions;
     	const { openAvatarDialog, openRenameDialog } = detail;
+    	const program = selectedRobot?.driver === "program";
     	const refreshButton = h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("refresh"),
     		side: "bottom",
@@ -1563,6 +1623,15 @@ window.__ModuleLoader__.load({
     		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
     		onClick: reload
     	}, t("refresh")));
+    	const filterButton = selectedRobot === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-robots-toolbarButton",
+    		"aria-pressed": assistantOnly === true,
+    		"aria-label": assistantOnly === true ? t("showAllRobots") : t("filterAssistants"),
+    		disabled: mutating,
+    		onClick: () => setAssistantOnly(assistantOnly !== true)
+    	}, assistantOnly === true ? t("showAllRobots") : t("filterAssistants")) : null;
     	const createButton = selectedRobot === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "primary",
     		size: "sm",
@@ -1572,7 +1641,7 @@ window.__ModuleLoader__.load({
     		disabled: mutating || corrupt,
     		onClick: openCreateDialog
     	}, t("create")) : null;
-    	const detailActions = selectedRobot === null ? null : [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	const detailActions = selectedRobot === null || program ? null : [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "open",
     		variant: "outline",
     		size: "sm",
@@ -1604,7 +1673,7 @@ window.__ModuleLoader__.load({
     		"aria-label": t("back"),
     		disabled: mutating,
     		onClick: backToList
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 16 }))), selectedRobot === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 16 }))), selectedRobot === null || program ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("changeAvatar"),
     		side: "top",
     		delayMs: 400
@@ -1614,7 +1683,7 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("changeAvatar")} ${selectedRobot.name}`,
     		disabled: mutating,
     		onClick: () => openAvatarDialog(selectedRobot)
-    	}, renderAvatar(selectedRobot.avatar, 32))), h("h1", { className: "buka-robots-title" }, selectedRobot === null ? t("title") : String(selectedRobot.name ?? "")), selectedRobot === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    	}, renderAvatar(selectedRobot.avatar, 32))), h("h1", { className: "buka-robots-title" }, selectedRobot === null ? t("title") : String(selectedRobot.name ?? "")), selectedRobot === null || program ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: `${t("renameLabel")} ${selectedRobot.name}`,
     		side: "top",
     		delayMs: 400
@@ -1624,10 +1693,10 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("renameLabel")} ${selectedRobot.name}`,
     		disabled: mutating || corrupt || selectedRobot.exists === false,
     		onClick: openRenameDialog
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedRobot === null ? null : h("span", { className: "buka-robots-headingTag" }, h(MountedTag, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedRobot === null ? null : h("span", { className: "buka-robots-headingTag" }, program ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverProgram")) : h(MountedTag, {
     		t,
     		robot: selectedRobot
-    	})))), h("div", { className: "buka-robots-toolbar" }, detailActions, refreshButton, createButton), selectedRobot === null ? null : h("div", { className: "buka-robots-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	}), selectedRobot.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null))), h("div", { className: "buka-robots-toolbar" }, detailActions, filterButton, refreshButton, createButton), selectedRobot === null ? null : h("div", { className: "buka-robots-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-robots-tabList",
     		label: t("tabsLabel"),
@@ -1970,26 +2039,31 @@ window.__ModuleLoader__.load({
     /**
     * 「机器人」列表：机器人卡片与列表状态。
     *
-    * 列表不展示目录；每张卡片显示名称、skills / AGENTS.md / 挂载状态、一句职责
-    * 与行内动作。整行点击进入详情，行内动作区自己挡住冒泡。
+    * 列表不展示目录；每张卡片显示名称、驱动类型、skills / AGENTS.md / 挂载状态、
+    * 一句职责与行内动作。整行点击进入详情，行内动作区自己挡住冒泡。
+    *
+    * program 型机器人（clock）只读：卡片展示驱动与职责，没有新会话 / 挂载 /
+    * 删除 / 助理入口，也不进入配置视图。agent 型机器人可以标记 / 取消助理。
     *
     * @module @buka/dsh-plugin-robots/client/components/robot-list
     */
     /**
-    * 一条机器人卡片：名称、skills / AGENTS.md / 挂载状态、路径、动作与删除确认。
+    * 一条机器人卡片：名称、驱动 / 助理 / skills / AGENTS.md / 挂载状态、职责与
+    * 动作与删除确认。program 型机器人只读。
     *
     */
     function RobotCard({ t, robot, state, actions: robotActions }) {
     	const { confirming, setConfirming, busy, mutating, corrupt, openDetail } = state;
-    	const { openRobot, mountRobot, removeRobot } = robotActions;
+    	const { openRobot, mountRobot, removeRobot, toggleAssistant } = robotActions;
     	const skills = skillsOf(robot);
     	const agents = agentsOf(robot);
+    	const program = isProgramRobot(robot);
     	const confirmingThis = confirming === robot.name;
-    	const missing = robot.exists === false;
+    	const missing = !program && robot.exists === false;
     	const mounted = robot.mounted === true;
     	const anyBusy = mutating || corrupt;
-    	const canOpen = !mutating;
-    	const actions = confirmingThis ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	const canOpen = !mutating && !program;
+    	const actions = program ? [] : confirmingThis ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "confirm",
     		variant: "outline",
     		size: "sm",
@@ -2026,6 +2100,14 @@ window.__ModuleLoader__.load({
     			onClick: () => mountRobot(robot)
     		}, busy === `mount:${robot.name}` ? t("mounting") : t("mount")),
     		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			key: "assistant",
+    			variant: "outline",
+    			size: "sm",
+    			disabled: anyBusy || busy === `assistant:${robot.name}`,
+    			"aria-label": `${robot.assistant === true ? t("clearAssistant") : t("setAssistant")} ${robot.name}`,
+    			onClick: () => toggleAssistant(robot)
+    		}, busy === `assistant:${robot.name}` ? t("saving") : robot.assistant === true ? t("clearAssistant") : t("setAssistant")),
+    		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "delete",
     			variant: "outline",
     			size: "sm",
@@ -2037,7 +2119,7 @@ window.__ModuleLoader__.load({
     		}, t("delete"))
     	];
     	return h("li", {
-    		className: `buka-robots-card${canOpen ? " is-clickable" : ""}`,
+    		className: `buka-robots-card${canOpen ? " is-clickable" : ""}${program ? " is-program" : ""}`,
     		key: robot.name,
     		"aria-busy": busy !== null ? true : void 0,
     		onClick: () => {
@@ -2051,19 +2133,20 @@ window.__ModuleLoader__.load({
     		disabled: !canOpen,
     		onClick: (event) => {
     			event.stopPropagation();
-    			openDetail(robot);
+    			if (canOpen) openDetail(robot);
     		}
-    	}, String(robot.name ?? "")), h(MountedTag, {
+    	}, String(robot.name ?? "")), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: program ? "info" : "neutral" }, program ? t("driverProgram") : t("driverAgent")), robot.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null, program ? null : h(MountedTag, {
     		t,
     		robot
-    	}), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: agents.exists ? "success" : "neutral" }, agents.exists ? t("agentsBadge") : t("noAgentsBadge")), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
+    	}), program ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), program ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: agents.exists ? "success" : "neutral" }, agents.exists ? t("agentsBadge") : t("noAgentsBadge")), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
     		className: "buka-robots-titleActions",
     		onClick: (event) => event.stopPropagation()
-    	}, ...actions.filter(Boolean))), typeof robot.description === "string" && robot.description !== "" ? h("p", { className: "buka-robots-cardDesc" }, robot.description) : null, missing ? h("p", { className: "buka-robots-hint" }, t("missingDirHint")) : null, confirmingThis ? h("p", { className: "buka-robots-hint" }, t("deleteHint")) : null));
+    	}, ...actions.filter(Boolean))), typeof robot.description === "string" && robot.description !== "" ? h("p", { className: "buka-robots-cardDesc" }, robot.description) : null, program ? h("p", { className: "buka-robots-hint" }, t("programReadOnly")) : null, missing ? h("p", { className: "buka-robots-hint" }, t("missingDirHint")) : null, confirmingThis ? h("p", { className: "buka-robots-hint" }, t("deleteHint")) : null));
     }
     /** 列表页：登记文件提示、加载 / 失败 / 空状态与机器人卡片（不展示目录）。 */
     function RobotList({ t, state, actions }) {
-    	const { corrupt, registry, list, data, robots } = state;
+    	const { corrupt, registry, list, data, robots, assistantOnly } = state;
+    	const visible = assistantOnly ? robots.filter((robot) => robot.assistant === true) : robots;
     	const corruptNotice = corrupt ? h("p", {
     		className: "buka-robots-notice",
     		role: "status"
@@ -2074,7 +2157,7 @@ window.__ModuleLoader__.load({
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "error" }), `${t("loadFailed")} ${list.error}`), list.loading && data === null ? h("p", {
     		className: "buka-robots-statusWithDot",
     		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")) : null, data === null ? null : robots.length === 0 && !list.loading && !corrupt ? h("p", { className: "buka-robots-empty" }, t("empty")) : h("ul", { className: "buka-robots-cards" }, ...robots.map((robot) => h(RobotCard, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")) : null, data === null ? null : visible.length === 0 && !list.loading && !corrupt ? h("p", { className: "buka-robots-empty" }, assistantOnly ? t("assistantEmpty") : t("empty")) : h("ul", { className: "buka-robots-cards" }, ...visible.map((robot) => h(RobotCard, {
     		t,
     		robot,
     		state,
@@ -2212,6 +2295,18 @@ window.__ModuleLoader__.load({
     	noAgentsBadge: "No AGENTS.md",
     	mountedBadge: "Mounted",
     	unmountedBadge: "Not mounted",
+    	driverAgent: "Agent",
+    	driverProgram: "Program",
+    	assistantBadge: "Assistant",
+    	setAssistant: "Make assistant",
+    	clearAssistant: "Stop being assistant",
+    	assistantSet: "This robot is now an assistant.",
+    	assistantCleared: "This robot is no longer an assistant.",
+    	assistantSaveFailed: "Could not change the assistant flag:",
+    	filterAssistants: "Assistants only",
+    	showAllRobots: "All robots",
+    	assistantEmpty: "No robot is marked as an assistant yet.",
+    	programReadOnly: "Program robots are driven by the plugin: they have no directory and cannot be opened, edited or installed with skills.",
     	missingDir: "Missing directory",
     	missingDirHint: "This robot directory no longer exists. You can delete the record and create it again.",
     	missingDirDetail: "This robot directory no longer exists, so skills and AGENTS.md operations will fail.",
@@ -2288,6 +2383,10 @@ window.__ModuleLoader__.load({
     	errPathOutsideRoot: "The robot directory is outside the robots folder, so it cannot be renamed. Fix the registry entry first.",
     	errMissingDirectory: "The robot directory does not exist, so this operation cannot run.",
     	errRegistryUnreadable: "The robot registry cannot be read, so this change was cancelled. Fix or delete the file, then refresh.",
+    	errProgramRobot: "Program robots are read-only: they have no directory or session, so this change is not available.",
+    	errBuiltinRobot: "Built-in robots cannot be created, changed or removed.",
+    	errInvalidAssistant: "The assistant flag must be true or false.",
+    	errInvalidDriver: "Only agent robots can be created; program robots are built into the plugin.",
     	errTooLarge: "AGENTS.md is larger than 512 KiB and cannot be saved.",
     	errInvalidContent: "The AGENTS.md content must be text.",
     	errInvalidSource: "Invalid source. Use an npx skills source such as owner/repo.",
@@ -2353,6 +2452,18 @@ window.__ModuleLoader__.load({
     	noAgentsBadge: "无 AGENTS.md",
     	mountedBadge: "已挂载",
     	unmountedBadge: "未挂载",
+    	driverAgent: "Agent 型",
+    	driverProgram: "程序型",
+    	assistantBadge: "助理",
+    	setAssistant: "设为助理",
+    	clearAssistant: "取消助理",
+    	assistantSet: "已设为助理。",
+    	assistantCleared: "已取消助理。",
+    	assistantSaveFailed: "修改助理标记失败：",
+    	filterAssistants: "只看助理",
+    	showAllRobots: "全部机器人",
+    	assistantEmpty: "还没有标记为助理的机器人。",
+    	programReadOnly: "program 机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。",
     	missingDir: "目录缺失",
     	missingDirHint: "这个机器人目录已经不存在了，可以删除记录后重新创建。",
     	missingDirDetail: "这个机器人目录已经不存在了，skills 与 AGENTS.md 操作都会失败。",
@@ -2429,6 +2540,10 @@ window.__ModuleLoader__.load({
     	errPathOutsideRoot: "机器人目录不在机器人根目录下，无法重命名；请先修复登记表。",
     	errMissingDirectory: "机器人目录不存在，无法执行这个操作。",
     	errRegistryUnreadable: "机器人登记文件无法读取，本次修改已取消；请修复或删除该文件后刷新。",
+    	errProgramRobot: "program 机器人只读：没有目录与会话，不能执行这个操作。",
+    	errBuiltinRobot: "内建机器人不可创建、修改或删除。",
+    	errInvalidAssistant: "助理标记必须是 true 或 false。",
+    	errInvalidDriver: "只能创建 agent 型机器人；program 型机器人由插件内建。",
     	errTooLarge: "AGENTS.md 超过 512 KiB，无法保存。",
     	errInvalidContent: "AGENTS.md 内容必须是文本。",
     	errInvalidSource: "来源不合法：请填 owner/repo 这类 npx skills 来源。",
@@ -2600,13 +2715,16 @@ window.__ModuleLoader__.load({
     *
     * 页面有两个视图，共用同一个标题行与工具栏：
     *
-    * - 列表视图：整行点击（或点机器人名 / 键盘 Tab 到标题）进入详情，行内动作是
-    *   「新会话 / 挂载 / 删除」。删除先摘掉工作区注册、再删插件记录，目录与文件
-    *   保留；登记文件损坏时只允许刷新，新建/删除/挂载都会禁用。列表**不展示目录**
-    *   （机器人根目录与各机器人路径都只在详情页出现）；每张卡片显示机器人的一行
-    *   描述（工作流靠它决定是否选用该机器人）；标题行「刷新」右侧的「创建机器人」
-    *   按钮打开对话框填名称与描述后提交；全新安装（登记表为空）时插件会自动补上
-    *   「软件工程师」与「质量保障工程师」两个预设机器人；
+    * - 列表视图：按 `driver` 展示驱动标签（agent / program），agent 型机器人可标记
+    *   / 取消助理，列表可按助理筛选。整行点击（或点机器人名 / 键盘 Tab 到标题）
+    *   进入详情，行内动作是「新会话 / 挂载 / 设为助理 / 删除」。删除先摘掉工作区
+    *   注册、再删插件记录，目录与文件保留；登记文件损坏时只允许刷新，新建/删除/
+    *   挂载都会禁用。列表**不展示目录**（机器人根目录与各机器人路径都只在详情页
+    *   出现）；每张卡片显示机器人的一行描述（工作流靠它决定是否选用该机器人）；
+    *   标题行「刷新」右侧的「创建机器人」按钮打开对话框填名称与描述后提交；全新
+    *   安装时插件会自动补上「软件工程师」与「质量保障工程师」两个预设机器人。
+    *   program 型机器人（内建 clock）只读：卡片展示驱动与描述，没有新会话 / 挂载 /
+    *   删除 / 助理入口，也不能编辑 AGENTS.md 或安装 skills；
     * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
     *   机器人名旁的铅笔按钮打开「重命名机器人」对话框：改的是机器人目录名，Host 会
     *   在新路径重建 DSH 工作区，已有会话日志保留但不再列在这个机器人下。正文用

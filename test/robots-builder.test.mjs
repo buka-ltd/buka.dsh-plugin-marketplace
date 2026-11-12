@@ -28,7 +28,11 @@ import {
   mountRobot,
   normalizeBuildRequest,
 } from '../plugins/robots/src/builder.ts'
-import { readClaudeLink, readRobotRegistry } from '../plugins/robots/src/robot-store.ts'
+import {
+  readClaudeLink,
+  readRobotRegistry,
+  writeRobotRegistry,
+} from '../plugins/robots/src/robot-store.ts'
 
 /**
  * 建一个临时根目录。
@@ -284,6 +288,8 @@ test('buildRobot：新建机器人写目录、登记、AGENTS.md、CLAUDE.md 链
     assert.equal(result.created, true)
     assert.equal(result.updated, false)
     assert.equal(result.robot.name, '简报')
+    assert.equal(result.robot.driver, 'agent')
+    assert.equal(result.robot.assistant, false, 'build 工具创建的 agent 机器人默认不是助理')
     assert.equal(result.robot.avatar, 'owl')
     assert.equal(result.agentsBytes, Buffer.byteLength(agents, 'utf8'))
     assert.equal(result.mounted, true)
@@ -538,6 +544,7 @@ function toolOutput(overrides = {}) {
     path: '/tmp/robots/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
+    assistant: false,
     created: true,
     updated: false,
     renamed: false,
@@ -560,10 +567,12 @@ function buildResult(overrides = {}) {
   return {
     robot: {
       name: 'writer',
+      driver: 'agent',
       path: '/tmp/robots/writer',
       avatar: 'owl',
       description: '把会议记录整理成三点结论',
       createdAt: '2026-01-01T00:00:00.000Z',
+      assistant: false,
     },
     created: true,
     updated: false,
@@ -604,6 +613,8 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
   assert.equal(tool.output.schema.properties.workspaceId.oneOf.length, 2)
   assert.equal(tool.output.schema.properties.renamed.type, 'boolean')
   assert.equal(tool.output.schema.properties.previousName.oneOf.length, 2)
+  assert.equal(tool.output.schema.properties.assistant.required, true)
+  assert.equal(tool.output.schema.properties.assistant.type, 'boolean')
 
   const agent = { id: 'root' }
   const output = await tool.execute({ name: 'writer', agents: '# x' }, { agent })
@@ -614,6 +625,7 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     path: '/tmp/robots/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
+    assistant: false,
     created: true,
     updated: false,
     renamed: false,
@@ -643,6 +655,7 @@ test('createRobotBuildTool：定义、可见性兜底与结果映射', async () 
     path: '/tmp/robots/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
+    assistant: false,
     created: false,
     updated: true,
     renamed: false,
@@ -970,6 +983,83 @@ test('buildRobot：改名与头像 / 职责 / AGENTS.md 同一次调用；未挂
     assert.equal(mountAfterRename.renamed, true)
     assert.equal(mountAfterRename.mounted, true)
     assert.equal(mountAfterRename.workspaceId, 'workspace-1')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('buildRobot：内建 clock 不可创建，也不可作为改名目标', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    const registry = fakeWorkspaceRegistry()
+
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'clock', workspaceRegistry: registry }),
+      (error) => error.code === BUILD_ERROR_CODES.builtinRobot,
+    )
+
+    const writer = await buildRobot({ ...store, name: 'writer', workspaceRegistry: registry })
+    await assert.rejects(
+      () =>
+        buildRobot({
+          ...store,
+          name: 'writer',
+          newName: 'clock',
+          update: true,
+          workspaceRegistry: registry,
+        }),
+      (error) => error.code === BUILD_ERROR_CODES.builtinRobot,
+    )
+    // 失败的调用没有动登记表与目录。
+    assert.deepEqual(
+      (await readRobotRegistry({ file: store.file })).robots.map((robot) => robot.name),
+      ['writer'],
+    )
+    assert.equal((await fs.stat(writer.robot.path)).isDirectory(), true)
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('buildRobot：program 型机器人只读，构建工具不能修改它', async () => {
+  const root = await makeRoot()
+  try {
+    const store = storeOf(root)
+    await writeRobotRegistry({
+      file: store.file,
+      robots: [
+        {
+          name: 'timer',
+          driver: 'program',
+          program: 'clock',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          description: '到点完成任务',
+          assistant: false,
+        },
+      ],
+    })
+
+    await assert.rejects(
+      () =>
+        buildRobot({
+          ...store,
+          name: 'timer',
+          description: '改描述',
+          update: true,
+          workspaceRegistry: fakeWorkspaceRegistry(),
+        }),
+      (error) => error.code === BUILD_ERROR_CODES.programRobot,
+    )
+    const registry = await readRobotRegistry({ file: store.file })
+    assert.equal(registry.robots.length, 1)
+    assert.equal(registry.robots[0].description, '到点完成任务')
+
+    // 新建时看到同名 program 条目也不能覆盖。
+    await assert.rejects(
+      () => buildRobot({ ...store, name: 'timer', workspaceRegistry: fakeWorkspaceRegistry() }),
+      (error) => error.code === BUILD_ERROR_CODES.programRobot,
+    )
   } finally {
     await removeRoot(root)
   }

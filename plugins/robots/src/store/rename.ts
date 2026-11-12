@@ -11,6 +11,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { resolveAvatar } from '../avatar.ts'
 import { ensureClaudeLink, robotAgentsTemplate } from './agents.ts'
+import { builtinRobotError, isBuiltinRobotName } from './builtin.ts'
 import {
   AGENTS_FILE,
   defaultRobotsRoot,
@@ -22,6 +23,7 @@ import {
 } from './paths.ts'
 import {
   invalidNameError,
+  programRobotError,
   readRobotRegistry,
   registryUnreadableError,
   unknownRobotError,
@@ -78,6 +80,10 @@ export async function renameRobot({
 
   const current = registry.robots.find((robot) => robot.name === trimmed)
   if (current === undefined) throw unknownRobotError(trimmed)
+
+  // program 型机器人没有目录、只读；内建名字也不能成为改名目标。
+  if (current.driver !== 'agent') throw programRobotError(trimmed)
+  if (isBuiltinRobotName(nextName)) throw builtinRobotError(nextName)
 
   // 名称没变：当作 no-op（页面会禁用保存；工具可能带着相同值调用）。
   if (nextName === current.name) {
@@ -148,7 +154,7 @@ export async function renameRobot({
 
   const canonical = await realpathOr(target, target)
 
-  const next = {
+  const next: typeof current = {
     ...current,
     name: nextName,
     path: canonical,

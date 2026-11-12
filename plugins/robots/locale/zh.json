@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka 机器人",
-    "description": "在侧边栏新增「机器人」页面：机器人是本插件在 ~/.cache/dsh-plugin-robots/robots 下创建并挂载成 DSH 工作区的目录，可以装项目级 skills、编辑自己的 AGENTS.md，并带预设头像与一句职责。安装插件还会多出「机器人构建」模式、全新安装时自动补两个可编辑的预设机器人，其他插件通过 ctx.bukaRobots 服务使用它们。",
+    "description": "在侧边栏管理机器人：agent 型机器人有自己的目录、AGENTS.md 与项目 skills，program 型是固定程序（v1 内建 clock）；带 assistant 标记的机器人可以替人任务做沟通。登记表升级为 version 2（driver / assistant），并删除会话压缩与结果追问。",
     "detail": "docs/DETAIL.zh.md"
   }
 }

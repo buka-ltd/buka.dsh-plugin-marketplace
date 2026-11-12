@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka Robots",
-    "description": "Adds a Robots page to the sidebar: each robot is a directory the plugin creates under ~/.cache/dsh-plugin-robots/robots and mounts as a DSH workspace, with project-level skills installed through npx skills, an editable AGENTS.md, a preset avatar and a one-sentence responsibility statement. The plugin also ships the robot-builder mode and, on a fresh install, seeds two editable preset robots; other plugins reach robots through the ctx.bukaRobots service.",
+    "description": "Manage robots in the sidebar: agent robots have a directory, AGENTS.md and project skills, while program robots are fixed programs (v1 ships clock); a robot marked assistant can talk to people for human tasks. The registry is version 2 (driver / assistant), and session compaction and result retries are removed.",
     "detail": "docs/DETAIL.md"
   }
 }

@@ -30,9 +30,12 @@ import { revealCommand, revealDirectory } from '../plugins/robots/src/reveal.ts'
 import {
   AGENTS_MAX_READ_BYTES,
   addRobot,
+  BUILTIN_ROBOTS,
   CLAUDE_FILE,
+  CLOCK_ROBOT_NAME,
   defaultRobotsRoot,
   emptyAgentsFile,
+  ensureBuiltinRobots,
   ensureClaudeLink,
   isValidRobotDescription,
   isValidRobotName,
@@ -50,6 +53,7 @@ import {
   resolveRobotsDir,
   robotDirectory,
   scanProjectSkills,
+  setRobotAssistant,
   setRobotAvatar,
   setRobotDescription,
   writeAgentsFile,
@@ -342,7 +346,7 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
     const robotsDir = path.join(pluginDir, 'robots')
     const file = path.join(pluginDir, 'robots.json')
 
-    assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: [], file })
+    assert.deepEqual(await readRobotRegistry({ file }), { version: 2, robots: [], file })
 
     const entries = [
       {
@@ -360,10 +364,13 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
     // 写回时一定会落下具体头像：没有指定就按名字分配。
     const written = entries.map((entry) => ({
       ...entry,
+      driver: 'agent',
+      program: '',
       avatar: defaultAvatarFor(entry.name),
       description: '',
+      assistant: false,
     }))
-    assert.deepEqual(await readRobotRegistry({ file }), { version: 1, robots: written, file })
+    assert.deepEqual(await readRobotRegistry({ file }), { version: 2, robots: written, file })
 
     if (process.platform !== 'win32') {
       assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
@@ -372,7 +379,7 @@ test('机器人登记表：缺失按空表、原子写 0600', async () => {
     // 覆盖写之后权限仍然收紧，且不残留临时文件。
     await writeRobotRegistry({ file, robots: entries.slice(0, 1) })
     assert.deepEqual(await readRobotRegistry({ file }), {
-      version: 1,
+      version: 2,
       robots: written.slice(0, 1),
       file,
     })
@@ -396,7 +403,7 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
       '{not json',
       'null',
       '[]',
-      JSON.stringify({ version: 2, robots: [] }),
+      JSON.stringify({ version: 3, robots: [] }),
       JSON.stringify({ version: 1, robots: 'nope' }),
     ]
     for (const bad of cases) {
@@ -439,10 +446,13 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
     assert.deepEqual(filtered.robots, [
       {
         name: 'ok',
+        driver: 'agent',
+        program: '',
         path: '/abs/ok',
         createdAt: '2026-01-01T00:00:00.000Z',
         avatar: '',
         description: '',
+        assistant: false,
       },
     ])
   } finally {
@@ -549,13 +559,19 @@ test('listRobots：挂载 join、目录缺失、skills/agents 汇总与损坏容
     const robotsDir = path.join(pluginDir, 'robots')
     const file = path.join(pluginDir, 'robots.json')
 
-    // 没有任何登记时是空表，不抛错。
-    assert.deepEqual(await listRobots({ file, robotsDir }), {
-      root: robotsDir,
-      registry: file,
-      corrupt: false,
-      robots: [],
-    })
+    // 没有任何用户登记时，视图里只有内建 program 机器人 clock，不抛错。
+    const empty = await listRobots({ file, robotsDir })
+    assert.equal(empty.root, robotsDir)
+    assert.equal(empty.registry, file)
+    assert.equal(empty.corrupt, false)
+    assert.deepEqual(
+      empty.robots.map((robot) => robot.name),
+      ['clock'],
+    )
+    assert.equal(empty.robots[0].driver, 'program')
+    assert.equal(empty.robots[0].program, 'clock')
+    assert.equal(empty.robots[0].exists, false)
+    assert.deepEqual(empty.robots[0].skills, [])
 
     const writer = await addRobot({ robotsDir, file, name: 'writer' })
     const painter = await addRobot({ robotsDir, file, name: 'painter' })
@@ -589,11 +605,13 @@ test('listRobots：挂载 join、目录缺失、skills/agents 汇总与损坏容
     assert.equal(snapshot.corrupt, false)
     assert.deepEqual(
       snapshot.robots.map((robot) => robot.name),
-      ['ghost', 'painter', 'writer'],
+      ['ghost', 'painter', 'writer', 'clock'],
     )
 
     const byName = new Map(snapshot.robots.map((robot) => [robot.name, robot]))
 
+    assert.equal(byName.get('writer').driver, 'agent')
+    assert.equal(byName.get('writer').assistant, false)
     assert.equal(byName.get('writer').exists, true)
     assert.equal(byName.get('writer').mounted, true)
     assert.equal(byName.get('writer').workspaceId, 'w-writer')
@@ -1248,6 +1266,226 @@ test('预设机器人：只在登记表为空时种子一次，非空 / 损坏�
     assert.equal(corrupt.corrupt, true)
     assert.deepEqual(corrupt.seeded, [])
     assert.equal(await fs.readFile(file, 'utf8'), '{broken')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('登记表 version 1 → 2：读时迁移 driver/assistant，写时落盘新格式', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    // 旧表只有 name / path / createdAt：读时补 driver=agent、assistant=false。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        robots: [
+          {
+            name: 'writer',
+            path: path.join(robotsDir, 'writer'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            avatar: 'panda',
+            description: '写发布说明',
+          },
+        ],
+      }),
+    )
+    const migrated = await readRobotRegistry({ file })
+    assert.equal(migrated.version, 2)
+    assert.deepEqual(migrated.robots, [
+      {
+        name: 'writer',
+        driver: 'agent',
+        program: '',
+        path: path.join(robotsDir, 'writer'),
+        createdAt: '2026-01-01T00:00:00.000Z',
+        avatar: 'panda',
+        description: '写发布说明',
+        assistant: false,
+      },
+    ])
+
+    // 任何一次写入都把迁移结果落盘：文件升 version 2，条目带新字段。
+    await setRobotAvatar({ file, name: 'writer', avatar: 'owl' })
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'))
+    assert.equal(raw.version, 2)
+    assert.deepEqual(raw.robots[0], {
+      name: 'writer',
+      driver: 'agent',
+      path: path.join(robotsDir, 'writer'),
+      createdAt: '2026-01-01T00:00:00.000Z',
+      avatar: 'owl',
+      description: '写发布说明',
+      assistant: false,
+    })
+
+    // 写入方给旧形状（没有 driver / assistant）时也按 agent / false 补齐。
+    await writeRobotRegistry({
+      file,
+      robots: [
+        {
+          name: 'painter',
+          path: path.join(robotsDir, 'painter'),
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    })
+    const plain = JSON.parse(await fs.readFile(file, 'utf8'))
+    assert.equal(plain.robots[0].driver, 'agent')
+    assert.equal(plain.robots[0].assistant, false)
+    assert.equal(plain.robots[0].program, undefined)
+    assert.equal(plain.robots[0].path, path.join(robotsDir, 'painter'))
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('内建 program 机器人 clock：启动补写、幂等、不可创建/删除/改名/改字段', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    // 首次补写：clock 进表，文件升到 version 2，条目没有 path。
+    const first = await ensureBuiltinRobots({ file })
+    assert.deepEqual(first, { added: [CLOCK_ROBOT_NAME] })
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'))
+    assert.equal(raw.version, 2)
+    assert.deepEqual(raw.robots, [
+      {
+        name: 'clock',
+        driver: 'program',
+        program: 'clock',
+        createdAt: BUILTIN_ROBOTS[0].createdAt,
+        avatar: defaultAvatarFor(CLOCK_ROBOT_NAME),
+        description: BUILTIN_ROBOTS[0].description,
+        assistant: false,
+      },
+    ])
+
+    // 幂等：第二次不再写。
+    assert.deepEqual(await ensureBuiltinRobots({ file }), { added: [] })
+
+    // 不可创建、不可删除、不可改名、不可改头像 / 描述 / 助理标记。
+    await assert.rejects(
+      () => addRobot({ robotsDir, file, name: 'clock' }),
+      (error) => error.code === 'builtin-robot',
+    )
+    await assert.rejects(
+      () => removeRobot({ file, name: 'clock' }),
+      (error) => error.code === 'builtin-robot',
+    )
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'clock', newName: 'timer' }),
+      (error) => error.code === 'program-robot',
+    )
+    await assert.rejects(
+      () => setRobotAvatar({ file, name: 'clock', avatar: 'owl' }),
+      (error) => error.code === 'program-robot',
+    )
+    await assert.rejects(
+      () => setRobotDescription({ file, name: 'clock', description: 'x' }),
+      (error) => error.code === 'program-robot',
+    )
+    await assert.rejects(
+      () => setRobotAssistant({ file, name: 'clock', assistant: true }),
+      (error) => error.code === 'program-robot',
+    )
+
+    // 改名到内建名字也被拒绝（不能占用 clock）。
+    await addRobot({ robotsDir, file, name: 'writer' })
+    await assert.rejects(
+      () => renameRobot({ robotsDir, file, name: 'writer', newName: 'clock' }),
+      (error) => error.code === 'builtin-robot',
+    )
+
+    // 损坏的登记表：补写拒绝、不覆盖原文件。
+    await writeFile(file, '{broken')
+    assert.deepEqual(await ensureBuiltinRobots({ file }), { added: [], corrupt: true })
+    assert.equal(await fs.readFile(file, 'utf8'), '{broken')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('setRobotAssistant：只有 agent 机器人可以标记 / 取消助理', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    await addRobot({ robotsDir, file, name: 'writer' })
+    const marked = await setRobotAssistant({ file, name: 'writer', assistant: true })
+    assert.equal(marked.robot.assistant, true)
+    assert.equal(marked.robot.driver, 'agent')
+    assert.equal((await readRobotRegistry({ file })).robots[0].assistant, true)
+
+    const cleared = await setRobotAssistant({ file, name: 'writer', assistant: false })
+    assert.equal(cleared.robot.assistant, false)
+
+    await assert.rejects(
+      () => setRobotAssistant({ file, name: 'writer', assistant: 'yes' }),
+      (error) => error.code === 'invalid-assistant',
+    )
+    await assert.rejects(
+      () => setRobotAssistant({ file, name: 'nobody', assistant: true }),
+      (error) => error.code === 'unknown-robot',
+    )
+
+    // program 机器人不是 agent，不能是助理。
+    await ensureBuiltinRobots({ file })
+    await assert.rejects(
+      () => setRobotAssistant({ file, name: 'clock', assistant: true }),
+      (error) => error.code === 'program-robot',
+    )
+    // 手工写坏的 program 条目即使带 assistant: true，读回来也归一成 false。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 2,
+        robots: [
+          {
+            name: 'clock',
+            driver: 'program',
+            program: 'clock',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            assistant: true,
+          },
+        ],
+      }),
+    )
+    assert.equal((await readRobotRegistry({ file })).robots[0].assistant, false)
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('预设机器人：已有内建 clock 时仍然补两个 agent 起点机器人', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-robots')
+    const robotsDir = path.join(pluginDir, 'robots')
+    const file = path.join(pluginDir, 'robots.json')
+
+    // 启动顺序：先补内建 clock，再做预设种子；clock 不算「已有机器人」。
+    await ensureBuiltinRobots({ file })
+    const seeded = await seedPresetRobots({ robotsDir, file })
+    assert.equal(seeded.corrupt, false)
+    assert.deepEqual(seeded.seeded.sort(), PRESET_ROBOTS.map((preset) => preset.name).sort())
+    const registry = await readRobotRegistry({ file })
+    assert.deepEqual(
+      registry.robots.map((robot) => [robot.name, robot.driver]).sort(),
+      [...PRESET_ROBOTS.map((preset) => [preset.name, 'agent']), ['clock', 'program']].sort(),
+    )
+
+    // 再种一次：已经有 agent 机器人，不再新增。
+    assert.deepEqual((await seedPresetRobots({ robotsDir, file })).seeded, [])
   } finally {
     await removeRoot(root)
   }

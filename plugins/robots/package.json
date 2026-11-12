@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-robots",
-  "version": "0.11.1",
-  "description": "在侧边栏管理机器人工作区：安装项目级 skills、编辑 AGENTS.md、一键打开会话并指派职责。",
+  "version": "1.0.0",
+  "description": "在侧边栏管理机器人：agent / program 两种驱动、助理标记、项目 skills 与 AGENTS.md。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

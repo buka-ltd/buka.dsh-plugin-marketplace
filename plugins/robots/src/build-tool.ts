@@ -30,7 +30,15 @@ export function createRobotBuildTool({
   defineTool?: typeof defineToolType
   avatarIds?: readonly string[]
   runBuild?: (args: Record<string, unknown>) => Promise<{
-    robot: { name: string; path: string; avatar: string; description: string; createdAt: string }
+    robot: {
+      name: string
+      driver: 'agent'
+      path: string
+      avatar: string
+      description: string
+      createdAt: string
+      assistant: boolean
+    }
     created: boolean
     updated: boolean
     renamed: boolean
@@ -54,7 +62,7 @@ export function createRobotBuildTool({
     name: ROBOT_BUILD_TOOL_NAME,
     description:
       'Create, update or rename one robot of the Buka Robots plugin and mount it as a DSH workspace. A robot is a directory the plugin manages (by default ~/.cache/dsh-plugin-robots/robots/<name>) whose AGENTS.md tells every session in it who the robot is and how it works. Use this only in the robot-builder preset, after understanding what the user wants the robot to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_robots first so you do not duplicate an existing robot. The tool creates the directory, registers the robot, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the robot as a workspace. An existing robot name is rejected unless update: true is passed; pass it only when the user asked to change that robot, and omit the fields that should stay unchanged. To rename that existing robot, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the robot — confirm the new name with the user first. Installing project-level skills is a page action (Robots page → the robot → 技能) and is not done by this tool; recommend sources instead. Each robot also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that robot (like a skill description). Avatar ids: ' +
-      `${avatars}.`,
+      `${avatars}. Robots created here are agent robots; the assistant flag starts false and can be turned on for an agent robot on the Robots page.`,
     parameters: {
       name: {
         type: 'string',
@@ -105,6 +113,12 @@ export function createRobotBuildTool({
             type: 'string',
             required: true,
             description: 'One-sentence description stored for the robot; empty when none was set.',
+          },
+          assistant: {
+            type: 'boolean',
+            required: true,
+            description:
+              'Whether the robot is marked as an assistant. Robots created by this tool are agent robots and start with false.',
           },
           created: {
             type: 'boolean',
@@ -197,6 +211,7 @@ export function createRobotBuildTool({
         path: result.robot.path,
         avatar: result.robot.avatar,
         description: result.robot.description,
+        assistant: result.robot.assistant === true,
         created: result.created,
         updated: result.updated,
         renamed: result.renamed === true,

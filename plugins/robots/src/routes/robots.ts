@@ -1,9 +1,12 @@
 /**
  * 「机器人」页面的机器人相关 HTTP 路由。
  *
- * 负责登记表与目录的机器人管理接口：列表、创建、头像、描述、重命名、移除、
- * 写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
+ * 负责登记表与目录的机器人管理接口：列表、创建、头像、描述、助理标记、重命名、
+ * 移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
  * 浏览器一半走 DSH Client Service，这里只处理磁盘事实。
+ *
+ * program 型机器人（内建 clock）只读：创建 / 删除 / 改名 / 改字段都会被拒绝，
+ * 助理标记只对 agent 型机器人开放。
  *
  * @module @buka/dsh-plugin-robots/routes/robots
  */
@@ -21,6 +24,7 @@ import {
   ROBOT_DESCRIPTION_MAX_LENGTH,
   readAgentsFile,
   removeRobot,
+  setRobotAssistant,
   setRobotAvatar,
   setRobotDescription,
   writeAgentsFile,
@@ -48,6 +52,9 @@ const AVATAR_ROUTE = '/buka-robots/avatar'
 
 /** 页面编辑机器人描述用的路由。 */
 const DESCRIPTION_ROUTE = '/buka-robots/description'
+
+/** 页面标记 / 取消助理（只有 agent 机器人可设）用的路由。 */
+const ASSISTANT_ROUTE = '/buka-robots/assistant'
 
 /** 页面重命名机器人（改目录 + 重建工作区）用的路由。 */
 const RENAME_ROUTE = '/buka-robots/rename'
@@ -133,6 +140,16 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
             )
             return
           }
+          // v1 不允许创建 program 机器人：它们由插件内建登记（只有 clock）。
+          if (body?.driver !== undefined && body.driver !== 'agent') {
+            sendError(
+              res,
+              400,
+              'invalid-driver',
+              '只能创建 agent 型机器人；program 型机器人由插件内建登记，不能创建。',
+            )
+            return
+          }
           // 头像可选：不传 / 传了非法 id 时由 addRobot 按名字分配默认头像。
           const avatar = typeof body?.avatar === 'string' ? body.avatar.trim() : ''
           if (body?.description !== undefined && typeof body.description !== 'string') {
@@ -167,6 +184,10 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
             }
             if (errorCode(error) === 'registry-unreadable') {
               sendError(res, 409, 'registry-unreadable', describeError(error))
+              return
+            }
+            if (errorCode(error) === 'builtin-robot' || errorCode(error) === 'program-robot') {
+              sendError(res, 409, String(errorCode(error)), describeError(error))
               return
             }
             webCtx.logger?.warn?.('buka-robots: 创建机器人失败：%s', describeError(error))
@@ -215,6 +236,10 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
             }
             if (errorCode(error) === 'unknown-robot') {
               sendError(res, 404, 'unknown-robot', describeError(error))
+              return
+            }
+            if (errorCode(error) === 'program-robot') {
+              sendError(res, 409, 'program-robot', describeError(error))
               return
             }
             if (errorCode(error) === 'registry-unreadable') {
@@ -278,6 +303,10 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
               sendError(res, 404, 'unknown-robot', describeError(error))
               return
             }
+            if (errorCode(error) === 'program-robot') {
+              sendError(res, 409, 'program-robot', describeError(error))
+              return
+            }
             if (errorCode(error) === 'registry-unreadable') {
               sendError(res, 409, 'registry-unreadable', describeError(error))
               return
@@ -288,6 +317,66 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
         },
       }),
     `buka-robots: POST ${DESCRIPTION_ROUTE}`,
+  )
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: ASSISTANT_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'POST') {
+            sendMethodNotAllowed(res, 'POST')
+            return
+          }
+          const body = await readJsonBody(req, res)
+          if (body === undefined) return
+
+          const name = typeof body?.name === 'string' ? body.name.trim() : ''
+          if (!isValidRobotName(name)) {
+            sendError(res, 400, 'invalid-name', `机器人名称不合法：${String(body?.name)}`)
+            return
+          }
+          const assistant = body?.assistant
+          if (typeof assistant !== 'boolean') {
+            sendError(res, 400, 'invalid-assistant', 'assistant 必须是布尔值')
+            return
+          }
+
+          try {
+            const result = await serializeRegistry(() =>
+              setRobotAssistant({ file: registryFile, name, assistant }),
+            )
+            webCtx.logger?.info?.(
+              'buka-robots: 机器人 %s 的助理标记改为 %s',
+              name,
+              String(assistant),
+            )
+            sendJson(res, 200, { ok: true, robot: result.robot })
+          } catch (error) {
+            switch (errorCode(error)) {
+              case 'invalid-name':
+              case 'invalid-assistant':
+                sendError(res, 400, String(errorCode(error)), describeError(error))
+                return
+              case 'unknown-robot':
+                sendError(res, 404, 'unknown-robot', describeError(error))
+                return
+              case 'program-robot':
+                sendError(res, 409, 'program-robot', describeError(error))
+                return
+              case 'registry-unreadable':
+                sendError(res, 409, 'registry-unreadable', describeError(error))
+                return
+              default:
+                webCtx.logger?.warn?.('buka-robots: 修改助理标记失败：%s', describeError(error))
+                sendError(res, 500, 'assistant-failed', `修改助理标记失败：${describeError(error)}`)
+            }
+          }
+        },
+      }),
+    `buka-robots: POST ${ASSISTANT_ROUTE}`,
   )
 
   webCtx.effect(
@@ -374,6 +463,12 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
               case 'registry-unreadable':
                 sendError(res, 409, 'registry-unreadable', describeError(error))
                 return
+              case 'builtin-robot':
+                sendError(res, 409, 'builtin-robot', describeError(error))
+                return
+              case 'program-robot':
+                sendError(res, 409, 'program-robot', describeError(error))
+                return
               default:
                 webCtx.logger?.warn?.('buka-robots: 重命名机器人失败：%s', describeError(error))
                 sendError(res, 500, 'rename-failed', `重命名机器人失败：${describeError(error)}`)
@@ -411,6 +506,10 @@ export function registerRobotRoutes(hostCtx: Context, webCtx: Context, deps: Rob
           } catch (error) {
             if (errorCode(error) === 'registry-unreadable') {
               sendError(res, 409, 'registry-unreadable', describeError(error))
+              return
+            }
+            if (errorCode(error) === 'builtin-robot' || errorCode(error) === 'program-robot') {
+              sendError(res, 409, String(errorCode(error)), describeError(error))
               return
             }
             webCtx.logger?.warn?.('buka-robots: 移除机器人失败：%s', describeError(error))

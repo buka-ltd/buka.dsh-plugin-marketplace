@@ -102,7 +102,10 @@ export async function seedPresetRobots({
 } = {}): Promise<{ corrupt: boolean; seeded: string[] }> {
   const registry = await readRobotRegistry({ file })
   if (registry.corrupt) return { corrupt: true, seeded: [] }
-  if (registry.robots.length > 0) return { corrupt: false, seeded: [] }
+  // 内建 program 机器人（clock）不算「用户机器人」：只有已经存在 agent 型
+  // 机器人时才跳过种子初始化，否则全新安装永远补不出两个起步机器人。
+  const agents = registry.robots.filter((robot) => robot.driver === 'agent')
+  if (agents.length > 0) return { corrupt: false, seeded: [] }
 
   const seeded: string[] = []
   for (const preset of PRESET_ROBOTS) {

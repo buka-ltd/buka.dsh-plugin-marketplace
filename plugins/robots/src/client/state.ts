@@ -107,6 +107,8 @@ export function useRobotsState(props: { getService: GetService }) {
 
   /** Toast 文案；同一时刻只保留最后一条。 */
   const [notice, setNotice] = React.useState<Notice | null>(null)
+  /** 列表筛选：只看带 `assistant` 标记的机器人。 */
+  const [assistantOnly, setAssistantOnly] = React.useState(false)
 
   // 首次挂载与每次刷新（reloadKey 变化）都重新读 Host 的机器人登记表。
   React.useEffect(() => {
@@ -212,6 +214,8 @@ export function useRobotsState(props: { getService: GetService }) {
    *
    */
   function openDetail(robot: Robot) {
+    // program 型机器人只读：没有目录、AGENTS.md 与 skills，不进入配置视图。
+    if (robot.driver === 'program') return
     setSelectedName(robot.name)
     setTab('agents')
     setAgentsDraft(agentsOf(robot).content)
@@ -322,6 +326,8 @@ export function useRobotsState(props: { getService: GetService }) {
     setFavourites,
     notice,
     setNotice,
+    assistantOnly,
+    setAssistantOnly,
     data,
     robots,
     registry,

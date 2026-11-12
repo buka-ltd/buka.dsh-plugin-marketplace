@@ -14,6 +14,7 @@ import {
   IconRefreshOutlineRegular,
   SegmentedTabs,
   StateDot,
+  Tag,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactElement } from 'react'
@@ -41,9 +42,23 @@ export function PageHeader({
   actions: ReturnType<typeof createRobotActions>
   detail: ReturnType<typeof createDetailActions>
 }): ReactElement {
-  const { selectedRobot, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } = state
+  const {
+    selectedRobot,
+    mutating,
+    corrupt,
+    list,
+    busy,
+    tab,
+    reload,
+    switchTab,
+    backToList,
+    assistantOnly,
+    setAssistantOnly,
+  } = state
   const { openCreateDialog, openRobot, revealRobot } = actions
   const { openAvatarDialog, openRenameDialog } = detail
+  // program 型机器人只读：不提供新会话 / 打开目录 / 改名 / 换头像入口。
+  const program = selectedRobot?.driver === 'program'
 
   const refreshButton = h(
     Tooltip,
@@ -66,6 +81,24 @@ export function PageHeader({
     ),
   )
 
+  // 列表视图的筛选：只看带 assistant 标记的机器人（program 型永远不是助理）。
+  const filterButton =
+    selectedRobot === null
+      ? h(
+          Button,
+          {
+            variant: 'outline',
+            size: 'sm',
+            className: 'buka-robots-toolbarButton',
+            'aria-pressed': assistantOnly === true,
+            'aria-label': assistantOnly === true ? t('showAllRobots') : t('filterAssistants'),
+            disabled: mutating,
+            onClick: () => setAssistantOnly(assistantOnly !== true),
+          },
+          assistantOnly === true ? t('showAllRobots') : t('filterAssistants'),
+        )
+      : null
+
   // 「创建机器人」常驻标题行，「刷新」右侧、同一尺寸；名称在对话框里填。
   const createButton =
     selectedRobot === null
@@ -85,7 +118,7 @@ export function PageHeader({
       : null
 
   const detailActions =
-    selectedRobot === null
+    selectedRobot === null || program
       ? null
       : [
           h(
@@ -150,7 +183,7 @@ export function PageHeader({
                   h(IconChevronRightOutlineRegular, { size: 16 }),
                 ),
               ),
-          selectedRobot === null
+          selectedRobot === null || program
             ? null
             : h(
                 Tooltip,
@@ -174,7 +207,7 @@ export function PageHeader({
           ),
           // 重命名入口紧挨机器人名：改名会移动目录并重建工作区（旧会话不再
           // 列在这个机器人下），登记文件损坏、目录缺失或写操作进行中时禁用。
-          selectedRobot === null
+          selectedRobot === null || program
             ? null
             : h(
                 Tooltip,
@@ -196,11 +229,23 @@ export function PageHeader({
             : h(
                 'span',
                 { className: 'buka-robots-headingTag' },
-                h(MountedTag, { t, robot: selectedRobot }),
+                program
+                  ? h(Tag, { tone: 'info' }, t('driverProgram'))
+                  : h(MountedTag, { t, robot: selectedRobot }),
+                selectedRobot.assistant === true
+                  ? h(Tag, { tone: 'success' }, t('assistantBadge'))
+                  : null,
               ),
         ),
       ),
-      h('div', { className: 'buka-robots-toolbar' }, detailActions, refreshButton, createButton),
+      h(
+        'div',
+        { className: 'buka-robots-toolbar' },
+        detailActions,
+        filterButton,
+        refreshButton,
+        createButton,
+      ),
       selectedRobot === null
         ? null
         : h(

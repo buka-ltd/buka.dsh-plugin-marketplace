@@ -36,9 +36,18 @@ export interface RobotClaude {
   target: string
 }
 
+/** 机器人驱动类型：agent 型跑 DSH 会话，program 型由插件内建。 */
+export type RobotDriver = 'agent' | 'program'
+
 /** 列表接口里的一行机器人。 */
 export interface Robot {
   name: string
+  /** agent 型有目录并跑会话；program 型（clock）只读、没有目录与会话。 */
+  driver: RobotDriver
+  /** program 型机器人的程序 id（稳定契约）；agent 型为空串。 */
+  program: string
+  /** 只有 agent 型机器人可以是助理（人任务的承办者）。 */
+  assistant: boolean
   path: string
   createdAt: string
   avatar: string

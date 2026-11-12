@@ -48,7 +48,7 @@ export function createRobotsListTool({
   return defineTool({
     name: ROBOTS_LIST_TOOL_NAME,
     description:
-      "List the robots created by the Buka Robots page in the DSH sidebar. A robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear, and each one reports whether it is currently mounted. Each robot also has a one-sentence responsibility statement (like a skill description) of what it does and when to use it — it is what a workflow orchestrator reads to decide which robot should run a node, and the orchestrator sees that statement only, without the robot's skill list. Use this tool when the user asks which robots exist, which are mounted, what project-level skills a robot has, or whether it has an AGENTS.md; skills are reported only to callers whose preset may see them. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build. Removing robots, mounting them, installing skills, and editing AGENTS.md remain user actions on the Robots page.",
+      'List the subjects a workflow can delegate a node to: agent robots created by the Buka Robots page and the built-in program robots (v1: clock). An agent robot is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-robots/robots) and registered in robots.json, then mounted as a DSH workspace; a program robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only robots registered by the plugin appear. Each robot reports its driver (agent or program), whether it is an assistant (agent robots only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which robot should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which robots exist, which are mounted, which are assistants, what a robot is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a robot from a chat is available only to the robot-builder preset through buka_robot_build; program robots (clock) cannot be created or removed. Removing robots, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Robots page.',
     parameters: {},
     output: {
       schema: {
@@ -81,6 +81,25 @@ export function createRobotsListTool({
                   required: true,
                   description:
                     'One-sentence description of what the robot does and when to use it; empty when none was set.',
+                },
+                driver: {
+                  type: 'string',
+                  required: true,
+                  description:
+                    'How the robot runs: "agent" is a DSH session with a directory and skills, "program" is a fixed program (no directory, no session; v1 only clock).',
+                  enum: ['agent', 'program'],
+                },
+                assistant: {
+                  type: 'boolean',
+                  required: true,
+                  description:
+                    'Whether this agent robot is an assistant that can take over human tasks. Program robots are never assistants.',
+                },
+                program: {
+                  required: true,
+                  description:
+                    'Program id for a program robot (for example "clock"); empty string for agent robots.',
+                  oneOf: [{ type: 'string' }, { type: 'null' }],
                 },
                 mounted: {
                   type: 'boolean',
@@ -143,6 +162,14 @@ export function createRobotsListTool({
                 const location =
                   typeof robot.path === 'string' && robot.path !== '' ? ` (${robot.path})` : ''
                 const parts = [`- ${robot.name} — ${description}${location}`]
+                if (robot.driver === 'program') {
+                  const program =
+                    typeof robot.program === 'string' && robot.program !== ''
+                      ? `: ${robot.program}`
+                      : ''
+                  parts.push(`program${program}`)
+                }
+                if (robot.assistant === true) parts.push('assistant')
                 // 技能清单被隐藏时连数量也不展示：`skills: []` 与「不让看」是两件事。
                 if (Array.isArray(robot.skills)) {
                   const count = robot.skills.length
@@ -169,6 +196,9 @@ export function createRobotsListTool({
           name: string
           path: string
           description: string
+          driver: 'agent' | 'program'
+          assistant: boolean
+          program: string | null
           mounted: boolean
           workspaceId: string | null
           agentsFile: boolean
@@ -177,6 +207,9 @@ export function createRobotsListTool({
           name: robot.name,
           path: robot.path,
           description: robot.description ?? '',
+          driver: robot.driver === 'program' ? 'program' : 'agent',
+          assistant: robot.assistant === true,
+          program: robot.driver === 'program' && robot.program !== '' ? robot.program : null,
           mounted: robot.mounted,
           workspaceId: robot.workspaceId,
           agentsFile: robot.agents.exists,

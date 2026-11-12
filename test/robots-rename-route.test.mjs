@@ -211,12 +211,13 @@ test('POST /buka-robots/rename：改名成功并重建工作区，返回新的 A
     assert.ok(result.body.agents.content.includes('这是「author」机器人的协作说明'))
     assert.ok(result.body.agents.content.includes(`- 路径：\`${result.body.robot.path}\``))
 
-    // 登记表：条目原位更新，旧目录不存在。
+    // 登记表：条目原位更新，旧目录不存在；内建 clock 仍在表里。
     const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
     assert.deepEqual(
       registry.robots.map((robot) => robot.name),
-      ['author'],
+      ['author', 'clock'],
     )
+    assert.equal(registry.version, 2)
     assert.equal(registry.robots[0].path, result.body.robot.path)
     assert.equal(
       await fs.stat(path.join(harness.robotsDir, 'writer')).then(
@@ -276,7 +277,7 @@ test('POST /buka-robots/rename：错误码映射（内置名 409、非法名 400
     // 以上失败都没有动目录与登记表。
     assert.deepEqual(
       JSON.parse(await fs.readFile(harness.registryFile, 'utf8')).robots.map((robot) => robot.name),
-      ['painter', 'writer'],
+      ['painter', 'writer', 'clock'],
     )
   } finally {
     await harness.cleanup()
@@ -285,4 +286,107 @@ test('POST /buka-robots/rename：错误码映射（内置名 409、非法名 400
 
 test.after(async () => {
   await fs.rm(stubRoot, { recursive: true, force: true })
+})
+
+test('POST /buka-robots/assistant：agent 机器人可设 / 取消助理，program 与内建名字只读', async () => {
+  const harness = await makeHarness()
+  try {
+    const agent = { agent: { id: 'builder' } }
+    await harness.tool.execute({ name: 'writer' }, agent)
+
+    // 设为助理：响应带回完整条目，登记表落到 version 2。
+    const marked = await callRoute(harness.routes, '/buka-robots/assistant', {
+      body: { name: 'writer', assistant: true },
+    })
+    assert.equal(marked.status, 200)
+    assert.equal(marked.body.ok, true)
+    assert.equal(marked.body.robot.assistant, true)
+    assert.equal(marked.body.robot.driver, 'agent')
+    const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
+    const writer = registry.robots.find((robot) => robot.name === 'writer')
+    assert.equal(writer.assistant, true)
+
+    // 取消助理。
+    const cleared = await callRoute(harness.routes, '/buka-robots/assistant', {
+      body: { name: 'writer', assistant: false },
+    })
+    assert.equal(cleared.status, 200)
+    assert.equal(cleared.body.robot.assistant, false)
+
+    // 非布尔值 / 未知机器人。
+    const invalid = await callRoute(harness.routes, '/buka-robots/assistant', {
+      body: { name: 'writer', assistant: 'yes' },
+    })
+    assert.equal(invalid.status, 400)
+    assert.equal(invalid.body.code, 'invalid-assistant')
+    const unknown = await callRoute(harness.routes, '/buka-robots/assistant', {
+      body: { name: 'nobody', assistant: true },
+    })
+    assert.equal(unknown.status, 404)
+    assert.equal(unknown.body.code, 'unknown-robot')
+
+    // 内建 program 机器人不能是助理。
+    const clock = await callRoute(harness.routes, '/buka-robots/assistant', {
+      body: { name: 'clock', assistant: true },
+    })
+    assert.equal(clock.status, 409)
+    assert.equal(clock.body.code, 'program-robot')
+  } finally {
+    await harness.cleanup()
+  }
+})
+
+test('机器人路由：内建 clock 不可创建 / 删除 / 改名 / 改头像，列表按 driver 展示', async () => {
+  const harness = await makeHarness()
+  try {
+    const agent = { agent: { id: 'builder' } }
+
+    // 构建工具不能创建 clock。
+    await assert.rejects(
+      () => harness.tool.execute({ name: 'clock' }, agent),
+      (error) => error.code === 'builtin-robot',
+    )
+
+    // 页面新建同样拒绝（内建名字 / program driver）。
+    const created = await callRoute(harness.routes, '/buka-robots/create', {
+      body: { name: 'clock' },
+    })
+    assert.equal(created.status, 409)
+    assert.equal(created.body.code, 'builtin-robot')
+    const invalidDriver = await callRoute(harness.routes, '/buka-robots/create', {
+      body: { name: 'timer', driver: 'program' },
+    })
+    assert.equal(invalidDriver.status, 400)
+    assert.equal(invalidDriver.body.code, 'invalid-driver')
+
+    // 删除 / 改名 / 改头像都拒绝内建 program 机器人。
+    const removed = await callRoute(harness.routes, '/buka-robots/remove', {
+      body: { name: 'clock' },
+    })
+    assert.equal(removed.status, 409)
+    assert.equal(removed.body.code, 'builtin-robot')
+    const renamed = await callRoute(harness.routes, '/buka-robots/rename', {
+      body: { name: 'clock', newName: 'timer' },
+    })
+    assert.equal(renamed.status, 409)
+    assert.equal(renamed.body.code, 'builtin-robot')
+    const avatar = await callRoute(harness.routes, '/buka-robots/avatar', {
+      body: { name: 'clock', avatar: 'owl' },
+    })
+    assert.equal(avatar.status, 409)
+    assert.equal(avatar.body.code, 'program-robot')
+
+    // 列表包含 clock，带 driver / assistant，且没有目录状态。
+    const listed = await callRoute(harness.routes, '/buka-robots/list', { method: 'GET' })
+    assert.equal(listed.status, 200)
+    const clock = listed.body.robots.find((robot) => robot.name === 'clock')
+    assert.ok(clock, '列表里应有内建 clock')
+    assert.equal(clock.driver, 'program')
+    assert.equal(clock.program, 'clock')
+    assert.equal(clock.assistant, false)
+    assert.equal(clock.exists, false)
+    assert.equal(clock.mounted, false)
+  } finally {
+    await harness.cleanup()
+  }
 })

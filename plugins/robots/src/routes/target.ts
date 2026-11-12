@@ -9,6 +9,7 @@
 
 import { promises as fs } from 'node:fs'
 import { isValidRobotName, readRobotRegistry } from '../robot-store.ts'
+import type { RobotRecord } from '../store/types.ts'
 
 /** 路由错误的统一形状：状态码 + 错误码 + 可展示文案。 */
 export interface RobotRouteError {
@@ -37,11 +38,7 @@ export async function resolveRobot(
   registryFile: string,
   name: unknown,
 ): Promise<
-  | {
-      robot: { name: string; path: string; createdAt: string }
-      error?: undefined
-    }
-  | { robot?: undefined; error: RobotRouteError }
+  { robot: RobotRecord; error?: undefined } | { robot?: undefined; error: RobotRouteError }
 > {
   const registry = await readRobotRegistry({ file: registryFile })
   if (registry.corrupt) return { error: registryUnreadableError(registryFile) }
@@ -56,6 +53,16 @@ export async function resolveRobot(
   if (robot === undefined) {
     return {
       error: { status: 404, code: 'unknown-robot', message: `没有找到这个机器人：${trimmed}` },
+    }
+  }
+  // program 型机器人没有目录、没有 AGENTS.md / skills / 会话：只读。
+  if (robot.driver === 'program') {
+    return {
+      error: {
+        status: 409,
+        code: 'program-robot',
+        message: `program 型机器人只读，不能执行这个操作：${trimmed}`,
+      },
     }
   }
 

@@ -8,8 +8,14 @@
  */
 
 import type { FormEvent } from 'react'
-import { agentsOf, errorCode, failureText, messageOf, requestJson } from '../api.ts'
-import { AGENTS_ROUTE, CREATE_ROUTE, REMOVE_ROUTE, REVEAL_ROUTE } from '../constants.ts'
+import { agentsOf, errorCode, failureText, isProgramRobot, messageOf, requestJson } from '../api.ts'
+import {
+  AGENTS_ROUTE,
+  ASSISTANT_ROUTE,
+  CREATE_ROUTE,
+  REMOVE_ROUTE,
+  REVEAL_ROUTE,
+} from '../constants.ts'
 import type { RobotsPageState } from '../state.ts'
 import type { Robot, Translate, UiWorkspaceService, WorkspacesService } from '../types.ts'
 
@@ -51,6 +57,10 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
    *
    */
   async function openRobot(robot: Robot) {
+    if (isProgramRobot(robot)) {
+      flash('error', t('programReadOnly'))
+      return
+    }
     if (
       robot.mounted !== true ||
       typeof robot.workspaceId !== 'string' ||
@@ -82,6 +92,10 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
    */
   async function revealRobot(robot: Robot) {
     if (mutating) return
+    if (isProgramRobot(robot)) {
+      flash('error', t('programReadOnly'))
+      return
+    }
     setBusy(`reveal:${robot.name}`)
     try {
       await requestJson(REVEAL_ROUTE, {
@@ -102,6 +116,10 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
    *
    */
   async function mountRobot(robot: Robot) {
+    if (isProgramRobot(robot)) {
+      flash('error', t('programReadOnly'))
+      return
+    }
     const workspaces = service<WorkspacesService>('workspaces')
     if (workspaces === null || typeof workspaces.create !== 'function') {
       flash('error', t('noWorkspacesCreate'))
@@ -193,6 +211,10 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
    *
    */
   async function removeRobot(robot: Robot) {
+    if (isProgramRobot(robot)) {
+      flash('error', t('programReadOnly'))
+      return
+    }
     setBusy(`delete:${robot.name}`)
     try {
       if (
@@ -239,6 +261,10 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
    */
   async function saveAgents(robot: Robot) {
     if (agentsSaving) return
+    if (isProgramRobot(robot)) {
+      flash('error', t('programReadOnly'))
+      return
+    }
     const content = agentsDraft
     if (content === agentsOf(robot).content) return
     setAgentsSaving(true)
@@ -266,6 +292,29 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
     }
   }
 
+  /**
+   * 标记 / 取消助理：只有 agent 型机器人可以设（program 机器人由服务端拒绝）。
+   *
+   */
+  async function toggleAssistant(robot: Robot) {
+    if (mutating || isProgramRobot(robot)) return
+    const next = robot.assistant !== true
+    setBusy(`assistant:${robot.name}`)
+    try {
+      const body = await requestJson(ASSISTANT_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ name: robot.name, assistant: next }),
+      })
+      const saved = body?.robot?.assistant
+      patchRobot(robot.name, { assistant: typeof saved === 'boolean' ? saved : next })
+      flash('success', next ? t('assistantSet') : t('assistantCleared'))
+    } catch (failure) {
+      flash('error', `${t('assistantSaveFailed')} ${failureText(t, failure)}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return {
     openRobot,
     revealRobot,
@@ -275,5 +324,6 @@ export function createRobotActions(state: RobotsPageState, t: Translate) {
     createRobot,
     removeRobot,
     saveAgents,
+    toggleAssistant,
   }
 }

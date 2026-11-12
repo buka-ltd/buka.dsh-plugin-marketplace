@@ -12,6 +12,7 @@
  * | `POST /buka-robots/create` | 建目录 + AGENTS.md 模板，并把机器人（含可选描述）插到登记表最前 |
  * | `POST /buka-robots/avatar` | 只改登记表里的头像 id |
  * | `POST /buka-robots/description` | 只改登记表里的一行描述（工作流用它选机器人） |
+ * | `POST /buka-robots/assistant` | 标记 / 取消 agent 机器人的助理身份（program 只读） |
  * | `POST /buka-robots/rename` | 改机器人目录名 + 更新登记表 + 按新路径重建 DSH 工作区 |
  * | `POST /buka-robots/remove` | 从登记表移除（目录、文件与会话保留） |
  * | `POST /buka-robots/agents` | 写入某机器人的 AGENTS.md，并补 CLAUDE.md 链接 |
@@ -30,20 +31,27 @@
  * `lib/access.js`）。删除机器人、安装 skills、页面上的编辑仍然只留给用户。
  *
  * 另通过 `ctx.provide('bukaRobots', ...)` 对外提供一个 Host Service（见
- * `lib/service.js`）：`list()` 列出机器人，`avatarMap()` 给出机器人头像，
- * `startSession()` 在机器人目录下开一个会话（或按 sessionId 续接已有会话）并返回结果。工作流插件用它
- * 把每个节点交给一个机器人、并在节点图上画出机器人头像；
- * 注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面路由与工具。
+ * `lib/service.js`）：`list()` 列出机器人（含内建 program 机器人 clock 的
+ * `driver` / `assistant` / `program`），`avatarMap()` 给出机器人头像，
+ * `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
+ * 会话（不压缩）。工作流插件用它把每个任务交给一个机器人、并在节点图上画出
+ * 机器人头像；注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面
+ * 路由与工具。
  *
  * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
  * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
  *
  * @module @buka/dsh-plugin-robots
  */
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { normalizePresets } from './access.ts'
-import { defaultRobotsRoot, resolveRobotRegistryFile, resolveRobotsDir } from './robot-store.ts'
+import {
+  defaultRobotsRoot,
+  ensureBuiltinRobots,
+  resolveRobotRegistryFile,
+  resolveRobotsDir,
+} from './robot-store.ts'
+import { describeError } from './routes/http.ts'
 import { registerRoutes } from './routes.ts'
 import { seedRobotsOnStartup } from './seed.ts'
 import { RobotSessionService, SERVICE_NAME } from './service.ts'
@@ -77,15 +85,6 @@ export const Config = z.object({
     .description(
       '机器人根目录：机器人目录建在插件全局目录下；登记文件固定为该目录同级的 robots.json，支持 ~ 前缀。',
     ),
-  resultRetries: z
-    .number()
-    .step(1)
-    .min(0)
-    .max(5)
-    .default(2)
-    .description(
-      '所有机器人节点都必须交回一个 JSON 结果（工作流节点用 outputSchema 约束其结构）；没有交回时，在原会话里要求它按格式重新回复的次数上限；0 表示不重试。',
-    ),
   builderPresets: z
     .array(z.string())
     .default(DEFAULT_BUILDER_PRESETS)
@@ -109,7 +108,6 @@ export function apply(
   config?:
     | {
         robotsDir?: string
-        resultRetries?: number
         builderPresets?: string[]
         seedPresets?: boolean
       }
@@ -125,8 +123,6 @@ export function apply(
       ctx,
       robotsDir,
       registryFile,
-      defineTool,
-      resultRetries: config?.resultRetries,
     }),
   )
 
@@ -142,8 +138,24 @@ export function apply(
     return run
   }
 
-  // 全新安装（登记表为空）时补上两个预设机器人；串行进队列，避免与页面上的
-  // 首次新建抢写。异步完成、不阻塞启动，失败只记日志。`seedPresets: false` 时跳过。
+  // 内建 program 机器人（clock）必须在登记表里：启动时补写一次（幂等）。
+  // 与页面上的写操作共用队列，避免抢写；失败只记日志，页面仍会从读视图里看到
+  // 内建机器人。
+  void serializeRegistry(() => ensureBuiltinRobots({ file: registryFile }))
+    .then((result) => {
+      if (result.corrupt) {
+        ctx.logger?.warn?.('buka-robots: 登记文件损坏，跳过内建机器人登记：%s', registryFile)
+      } else if (result.added.length > 0) {
+        ctx.logger?.info?.('buka-robots: 已登记内建机器人：%s', result.added.join('、'))
+      }
+    })
+    .catch((error) => {
+      ctx.logger?.warn?.('buka-robots: 登记内建机器人失败：%s', describeError(error))
+    })
+
+  // 全新安装（只补过内建程序机器人）时补上两个预设 agent 机器人；串行进队列，
+  // 避免与页面上的首次新建抢写。异步完成、不阻塞启动，失败只记日志。
+  // `seedPresets: false` 时跳过。
   seedRobotsOnStartup({
     ctx,
     robotsDir,

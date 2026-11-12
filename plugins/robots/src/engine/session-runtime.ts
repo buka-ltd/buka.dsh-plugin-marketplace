@@ -1,8 +1,8 @@
 /**
- * 机器人会话的运行时小工具：等轮次结束、等取消落定、组装消息、合并模型路由。
+ * 机器人会话的运行时小工具：等取消落定、组装消息、合并模型路由。
  *
- * 超时 / 取消统一用 `RobotSessionStop` 表达；这些函数不读写服务状态，只操作
- * 传进来的 live agent。
+ * 服务是非阻塞的：不再等轮次结束（观察者订阅会话事件），这里只保留真正被
+ * 调用到的函数；这些函数不读写服务状态，只操作传进来的 live agent。
  *
  * @module @buka/dsh-plugin-robots/engine/session-runtime
  */
@@ -11,7 +11,6 @@ import { randomUUID } from 'node:crypto'
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandleLike, LiveAgent } from '../service/types.ts'
-import { RobotSessionStop } from './errors.ts'
 
 /** 取消后等待 agent 落定（写入 turn/end）的最长时间。 */
 const SETTLE_AFTER_CANCEL_MS = 2000
@@ -52,145 +51,6 @@ export function followupMessage(
     content: [{ type: 'text', text }],
     source: { kind: sourceKind },
   }
-}
-
-/**
- * 等待 agent 空闲；超时 / 取消时抛 `RobotSessionStop`。
- *
- */
-export function waitForIdle(
-  agent: LiveAgent,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let timer: NodeJS.Timeout | undefined
-    const cleanup = () => {
-      if (timer !== undefined) clearTimeout(timer)
-      signal?.removeEventListener?.('abort', onAbort)
-    }
-    const finish = (error?: unknown) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      if (error === undefined) resolve()
-      else reject(error)
-    }
-    const onAbort = () => finish(new RobotSessionStop('aborted', 'robot session was cancelled'))
-    signal?.addEventListener?.('abort', onAbort, { once: true })
-    if (signal?.aborted === true) {
-      onAbort()
-      return
-    }
-    if (Number.isInteger(timeoutMs) && timeoutMs > 0) {
-      timer = setTimeout(
-        () =>
-          finish(new RobotSessionStop('timeout', `robot session timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      )
-    }
-    Promise.resolve(agent.whenIdle()).then(
-      () => finish(undefined),
-      (error) => finish(new RobotSessionStop('aborted', describeError(error))),
-    )
-  })
-}
-
-/**
- * 等这一轮真正结束（`turn/end`），而不是仅仅等 agent 空闲。
- *
- * 续接会话时 agent 在 followup 之前就是 idle 的，单等 `whenIdle()` 可能在
- * 新一轮还没开起来时立刻返回，读到上一轮的旧文本。先挂事件监听、再投递消息，
- * 就能拿到这一轮的结束事件；没有事件源（测试替身 / 老运行时）时退回 `whenIdle()`。
- *
- */
-export function waitForTurnEnd(
-  agent: LiveAgent,
-  startSeq: number,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let timer: NodeJS.Timeout | undefined
-    let off: (() => void) | undefined
-    const cleanup = () => {
-      if (timer !== undefined) clearTimeout(timer)
-      signal?.removeEventListener?.('abort', onAbort)
-      try {
-        off?.()
-      } catch {
-        // 会话已经释放：忽略。
-      }
-    }
-    const finish = (error?: unknown) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      if (error === undefined) resolve()
-      else reject(error)
-    }
-    const onAbort = () => finish(new RobotSessionStop('aborted', 'robot session was cancelled'))
-    const hasTurnEnd = () => {
-      try {
-        const events =
-          typeof agent?.session?.ownEvents === 'function' ? agent.session.ownEvents() : []
-        for (const event of events) {
-          if (event?.type === 'turn/end' && typeof event.seq === 'number' && event.seq >= startSeq)
-            return true
-        }
-      } catch {
-        // 读不到事件时退回 idle 判定。
-      }
-      return false
-    }
-
-    signal?.addEventListener?.('abort', onAbort, { once: true })
-    if (signal?.aborted === true) {
-      onAbort()
-      return
-    }
-    if (Number.isInteger(timeoutMs) && timeoutMs > 0) {
-      timer = setTimeout(
-        () =>
-          finish(new RobotSessionStop('timeout', `robot session timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      )
-    }
-
-    if (hasTurnEnd()) {
-      finish(undefined)
-      return
-    }
-
-    if (typeof agent?.ctx?.on === 'function') {
-      try {
-        off = agent.ctx.on('session/event', (session, event) => {
-          if (session !== undefined && agent?.session !== undefined && session !== agent.session)
-            return
-          if (event?.type !== 'turn/end') return
-          if (typeof event.seq === 'number' && event.seq < startSeq) return
-          finish(undefined)
-        })
-      } catch {
-        off = undefined
-      }
-    }
-
-    if (off === undefined) {
-      // 没有事件源时退回原来的语义；startSeq 过滤保证不会把旧轮次当成本轮结果。
-      waitForIdle(agent, timeoutMs, signal).then(
-        () => finish(undefined),
-        (error) =>
-          finish(
-            error instanceof RobotSessionStop
-              ? error
-              : new RobotSessionStop('aborted', describeError(error)),
-          ),
-      )
-    }
-  })
 }
 
 /**
@@ -244,12 +104,6 @@ export function mergeAgentOptions(
     target[key] = value
   }
   return merged
-}
-
-/**
- */
-export function positive(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
 }
 
 /**

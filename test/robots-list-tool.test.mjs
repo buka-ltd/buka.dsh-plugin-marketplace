@@ -9,7 +9,7 @@ import test from 'node:test'
 
 import { createRobotsListTool, ROBOTS_LIST_TOOL_NAME } from '../plugins/robots/src/list-tool.ts'
 
-/** 假快照：两个机器人，一个有 2 个 skill、另一个 0 个。 */
+/** 假快照：两个 agent 机器人 + 一个内建 program 机器人。 */
 const SNAPSHOT = {
   root: '/robots',
   registry: '/robots.json',
@@ -17,6 +17,9 @@ const SNAPSHOT = {
   robots: [
     {
       name: 'writer',
+      driver: 'agent',
+      program: '',
+      assistant: false,
       path: '/robots/writer',
       description: '写代码',
       mounted: true,
@@ -26,8 +29,23 @@ const SNAPSHOT = {
     },
     {
       name: 'painter',
+      driver: 'agent',
+      program: '',
+      assistant: false,
       path: '/robots/painter',
       description: '',
+      mounted: false,
+      workspaceId: null,
+      skills: [],
+      agents: { exists: false },
+    },
+    {
+      name: 'clock',
+      driver: 'program',
+      program: 'clock',
+      assistant: false,
+      path: '',
+      description: '到点完成任务的定时机器人',
       mounted: false,
       workspaceId: null,
       skills: [],
@@ -79,6 +97,10 @@ test('createRobotsListTool：工具名、输出 schema 与依赖校验', () => {
   assert.equal(robotProps.skills.required, undefined)
   assert.equal(robotProps.name.required, true)
   assert.equal(robotProps.agentsFile.required, true)
+  assert.equal(robotProps.driver.required, true)
+  assert.deepEqual(robotProps.driver.enum, ['agent', 'program'])
+  assert.equal(robotProps.assistant.required, true)
+  assert.equal(robotProps.program.required, true)
 
   assert.throws(() => createRobotsListTool(), /defineTool is required/)
   assert.throws(
@@ -97,11 +119,18 @@ test('createRobotsListTool：默认输出包含技能清单，并把调用参数
   ])
   assert.deepEqual(
     result.robots.map((robot) => robot.name),
-    ['writer', 'painter'],
+    ['writer', 'painter', 'clock'],
   )
   assert.deepEqual(result.robots[0].skills, [{ name: 'foo' }, { name: 'bar' }])
   assert.deepEqual(result.robots[1].skills, [])
   assert.equal(result.robots[1].description, '')
+  // 输出带 driver / assistant / program：工作流按 driver 分派，program 机器人没有会话。
+  assert.equal(result.robots[0].driver, 'agent')
+  assert.equal(result.robots[0].assistant, false)
+  assert.equal(result.robots[0].program, null)
+  assert.equal(result.robots[2].driver, 'program')
+  assert.equal(result.robots[2].program, 'clock')
+  assert.equal(result.robots[2].assistant, false)
 })
 
 test('createRobotsListTool：isSkillsVisible 为 false 时输出与渲染都不含技能清单', async () => {
