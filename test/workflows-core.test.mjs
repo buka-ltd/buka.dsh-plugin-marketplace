@@ -19,6 +19,7 @@ import {
   findTaskType,
   validateWorkflowDefinition,
 } from '../plugins/workflows/src/definition/index.ts'
+import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
 import {
   assertJobTransition,
   assertTaskTransition,
@@ -802,7 +803,7 @@ test('store: job / task / attempt / attachment records filter by job', async () 
     assert.equal(updated.status, 'completed')
 
     const task = {
-      id: '$start',
+      id: START_TASK_ID,
       jobId: 'job-test-1',
       position: 'start',
       type: 'start',
@@ -827,12 +828,12 @@ test('store: job / task / attempt / attachment records filter by job', async () 
       id: 'task-2',
       position: 'need',
       type: 'need.analyze',
-      deps: ['$start'],
+      deps: [START_TASK_ID],
     })
     await store.insertTask({ ...task, id: 'task-3', jobId: 'other-job' })
     assert.deepEqual(
       store.listTasks('job-test-1').map((entry) => entry.id),
-      ['$start', 'task-2'],
+      [START_TASK_ID, 'task-2'],
     )
     const claimed = await store.updateTask('task-2', (current) => ({
       ...current,

@@ -2,7 +2,8 @@
 #
 # 两条 insert：
 # - `tool-buka-workflows`：Host 一半注册工作流 / 作业 / 任务工具与 `/job` 命令。
-#   编辑工作流的工具只对编排 preset 的根会话可见（见 Config.orchestratorPresets）；
+#   编辑工作流的工具只对编排 preset 的根会话可见（见 Config.orchestratorPresets），
+#   或对 Config.orchestratorWorkspaces 点名目录里的会话可见；
 #   执行工具（任务创建 / 完成、看板、附件）只对引擎创建的任务会话、助理会话与
 #   启动者会话可见。持久定义进 ctx.storageDomain，大文本与附件进插件作业目录；
 #   页面把「工作流」入口注册进侧边栏。

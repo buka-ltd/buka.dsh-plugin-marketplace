@@ -9,7 +9,7 @@
  *
  * 1. 解析配置；
  * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
- * 3. 注册工具（可见性按编排 preset / 任务会话收窄）；
+ * 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
  * 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
  * 5. 注册浏览器路由。
  *
@@ -100,6 +100,7 @@ export function apply(ctx: Context, config: WorkflowsConfig): void {
   function accessOf(agent: { id?: unknown } | null | undefined): WorkflowAccess {
     return resolveWorkflowAccess({
       allowed: options.orchestratorPresets,
+      allowedWorkspaces: options.orchestratorWorkspaces,
       agentId: typeof agent?.id === 'string' ? agent.id : '',
       sessions: ctx.get('sessions'),
       agentPresets: ctx.get('agentPresets'),
@@ -137,7 +138,7 @@ export function apply(ctx: Context, config: WorkflowsConfig): void {
       const access = accessOf(agent)
       if (access.visible) return
       throw new Error(
-        `workflow definition tools are only available to the ${options.orchestratorPresets.join(' / ')} preset (reason: ${access.reason})`,
+        `workflow definition tools are only available to the ${options.orchestratorPresets.join(' / ')} preset or to sessions started in the configured orchestrator workspaces (reason: ${access.reason})`,
       )
     },
   })

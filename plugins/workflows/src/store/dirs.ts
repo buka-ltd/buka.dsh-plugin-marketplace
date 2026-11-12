@@ -21,7 +21,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-/** 单个 id 允许的字符；记录 id 都是 `[a-z]+-...` 或 `$start`。 */
+/** 单个 id 允许的字符；记录 id 都是 `[a-z]+-...`（启动任务也是 `start-task`）。 */
 const SAFE_SEGMENT = /^[A-Za-z0-9$][A-Za-z0-9._-]*$/u
 
 /** 作业目录内的相对路径。 */

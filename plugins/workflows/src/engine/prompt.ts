@@ -18,6 +18,7 @@
 import { clipUtf8, visibleAttachmentsForTask } from '../attachments/index.ts'
 import { buildTemplateContext, renderPayload } from '../definition/payload.ts'
 import { findTaskType } from '../definition/validate.ts'
+import { START_TASK_ID } from '../domain/ids.ts'
 import type {
   AttachmentRecord,
   JobRecord,
@@ -91,7 +92,7 @@ export function positionLabel(definition: WorkflowDefinition, positionId: string
  * @returns 渲染后的 payload
  */
 export function renderTaskPayload(payload: JsonValue, tasks: readonly TaskRecord[]): JsonValue {
-  const start = tasks.find((task) => task.id === '$start')
+  const start = tasks.find((task) => task.id === START_TASK_ID)
   const values = new Map<string, { output?: unknown; text?: string }>()
   for (const task of tasks) {
     values.set(task.id, {

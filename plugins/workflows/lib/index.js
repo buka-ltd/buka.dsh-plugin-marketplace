@@ -1,17 +1,32 @@
+import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isUtf8 } from "node:buffer";
 import { createReadStream, promises } from "node:fs";
-import path from "node:path";
 import os from "node:os";
 import z from "@deepseek-ai/schemastery";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 // .build/workflows/access.js
 /**
+* 工作流工具的可见性判定。
+*
+* 工具本身注册在 Host 上，默认每个会话都能看到。这里把可见性收窄到配置里
+* 点名的 agent preset，并且只放行该 preset 的**根会话**：由编排器 spawn 出来
+* 的子会话（机器人节点）拿不到工具，避免机器人在节点里自己去开新工作流。
+*
+* 另外可以按工作区放行（`orchestratorWorkspaces`）：在点名目录（含子目录）
+* 里启动的会话直接可见，不必切到编排 preset——开发者工作区就是这种用法。
+*
+* 纯函数，不 import DSH 包，便于单测。
+*
+* @module @buka/dsh-plugin-workflows/access
+*/
+/**
 * 判断某个 agent 能否看到 / 调用工作流工具。
 *
-* - `allowed` 为空：不做收窄（兼容没有 preset 服务的组成）。
+* - `allowed` 与 `allowedWorkspaces` 都为空：不做收窄（兼容没有 preset 服务的组成）。
 * - 组成里没有 `sessions` / `agentPresets` 服务：无法判定，保持可见。
+* - 会话 cwd 落在 `allowedWorkspaces` 的某个目录下：直接放行（开发者工作区）。
 * - 其余情况：只有「点名 preset 的根会话」可见。
 *
 * @param input 判定入参
@@ -19,14 +34,15 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 */
 function resolveWorkflowAccess(input = {}) {
 	const allowed = normalizePresets(input.allowed);
-	if (allowed.length === 0) return {
+	const workspaces = normalizeWorkspaces(input.allowedWorkspaces);
+	if (allowed.length === 0 && workspaces.length === 0) return {
 		visible: true,
 		preset: null,
 		reason: "open"
 	};
 	const sessions = input.sessions;
 	const agentPresets = input.agentPresets;
-	if (typeof sessions?.get !== "function" || typeof agentPresets?.presetForSession !== "function") return {
+	if (typeof sessions?.get !== "function") return {
 		visible: true,
 		preset: null,
 		reason: "unavailable"
@@ -37,6 +53,16 @@ function resolveWorkflowAccess(input = {}) {
 		visible: false,
 		preset: null,
 		reason: "no-session"
+	};
+	if (isInsideWorkspace(typeof session.header?.cwd === "string" ? session.header.cwd : "", workspaces)) return {
+		visible: true,
+		preset: null,
+		reason: "workspace"
+	};
+	if (typeof agentPresets?.presetForSession !== "function") return {
+		visible: true,
+		preset: null,
+		reason: "unavailable"
 	};
 	if (session.header?.parentSession !== void 0) return {
 		visible: false,
@@ -58,6 +84,54 @@ function resolveWorkflowAccess(input = {}) {
 		preset,
 		reason: "denied"
 	};
+}
+/**
+* 规范化配置里的工作区目录：去掉空串与非字符串。
+*
+* @param value 配置里的原始值
+* @returns 规范化的目录列表
+*/
+function normalizeWorkspaces(value) {
+	if (!Array.isArray(value)) return [];
+	const roots = [];
+	for (const entry of value) {
+		if (typeof entry !== "string") continue;
+		const root = normalizeWorkspacePath(entry);
+		if (root !== "" && !roots.includes(root)) roots.push(root);
+	}
+	return roots;
+}
+/**
+* 会话 cwd 是否落在某个工作区目录下（含目录本身）。
+*
+* @param cwd 会话的工作目录
+* @param workspaces 放行的工作区目录
+* @returns 命中任何一个目录即为 true
+*/
+function isInsideWorkspace(cwd, workspaces) {
+	if (workspaces.length === 0 || typeof cwd !== "string" || cwd.trim() === "") return false;
+	const target = normalizeWorkspacePath(cwd);
+	if (target === "") return false;
+	const separator = path.sep;
+	for (const workspace of workspaces) {
+		if (target === workspace) return true;
+		const prefix = workspace.endsWith(separator) ? workspace : `${workspace}${separator}`;
+		if (target.startsWith(prefix)) return true;
+	}
+	return false;
+}
+/**
+* 规范化一个目录：转绝对路径、去掉末尾的 `/` 与 `\\`。
+*
+* @param value 原始路径
+* @returns 规范化路径；空串表示无效
+*/
+function normalizeWorkspacePath(value) {
+	const text = value.trim();
+	if (text === "") return "";
+	const absolute = path.resolve(text);
+	if (absolute === path.sep) return absolute;
+	return absolute.replace(/[\\/]+$/u, "");
 }
 /**
 * 规范化配置里的 preset 名单：去掉空串与非字符串。
@@ -184,12 +258,19 @@ function describeAvailableWorkflows(engine) {
 * 记录 id 生成与时间戳。
 *
 * 形态遵循 `.tmp/workflow-v4-spec.md` §7.1：`task-<base36 time>-<uuid8>`；
-* 其余记录沿用同一风格。启动任务固定使用保留 id `$start`，不经过这里。
+* 其余记录沿用同一风格。启动任务固定使用保留 id `start-task`，不经过这里。
 *
 * @module @buka/dsh-plugin-workflows/domain/ids
 */
-/** 启动任务的保留 id；定义里 `dependsOn: ["$start"]` 引用它。 */
-const START_TASK_ID = "$start";
+/**
+* 启动任务的保留 id。
+*
+* 定义格式里用 `dependsOn: ["$start"]` 引用启动任务，但**记录 id 必须能当
+* 文件名**：storageDomain 的 json 后端按记录 id 分文件，只接受
+* `[a-zA-Z0-9_-]`，`$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。
+* 所以落盘的启动任务 id 用 `start-task`，创建初始任务时把 `$start` 映射成它。
+*/
+const START_TASK_ID = "start-task";
 /** 一段 base36 时间戳。 */
 function timeSegment() {
 	return Date.now().toString(36);
@@ -2468,7 +2549,7 @@ function positionLabel(definition, positionId) {
 * @returns 渲染后的 payload
 */
 function renderTaskPayload(payload, tasks) {
-	const start = tasks.find((task) => task.id === "$start");
+	const start = tasks.find((task) => task.id === START_TASK_ID);
 	const values = /* @__PURE__ */ new Map();
 	for (const task of tasks) values.set(task.id, {
 		...task.result?.output === null || task.result?.output === void 0 ? {} : { output: task.result.output },
@@ -3232,8 +3313,8 @@ function resolveTargetTaskType(definition, position, type) {
 /**
 * 生成 `start.next` 发布的初始任务。
 *
-* 启动任务已完成：结构化输入是它们的唯一依赖 `$start`，所以初始状态都是
-* `ready`（除非模板里显式依赖了别的初始任务——本版不允许）。
+* 启动任务已完成：结构化输入是它们的唯一依赖（定义里的 `$start`，落盘为
+* `START_TASK_ID`），所以初始状态都是 `ready`（本版不允许依赖别的初始任务）。
 *
 * @param input 作业、启动任务、模板、已有任务与机器人表
 * @returns 新任务记录
@@ -3274,7 +3355,7 @@ function buildInitialTask(input) {
 		position: route.position,
 		type: taskType.id,
 		payload: route.payload,
-		deps: route.dependsOn === void 0 ? [START_TASK_ID] : [...route.dependsOn],
+		deps: [START_TASK_ID],
 		status: "ready",
 		createdBy: {
 			taskId: startTask.id,
@@ -3899,7 +3980,7 @@ var WorkflowEngine = class {
 			const task = this.store.getTask(reference.taskId);
 			if (task === void 0) throw new WorkflowError("not-found", "task not found");
 			if (task.status !== "running") throw new WorkflowError("task-not-running", `task ${task.id} is ${task.status}; it cannot be completed again`);
-			if (task.id === "$start") {
+			if (task.id === "start-task") {
 				if (this.store.listTasks(job.id).length + job.definition.start.next.length + 1 > job.definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${job.definition.budgets.maxTasks} would be exceeded by the initial tasks`);
 			}
 			const problems = this.outputProblemsFor(job, task, input.output);
@@ -4923,7 +5004,7 @@ var WorkflowEngine = class {
 		};
 		if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
 		const now = nowIso();
-		if (task.id === "$start") await this.store.updateJob(job.id, (current) => ({
+		if (task.id === "start-task") await this.store.updateJob(job.id, (current) => ({
 			...current,
 			input: {
 				...current.input,
@@ -4952,7 +5033,7 @@ var WorkflowEngine = class {
 			taskId: task.id,
 			type: task.type
 		});
-		if (task.id === "$start") await this.spawnInitialTasksLocked(job, updated);
+		if (task.id === "start-task") await this.spawnInitialTasksLocked(job, updated);
 		return updated;
 	}
 	/** 完成结束任务（无 recompute，由调用方继续）。 */
@@ -5087,7 +5168,7 @@ var WorkflowEngine = class {
 	outputProblemsFor(job, task, output) {
 		const definition = job.definition;
 		if (task.position === "end") return [];
-		if (task.id === "$start") return schemaProblems(definition.start.task.output, output);
+		if (task.id === "start-task") return schemaProblems(definition.start.task.output, output);
 		const taskType = this.taskTypeOf(definition, task.type);
 		if (taskType === void 0) return [`unknown task type "${task.type}"`];
 		return schemaProblems(taskType.output, output);
@@ -5181,8 +5262,8 @@ async function runMigrations(options) {
 * 插件配置与数据目录解析。
 *
 * v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
-* 轮询间隔、附件限额、编排 preset 与机器人会话 preset。作业 / 任务元数据
-* 进 `ctx.storageDomain`，不在这里配置。
+* 轮询间隔、附件限额、编排 preset / 工作区与机器人会话 preset。作业 / 任务
+* 元数据进 `ctx.storageDomain`，不在这里配置。
 *
 * @module @buka/dsh-plugin-workflows/options
 */
@@ -5199,6 +5280,7 @@ const DEFAULTS = {
 	maxInlineAttachmentBytes: 32768,
 	maxResultTextBytes: 2097152,
 	orchestratorPresets: ["workflow-orchestrator"],
+	orchestratorWorkspaces: [],
 	robotPreset: "standard"
 };
 /** 插件配置。 */
@@ -5212,6 +5294,7 @@ const Config = z.object({
 	maxInlineAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxInlineAttachmentBytes).description("可在 prompt 里内联的单个文本附件字节上限。"),
 	maxResultTextBytes: z.number().step(1).min(1).default(DEFAULTS.maxResultTextBytes).description("写入作业目录的结果全文上限；超出部分截断并在记录里标注。"),
 	orchestratorPresets: z.array(z.string()).default(DEFAULTS.orchestratorPresets).description("能保存 / 读取工作流定义的 agent preset 名单。留空表示不做收窄（所有会话可见）。推荐只保留随插件发布的 `workflow-orchestrator`。"),
+	orchestratorWorkspaces: z.array(z.string()).default(DEFAULTS.orchestratorWorkspaces).description("按工作区放行工作流定义工具：在这些目录（含子目录，支持 ~ 前缀）里启动的会话，即使 preset 不在 orchestratorPresets 里也能保存 / 读取定义。留空表示只按 preset 判定。"),
 	robotPreset: z.string().default(DEFAULTS.robotPreset).description("机器人任务会话使用的 agent preset。")
 });
 /**
@@ -5233,8 +5316,29 @@ function resolveOptions(config) {
 		maxInlineAttachmentBytes: positive(config?.maxInlineAttachmentBytes) ?? DEFAULTS.maxInlineAttachmentBytes,
 		maxResultTextBytes: positive(config?.maxResultTextBytes) ?? DEFAULTS.maxResultTextBytes,
 		orchestratorPresets,
+		orchestratorWorkspaces: resolveWorkspaceRoots(config?.orchestratorWorkspaces),
 		robotPreset: robotPreset === "" ? DEFAULTS.robotPreset : robotPreset
 	};
+}
+/**
+* 解析按工作区放行的目录：去空、展开 ~、转绝对路径、去掉末尾分隔符。
+*
+* @param value 配置里的目录列表
+* @param env 环境变量
+* @returns 规范化后的绝对路径列表
+*/
+function resolveWorkspaceRoots(value, env = process.env) {
+	if (!Array.isArray(value)) return [];
+	const roots = [];
+	for (const entry of value) {
+		const text = typeof entry === "string" ? entry.trim() : "";
+		if (text === "") continue;
+		const expanded = text === "~" || text.startsWith("~/") || text.startsWith("~\\") ? path.join(homeDir(env), text.slice(1)) : text;
+		const absolute = path.resolve(expanded);
+		const root = absolute.length > 1 && absolute.endsWith(path.sep) ? absolute.slice(0, -1) : absolute;
+		if (!roots.includes(root)) roots.push(root);
+	}
+	return roots;
 }
 /**
 * 解析数据目录：默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workflows`。
@@ -5811,7 +5915,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 *
 * @module @buka/dsh-plugin-workflows/store/dirs
 */
-/** 单个 id 允许的字符；记录 id 都是 `[a-z]+-...` 或 `$start`。 */
+/** 单个 id 允许的字符；记录 id 都是 `[a-z]+-...`（启动任务也是 `start-task`）。 */
 const SAFE_SEGMENT = /^[A-Za-z0-9$][A-Za-z0-9._-]*$/u;
 /**
 * 校验一个 id / 文件名是单个安全的路径段。
@@ -10820,7 +10924,13 @@ var WorkflowStore = class {
 * @throws 宿主缺少 storageDomain 服务 / 打开失败时抛出
 */
 function openWorkflowStore(ctx, options) {
-	const facility = ctx.storageDomain;
+	const facility = (() => {
+		try {
+			return ctx.get("storageDomain");
+		} catch {
+			return;
+		}
+	})();
 	if (facility === void 0 || facility === null || typeof facility.open !== "function") return Promise.reject(/* @__PURE__ */ new Error("the host storage domain service is unavailable in this composition (ctx.storageDomain is missing); update DeepSeek Harness or enable the dsh-storage-domain plugin"));
 	let domain;
 	ctx.effect(() => () => {
@@ -11437,7 +11547,7 @@ function defineAttachmentsTool(ready) {
 *
 * 1. 解析配置；
 * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
-* 3. 注册工具（可见性按编排 preset / 任务会话收窄）；
+* 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
 * 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
 * 5. 注册浏览器路由。
 *
@@ -11500,6 +11610,7 @@ function apply(ctx, config) {
 	function accessOf(agent) {
 		return resolveWorkflowAccess({
 			allowed: options.orchestratorPresets,
+			allowedWorkspaces: options.orchestratorWorkspaces,
 			agentId: typeof agent?.id === "string" ? agent.id : "",
 			sessions: ctx.get("sessions"),
 			agentPresets: ctx.get("agentPresets")
@@ -11530,7 +11641,7 @@ function apply(ctx, config) {
 		assertOrchestrator: (agent) => {
 			const access = accessOf(agent);
 			if (access.visible) return;
-			throw new Error(`workflow definition tools are only available to the ${options.orchestratorPresets.join(" / ")} preset (reason: ${access.reason})`);
+			throw new Error(`workflow definition tools are only available to the ${options.orchestratorPresets.join(" / ")} preset or to sessions started in the configured orchestrator workspaces (reason: ${access.reason})`);
 		}
 	});
 	if (!registerJobCommand({

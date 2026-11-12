@@ -2,8 +2,8 @@
  * 插件配置与数据目录解析。
  *
  * v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
- * 轮询间隔、附件限额、编排 preset 与机器人会话 preset。作业 / 任务元数据
- * 进 `ctx.storageDomain`，不在这里配置。
+ * 轮询间隔、附件限额、编排 preset / 工作区与机器人会话 preset。作业 / 任务
+ * 元数据进 `ctx.storageDomain`，不在这里配置。
  *
  * @module @buka/dsh-plugin-workflows/options
  */
@@ -27,6 +27,7 @@ const DEFAULTS = {
   maxInlineAttachmentBytes: 32 * 1024,
   maxResultTextBytes: 2 * 1024 * 1024,
   orchestratorPresets: ['workflow-orchestrator'],
+  orchestratorWorkspaces: [],
   robotPreset: 'standard',
 }
 
@@ -41,6 +42,7 @@ export interface WorkflowsConfig {
   readonly maxInlineAttachmentBytes: number
   readonly maxResultTextBytes: number
   readonly orchestratorPresets: string[]
+  readonly orchestratorWorkspaces: string[]
   readonly robotPreset: string
 }
 
@@ -55,6 +57,7 @@ export interface ResolvedOptions {
   maxInlineAttachmentBytes: number
   maxResultTextBytes: number
   orchestratorPresets: string[]
+  orchestratorWorkspaces: string[]
   robotPreset: string
 }
 
@@ -114,6 +117,12 @@ export const Config = z.object({
     .description(
       '能保存 / 读取工作流定义的 agent preset 名单。留空表示不做收窄（所有会话可见）。推荐只保留随插件发布的 `workflow-orchestrator`。',
     ),
+  orchestratorWorkspaces: z
+    .array(z.string())
+    .default(DEFAULTS.orchestratorWorkspaces)
+    .description(
+      '按工作区放行工作流定义工具：在这些目录（含子目录，支持 ~ 前缀）里启动的会话，即使 preset 不在 orchestratorPresets 里也能保存 / 读取定义。留空表示只按 preset 判定。',
+    ),
   robotPreset: z
     .string()
     .default(DEFAULTS.robotPreset)
@@ -146,8 +155,37 @@ export function resolveOptions(config: WorkflowsConfig | undefined): ResolvedOpt
       positive(config?.maxInlineAttachmentBytes) ?? DEFAULTS.maxInlineAttachmentBytes,
     maxResultTextBytes: positive(config?.maxResultTextBytes) ?? DEFAULTS.maxResultTextBytes,
     orchestratorPresets,
+    orchestratorWorkspaces: resolveWorkspaceRoots(config?.orchestratorWorkspaces),
     robotPreset: robotPreset === '' ? DEFAULTS.robotPreset : robotPreset,
   }
+}
+
+/**
+ * 解析按工作区放行的目录：去空、展开 ~、转绝对路径、去掉末尾分隔符。
+ *
+ * @param value 配置里的目录列表
+ * @param env 环境变量
+ * @returns 规范化后的绝对路径列表
+ */
+export function resolveWorkspaceRoots(
+  value: readonly unknown[] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (!Array.isArray(value)) return []
+  const roots: string[] = []
+  for (const entry of value) {
+    const text = typeof entry === 'string' ? entry.trim() : ''
+    if (text === '') continue
+    const expanded =
+      text === '~' || text.startsWith('~/') || text.startsWith('~\\')
+        ? path.join(homeDir(env), text.slice(1))
+        : text
+    const absolute = path.resolve(expanded)
+    const root =
+      absolute.length > 1 && absolute.endsWith(path.sep) ? absolute.slice(0, -1) : absolute
+    if (!roots.includes(root)) roots.push(root)
+  }
+  return roots
 }
 
 /**

@@ -2,15 +2,22 @@
  * 记录 id 生成与时间戳。
  *
  * 形态遵循 `.tmp/workflow-v4-spec.md` §7.1：`task-<base36 time>-<uuid8>`；
- * 其余记录沿用同一风格。启动任务固定使用保留 id `$start`，不经过这里。
+ * 其余记录沿用同一风格。启动任务固定使用保留 id `start-task`，不经过这里。
  *
  * @module @buka/dsh-plugin-workflows/domain/ids
  */
 
 import { randomUUID } from 'node:crypto'
 
-/** 启动任务的保留 id；定义里 `dependsOn: ["$start"]` 引用它。 */
-export const START_TASK_ID = '$start'
+/**
+ * 启动任务的保留 id。
+ *
+ * 定义格式里用 `dependsOn: ["$start"]` 引用启动任务，但**记录 id 必须能当
+ * 文件名**：storageDomain 的 json 后端按记录 id 分文件，只接受
+ * `[a-zA-Z0-9_-]`，`$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。
+ * 所以落盘的启动任务 id 用 `start-task`，创建初始任务时把 `$start` 映射成它。
+ */
+export const START_TASK_ID = 'start-task'
 
 /** 一段 base36 时间戳。 */
 function timeSegment(): string {

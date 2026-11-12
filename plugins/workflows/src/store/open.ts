@@ -31,7 +31,16 @@ export function openWorkflowStore(
   ctx: Context,
   options: OpenWorkflowStoreOptions,
 ): Promise<WorkflowStore> {
-  const facility = ctx.storageDomain
+  // 不能直接读 `ctx.storageDomain`：该服务没有写进 `inject`，cordis 会抛
+  // `cannot get property "storageDomain" without inject`。可选服务一律用
+  // `ctx.get(name)`，并兜住 isolate 等情况下可能抛出的异常。
+  const facility = (() => {
+    try {
+      return ctx.get('storageDomain')
+    } catch {
+      return undefined
+    }
+  })()
   if (facility === undefined || facility === null || typeof facility.open !== 'function') {
     return Promise.reject(
       new Error(

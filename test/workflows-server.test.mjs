@@ -15,6 +15,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { visibleAttachmentsForTask } from '../plugins/workflows/src/attachments/index.ts'
+import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
@@ -566,6 +567,27 @@ function taskAt(store, jobId, position) {
 // ---------------------------------------------------------------------------
 // 作业创建与调度
 // ---------------------------------------------------------------------------
+
+test('engine: the start task id can be used as a storageDomain record key', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    // storageDomain 的 json 后端按记录 id 分文件，只接受 [a-zA-Z0-9_-]。
+    // 旧实现用 `$start` 当记录 id，真实宿主上创建作业会直接失败。
+    assert.match(START_TASK_ID, /^[a-zA-Z0-9_-]+$/u)
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      rawInput: { request: '做一个登录页' },
+      structuredInput: { requirement: '登录页需求' },
+    })
+    const tasks = jobTasks(env.store, job.id)
+    const start = tasks.find((task) => task.position === 'start')
+    assert.equal(start.id, START_TASK_ID)
+    const dev = tasks.find((task) => task.position === 'dev')
+    assert.deepEqual(dev.deps, [START_TASK_ID])
+  } finally {
+    await env.cleanup()
+  }
+})
 
 test('engine: a human-started job completes the start task and dispatches the first task', async () => {
   const env = await setup(simpleDevDefinition())

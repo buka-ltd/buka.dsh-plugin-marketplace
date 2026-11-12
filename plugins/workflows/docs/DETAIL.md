@@ -36,7 +36,7 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 | `buka_job_board` / `buka_task_get`         | Running tasks / assistant: read the board, a task and dependency results            |
 | `buka_job_attachments`                     | Running tasks / assistant: search / read attachments within the visible set         |
 
-Workflow-editing tools are visible only to root sessions of the presets named by `orchestratorPresets`; execution tools are visible only to task sessions, assistant sessions and starter sessions. Human tasks have no model answer tool.
+Workflow-editing tools are visible only to root sessions of the presets named by `orchestratorPresets`, plus sessions started inside a directory listed in `orchestratorWorkspaces`; execution tools are visible only to task sessions, assistant sessions and starter sessions. Human tasks have no model answer tool.
 
 ## Human tasks and assistants
 
@@ -62,7 +62,7 @@ The sidebar "Workflows" page: workflow list -> workflow detail (graph, positions
 
 ## Configuration
 
-See `src/options.ts` for the data directory, orchestrator presets, robot preset, concurrency and budgets. `orchestratorPresets` defaults to the shipped `workflow-orchestrator`.
+See `src/options.ts` for the data directory, orchestrator presets, orchestrator workspaces, robot preset, concurrency and budgets. `orchestratorPresets` defaults to the shipped `workflow-orchestrator`; `orchestratorWorkspaces` defaults to empty and, when set, lets sessions started in those directories (including subdirectories) save and read definitions without switching presets.
 
 ## Structure
 

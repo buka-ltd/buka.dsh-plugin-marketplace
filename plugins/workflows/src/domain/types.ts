@@ -224,7 +224,7 @@ export interface TaskResult {
 
 /** 任务记录。 */
 export interface TaskRecord {
-  /** 启动任务固定 `$start`；其余任务 `task-<time>-<uuid8>`。 */
+  /** 启动任务固定 `start-task`；其余任务 `task-<time>-<uuid8>`。 */
   readonly id: string
   readonly jobId: string
   /** 目标岗位 id；`start` / `end` 是内建节点。 */

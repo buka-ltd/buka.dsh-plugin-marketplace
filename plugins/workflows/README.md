@@ -43,7 +43,7 @@
 | `buka_job_board` / `buka_task_get`         | 执行中的任务 / 助理 | 只读作业看板、任务与依赖结果                          |
 | `buka_job_attachments`                     | 执行中的任务 / 助理 | 按可见范围检索 / 读取附件                             |
 
-编辑工具只对 `orchestratorPresets` 点名的 preset 根会话可见；执行工具只对任务会话、助理会话与启动者会话可见。人任务没有模型回答工具。
+编辑工具只对 `orchestratorPresets` 点名的 preset 根会话、以及 `orchestratorWorkspaces` 点名目录里的会话可见；执行工具只对任务会话、助理会话与启动者会话可见。人任务没有模型回答工具。
 
 ## 人任务与助理
 
@@ -69,7 +69,7 @@
 
 ## 配置
 
-配置项以 `src/options.ts` 为准：数据目录、编排 preset 名单、机器人 preset、并发与预算等。默认 `orchestratorPresets` 是随包发布的 `workflow-orchestrator`。
+配置项以 `src/options.ts` 为准：数据目录、编排 preset 名单、按工作区放行的目录、机器人 preset、并发与预算等。默认 `orchestratorPresets` 是随包发布的 `workflow-orchestrator`；`orchestratorWorkspaces` 默认为空，填了以后这些目录（含子目录）里的会话不用切 preset 也能保存 / 读取定义，适合插件自己的开发者工作区。
 
 ## 结构
 

@@ -358,8 +358,8 @@ export function resolveTargetTaskType(
 /**
  * 生成 `start.next` 发布的初始任务。
  *
- * 启动任务已完成：结构化输入是它们的唯一依赖 `$start`，所以初始状态都是
- * `ready`（除非模板里显式依赖了别的初始任务——本版不允许）。
+ * 启动任务已完成：结构化输入是它们的唯一依赖（定义里的 `$start`，落盘为
+ * `START_TASK_ID`），所以初始状态都是 `ready`（本版不允许依赖别的初始任务）。
  *
  * @param input 作业、启动任务、模板、已有任务与机器人表
  * @returns 新任务记录
@@ -429,7 +429,8 @@ function buildInitialTask(input: {
     position: route.position,
     type: taskType.id,
     payload: route.payload as JsonValue,
-    deps: route.dependsOn === undefined ? [START_TASK_ID] : [...route.dependsOn],
+    // 定义里的 `$start` 只是格式语法；记录间必须引用能当文件名的真实任务 id。
+    deps: [START_TASK_ID],
     status: 'ready',
     createdBy: { taskId: startTask.id, position: 'start' },
     assignee: resolveExecutor(definition, route.position, job, robots),
