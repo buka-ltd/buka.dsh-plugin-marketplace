@@ -4,10 +4,10 @@
  *
  * 四个提示时机都来自 DSH 自己的生命周期，不轮询、不改会话日志：
  *
- * - 完成音：顶层 Agent（`ctx.agents.roots()`）从 `running` 变回 `idle`，
- *   说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
- *   运行时的顶层归属过滤，否则每次工具子任务结束都会响。
- *   用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
+ * - 完成音：顶层 Agent（会话头不带 `origin: 'subagent'` 的 Agent）从
+ *   `running` 变回 `idle`，说明这一轮任务真正结束；子 Agent 也发
+ *   `agent/status`，所以必须按会话头的 subagent 标记过滤，否则每次工具子任务
+ *   结束都会响。用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
  *   `agent.cancel({ kind: 'user' })`，这一轮会以 `turn/end` 的
  *   `reason.kind === 'aborted'` 收尾，随后才是 `agent/status` idle。
  *   完成音监听会话日志里的 `turn/end` 记住最近一轮的结束原因，aborted 时
@@ -50,18 +50,25 @@ interface TurnEndReason {
   readonly reason?: { readonly kind?: string }
 }
 
-/** 一个 Agent 的最小形状；顶层判断只用到 id。 */
+/** 一个 Agent 的最小形状：顶层判断看会话头的 `origin`，预热看 `status`。 */
 interface AgentLike {
   readonly id: string
+  readonly status: string
+  readonly session?: { readonly header?: { readonly origin?: string } }
 }
 
 /**
- * 判断 Agent 是不是运行时顶层会话；子 Agent（subagent / workflow 子运行）
- * 也发 `agent/status`，但不应该触发完成音。
+ * 判断 Agent 是不是运行时顶层会话；子 Agent（subagent）也发 `agent/status`，
+ * 但不应该触发完成音。
+ *
+ * 不用 `ctx.agents.roots()`：DSH 0.2.2-rc.2 已移除这个方法（运行时归属信息
+ * 不再对外暴露），在 rc.2 上调用会抛 `roots is not a function`。改看会话头的
+ * `origin`：subagent 子会话标为 `'subagent'`，普通会话与被恢复的 fork 不写
+ * 这个字段，仍是用户自己的顶层会话。
  */
-function isRootAgent(ctx: Context, agent: AgentLike): boolean {
+function isRootAgent(agent: AgentLike): boolean {
   try {
-    return ctx.agents.roots().some((root) => root.id === agent.id)
+    return agent.session?.header?.origin !== 'subagent'
   } catch {
     return false
   }
@@ -101,8 +108,8 @@ export function watch(ctx: Context, config: BellConfig, play: Player): void {
   // 避免 Agent 创建时的初始 idle 也触发完成音。插件热加载时把正在跑的
   // 顶层 Agent 预置进来，这样装载前就开始的任务结束时也不会漏。
   const running = new Set<string>()
-  for (const agent of ctx.agents.roots()) {
-    if (agent.status === 'running') running.add(agent.id)
+  for (const agent of ctx.agents.list()) {
+    if (isRootAgent(agent) && agent.status === 'running') running.add(agent.id)
   }
 
   const gates = new Map<Cue, () => boolean>(CUES.map((cue) => [cue, createGate(COOLDOWN_MS)]))
@@ -148,7 +155,7 @@ export function watch(ctx: Context, config: BellConfig, play: Player): void {
     lastTurnEnd.delete(agent.id)
     const planReviseTurn = planRevise.delete(agent.id)
     if (!running.delete(agent.id)) return
-    if (!isRootAgent(ctx, agent)) return
+    if (!isRootAgent(agent)) return
     if (reason?.kind === 'aborted') {
       // 手动终止、会话归档、父级取消、Agent 卸载都会让这一轮以 aborted 收尾。
       // 只有用户自己点的终止才响手动终止音；其余情况保持静音。

@@ -6,12 +6,12 @@
 
 ## 什么时候响
 
-| 提示音       | 触发时机                                                                    | 依据                                                                          |
-| ------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 完成音       | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + `ctx.agents.roots()`，完成前先看 `turn/end` 的原因 |
-| 等待音       | `ask_user_question` 发起提问、plan review 等待确认、工具调用请求审批        | Host waterfall 事件 `user-questions/request`、`approval/request`              |
-| 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型                            | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因                    |
-| 手动终止音   | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务                           | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user`                 |
+| 提示音       | 触发时机                                                                    | 依据                                                                                        |
+| ------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 完成音       | 顶层 Agent 从 `running` 变回 `idle`，即这一轮任务真正结束（成功、报错都算） | Host 事件 `agent/status` + 会话头的 `origin: 'subagent'` 标记，完成前先看 `turn/end` 的原因 |
+| 等待音       | `ask_user_question` 发起提问、plan review 等待确认、工具调用请求审批        | Host waterfall 事件 `user-questions/request`、`approval/request`                            |
+| 计划被退回音 | plan review 卡片里点「要求修改」把计划退回给模型                            | 旁听 `user-questions/request` 的拒绝结果 + `turn/end` 原因                                  |
+| 手动终止音   | 你点 GUI 的终止按钮（或按停止快捷键）结束当前任务                           | `turn/end` 的 `reason.kind === 'aborted'` 且取消来源是 `user`                               |
 
 **手动终止不响完成音**：点终止按钮会走 `session/cancel` → `agent.cancel({ kind: 'user' })`，这一轮以 `turn/end` 的 `reason.kind === 'aborted'` 收尾，随后才发 `agent/status` idle。插件旁听会话日志里的 `turn/end` 记住最近一轮的结束原因：`aborted` 且取消来源是 `user` 时改播手动终止音（默认「你干嘛~哎哟」）；会话归档、父级取消、插件卸载同样以 aborted 收尾，但它们不是手动停止，保持静音。记「最近一轮」而不是布尔标记，是因为终止后队列里若还有消息，DSH 会接着跑下一轮，真正跑完时仍然按那一轮的原因响。
 
@@ -21,7 +21,7 @@
 
 等待音的监听器用 `prepend: true` 注册：Web UI 的回答器由 `api-remotes` 更早注册，它会把请求转发给浏览器并等用户作答、期间不调用 `next()`；普通顺序的监听器会被它挡在后面收不到事件。排在前面响铃、再 `next()` 交回决定，才能既响铃又不影响 UI。计划被退回的音也是靠这个排在前面的监听器旁听 `next()` 的结果。
 
-子 Agent（subagent、workflow 子运行）结束时不会响：它们也发 `agent/status`，但不在 `ctx.agents.roots()` 里，插件按运行时归属过滤掉了。
+子 Agent（subagent）结束时不会响：它们也发 `agent/status`，但会话头标了 `origin: 'subagent'`，插件按这个标记过滤掉了。普通会话与被恢复的 fork 不带这个标记，仍按顶层会话响铃。
 
 ## 设置页
 

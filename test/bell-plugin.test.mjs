@@ -165,3 +165,23 @@ test('声音列表用 radio：选中哪个就试听哪个，且不自动返回',
   // 「无」没法试听。
   assert.ok(source.includes('option.value !== NONE'), '「无」不该触发试听')
 })
+
+test('完成音按会话头 origin 过滤，不调用已被移除的 agents.roots()', () => {
+  const source = readFileSync(new URL('src/watch.ts', PACKAGE_ROOT), 'utf8')
+  // 只看代码行：注释里提到旧 API 不算调用。
+  const code = source
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim()
+      return !trimmed.startsWith('*') && !trimmed.startsWith('//')
+    })
+    .join('\n')
+  // DSH 0.2.2-rc.2 移除了 ctx.agents.roots()，调用会抛
+  // `roots is not a function`，插件整个加载失败。
+  assert.ok(!code.includes('.roots('), '不能调用 ctx.agents.roots()')
+  assert.ok(code.includes('ctx.agents.list()'), '应该用 ctx.agents.list() 枚举 live Agent')
+  assert.ok(
+    code.includes("agent.session?.header?.origin !== 'subagent'"),
+    '顶层判断应按会话头的 origin 过滤 subagent',
+  )
+})

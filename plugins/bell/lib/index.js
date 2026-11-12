@@ -412,10 +412,10 @@ async function readJsonBody(req, res, maxBytes) {
 *
 * 四个提示时机都来自 DSH 自己的生命周期，不轮询、不改会话日志：
 *
-* - 完成音：顶层 Agent（`ctx.agents.roots()`）从 `running` 变回 `idle`，
-*   说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
-*   运行时的顶层归属过滤，否则每次工具子任务结束都会响。
-*   用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
+* - 完成音：顶层 Agent（会话头不带 `origin: 'subagent'` 的 Agent）从
+*   `running` 变回 `idle`，说明这一轮任务真正结束；子 Agent 也发
+*   `agent/status`，所以必须按会话头的 subagent 标记过滤，否则每次工具子任务
+*   结束都会响。用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
 *   `agent.cancel({ kind: 'user' })`，这一轮会以 `turn/end` 的
 *   `reason.kind === 'aborted'` 收尾，随后才是 `agent/status` idle。
 *   完成音监听会话日志里的 `turn/end` 记住最近一轮的结束原因，aborted 时
@@ -439,12 +439,17 @@ async function readJsonBody(req, res, maxBytes) {
 /** 同类提示音的最小间隔，避免多个会话同时结束时响成一片。 */
 const COOLDOWN_MS = 500;
 /**
-* 判断 Agent 是不是运行时顶层会话；子 Agent（subagent / workflow 子运行）
-* 也发 `agent/status`，但不应该触发完成音。
+* 判断 Agent 是不是运行时顶层会话；子 Agent（subagent）也发 `agent/status`，
+* 但不应该触发完成音。
+*
+* 不用 `ctx.agents.roots()`：DSH 0.2.2-rc.2 已移除这个方法（运行时归属信息
+* 不再对外暴露），在 rc.2 上调用会抛 `roots is not a function`。改看会话头的
+* `origin`：subagent 子会话标为 `'subagent'`，普通会话与被恢复的 fork 不写
+* 这个字段，仍是用户自己的顶层会话。
 */
-function isRootAgent(ctx, agent) {
+function isRootAgent(agent) {
 	try {
-		return ctx.agents.roots().some((root) => root.id === agent.id);
+		return agent.session?.header?.origin !== "subagent";
 	} catch {
 		return false;
 	}
@@ -476,7 +481,7 @@ function rejectionCode(error) {
 */
 function watch(ctx, config, play) {
 	const running = /* @__PURE__ */ new Set();
-	for (const agent of ctx.agents.roots()) if (agent.status === "running") running.add(agent.id);
+	for (const agent of ctx.agents.list()) if (isRootAgent(agent) && agent.status === "running") running.add(agent.id);
 	const gates = new Map(CUES.map((cue) => [cue, createGate(COOLDOWN_MS)]));
 	/** 按当前配置播放一种提示音；选「无」时不响，也不占用节流门。 */
 	function ring(cue) {
@@ -505,7 +510,7 @@ function watch(ctx, config, play) {
 		lastTurnEnd.delete(agent.id);
 		const planReviseTurn = planRevise.delete(agent.id);
 		if (!running.delete(agent.id)) return;
-		if (!isRootAgent(ctx, agent)) return;
+		if (!isRootAgent(agent)) return;
 		if (reason?.kind === "aborted") {
 			if (reason.reason?.kind !== "user") return;
 			ring("abort");
@@ -545,9 +550,9 @@ function watch(ctx, config, play) {
 *
 * 四个提示时机都来自 DSH 自己的生命周期，不轮询、不改会话日志：
 *
-* - 完成音：顶层 Agent（`ctx.agents.roots()`）从 `running` 变回 `idle`，
-*   说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
-*   运行时的顶层归属过滤，否则每次工具子任务结束都会响。
+* - 完成音：顶层 Agent（会话头不带 `origin: 'subagent'`）从 `running` 变回
+*   `idle`，说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
+*   会话头的 subagent 标记过滤，否则每次工具子任务结束都会响。
 *   用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
 *   `agent.cancel({ kind: 'user' })`，这一轮会以 `turn/end` 的
 *   `reason.kind === 'aborted'` 收尾，随后才是 `agent/status` idle。
@@ -584,7 +589,7 @@ function watch(ctx, config, play) {
 */
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
 const name = "sound-buka-bell";
-/** 依赖的服务：用 `roots()` 判断一个 Agent 是不是运行时顶层会话。 */
+/** 依赖的服务：列 live Agent 并用会话头的 `origin` 判断是不是顶层会话。 */
 const inject = ["agents"];
 /**
 * 可在设置页改的四项声音。

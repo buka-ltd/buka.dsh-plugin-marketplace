@@ -3,9 +3,9 @@
  *
  * 四个提示时机都来自 DSH 自己的生命周期，不轮询、不改会话日志：
  *
- * - 完成音：顶层 Agent（`ctx.agents.roots()`）从 `running` 变回 `idle`，
- *   说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
- *   运行时的顶层归属过滤，否则每次工具子任务结束都会响。
+ * - 完成音：顶层 Agent（会话头不带 `origin: 'subagent'`）从 `running` 变回
+ *   `idle`，说明这一轮任务真正结束；子 Agent 也发 `agent/status`，所以必须按
+ *   会话头的 subagent 标记过滤，否则每次工具子任务结束都会响。
  *   用户手动终止不算任务结束：GUI 的终止按钮走 `session/cancel` →
  *   `agent.cancel({ kind: 'user' })`，这一轮会以 `turn/end` 的
  *   `reason.kind === 'aborted'` 收尾，随后才是 `agent/status` idle。
@@ -61,7 +61,7 @@ export { CUSTOM_SOUNDS, SILENT } from './sounds.ts'
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
 export const name = 'sound-buka-bell'
 
-/** 依赖的服务：用 `roots()` 判断一个 Agent 是不是运行时顶层会话。 */
+/** 依赖的服务：列 live Agent 并用会话头的 `origin` 判断是不是顶层会话。 */
 export const inject = ['agents']
 
 /**
