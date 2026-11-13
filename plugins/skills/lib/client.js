@@ -31,9 +31,9 @@ window.__ModuleLoader__.load({
     /**
     * 预设头像：id → emoji / 底色 / 词典 key。
     *
-    * 机器人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
+    * 打工人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
     * 所以统一收在这里，两个浏览器一半都从这里派生。id 与 Host 的
-    * `plugins/robots/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
+    * `plugins/workers/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
     * **id 是跨插件的稳定契约**：增删预设时两边一起改，顺序也不要动。
     *
     * @module plugin-ui/avatars
@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
     * 创建 React 元素的小包装。
     *
     * 页面直接手写 `createElement`（不用 JSX）。短名保持 `React.createElement` 的
-    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：机器人 / 技能
+    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：打工人 / 技能
     * 页有些 props 是自带的宽对象或带 `data-*` 的元素属性，类型系统不必逐个展开。
     *
     * @module plugin-ui/h
@@ -271,6 +271,7 @@ window.__ModuleLoader__.load({
     */
     /** 与 Host 一半的路由常量保持一致。 */
     const LIST_ROUTE = "/buka-skills/list";
+    const TARGETS_ROUTE = "/buka-skills/targets";
     const INSTALL_ROUTE = "/buka-skills/install";
     const REPOS_ROUTE = "/buka-skills/repos";
     const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
@@ -331,6 +332,48 @@ window.__ModuleLoader__.load({
     	let total = 0;
     	for (const child of children) total += countSkills(child);
     	return total;
+    }
+    /**
+    * 对话框里一类目标的条目；快照缺字段时当作空列表。
+    *
+    * @param kind 目标类型
+    * @param snapshot 目标列表快照
+    */
+    function targetItemsOf(kind, snapshot) {
+    	const list = kind === "worker" ? snapshot?.workers : snapshot?.workspaces;
+    	return Array.isArray(list?.items) ? [...list.items] : [];
+    }
+    /**
+    * 目标条目的选择键：打工人用名字，工作区用路径。
+    *
+    * @param kind 目标类型
+    * @param item 一条目标
+    */
+    function targetKeyOf(kind, item) {
+    	const record = item;
+    	const value = kind === "worker" ? record?.name : record?.path;
+    	return typeof value === "string" ? value : "";
+    }
+    /**
+    * 目标条目的展示名：打工人名，或工作区标题（缺省回退路径）。
+    *
+    * @param kind 目标类型
+    * @param item 一条目标
+    */
+    function targetLabelOf(kind, item) {
+    	const record = item;
+    	if (kind === "worker") return typeof record?.name === "string" ? record.name : "";
+    	const title = typeof record?.title === "string" ? record.title.trim() : "";
+    	return title !== "" ? title : typeof record?.path === "string" ? record.path : "";
+    }
+    /**
+    * 目标条目的路径副标题；打工人 / 工作区都有，缺失时返回空串。
+    *
+    * @param item 一条目标
+    */
+    function targetPathOf(item) {
+    	const record = item;
+    	return typeof record?.path === "string" ? record.path : "";
     }
     // .build/skills/client/repo-source.js
     /**
@@ -582,6 +625,16 @@ window.__ModuleLoader__.load({
     	const [addError, setAddError] = react.default.useState(null);
     	const [removing, setRemoving] = react.default.useState(null);
     	const [installing, setInstalling] = react.default.useState(null);
+    	const [targetDialog, setTargetDialog] = react.default.useState(null);
+    	const [targets, setTargets] = react.default.useState({
+    		data: null,
+    		error: null,
+    		loading: false
+    	});
+    	const [targetChoice, setTargetChoice] = react.default.useState("");
+    	const [targetInstalling, setTargetInstalling] = react.default.useState(false);
+    	const [targetError, setTargetError] = react.default.useState(null);
+    	const targetRequestRef = react.default.useRef(0);
     	const [restored] = react.default.useState(readViewCache);
     	const [expandedRepos, setExpandedRepos] = react.default.useState(restored?.expandedRepos ?? {});
     	const [trees, setTrees] = react.default.useState(restored?.trees ?? {});
@@ -914,6 +967,114 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
+    	* 读一次目标列表；成功后默认选中第一项，让「安装」按钮直接可用。
+    	*
+    	* @param kind 目标类型
+    	*/
+    	async function loadTargets(kind) {
+    		const request = ++targetRequestRef.current;
+    		setTargets((prev) => ({
+    			data: prev.data,
+    			error: null,
+    			loading: true
+    		}));
+    		try {
+    			const body = await requestJson(TARGETS_ROUTE);
+    			if (request !== targetRequestRef.current) return;
+    			setTargets({
+    				data: body,
+    				error: null,
+    				loading: false
+    			});
+    			const first = targetItemsOf(kind, body)[0];
+    			setTargetChoice((prev) => prev === "" ? targetKeyOf(kind, first) : prev);
+    		} catch (failure) {
+    			if (request !== targetRequestRef.current) return;
+    			setTargets((prev) => ({
+    				data: prev.data,
+    				error: messageOf(failure),
+    				loading: false
+    			}));
+    		}
+    	}
+    	/**
+    	* 打开「安装到打工人 / 工作区」对话框。
+    	*
+    	* @param kind 目标类型
+    	* @param repo 一条收藏
+    	* @param node Host 返回的 skill 节点
+    	*/
+    	function openTargetDialog(kind, repo, node) {
+    		if (installing !== null || targetInstalling) return;
+    		targetRequestRef.current += 1;
+    		setTargetDialog({
+    			kind,
+    			repo,
+    			node
+    		});
+    		setTargetChoice("");
+    		setTargetError(null);
+    		setTargets({
+    			data: null,
+    			error: null,
+    			loading: false
+    		});
+    		loadTargets(kind);
+    	}
+    	/** 清空对话框状态；安装成功时也用它，因为此时 `targetInstalling` 还是 true。 */
+    	function resetTargetDialog() {
+    		targetRequestRef.current += 1;
+    		setTargetDialog(null);
+    		setTargetChoice("");
+    		setTargetError(null);
+    		setTargets({
+    			data: null,
+    			error: null,
+    			loading: false
+    		});
+    	}
+    	/** 关闭对话框；安装中不响应，避免请求回来时状态错位。 */
+    	function closeTargetDialog() {
+    		if (targetInstalling) return;
+    		resetTargetDialog();
+    	}
+    	/** 重新读取当前对话框的目标列表。 */
+    	function reloadTargets() {
+    		if (targetDialog === null || targetInstalling) return;
+    		loadTargets(targetDialog.kind);
+    	}
+    	/**
+    	* 把当前 skill 安装到选中的打工人 / 工作区。Host 会把选择换回登记表里的
+    	* 可信目录；成功后关掉对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
+    	*/
+    	async function installToTarget() {
+    		if (targetDialog === null || targetInstalling) return;
+    		const kind = targetDialog.kind;
+    		const choice = targetChoice;
+    		if (choice === "") return;
+    		const label = targetLabelOf(kind, targetItemsOf(kind, targets.data).find((item) => targetKeyOf(kind, item) === choice)) || choice;
+    		setTargetInstalling(true);
+    		setTargetError(null);
+    		try {
+    			const body = await requestJson(INSTALL_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({
+    					source: targetDialog.repo.source,
+    					path: targetDialog.node.path,
+    					target: kind,
+    					...kind === "worker" ? { worker: choice } : { workspace: choice }
+    				})
+    			});
+    			resetTargetDialog();
+    			flash("success", `${t(kind === "worker" ? "installedToWorker" : "installedToWorkspace")} ${body.name ?? targetDialog.node.name} → ${label}`);
+    		} catch (failure) {
+    			const text = errorCode(failure) === "skill-not-found" ? t("installMissing") : `${t("installFailed")} ${messageOf(failure)}`;
+    			setTargetError(text);
+    		} finally {
+    			setTargetInstalling(false);
+    		}
+    	}
+    	/**
     	* 打开「收藏」对话框：清掉上一次的失败提示与残留输入。
     	* 收藏文件坏掉时不能写，按钮本身已禁用，这里再兜一次。
     	*/
@@ -1035,6 +1196,11 @@ window.__ModuleLoader__.load({
     		installedRepos,
     		installedSkillKeys,
     		installing,
+    		targetDialog,
+    		targets,
+    		targetChoice,
+    		targetInstalling,
+    		targetError,
     		reload,
     		loadTree,
     		probeRepo,
@@ -1043,6 +1209,11 @@ window.__ModuleLoader__.load({
     		uninstall,
     		refreshInstalled,
     		installSkill,
+    		openTargetDialog,
+    		closeTargetDialog,
+    		setTargetChoice,
+    		reloadTargets,
+    		installToTarget,
     		openSaveDialog,
     		closeSaveDialog,
     		addRepo,
@@ -1224,9 +1395,10 @@ window.__ModuleLoader__.load({
     /**
     * 收藏卡片展开后的树：加载中 / 失败可重试 / 空 / 递归树。
     *
-    * 树的状态来自页面（`trees`、`collapsedDirs`、`installing` 与已安装键集合），
-    * 这里只负责渲染与把点击转回页面动作，因此用 `createTreeRenderer()` 把这份
-    * 状态绑成 `renderTree` / `renderTreeNode` 两个函数，供「收藏」面板复用。
+    * 树的状态来自页面（`trees`、`collapsedDirs`、`installing`、目标安装状态与
+    * 已安装键集合），这里只负责渲染与把点击转回页面动作，因此用
+    * `createTreeRenderer()` 把这份状态绑成 `renderTree` / `renderTreeNode` 两个
+    * 函数，供「收藏」面板复用。
     *
     * @module @buka/dsh-plugin-skills/client/components/tree
     */
@@ -1255,7 +1427,7 @@ window.__ModuleLoader__.load({
     * @param props 渲染树需要的页面状态与动作
     */
     function createTreeRenderer(props) {
-    	const { t, trees, collapsedDirs, installedSkillKeys, installing, loadTree, toggleDir, installSkill } = props;
+    	const { t, trees, collapsedDirs, installedSkillKeys, installing, targetInstalling, loadTree, toggleDir, installSkill, openTargetDialog } = props;
     	/**
     	* 一个仓库展开后的内容：加载中 / 失败可重试 / 空 / 递归树。
     	*
@@ -1285,13 +1457,16 @@ window.__ModuleLoader__.load({
     		return h("div", { className: "buka-skills-treeArea" }, failure, body);
     	}
     	/**
-    	* 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 安装入口）。
+    	* 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 三个安装入口）。
     	*
-    	* skill 叶子右侧根据状态显示「安装」按钮 / 「安装中…」/ 禁用的「已安装」按钮：
-    	* 已安装的判断只看全局安装列表（名字按 npx 的 sanitize 规则归一），
-    	* 不依赖仓库来源，所以同一个 skill 从别的仓库装过也不给重复安装按钮。
-    	* 已安装用禁用按钮而不是 `Tag`：它和其它行的安装按钮占同一个操作位，
-    	* 按钮外形让「这里本来能点、只是已装过」一眼可见。
+    	* skill 叶子右侧固定三个按钮：「全局安装」「安装到打工人」「安装到工作区」。
+    	* 只有全局安装会在已安装时变成禁用的「全局已安装」：它的判断只看全局安装
+    	* 列表（名字按 npx 的 sanitize 规则归一），不依赖仓库来源，所以同一个 skill
+    	* 从别的仓库装过也不给重复安装按钮；打工人 / 工作区是每次临时选的目标，
+    	* 不做已安装判断。
+    	*
+    	* 全局按钮正在安装时显示「安装中…」并占据同一个操作位；三个入口都要等
+    	* Host 侧串行队列空出来，所以任何安装进行中时三个按钮统一禁用。
     	*
     	* @param repo 一条收藏
     	* @param node Host 返回的树节点
@@ -1324,18 +1499,30 @@ window.__ModuleLoader__.load({
     			size: "sm",
     			disabled: true,
     			icon: h(IconCheckOutlineRegular, { size: 13 }),
-    			"aria-label": `${t("installedBadge")} ${node.name}`
-    		}, t("installedBadge")) : busy ? h("span", {
+    			"aria-label": `${t("installedBadgeGlobal")} ${node.name}`
+    		}, t("installedBadgeGlobal")) : busy ? h("span", {
     			className: "buka-skills-statusWithDot",
     			role: "status"
     		}, h(StateDot, { state: "ongoing" }), t("installing")) : h(Button, {
     			variant: "outline",
     			size: "sm",
     			icon: h(IconDownloadOutlineRegular, { size: 13 }),
-    			"aria-label": `${t("install")} ${node.name}`,
-    			disabled: installing !== null,
+    			"aria-label": `${t("installGlobal")} ${node.name}`,
+    			disabled: installing !== null || targetInstalling,
     			onClick: () => installSkill(repo, node)
-    		}, t("install")))));
+    		}, t("installGlobal")), h(Button, {
+    			variant: "outline",
+    			size: "sm",
+    			"aria-label": `${t("installWorker")} ${node.name}`,
+    			disabled: installing !== null || targetInstalling,
+    			onClick: () => openTargetDialog("worker", repo, node)
+    		}, t("installWorker")), h(Button, {
+    			variant: "outline",
+    			size: "sm",
+    			"aria-label": `${t("installWorkspace")} ${node.name}`,
+    			disabled: installing !== null || targetInstalling,
+    			onClick: () => openTargetDialog("workspace", repo, node)
+    		}, t("installWorkspace")))));
     	}
     	return {
     		renderTree,
@@ -1427,13 +1614,112 @@ window.__ModuleLoader__.load({
     		role: "status"
     	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, t("storeUnreadable"), " ", h("span", { className: "buka-skills-path" }, String(savedData?.file ?? "")))) : null, savedData === null ? null : rows.length === 0 && !saved.loading ? h("p", { className: "buka-skills-empty" }, t("repoEmpty")) : h("ul", { className: "buka-skills-cards" }, ...rows));
     }
+    // .build/skills/client/components/target-dialog.js
+    /**
+    * 「安装到打工人 / 工作区」对话框：读取目标列表、单选，确认后安装。
+    *
+    * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
+    * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用名字 / 路径回去
+    * 解析一次，所以这里展示的列表只用于选择。
+    *
+    * @module @buka/dsh-plugin-skills/client/components/target-dialog
+    */
+    /**
+    * 一类目标不可用 / 为空时的说明文案。
+    *
+    * @param kind 目标类型
+    * @param available 服务是否可用
+    * @param t 翻译函数
+    */
+    function emptyText(kind, available, t) {
+    	if (kind === "worker") return available ? t("targetEmptyWorkers") : t("targetWorkersUnavailable");
+    	return available ? t("targetEmptyWorkspaces") : t("targetWorkspacesUnavailable");
+    }
+    /**
+    * 目标列表主体：加载中 / 读取失败可重试 / 不可用 / 空 / 单选列表。
+    *
+    * @param props 页面状态与动作
+    * @param kind 目标类型
+    */
+    function renderBody(props, kind) {
+    	const { t, targets, choice, installing, setChoice, reloadTargets } = props;
+    	const list = kind === "worker" ? targets.data?.workers : targets.data?.workspaces;
+    	const items = targetItemsOf(kind, targets.data);
+    	if (targets.loading && targets.data === null) return h("p", {
+    		className: "buka-skills-statusWithDot",
+    		role: "status"
+    	}, h(StateDot, { state: "ongoing" }), t("targetLoading"));
+    	if (targets.error !== null) return h("div", {
+    		className: "buka-skills-targetFailure",
+    		role: "alert"
+    	}, h("p", { className: "buka-skills-failure" }, h(StateDot, { state: "error" }), `${t("targetLoadFailed")} ${targets.error}`), h(Button, {
+    		variant: "ghost",
+    		size: "sm",
+    		disabled: installing,
+    		onClick: reloadTargets
+    	}, t("retry")));
+    	if (list?.available === false || items.length === 0) return h("p", { className: "buka-skills-targetHint" }, emptyText(kind, list?.available !== false, t));
+    	return h("ul", { className: "buka-skills-targetList" }, ...items.map((item) => {
+    		const key = targetKeyOf(kind, item);
+    		const label = targetLabelOf(kind, item);
+    		const itemPath = targetPathOf(item);
+    		const selected = key === choice;
+    		const record = item;
+    		const description = typeof record?.description === "string" ? record.description : "";
+    		return h("li", { key }, h("button", {
+    			type: "button",
+    			className: `buka-skills-targetOption${selected ? " isSelected" : ""}`,
+    			"aria-pressed": selected,
+    			title: description !== "" ? description : itemPath,
+    			disabled: installing,
+    			onClick: () => setChoice(key)
+    		}, h("span", { className: "buka-skills-targetName" }, label), itemPath === "" ? null : h("span", { className: "buka-skills-targetPath" }, itemPath)));
+    	}));
+    }
+    /**
+    * 「安装到打工人 / 工作区」对话框。
+    *
+    * @param props 页面状态与动作
+    */
+    function renderTargetDialog(props) {
+    	const { t, dialog, targets, choice, error, installing, closeTargetDialog, installToTarget } = props;
+    	const kind = dialog?.kind ?? "worker";
+    	const items = targetItemsOf(kind, targets.data);
+    	const canInstall = dialog !== null && choice !== "" && items.length > 0 && !installing;
+    	return h(Modal, {
+    		open: dialog !== null,
+    		onClose: closeTargetDialog,
+    		title: t(kind === "worker" ? "targetWorkerTitle" : "targetWorkspaceTitle"),
+    		closeLabel: t("close"),
+    		footer: h(react.Fragment, null, h(Button, {
+    			variant: "outline",
+    			onClick: closeTargetDialog,
+    			disabled: installing
+    		}, t("cancel")), h(Button, {
+    			variant: "primary",
+    			type: "button",
+    			disabled: !canInstall,
+    			icon: installing ? h(StateDot, {
+    				state: "ongoing",
+    				size: 13
+    			}) : void 0,
+    			onClick: () => {
+    				installToTarget();
+    			}
+    		}, installing ? t("targetInstalling") : t("targetInstall")))
+    	}, dialog === null ? null : h("div", { className: "buka-skills-targetBody" }, h("p", { className: "buka-skills-meta" }, `${t("targetFor")} ${dialog.node.name}`), renderBody(props, kind), error === null ? null : h("div", {
+    		className: "buka-skills-targetFailure",
+    		role: "alert"
+    	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, error))));
+    }
     // .build/skills/client/components/skills-page.js
     /**
     * 侧边栏「Skills」页面：标题行、工具栏、两个 Tab 与页脚的 Toast / 对话框。
     *
     * 页面本身只做装配：状态与请求在 `state.ts`，两个面板分别在
     * `components/installed-panel.ts` 与 `components/saved-panel.ts`，
-    * 收藏对话框在 `components/save-dialog.ts`。
+    * 收藏对话框在 `components/save-dialog.ts`，安装目标选择框在
+    * `components/target-dialog.ts`。
     *
     * @module @buka/dsh-plugin-skills/client/components/skills-page
     */
@@ -1445,7 +1731,7 @@ window.__ModuleLoader__.load({
     function SkillsPage(props) {
     	const t = props.t;
     	const state = useSkillsPageState(t);
-    	const { tab, storeCorrupt, loading, notice, setNotice, dialogOpen, adding, source, setSource, note, setNote, addError, reload, openSaveDialog, closeSaveDialog, addRepo, switchTab } = state;
+    	const { tab, storeCorrupt, loading, notice, setNotice, dialogOpen, adding, source, setSource, note, setNote, addError, targetDialog, targets, targetChoice, targetInstalling, targetError, reload, openSaveDialog, closeSaveDialog, addRepo, switchTab, closeTargetDialog, setTargetChoice, reloadTargets, installToTarget } = state;
     	const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0];
     	return h("div", { className: "buka-skills-page" }, h("div", { className: "buka-skills-head" }, h("div", { className: "buka-skills-headInner" }, h("div", { className: "buka-skills-heading" }, h("h1", { className: "buka-skills-title" }, t("title"))), h("div", { className: "buka-skills-toolbar" }, h(Tooltip, {
     		label: t("refresh"),
@@ -1512,6 +1798,17 @@ window.__ModuleLoader__.load({
     		setNote,
     		addError,
     		addRepo
+    	}), renderTargetDialog({
+    		t,
+    		dialog: targetDialog,
+    		targets,
+    		choice: targetChoice,
+    		error: targetError,
+    		installing: targetInstalling,
+    		closeTargetDialog,
+    		setChoice: setTargetChoice,
+    		reloadTargets,
+    		installToTarget
     	}));
     }
     // .build/skills/client/dictionary.js
@@ -1570,11 +1867,27 @@ window.__ModuleLoader__.load({
     	addFailed: "Could not save:",
     	removeFailed: "Could not remove:",
     	installedBadge: "installed",
-    	install: "Install",
+    	installedBadgeGlobal: "Installed globally",
+    	installGlobal: "Install globally",
+    	installWorker: "Install to worker",
+    	installWorkspace: "Install to workspace",
     	installing: "Installing…",
     	installedToast: "Installed:",
     	installFailed: "Install failed:",
     	installMissing: "This skill is no longer in the repository list. Refresh the repository and try again.",
+    	targetWorkerTitle: "Install to worker",
+    	targetWorkspaceTitle: "Install to workspace",
+    	targetFor: "Skill:",
+    	targetLoading: "Loading targets…",
+    	targetLoadFailed: "Could not load install targets:",
+    	targetEmptyWorkers: "No agents are available. Install the workers plugin or create one first.",
+    	targetEmptyWorkspaces: "No workspaces are registered yet.",
+    	targetWorkersUnavailable: "The workers plugin (@buka/dsh-plugin-workers) is not installed, so skills cannot be installed into a worker.",
+    	targetWorkspacesUnavailable: "This composition has no workspace registry, so skills cannot be installed into a workspace.",
+    	targetInstall: "Install",
+    	targetInstalling: "Installing…",
+    	installedToWorker: "Installed to worker:",
+    	installedToWorkspace: "Installed to workspace:",
     	expandRepo: "Show skills",
     	collapseRepo: "Hide skills",
     	treeLoading: "Loading skills…",
@@ -1635,11 +1948,27 @@ window.__ModuleLoader__.load({
     	addFailed: "收藏失败：",
     	removeFailed: "删除失败：",
     	installedBadge: "已安装",
-    	install: "安装",
+    	installedBadgeGlobal: "全局已安装",
+    	installGlobal: "全局安装",
+    	installWorker: "安装到打工人",
+    	installWorkspace: "安装到工作区",
     	installing: "安装中…",
     	installedToast: "已安装：",
     	installFailed: "安装失败：",
     	installMissing: "仓库列表里已经找不到这个 skill，刷新仓库后再试。",
+    	targetWorkerTitle: "安装到打工人",
+    	targetWorkspaceTitle: "安装到工作区",
+    	targetFor: "目标 skill：",
+    	targetLoading: "正在读取目标…",
+    	targetLoadFailed: "读取目标失败：",
+    	targetEmptyWorkers: "没有可用的智能体；装好打工人插件并创建打工人后再试。",
+    	targetEmptyWorkspaces: "还没有注册任何工作区。",
+    	targetWorkersUnavailable: "没有找到打工人插件（@buka/dsh-plugin-workers），无法安装到打工人。",
+    	targetWorkspacesUnavailable: "当前运行环境没有工作区注册表，无法安装到工作区。",
+    	targetInstall: "安装",
+    	targetInstalling: "安装中…",
+    	installedToWorker: "已安装到打工人：",
+    	installedToWorkspace: "已安装到工作区：",
     	expandRepo: "展开 skills",
     	collapseRepo: "收起 skills",
     	treeLoading: "正在获取 skills…",
@@ -1715,12 +2044,12 @@ window.__ModuleLoader__.load({
     .buka-skills-treeName{min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
     .buka-skills-treeCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px;line-height:18px}
     .buka-skills-treeGroup{margin:0;padding:0 0 0 16px;list-style:none;flex-direction:column;gap:1px;display:flex}
-    .buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;align-items:center;gap:8px;padding:2px 6px;display:flex}
+    .buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 6px;display:flex}
     @media (hover:hover){.buka-skills-treeSkill:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-skills-treeSkillMain{min-width:0;flex:1;flex-direction:column;display:flex}
+    .buka-skills-treeSkillMain{min-width:0;flex:1 1 160px;flex-direction:column;display:flex}
     .buka-skills-treeSkillName{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-size:13px;line-height:20px}
     .buka-skills-treeSkillDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:1;-webkit-box-orient:vertical;font-size:12px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere}
-    .buka-skills-treeSkillAction{flex:none;display:flex;align-items:center}
+    .buka-skills-treeSkillAction{flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;display:flex}
     .buka-skills-treeArea{flex-direction:column;gap:2px;display:flex}
     .buka-skills-treeStatus{padding:2px 6px 2px 34px}
     .buka-skills-treeFailure{gap:8px;padding:2px 6px 2px 34px;display:flex;flex-wrap:wrap;align-items:center}
@@ -1734,6 +2063,18 @@ window.__ModuleLoader__.load({
     .buka-skills-fieldLabel{color:var(--dsw-alias-label-secondary);font-size:13px;font-weight:500;line-height:20px}
     .buka-skills-fieldInput{box-sizing:border-box;display:flex;width:100%;min-width:0}
     .buka-skills-formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:13px;line-height:20px}
+    .buka-skills-targetBody{flex-direction:column;gap:12px;display:flex}
+    .buka-skills-targetList{flex-direction:column;gap:4px;max-height:300px;margin:0;padding:0;list-style:none;display:flex;overflow:auto}
+    .buka-skills-targetOption{box-sizing:border-box;width:100%;border:1px solid transparent;border-radius:var(--dsw-radius-md);background:0 0;color:inherit;text-align:left;cursor:pointer;font:inherit;flex-direction:column;gap:2px;padding:8px 10px;display:flex}
+    @media (hover:hover){.buka-skills-targetOption:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+    .buka-skills-targetOption:focus-visible{border-radius:var(--dsw-radius-md);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+    .buka-skills-targetOption:disabled{cursor:default;opacity:.6}
+    .buka-skills-targetOption.isSelected{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent)}
+    .buka-skills-targetName{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
+    .buka-skills-targetPath{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;overflow-wrap:anywhere}
+    .buka-skills-targetHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
+    .buka-skills-targetFailure{color:var(--dsw-alias-state-error-primary);align-items:flex-start;gap:8px;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}
+    .buka-skills-targetFailure>svg{flex:none;margin-top:2px}
     `;
     // .build/skills/client/index.js
     /**
@@ -1756,9 +2097,10 @@ window.__ModuleLoader__.load({
     *   （outline + 危险色）。来源既可以是 npx skills 仓库，也可以是 Claude Code
     *   marketplace 仓库：打开收藏页后会对每个可列出 skills 的收藏静默探测仓库
     *   类型（`probe=1`，只读 tree，不阻塞列表），标题行标出「npx skills」
-    *   「Claude Code 市场」或「不可用」。展开后的每个 skill 右侧有「安装」按钮：
-    *   点一下就把这一个 skill 装到全局（Host 交给 `npx skills add -g`），已经装过
-    *   的显示为禁用的「已安装」按钮（带对勾图标），不提供重复安装的入口。
+    *   「Claude Code 市场」或「不可用」。展开后的每个 skill 右侧有三个入口：
+    *   「全局安装」「安装到打工人」「安装到工作区」。后两个打开对话框，分别列出
+    *   `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册工作区；
+    *   只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾图标）。
     *
     * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
     * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。

@@ -7,7 +7,7 @@
  * @module @buka/dsh-plugin-skills/client/keys
  */
 
-import type { SkillTreeChild } from './types.ts'
+import type { InstallTargetsSnapshot, SkillTreeChild, TargetDialogKind } from './types.ts'
 
 /**
  * 同名的 skill 可能同时存在于两个全局根，所以页面状态用「根 + 名称」做键。
@@ -58,4 +58,59 @@ function countSkills(node: SkillTreeChild): number {
   return total
 }
 
-export { countSkills, entryKey, installKeyOf, skillKeyOf }
+/**
+ * 对话框里一类目标的条目；快照缺字段时当作空列表。
+ *
+ * @param kind 目标类型
+ * @param snapshot 目标列表快照
+ */
+function targetItemsOf(kind: TargetDialogKind, snapshot: InstallTargetsSnapshot | null): unknown[] {
+  const list = kind === 'worker' ? snapshot?.workers : snapshot?.workspaces
+  return Array.isArray(list?.items) ? [...list.items] : []
+}
+
+/**
+ * 目标条目的选择键：打工人用名字，工作区用路径。
+ *
+ * @param kind 目标类型
+ * @param item 一条目标
+ */
+function targetKeyOf(kind: TargetDialogKind, item: unknown): string {
+  const record = item as Record<string, unknown> | null | undefined
+  const value = kind === 'worker' ? record?.name : record?.path
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * 目标条目的展示名：打工人名，或工作区标题（缺省回退路径）。
+ *
+ * @param kind 目标类型
+ * @param item 一条目标
+ */
+function targetLabelOf(kind: TargetDialogKind, item: unknown): string {
+  const record = item as Record<string, unknown> | null | undefined
+  if (kind === 'worker') return typeof record?.name === 'string' ? record.name : ''
+  const title = typeof record?.title === 'string' ? record.title.trim() : ''
+  return title !== '' ? title : typeof record?.path === 'string' ? record.path : ''
+}
+
+/**
+ * 目标条目的路径副标题；打工人 / 工作区都有，缺失时返回空串。
+ *
+ * @param item 一条目标
+ */
+function targetPathOf(item: unknown): string {
+  const record = item as Record<string, unknown> | null | undefined
+  return typeof record?.path === 'string' ? record.path : ''
+}
+
+export {
+  countSkills,
+  entryKey,
+  installKeyOf,
+  skillKeyOf,
+  targetItemsOf,
+  targetKeyOf,
+  targetLabelOf,
+  targetPathOf,
+}

@@ -4,10 +4,12 @@
  * 覆盖容易回归的几件事：
  * - 目录名与 `npx skills` 的 sanitizeName() 一致（页面与 Host 都靠它认「已安装」）；
  * - 安装前拒绝：非法来源、非法 skill 名、已安装、DSH_AGENTS_HOME 指到 npx 不会写的位置；
- * - 安装走 `npx skills add <来源> --skill <名字> --global --yes`，退出码为 0 但
+ * - 全局安装走 `npx skills add <来源> --skill <名字> --global --yes`，退出码为 0 但
  *   SKILL.md 不在时按失败上报；
  * - 页面安装入口只接受收藏过的来源，skill 是否存在以 Host 读到的仓库列表为准
- *   （浏览器只传路径）。
+ *   （浏览器只传路径）；
+ * - 打工人 / 工作区安装把目标目录交给 `npx skills add`，在目标目录里执行，
+ *   浏览器传的名字 / 路径由 Host 解析成可信目录。
  */
 
 import assert from 'node:assert/strict'
@@ -19,6 +21,7 @@ import test from 'node:test'
 import { addSavedRepo, repoStoreFile } from '../plugins/skills/src/repo-store.ts'
 import {
   installGlobalSkill,
+  installProjectSkill,
   installSavedSkill,
   isInstallableSkillName,
   skillDirName,
@@ -431,6 +434,234 @@ test('页面入口：仓库读取失败原样带回，收藏文件损坏时拒�
       runNpx: async () => ({ ok: true }),
     })
     assert.equal(corrupt.code, 'store-unreadable')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+/** 假的项目级安装：在传入的工作目录里写 `.agents/skills`。 */
+function projectInstaller(calls) {
+  return async (args, cwd) => {
+    calls.push({ args, cwd })
+    const name = args[args.indexOf('--skill') + 1]
+    await writeSkill(path.join(cwd, '.agents', 'skills', skillDirName(name)), name)
+    return { ok: true, output: 'installed' }
+  }
+}
+
+test('项目级安装：打工人写 .agents 与 .claude 的 agent，工作区只写 .agents', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-project-'))
+  try {
+    const workerDir = path.join(root, 'worker')
+    const workspaceDir = path.join(root, 'workspace')
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.mkdir(workspaceDir, { recursive: true })
+    const calls = []
+
+    const worker = await installProjectSkill({
+      targetDir: workerDir,
+      target: 'worker',
+      source: 'Vercel-Labs/agent-skills',
+      name: 'Web Design Guidelines',
+      runNpx: projectInstaller(calls),
+    })
+    assert.deepEqual(
+      { ok: worker.ok, id: worker.id, target: worker.target },
+      { ok: true, id: 'web-design-guidelines', target: 'worker' },
+    )
+    assert.equal(worker.path, path.join(workerDir, '.agents', 'skills', 'web-design-guidelines'))
+
+    const workspace = await installProjectSkill({
+      targetDir: workspaceDir,
+      target: 'workspace',
+      source: 'Vercel-Labs/agent-skills',
+      name: 'Web Design Guidelines',
+      runNpx: projectInstaller(calls),
+    })
+    assert.equal(workspace.ok, true)
+    assert.equal(workspace.target, 'workspace')
+    assert.equal(
+      workspace.path,
+      path.join(workspaceDir, '.agents', 'skills', 'web-design-guidelines'),
+    )
+
+    assert.deepEqual(
+      calls.map((call) => call.args),
+      [
+        [
+          'add',
+          'Vercel-Labs/agent-skills',
+          '--skill',
+          'Web Design Guidelines',
+          '-a',
+          'universal',
+          '-a',
+          'claude-code',
+          '-y',
+        ],
+        [
+          'add',
+          'Vercel-Labs/agent-skills',
+          '--skill',
+          'Web Design Guidelines',
+          '-a',
+          'universal',
+          '-y',
+        ],
+      ],
+    )
+    assert.deepEqual(
+      calls.map((call) => call.cwd),
+      [workerDir, workspaceDir],
+      '每次都要在目标目录里执行 npx，不能沿用全局的 agentsHome',
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('项目级安装：目标目录缺失与非法名字都在调用 npx 之前拒绝', async () => {
+  let called = false
+  const runNpx = async () => {
+    called = true
+    return { ok: true }
+  }
+
+  const noTarget = await installProjectSkill({
+    target: 'workspace',
+    source: 'owner/repo',
+    name: 'x',
+    runNpx,
+  })
+  assert.equal(noTarget.code, 'no-target')
+
+  const missing = await installProjectSkill({
+    targetDir: path.join(tmpdir(), 'buka-skills-does-not-exist'),
+    target: 'workspace',
+    source: 'owner/repo',
+    name: 'x',
+    runNpx,
+  })
+  assert.equal(missing.code, 'missing-target')
+
+  const badName = await installProjectSkill({
+    targetDir: tmpdir(),
+    target: 'workspace',
+    source: 'owner/repo',
+    name: '-g',
+    runNpx,
+  })
+  assert.equal(badName.code, 'invalid-skill-name')
+  assert.equal(called, false, '校验失败不该调用 npx')
+})
+
+test('项目级安装：CLI 不认识指定 agent 时退回默认命令', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-project-agent-'))
+  try {
+    const targetDir = path.join(root, 'worker')
+    await fs.mkdir(targetDir, { recursive: true })
+    const calls = []
+    const runNpx = async (args, cwd) => {
+      calls.push({ args, cwd })
+      if (calls.length === 1) {
+        return { ok: false, message: 'Invalid agents: universal, claude-code' }
+      }
+      const name = args[args.indexOf('--skill') + 1]
+      await writeSkill(path.join(cwd, '.agents', 'skills', skillDirName(name)), name)
+      return { ok: true, output: 'installed' }
+    }
+
+    const result = await installProjectSkill({
+      targetDir,
+      target: 'worker',
+      source: 'owner/repo',
+      name: 'Convex Best Practices',
+      runNpx,
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(calls[1].args, ['add', 'owner/repo', '--skill', 'Convex Best Practices', '-y'])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('页面入口：安装到打工人 / 工作区由 Host 解析目录，失败码原样带回', async () => {
+  const { root, homes } = await makeHomes()
+  try {
+    await addSavedRepo({ homes, source: 'owner/repo' })
+    const targetDir = path.join(root, 'worker')
+    await fs.mkdir(targetDir, { recursive: true })
+    const catalog = {
+      async listSkills() {
+        return {
+          ok: true,
+          skills: [{ name: 'Frontend Design', description: 'design', path: 'skills/fe/SKILL.md' }],
+        }
+      },
+    }
+    const calls = []
+    const resolved = []
+    const resolveTarget = async (request) => {
+      resolved.push(request)
+      return { ok: true, path: targetDir, label: 'bot' }
+    }
+
+    const result = await installSavedSkill({
+      homes,
+      catalog,
+      source: 'owner/repo',
+      skillPath: 'skills/fe/SKILL.md',
+      target: 'worker',
+      worker: 'bot',
+      resolveTarget,
+      runNpx: projectInstaller(calls),
+    })
+    assert.deepEqual(
+      { ok: result.ok, id: result.id, target: result.target, repo: result.repo },
+      { ok: true, id: 'frontend-design', target: 'worker', repo: 'owner/repo' },
+    )
+    assert.deepEqual(resolved, [{ target: 'worker', worker: 'bot', workspace: undefined }])
+    assert.equal(calls[0].cwd, targetDir)
+
+    const denied = await installSavedSkill({
+      homes,
+      catalog,
+      source: 'owner/repo',
+      skillPath: 'skills/fe/SKILL.md',
+      target: 'workspace',
+      workspace: '/gone',
+      resolveTarget: async () => ({
+        ok: false,
+        code: 'unknown-workspace',
+        message: '没有找到这个工作区',
+      }),
+      runNpx: async () => ({ ok: true }),
+    })
+    assert.deepEqual(
+      { code: denied.code, message: denied.message },
+      { code: 'unknown-workspace', message: '没有找到这个工作区' },
+    )
+
+    const invalid = await installSavedSkill({
+      homes,
+      catalog,
+      source: 'owner/repo',
+      skillPath: 'skills/fe/SKILL.md',
+      target: 'elsewhere',
+      runNpx: async () => ({ ok: true }),
+    })
+    assert.equal(invalid.code, 'invalid-target')
+
+    const noResolver = await installSavedSkill({
+      homes,
+      catalog,
+      source: 'owner/repo',
+      skillPath: 'skills/fe/SKILL.md',
+      target: 'worker',
+      worker: 'bot',
+      runNpx: async () => ({ ok: true }),
+    })
+    assert.equal(noResolver.code, 'no-target-resolver')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

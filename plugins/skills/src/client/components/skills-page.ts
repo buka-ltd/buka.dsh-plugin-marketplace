@@ -3,7 +3,8 @@
  *
  * 页面本身只做装配：状态与请求在 `state.ts`，两个面板分别在
  * `components/installed-panel.ts` 与 `components/saved-panel.ts`，
- * 收藏对话框在 `components/save-dialog.ts`。
+ * 收藏对话框在 `components/save-dialog.ts`，安装目标选择框在
+ * `components/target-dialog.ts`。
  *
  * @module @buka/dsh-plugin-skills/client/components/skills-page
  */
@@ -27,6 +28,7 @@ import { useSkillsPageState } from '../state.ts'
 import { renderInstalled } from './installed-panel.ts'
 import { renderSaveDialog } from './save-dialog.ts'
 import { renderSaved } from './saved-panel.ts'
+import { renderTargetDialog } from './target-dialog.ts'
 
 /**
  * 侧边栏「Skills」页面。
@@ -49,11 +51,20 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
     note,
     setNote,
     addError,
+    targetDialog,
+    targets,
+    targetChoice,
+    targetInstalling,
+    targetError,
     reload,
     openSaveDialog,
     closeSaveDialog,
     addRepo,
     switchTab,
+    closeTargetDialog,
+    setTargetChoice,
+    reloadTargets,
+    installToTarget,
   } = state
 
   const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0]
@@ -173,6 +184,20 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
       setNote,
       addError,
       addRepo,
+    }),
+    // 「安装到打工人 / 工作区」对话框：打开时才读目标列表，确认后复用同一条
+    // 安装路由；失败留在框里，安装中不响应关闭。
+    renderTargetDialog({
+      t,
+      dialog: targetDialog,
+      targets,
+      choice: targetChoice,
+      error: targetError,
+      installing: targetInstalling,
+      closeTargetDialog,
+      setChoice: setTargetChoice,
+      reloadTargets,
+      installToTarget,
     }),
   )
 }

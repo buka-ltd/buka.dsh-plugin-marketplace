@@ -13,6 +13,7 @@ import { messageOf, requestJson } from '@buka/plugin-ui'
 /** 与 Host 一半的路由常量保持一致。 */
 const LIST_ROUTE = '/buka-skills/list'
 const UNINSTALL_ROUTE = '/buka-skills/uninstall'
+const TARGETS_ROUTE = '/buka-skills/targets'
 const INSTALL_ROUTE = '/buka-skills/install'
 const REPOS_ROUTE = '/buka-skills/repos'
 const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
@@ -35,5 +36,6 @@ export {
   REPO_SKILLS_ROUTE,
   REPOS_ROUTE,
   requestJson,
+  TARGETS_ROUTE,
   UNINSTALL_ROUTE,
 }

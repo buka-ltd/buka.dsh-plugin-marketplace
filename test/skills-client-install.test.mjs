@@ -7,10 +7,11 @@
  *
  * - 安装走 Host 路由 `POST /buka-skills/install`，请求体只传来源与仓库里的路径，
  *   名字与是否存在由 Host 的仓库列表决定；
- * - skill 叶子右侧：未安装显示「安装」按钮，安装中显示状态点，已安装显示禁用的
- *   「已安装」按钮（与安装按钮同一操作位，外形一致但不可点）；
+ * - skill 叶子右侧固定三个入口：「全局安装」「安装到打工人」「安装到工作区」；
+ * - 只有全局入口在已安装时变成禁用的「全局已安装」按钮，全局安装中显示状态点；
  * - 已安装按 `npx skills` 的目录名规则归一后与全局安装列表比较，不看来源；
- * - 安装成功只重读「已安装」列表，不重建仓库树；失败用 Toast 提示。
+ * - 安装成功只重读「已安装」列表，不重建仓库树；失败用 Toast 提示；
+ * - 打工人 / 工作区先读目标列表，确认后带 `target` 请求同一条安装路由。
  *
  * `skillKeyOf()` 是纯字符串函数，直接从源码里抽出来求值，用行为断言补住边界。
  */
@@ -116,14 +117,14 @@ test('安装走独立的 Host 路由，与卸载分开', () => {
   assert.ok(!install.includes('skill:'), '浏览器不该自己决定要安装的名字')
 })
 
-test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装的禁用按钮', () => {
+test('skill 叶子：全局安装 / 安装到打工人 / 安装到工作区三个入口', () => {
   const tree = section(
     'function renderTreeNode(repo, node)',
     'return { renderTree, renderTreeNode }',
   )
   assert.ok(
     tree.includes('const installed = installedSkillKeys.has(skillKeyOf(node.name))'),
-    '没有按目录键判断已安装',
+    '没有按目录键判断全局已安装',
   )
   assert.ok(
     tree.includes('const busy = installing === installKeyOf(repo, node)'),
@@ -131,10 +132,13 @@ test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装的禁�
   )
   assert.ok(
     tree.includes('icon: h(IconDownloadOutlineRegular, { size: 13 })'),
-    '安装按钮没有下载图标',
+    '全局安装按钮没有下载图标',
   )
-  assert.ok(tree.includes('onClick: () => installSkill(repo, node)'), '安装按钮没有触发安装')
-  assert.ok(tree.includes('disabled: installing !== null'), '安装请求进行中应禁用其它安装按钮')
+  assert.ok(tree.includes('onClick: () => installSkill(repo, node)'), '全局安装按钮没有触发安装')
+  assert.ok(
+    tree.includes('disabled: installing !== null || targetInstalling'),
+    '有安装请求进行中时应禁用安装按钮',
+  )
   // 已安装的分支在「安装中」之前：它应该是一个禁用的按钮，不是 Tag。
   const installedBranch = tree.slice(
     tree.indexOf("className: 'buka-skills-treeSkillAction'"),
@@ -142,15 +146,31 @@ test('skill 叶子的三种状态：安装按钮 / 安装中 / 已安装的禁�
   )
   assert.ok(
     installedBranch.includes('h(IconCheckOutlineRegular, { size: 13 })'),
-    '已安装按钮没有对勾图标',
+    '全局已安装按钮没有对勾图标',
   )
-  assert.ok(installedBranch.includes("t('installedBadge')"), '已安装按钮应显示「已安装」文案')
-  assert.ok(installedBranch.includes('disabled: true'), '已安装应显示禁用的按钮')
-  assert.ok(installedBranch.includes("variant: 'outline'"), '已安装按钮应与安装按钮同款（outline）')
-  assert.ok(installedBranch.includes("size: 'sm'"), '已安装按钮应与安装按钮同尺寸（sm）')
+  assert.ok(
+    installedBranch.includes("t('installedBadgeGlobal')"),
+    '全局已安装按钮应显示「全局已安装」文案',
+  )
+  assert.ok(installedBranch.includes('disabled: true'), '全局已安装应显示禁用的按钮')
+  assert.ok(
+    installedBranch.includes("variant: 'outline'"),
+    '全局已安装按钮应与安装按钮同款（outline）',
+  )
+  assert.ok(installedBranch.includes("size: 'sm'"), '全局已安装按钮应与安装按钮同尺寸（sm）')
   assert.ok(!installedBranch.includes('h(Tag'), '已安装不该再用 Tag 显示')
   assert.ok(tree.includes("t('installing')"), '安装中应显示「安装中…」')
-  assert.ok(tree.includes("t('install')"), '未安装应显示「安装」')
+  assert.ok(tree.includes("t('installGlobal')"), '未安装应显示「全局安装」')
+  assert.ok(tree.includes("t('installWorker')"), '缺少「安装到打工人」入口')
+  assert.ok(tree.includes("t('installWorkspace')"), '缺少「安装到工作区」入口')
+  assert.ok(
+    tree.includes("openTargetDialog('worker', repo, node)"),
+    '「安装到打工人」没有打开目标选择框',
+  )
+  assert.ok(
+    tree.includes("openTargetDialog('workspace', repo, node)"),
+    '「安装到工作区」没有打开目标选择框',
+  )
   assert.ok(tree.includes("className: 'buka-skills-treeSkillAction'"), '缺少右侧操作区')
   assert.ok(tree.includes("className: 'buka-skills-treeSkillMain'"), '名称与描述应包在左侧主区里')
 })
@@ -219,25 +239,74 @@ test('安装中/已完成的状态不写进 localStorage 的 view cache', () => 
   assert.ok(!source.includes('useState(restored?.installing'), '重启后不该恢复安装中的状态')
 })
 
-test('中英文都补齐了安装相关文案', () => {
+test('中英文词典键完全一致，安装相关文案齐全', () => {
+  const dictionary = normalize(readFileSync(path.join(CLIENT_BUILD, 'dictionary.js'), 'utf8'))
+  const en = dictionary.slice(dictionary.indexOf('const en = {'), dictionary.indexOf('const zh ='))
+  const zh = dictionary.slice(dictionary.indexOf('const zh ='), dictionary.indexOf('export {'))
+  const keysOf = (block) =>
+    [...block.matchAll(/^([A-Za-z0-9_]+):/gmu)].map((match) => match[1]).sort()
+  assert.deepEqual(keysOf(zh), keysOf(en), 'en 与 zh 的键必须完全相同')
   for (const key of [
-    'install',
+    'installedBadgeGlobal',
+    'installGlobal',
+    'installWorker',
+    'installWorkspace',
     'installing',
     'installedToast',
     'installFailed',
     'installMissing',
+    'targetWorkerTitle',
+    'targetWorkspaceTitle',
+    'targetLoading',
+    'targetLoadFailed',
+    'targetEmptyWorkers',
+    'targetEmptyWorkspaces',
+    'targetWorkersUnavailable',
+    'targetWorkspacesUnavailable',
+    'targetInstall',
+    'targetInstalling',
+    'installedToWorker',
+    'installedToWorkspace',
   ]) {
-    const occurrences = source.split(`\n${key}:`).length - 1
-    assert.equal(occurrences, 2, `${key} 应该在 en 与 zh 各有一份`)
+    assert.ok(keysOf(en).includes(key), `缺少英文文案：${key}`)
   }
-  assert.ok(source.includes("install: 'Install'"), '英文 install 文案不对')
-  assert.ok(source.includes("install: '安装'"), '中文 install 文案不对')
-  assert.ok(source.includes("installing: 'Installing…'"), '英文 installing 文案不对')
-  assert.ok(source.includes("installing: '安装中…'"), '中文 installing 文案不对')
-  assert.ok(source.includes("installedToast: 'Installed:'"), '英文 installedToast 文案不对')
-  assert.ok(source.includes("installedToast: '已安装：'"), '中文 installedToast 文案不对')
-  assert.ok(source.includes("installFailed: 'Install failed:'"), '英文 installFailed 文案不对')
-  assert.ok(source.includes("installFailed: '安装失败：'"), '中文 installFailed 文案不对')
+  assert.ok(source.includes("installGlobal: 'Install globally'"), '英文 installGlobal 文案不对')
+  assert.ok(source.includes("installGlobal: '全局安装'"), '中文 installGlobal 文案不对')
+  assert.ok(source.includes("installedBadgeGlobal: 'Installed globally'"), '英文全局已安装文案不对')
+  assert.ok(source.includes("installedBadgeGlobal: '全局已安装'"), '中文全局已安装文案不对')
+  assert.ok(source.includes("targetInstalling: 'Installing…'"), '英文 targetInstalling 文案不对')
+  assert.ok(source.includes("targetInstalling: '安装中…'"), '中文 targetInstalling 文案不对')
+})
+
+test('安装到打工人 / 工作区：先读目标列表，确认后带 target 请求 Host', () => {
+  assert.ok(source.includes("const TARGETS_ROUTE = '/buka-skills/targets'"), '缺少目标列表路由常量')
+  const load = section('async function loadTargets(kind)', 'function openTargetDialog(')
+  assert.ok(load.includes('requestJson(TARGETS_ROUTE)'), '没有读取目标列表')
+  assert.ok(load.includes('setTargets('), '没有记录目标列表状态')
+
+  const open = section('function openTargetDialog(kind, repo, node)', 'function resetTargetDialog(')
+  assert.ok(open.includes('setTargetDialog({ kind, repo, node })'), '没有打开目标对话框')
+  assert.ok(open.includes("setTargetChoice('')"), '打开对话框时没有清空上一次的选择')
+  assert.ok(open.includes('loadTargets(kind)'), '打开对话框时没有读取目标列表')
+
+  const install = section('async function installToTarget()', 'function openSaveDialog()')
+  assert.ok(install.includes('requestJson(INSTALL_ROUTE, {'), '没有请求 Host 的安装路由')
+  assert.ok(install.includes('target: kind'), '请求体没有带安装目标')
+  assert.ok(install.includes('worker: choice'), '打工人目标没有带名字')
+  assert.ok(install.includes('workspace: choice'), '工作区目标没有带路径')
+  assert.ok(install.includes("'installedToWorker'"), '缺少安装到打工人的成功文案')
+  assert.ok(install.includes("'installedToWorkspace'"), '缺少安装到工作区的成功文案')
+  assert.ok(install.includes('setTargetError(text)'), '失败应留在对话框里提示')
+  assert.ok(!install.includes('refreshInstalled()'), '项目级安装不该刷新全局已安装列表')
+})
+
+test('目标选择对话框复用基座 Modal，并列出可选目标', () => {
+  assert.ok(source.includes('renderTargetDialog'), '页面没有渲染目标对话框')
+  assert.ok(source.includes("'targetWorkerTitle'"), '缺少打工人对话框标题')
+  assert.ok(source.includes("'targetWorkspaceTitle'"), '缺少工作区对话框标题')
+  assert.ok(source.includes('targetItemsOf(kind, targets.data)'), '没有取目标条目')
+  assert.ok(source.includes("'aria-pressed': selected"), '目标选项没有单选语义')
+  assert.ok(source.includes('setChoice(key)'), '点击目标没有更新选择')
 })
 
 test('树 skill 行改成左右布局，操作区在右侧', () => {

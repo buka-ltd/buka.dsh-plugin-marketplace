@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka Skills",
-    "description": "在侧边栏新增「Skills」页面：已安装列出对所有会话生效的全局 skills，并按来源选择正确的卸载方式；收藏用来记下常用的 npx skills 来源。每个可列出的来源都会自动判定并展开成带缓存的 skills 树，树里每个 skill 都能一键安装到全局。",
+    "description": "在侧边栏新增「Skills」页面：已安装列出对所有会话生效的全局 skills，并按来源选择正确的卸载方式；收藏用来记下常用的 npx skills 来源。每个可列出的来源都会自动判定并展开成带缓存的 skills 树，树里每个 skill 都能安装到全局、某个打工人或某个已注册工作区；只有全局安装会在已装过时变成禁用的「全局已安装」。",
     "detail": "docs/DETAIL.zh.md"
   }
 }

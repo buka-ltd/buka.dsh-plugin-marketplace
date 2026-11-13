@@ -3,7 +3,7 @@
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`npx skills`](https://github.com/vercel-labs/skills) 安装和管理，并按来源决定卸载方式；
-- **收藏**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；标题行右侧「刷新」旁边的「收藏」按钮打开对话框，填「仓库」与「备注」后提交；有网页地址的来源点标题直接打开仓库页，卡片右侧的「删除」按钮（与已安装列表的卸载按钮同款样式）移除收藏；可列出的来源还会自动判定类型并在卡片上标出 —— `npx skills` 仓库、Claude Code marketplace 仓库，或都不可用的「不可用」；前两种还能展开成一棵 skills 树（Host 读取并缓存，展开状态跨重启保留），看清仓库里有哪些可安装的 skill；树里每个 skill 右侧有「安装」按钮，点一下就把**这一个** skill 装到全局（Host 交给 `npx skills add -g`），已经装过的显示禁用的「已安装」按钮。
+- **收藏**：记下常用的 `npx skills` 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；标题行右侧「刷新」旁边的「收藏」按钮打开对话框，填「仓库」与「备注」后提交；有网页地址的来源点标题直接打开仓库页，卡片右侧的「删除」按钮（与已安装列表的卸载按钮同款样式）移除收藏；可列出的来源还会自动判定类型并在卡片上标出 —— `npx skills` 仓库、Claude Code marketplace 仓库，或都不可用的「不可用」；前两种还能展开成一棵 skills 树（Host 读取并缓存，展开状态跨重启保留），看清仓库里有哪些可安装的 skill；树里每个 skill 右侧有「全局安装」「安装到打工人」「安装到工作区」三个入口，只有全局安装会在已安装时变成禁用的「全局已安装」（Host 分别交给 `npx skills add` 装到 `~/.agents/skills`、某个打工人目录或某个已注册工作区）。
 
 页面之外，插件还把收藏与仓库内容开放成一个 Host Service `ctx.bukaSkills`：其他插件用 `inject: ['bukaSkills']` 就能列出收藏的仓库、某个仓库里的 skill 列表，或某个 Claude Code marketplace 里的插件列表，见下方[对外服务](#对外服务host-service)。
 
@@ -16,7 +16,7 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 | `user-agents` | `~/.agents/skills`（可用 `DSH_AGENTS_HOME` 覆盖） | `npx skills add -g`、手工安装 |
 | `user-dsh`    | `~/.dsh/skills`（可用 `DSH_HOME` 覆盖）           | 手工安装                      |
 
-页面对这两个目录做与 DSH 相同的一层扫描：`<name>/SKILL.md` 目录或平铺的 `<name>.md`。工作区里的 `项目/.agents/skills` 只对那个项目生效，不在此列出。
+页面对这两个目录做与 DSH 相同的一层扫描：`<name>/SKILL.md` 目录或平铺的 `<name>.md`。工作区里的 `项目/.agents/skills` 只对那个项目生效，不在「已安装」里列出（收藏页的「安装到工作区」会写到这里）。
 
 每个 skill 显示名称、描述、来源根与安装来源标签。描述优先取 DSH skills 注册表解析出的 frontmatter；注册表拿不到（不可用或路径未命中）时回退到直接读 `SKILL.md` 的 `description`，保证页面上总能看到 skill 自己的描述。
 
@@ -83,40 +83,53 @@ lockfile 不存在时，所有 skill 按手工安装展示；存在但无法解�
 
 ### 一键安装收藏里的 skill
 
-展开一个可用的收藏后，每个 skill 右侧都有操作入口：
+展开一个可用的收藏后，每个 skill 右侧固定三个入口：
 
-| 状态   | 显示                                                   | 行为                                                                |
-| ------ | ------------------------------------------------------ | ------------------------------------------------------------------- |
-| 未安装 | 「安装」按钮（下载图标）                               | 点一下把这个 skill 装到全局，其它行的按钮在请求期间一并禁用         |
-| 安装中 | 状态点 + 「安装中…」                                   | Host 正在执行 `npx skills add`，只影响请求的那一行                  |
-| 已安装 | 禁用的「已安装」按钮（对勾图标，与安装按钮同款同尺寸） | 两个全局根里任何一个已有同名 skill 都算；要重装先去「已安装」里卸载 |
+| 入口         | 行为                                                                                                                                      |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 全局安装     | 装到 `~/.agents/skills`（对所有 DSH 会话生效）；两个全局根里任何一个已有同名 skill 时变成禁用的「全局已安装」，要重装先去「已安装」里卸载 |
+| 安装到打工人 | 打开选择框，列出智能体（`ctx.bukaWorkers`；机器人不列），选中后装进 `<打工人目录>/.agents/skills` 与 `.claude/skills`                     |
+| 安装到工作区 | 打开选择框，列出 DSH 已注册工作区（`ctx.workspaceRegistry`），选中后装进 `<工作区路径>/.agents/skills`                                    |
 
-安装命令等价于：
+全局按钮在安装中显示「安装中…」；三个入口在请求期间统一禁用。打工人 / 工作区是每次临时选的目标，页面不做「已安装」判断——同一个 skill 装进另一个打工人或工作区是正常操作。
+
+全局安装命令等价于：
 
 ```bash
 npx skills add <收藏来源> --skill <skill 名字> --global --yes -a universal
 ```
 
-所以装的是 `npx skills` 的全局规范副本 `~/.agents/skills/<目录名>`（也是 DSH 的 `user-agents` 根，对所有会话生效），lockfile 由 `npx skills` 自己维护。`-a universal` 是 CLI 自带的「通用 agent」：只写规范副本，不往本机其它 agent 目录（`~/.claude/skills` 等）建链接——DSH 页面上的安装只改 DSH 会扫描的全局目录。想顺便给别的 agent 用，自己跑一次不带 `-a` 的 `npx skills add` 即可。CLI 版本如果不认识 `universal` 这个 agent，Host 会自动退回不带 `-a` 的默认命令，错误信息照常上报。装完切到「已安装」就能看到它，并标成 npx 管理、来源是这条收藏。
+所以装的是 `npx skills` 的全局规范副本 `~/.agents/skills/<目录名>`（也是 DSH 的 `user-agents` 根，对所有会话生效），lockfile 由 `npx skills` 自己维护。`-a universal` 是 CLI 自带的「通用 agent」：只写规范副本，不往本机其它 agent 目录（`~/.claude/skills` 等）建链接——DSH 页面上的全局安装只改 DSH 会扫描的全局目录。想顺便给别的 agent 用，自己跑一次不带 `-a` 的 `npx skills add` 即可。CLI 版本如果不认识 `universal` 这个 agent，Host 会自动退回不带 `-a` 的默认命令，错误信息照常上报。装完切到「已安装」就能看到它，并标成 npx 管理、来源是这条收藏。
+
+打工人 / 工作区的安装命令在目标目录里执行：
+
+```bash
+# 打工人：按 workers 插件的约定同时落 .agents/skills 与 .claude/skills
+npx skills add <收藏来源> --skill <skill 名字> -a universal -a claude-code -y
+
+# 工作区：只写 DSH 会扫描的 .agents/skills
+npx skills add <收藏来源> --skill <skill 名字> -a universal -y
+```
 
 Host 侧的约束：
 
 - 只允许安装**收藏过**的来源；浏览器只传来源与 skill 在仓库里的路径，名字和「这个 skill 是否存在」都以 Host 这次读到的仓库列表为准，页面过期的缓存不会让它装错东西；
-- 已安装（两个全局根里任一命中同名目录）时直接拒绝并提示先去卸载，不会覆盖；
-- 安装目标固定是 `~/.agents/skills`：`DSH_AGENTS_HOME` 指到别处时拒绝安装，避免装到 DSH 扫描不到的目录；
+- 全局安装：已安装（两个全局根里任一命中同名目录）时直接拒绝并提示先去卸载，不会覆盖；
+- 打工人 / 工作区：浏览器只传选中的名字 / 路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录并确认目录仍在；没装 workers 插件、没有工作区注册表、机器人、未知打工人 / 工作区或目标目录已消失都返回稳定的错误码；
+- 全局安装目标固定是 `~/.agents/skills`：`DSH_AGENTS_HOME` 指到别处时拒绝安装，避免装到 DSH 扫描不到的目录；
 - 安装与卸载共用一条串行队列，因为 `npx skills` 会整份重写共享的 lockfile；
 - 命令退出码为 0 但 `SKILL.md` 不在目标目录时按失败上报，错误信息带上命令输出。
 
-安装失败用页面底部的 Toast 提示（仓库读取失败、限流、skill 已不在列表里、npx 失败等）；成功同样用 Toast 提示并只重读「已安装」列表，已经展开的仓库树不会重建。
+安装失败用页面底部的 Toast 提示（全局安装）；打工人 / 工作区的失败留在选择框里，方便换一个目标重试。成功同样用 Toast 提示，全局安装只重读「已安装」列表，已经展开的仓库树不会重建。
 
 ## 页面
 
 侧边栏导航里（Plugins、Automation tasks 之后）出现一个「Skills」图标，点开就是主面板页面。视觉与控件直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`（`Button` / `Input` / `Modal` / `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标），布局照 Plugins 页面：20px 标题行 + 右侧「刷新」与「收藏」两个同尺寸按钮 + 下方分段 Tab，内容区 960px、卡片列表（无前置图标）。标题与 Tab 行吸顶，列表在页面自身的纵向滚动容器里滚动，横向不出滚动条。页面不放说明文字：
 
 - **已安装**：标题行是名称 + 两个标签 —— 第一个是来源根（`agents` / `dsh`），第二个是安装来源（npx 管理时显示来源仓库，如 `vercel-labs/skills`；否则显示 `manual`）；卸载按钮在标题行右侧，点开后先二次确认再按上表选择方式执行。下面展示 skill 自己的 description（最多三行，超出显示 `…`），不展示安装时间；空列表会提示两个全局根目录的位置；
-- **收藏**：标题行右侧常驻的「收藏」按钮（两个 Tab 都有，与「刷新」同尺寸）打开对话框，填「仓库」与「备注」后提交；页面本身只有卡片列表（来源有网页地址时标题可点开仓库页，否则是纯文本；标题行还会标出 `npx skills` / `Claude Code 市场` / `不可用`；右侧是「删除」按钮，已安装的会带标记；可列出的仓库左侧箭头展开 skills 树，目录可再折叠，树里每个 skill 右侧是「安装」按钮 /「安装中…」/ 禁用的「已安装」按钮）；操作结果用页面底部的 Toast 提示，对话框里的失败留在对话框内提示。
+- **收藏**：标题行右侧常驻的「收藏」按钮（两个 Tab 都有，与「刷新」同尺寸）打开对话框，填「仓库」与「备注」后提交；页面本身只有卡片列表（来源有网页地址时标题可点开仓库页，否则是纯文本；标题行还会标出 `npx skills` / `Claude Code 市场` / `不可用`；右侧是「删除」按钮，已安装的会带标记；可列出的仓库左侧箭头展开 skills 树，目录可再折叠，树里每个 skill 右侧是「全局安装」/「安装到打工人」/「安装到工作区」三个按钮（全局已安装时变成禁用的「全局已安装」；打工人 / 工作区按钮打开选择框））；操作结果用页面底部的 Toast 提示，对话框里的失败留在对话框内提示。
 
-页面只做展示与触发：列表、卸载、安装、收藏、仓库判定与仓库树的读写都走 Host 一半注册的包内路由（`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`POST /buka-skills/install`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`），沿用 web 组合的信任栅栏，只接受本机同源请求。`probe=1` 是轻量判定（只回仓库类型与 skill 数量，不拉 `SKILL.md`），收藏页打开时对每张卡片各发一次。例外只有收藏页自己的展开状态与上次拿到的树：它们是纯页面状态，缓存在浏览器 localStorage（`dsh.buka-skills.view.v1`），重开 DSH 时先用它恢复视图，再找 Host 校正。
+页面只做展示与触发：列表、卸载、安装、收藏、仓库判定与仓库树的读写都走 Host 一半注册的包内路由（`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET /buka-skills/targets`、`POST /buka-skills/install`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`），沿用 web 组合的信任栅栏，只接受本机同源请求。`probe=1` 是轻量判定（只回仓库类型与 skill 数量，不拉 `SKILL.md`），收藏页打开时对每张卡片各发一次。例外只有收藏页自己的展开状态与上次拿到的树：它们是纯页面状态，缓存在浏览器 localStorage（`dsh.buka-skills.view.v1`），重开 DSH 时先用它恢复视图，再找 Host 校正。
 
 ## 模型工具
 
@@ -168,7 +181,8 @@ export function apply(ctx) {
 | `src/index.ts`                                 | Host 入口：装配路由与 `buka_skills` 工具、把 `ctx.bukaSkills` 服务注册进 composition；安装与卸载共用一条 npx 串行队列；只做装配                                                                                                                                                                                                                       |
 | `src/service.ts`                               | 对外服务 `ctx.bukaSkills`：`listRepositories()` / `listSkills()` / `listPlugins()`；持有仓库请求的并发合并与 TTL 缓存入口，不依赖 DSH 包，便于单独测试                                                                                                                                                                                                |
 | `src/skill-store.ts`                           | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试                                                                                                                                                                                                                                                                    |
-| `src/skill-install.ts`                         | 「安装」按钮背后的逻辑：只接受收藏来源、按 Host 读到的仓库列表定位 skill、交给 `npx skills add -g`，安装后确认 `SKILL.md` 落到 `~/.agents/skills`；拒绝已安装与 `DSH_AGENTS_HOME` 指到 npx 不会写的位置，不依赖 DSH 包，便于单独测试                                                                                                                  |
+| `src/skill-install.ts`                         | 「安装」按钮背后的逻辑：只接受收藏来源、按 Host 读到的仓库列表定位 skill，再交给 `npx skills add` 装到全局 / 打工人 / 工作区，安装后确认 `SKILL.md` 落到目标目录；全局安装拒绝已安装与 `DSH_AGENTS_HOME` 指到 npx 不会写的位置，不依赖 DSH 包，便于单独测试                                                                                           |
+| `src/install-targets.ts`                       | 「安装到打工人 / 工作区」的目标解析：从可选的 `ctx.bukaWorkers` 与 `ctx.workspaceRegistry` 读列表（过滤机器人与缺目录条目），安装时把浏览器选中的名字 / 路径换回登记表里的可信目录并确认目录仍在；服务缺失与读取失败都退化成 `available: false`，不依赖其他插件实现                                                                                   |
 | `src/repo-store.ts`                            | 收藏来源的规范化与分类（GitHub / 任意 git 地址 / 本地路径 / 网页链接 / 包名）/ 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包                                                                                                                                                                                                              |
 | `src/repo-skills.ts`                           | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树（npx 仓库按 CLI 的清单方式平铺 / 按仓库清单显式声明的插件分组）并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
 | `src/repo/**`                                  | 仓库读取的实现细节：缓存、发现规则、分组、GitHub API、marketplace 清单、失败分类、本地 / git 来源与树模型                                                                                                                                                                                                                                             |
@@ -176,7 +190,7 @@ export function apply(ctx) {
 | `src/git-source.ts`                            | 任意 git 地址的克隆缓存：`git clone --depth 1` 到 `buka-skills/cache/git/`，刷新时 fetch / reset，离线复用旧克隆；git 不在 `PATH` 与 clone 失败分别报 `git-unavailable` / `git-failed`，便于单独测试                                                                                                                                                  |
 | `src/routes.ts`、`src/tools.ts`、`src/http.ts` | 包内路由、`buka_skills` 只读工具与请求 / 响应辅助；npx 的定位与执行来自 `@buka/plugin-kit` 的 `createNpxRunner`                                                                                                                                                                                                                                       |
 | `src/client/index.ts`                          | 浏览器一半入口：往 `sidebar.panellist` 注册侧边栏图标，往 `main` 注册同 id 的面板页面；只导出 `inject` / `apply`                                                                                                                                                                                                                                      |
-| `src/client/**`                                | 两个 Tab（已安装 / 收藏）、页面状态、请求、词典与样式；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage                                                                                                                                                                                                                                |
+| `src/client/**`                                | 两个 Tab（已安装 / 收藏）、页面状态、请求、词典与样式；收藏页自动探测来源类型并显示徽标，展开状态与树另存 localStorage；树里的三个安装入口共用 `POST /buka-skills/install`，打工人 / 工作区由 `components/target-dialog.ts` 选目标                                                                                                                    |
 | `lib/index.js`                                 | 构建产物（ESM）：Host 一半的运行文件；不手改                                                                                                                                                                                                                                                                                                          |
 | `lib/client.js`                                | 构建产物：界面一半的运行文件，外层是 `window.__ModuleLoader__.load({...})` 外壳；不手改                                                                                                                                                                                                                                                               |
 | `market.json`                                  | 只在市场上挂牌用的展示信息（分类、标签、关键词、图标等），不随包发布                                                                                                                                                                                                                                                                                  |
@@ -196,13 +210,14 @@ dsh plugin --profile <profile> add "link:$PWD/plugins/skills"
 
 ## 已知限制
 
-- 只管理全局根目录；项目级 `.agents/skills` 由项目自己负责。
+- 「已安装」页只列出全局根目录；收藏页的「安装到打工人 / 工作区」写的是项目级 `.agents/skills`，装完不会出现在「已安装」列表里，由对应打工人 / 项目自己负责。
 - 识别依赖 `npx skills` 当前的 lockfile 结构（version 3，位置随 `XDG_STATE_HOME` 变化）；更旧版本的 lockfile 会被当作不可用并拒绝自动卸载。
 - `npx skills remove` 需要本机有 Node.js / npm；离线且 npx 缓存里没有该包时会失败，错误会原样显示在页面上。
 - 同名 skill 同时存在于两个全局根时，两行都会列出；卸载其中一行只影响对应根目录。
-- 「安装」一次只装一个 skill，且这个 skill 必须能出现在仓库列表里：包名与网页子页面不能安装；命令等价于 `npx skills add <收藏来源> --skill <名字> --global --yes -a universal`，需要网络与可用的 `npx`（GitHub 列表走 Host 缓存，git 来源用本机 git / SSH 凭据）。CLI 不认识 `universal` agent 时会退回不带 `-a` 的命令，那种版本可能同时给其它 agent 目录建链接。
-- 安装目标固定是 `~/.agents/skills`（`npx skills` 的全局规范副本目录）：把 `DSH_AGENTS_HOME` 指到别处时「安装」会拒绝执行，避免装到 DSH 扫描不到的目录。
-- 两个全局根里已有同名 skill 时，那一行显示禁用的「已安装」按钮并拒绝重装；要重装先在「已安装」里卸载。
+- 三个安装入口一次都只装一个 skill，且这个 skill 必须能出现在仓库列表里：包名与网页子页面不能安装；全局安装命令等价于 `npx skills add <收藏来源> --skill <名字> --global --yes -a universal`，需要网络与可用的 `npx`（GitHub 列表走 Host 缓存，git 来源用本机 git / SSH 凭据）。CLI 不认识 `universal` / `claude-code` agent 时会退回不带 `-a` 的命令，那种版本可能同时给其它 agent 目录建链接。
+- 全局安装目标固定是 `~/.agents/skills`（`npx skills` 的全局规范副本目录）：把 `DSH_AGENTS_HOME` 指到别处时「全局安装」会拒绝执行，避免装到 DSH 扫描不到的目录。
+- 两个全局根里已有同名 skill 时，那一行显示禁用的「全局已安装」按钮并拒绝重装；要重装先在「已安装」里卸载。打工人 / 工作区不做这项检查。
+- 「安装到打工人」需要安装 workers 插件（`ctx.bukaWorkers`）；只列智能体，机器人（如内建 clock）没有目录。「安装到工作区」需要宿主提供 `workspaceRegistry`，列表来自 DSH 已注册工作区。
 - 同一仓库里出现同名 skill 时按名字安装，由 `npx skills` 自己的发现顺序决定装哪一个（与手动执行该命令一致，页面无法指定物理目录）。
 - 安装成功但 `npx skills` 没有写 lockfile 时（例如手工改坏了 lockfile），「已安装」里的新 skill 会按手工安装展示；这不影响使用，只是解锁时会走直接删目录。
 - 收藏文件损坏时页面只读不写，修复或删除 `buka-skills/repos.json` 后刷新即可恢复。

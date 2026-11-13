@@ -23,15 +23,24 @@ import {
   REPO_SKILLS_ROUTE,
   REPOS_ROUTE,
   requestJson,
+  TARGETS_ROUTE,
   UNINSTALL_ROUTE,
 } from './api.ts'
 import type { PageTab } from './constants.ts'
 import type { Translate } from './dictionary.ts'
-import { entryKey, installKeyOf, skillKeyOf } from './keys.ts'
+import {
+  entryKey,
+  installKeyOf,
+  skillKeyOf,
+  targetItemsOf,
+  targetKeyOf,
+  targetLabelOf,
+} from './keys.ts'
 import { isListableSource, normalizeRepo } from './repo-source.ts'
 import type {
   InstalledSkill,
   InstalledSnapshot,
+  InstallTargetsSnapshot,
   LoadedState,
   Notice,
   ProbeState,
@@ -41,6 +50,8 @@ import type {
   SavedSnapshot,
   SkillsPageState,
   SkillTreeLeaf,
+  TargetDialog,
+  TargetDialogKind,
   TreeState,
   ViewCache,
 } from './types.ts'
@@ -76,6 +87,19 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   // 正在安装的树 skill（`installKeyOf()` 的组合键）；Host 侧安装与卸载串行，
   // 这里也同一时刻只放一个请求，避免用户连点排出看不到的队列。
   const [installing, setInstalling] = React.useState<string | null>(null)
+  // 「安装到打工人 / 工作区」对话框：打开时才去读目标列表，选中后复用同一条
+  // 安装路由（带 `target`）。目标列表与选择都是纯页面状态，不进 localStorage。
+  const [targetDialog, setTargetDialog] = React.useState<TargetDialog | null>(null)
+  const [targets, setTargets] = React.useState<LoadedState<InstallTargetsSnapshot>>({
+    data: null,
+    error: null,
+    loading: false,
+  })
+  const [targetChoice, setTargetChoice] = React.useState('')
+  const [targetInstalling, setTargetInstalling] = React.useState(false)
+  const [targetError, setTargetError] = React.useState<string | null>(null)
+  // 目标列表请求的序号：连续打开 / 重读时只让最后一次响应落地。
+  const targetRequestRef = React.useRef(0)
   // 收藏仓库的树：哪些卡片展开、各仓库拿到（或正在拿）的树、哪些目录收起来。
   // 按仓库 id 存，删除收藏后由下面的 prune 清掉，避免留下孤儿状态。
   // 初始值来自 localStorage 里的上一份缓存：重开 DSH 后先按上次的样子渲染，
@@ -386,6 +410,107 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
+   * 读一次目标列表；成功后默认选中第一项，让「安装」按钮直接可用。
+   *
+   * @param kind 目标类型
+   */
+  async function loadTargets(kind: TargetDialogKind): Promise<void> {
+    const request = ++targetRequestRef.current
+    setTargets((prev) => ({ data: prev.data, error: null, loading: true }))
+    try {
+      const body = await requestJson<InstallTargetsSnapshot>(TARGETS_ROUTE)
+      if (request !== targetRequestRef.current) return
+      setTargets({ data: body, error: null, loading: false })
+      const first = targetItemsOf(kind, body)[0]
+      setTargetChoice((prev) => (prev === '' ? targetKeyOf(kind, first) : prev))
+    } catch (failure) {
+      if (request !== targetRequestRef.current) return
+      setTargets((prev) => ({ data: prev.data, error: messageOf(failure), loading: false }))
+    }
+  }
+
+  /**
+   * 打开「安装到打工人 / 工作区」对话框。
+   *
+   * @param kind 目标类型
+   * @param repo 一条收藏
+   * @param node Host 返回的 skill 节点
+   */
+  function openTargetDialog(kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf): void {
+    if (installing !== null || targetInstalling) return
+    targetRequestRef.current += 1
+    setTargetDialog({ kind, repo, node })
+    setTargetChoice('')
+    setTargetError(null)
+    setTargets({ data: null, error: null, loading: false })
+    void loadTargets(kind)
+  }
+
+  /** 清空对话框状态；安装成功时也用它，因为此时 `targetInstalling` 还是 true。 */
+  function resetTargetDialog(): void {
+    targetRequestRef.current += 1
+    setTargetDialog(null)
+    setTargetChoice('')
+    setTargetError(null)
+    setTargets({ data: null, error: null, loading: false })
+  }
+
+  /** 关闭对话框；安装中不响应，避免请求回来时状态错位。 */
+  function closeTargetDialog(): void {
+    if (targetInstalling) return
+    resetTargetDialog()
+  }
+
+  /** 重新读取当前对话框的目标列表。 */
+  function reloadTargets(): void {
+    if (targetDialog === null || targetInstalling) return
+    void loadTargets(targetDialog.kind)
+  }
+
+  /**
+   * 把当前 skill 安装到选中的打工人 / 工作区。Host 会把选择换回登记表里的
+   * 可信目录；成功后关掉对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
+   */
+  async function installToTarget(): Promise<void> {
+    if (targetDialog === null || targetInstalling) return
+    const kind = targetDialog.kind
+    const choice = targetChoice
+    if (choice === '') return
+    const chosen = targetItemsOf(kind, targets.data).find(
+      (item) => targetKeyOf(kind, item) === choice,
+    )
+    const label = targetLabelOf(kind, chosen) || choice
+    setTargetInstalling(true)
+    setTargetError(null)
+    try {
+      const body = await requestJson<{ name?: string }>(INSTALL_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({
+          source: targetDialog.repo.source,
+          path: targetDialog.node.path,
+          target: kind,
+          ...(kind === 'worker' ? { worker: choice } : { workspace: choice }),
+        }),
+      })
+      resetTargetDialog()
+      flash(
+        'success',
+        `${t(kind === 'worker' ? 'installedToWorker' : 'installedToWorkspace')} ${
+          body.name ?? targetDialog.node.name
+        } → ${label}`,
+      )
+    } catch (failure) {
+      const text =
+        errorCode(failure) === 'skill-not-found'
+          ? t('installMissing')
+          : `${t('installFailed')} ${messageOf(failure)}`
+      setTargetError(text)
+    } finally {
+      setTargetInstalling(false)
+    }
+  }
+
+  /**
    * 打开「收藏」对话框：清掉上一次的失败提示与残留输入。
    * 收藏文件坏掉时不能写，按钮本身已禁用，这里再兜一次。
    */
@@ -512,6 +637,11 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     installedRepos,
     installedSkillKeys,
     installing,
+    targetDialog,
+    targets,
+    targetChoice,
+    targetInstalling,
+    targetError,
     reload,
     loadTree,
     probeRepo,
@@ -520,6 +650,11 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     uninstall,
     refreshInstalled,
     installSkill,
+    openTargetDialog,
+    closeTargetDialog,
+    setTargetChoice,
+    reloadTargets,
+    installToTarget,
     openSaveDialog,
     closeSaveDialog,
     addRepo,

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka Skills",
-    "description": "Adds a Skills page to the sidebar: Installed lists the skills installed globally for every DSH session and uninstalls each through the right path, while Saved keeps a personal list of npx skills sources. Every saved repository is probed and expanded into a cached skills tree, and any single skill in it installs into the global skills directory with one click.",
+    "description": "Adds a Skills page to the sidebar: Installed lists the skills installed globally for every DSH session and uninstalls each through the right path, while Saved keeps a personal list of npx skills sources. Every saved repository is probed and expanded into a cached skills tree; each skill in it can be installed globally, into an agent, or into a registered workspace, and only the global action is disabled once that skill is installed globally.",
     "detail": "docs/DETAIL.md"
   }
 }

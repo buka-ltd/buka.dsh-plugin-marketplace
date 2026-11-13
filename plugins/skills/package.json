@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-skills",
-  "version": "0.6.0",
-  "description": "在侧边栏管理全局 skills 与常用来源，一键安装、卸载并浏览带缓存的 skills 树。",
+  "version": "0.7.0",
+  "description": "在侧边栏管理全局 skills 与常用来源，一键安装到全局 / 打工人 / 工作区，卸载并浏览带缓存的 skills 树。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

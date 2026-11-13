@@ -56,6 +56,43 @@ export interface SkillTreeLeaf {
   readonly description?: string
 }
 
+/** 「安装到」对话框的类型。 */
+export type TargetDialogKind = 'worker' | 'workspace'
+
+/** Host `GET /buka-skills/targets` 返回的一个打工人。 */
+export interface WorkerInstallTarget {
+  readonly name: string
+  readonly path: string
+  readonly description?: string
+}
+
+/** Host `GET /buka-skills/targets` 返回的一个工作区。 */
+export interface WorkspaceInstallTarget {
+  readonly id?: string
+  readonly title: string
+  readonly path: string
+}
+
+/** 一类安装目标：服务在不在、读取失败的原因、以及条目。 */
+export interface InstallTargetList<T> {
+  readonly available?: boolean
+  readonly error?: string | null
+  readonly items?: T[]
+}
+
+/** 可安装目标快照。 */
+export interface InstallTargetsSnapshot {
+  readonly workers?: InstallTargetList<WorkerInstallTarget>
+  readonly workspaces?: InstallTargetList<WorkspaceInstallTarget>
+}
+
+/** 打开着的「安装到打工人 / 工作区」对话框。 */
+export interface TargetDialog {
+  readonly kind: TargetDialogKind
+  readonly repo: RepoRef
+  readonly node: SkillTreeLeaf
+}
+
 /** 树里的目录节点。 */
 export interface SkillTreeDir {
   readonly type: 'dir'
@@ -173,6 +210,16 @@ export interface SkillsPageState {
   readonly installedSkillKeys: ReadonlySet<string>
   /** 正在安装的树 skill 键。 */
   readonly installing: string | null
+  /** 打开着的「安装到打工人 / 工作区」对话框；`null` 表示没有。 */
+  readonly targetDialog: TargetDialog | null
+  /** 对话框里可选的打工人 / 工作区列表。 */
+  readonly targets: LoadedState<InstallTargetsSnapshot>
+  /** 对话框里选中的目标：打工人名或工作区路径。 */
+  readonly targetChoice: string
+  /** 是否正在把 skill 安装到选中的目标。 */
+  readonly targetInstalling: boolean
+  /** 对话框里的失败提示。 */
+  readonly targetError: string | null
   /** 页面「刷新」。 */
   readonly reload: () => void
   /** 取一个仓库的 skills 树。 */
@@ -189,6 +236,16 @@ export interface SkillsPageState {
   readonly refreshInstalled: () => Promise<void>
   /** 安装树里的一个 skill。 */
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
+  /** 打开「安装到打工人 / 工作区」对话框。 */
+  readonly openTargetDialog: (kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf) => void
+  /** 关闭对话框；安装中不响应。 */
+  readonly closeTargetDialog: () => void
+  /** 选择对话框里的目标。 */
+  readonly setTargetChoice: (value: string) => void
+  /** 重新读取对话框里的目标列表。 */
+  readonly reloadTargets: () => void
+  /** 把当前 skill 安装到选中的目标。 */
+  readonly installToTarget: () => Promise<void>
   /** 打开「收藏」对话框。 */
   readonly openSaveDialog: () => void
   /** 关闭「收藏」对话框。 */

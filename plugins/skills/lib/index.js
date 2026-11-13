@@ -24,13 +24,13 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 *
 * 两个插件的已知差异都保留成显式参数，不在这里悄悄统一：
 *
-* - 工作目录：skills 的全局安装固定在 `agentsHome` 下，robots 每次调用传项目
+* - 工作目录：skills 的全局安装固定在 `agentsHome` 下，workers 每次调用传项目
 *   目录（`cwd` 既可以在工厂里绑定，也可以在调用时覆盖）；
-* - 超时：skills 用默认的 120 s，robots 显式传 180 s；
+* - 超时：skills 用默认的 120 s，workers 显式传 180 s；
 * - 失败信息：找不到 npx 时的完整文案由调用方传入；命令名默认是
-*   `npx skills`，robots 传一个按子命令生成的函数；
+*   `npx skills`，workers 传一个按子命令生成的函数；
 * - 「没跑到子进程」的失败（找不到 npx、spawn 直接抛错）是否带 `output: ''`：
-*   robots 的返回形状要求有，skills 原本没有。
+*   workers 的返回形状要求有，skills 原本没有。
 *
 * 本模块只依赖 Node 内置模块，便于单独测试。
 */
@@ -47,7 +47,7 @@ const CARRIAGE_RETURN = /\r/gu;
 /**
 * 生成调用 `npx skills` 的函数。
 *
-* 参数与 `uninstallGlobalSkill` / robots 安装路由里的 `runNpx` 一致：传入子命令
+* 参数与 `uninstallGlobalSkill` / workers 安装路由里的 `runNpx` 一致：传入子命令
 * 参数，解析为 `{ ok, message?, output? }`；不抛错（工作目录缺失属于调用方
 * 编程错误，会直接抛出）。
 *
@@ -436,7 +436,7 @@ async function readJsonBody(req, res) {
 /**
 * 把任意错误转成可以展示的文本。
 */
-function describeError(error) {
+function describeError$1(error) {
 	if (error instanceof Error) return error.message;
 	return String(error);
 }
@@ -469,6 +469,262 @@ async function readBoundedBody(req) {
 		chunks.push(buffer);
 	}
 	return Buffer.concat(chunks, size).toString("utf8");
+}
+// .build/skills/install-targets.js
+/**
+* 全局之外的安装目标：打工人目录与工作区目录。
+*
+* 收藏页的「安装到打工人 / 安装到工作区」需要两份列表，两份都来自别的插件或
+* 宿主服务，不能由浏览器传路径：
+*
+* - 打工人：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
+*   目录存在的打工人；机器人没有目录，装不了项目级 skill。
+* - 工作区：`ctx.workspaceRegistry`（DSH 自带）的 `list()`，取已注册工作区的
+*   规范路径与标题。
+*
+* 安装时按名字 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
+* 登记表。浏览器传来的字符串永远只当日志里的选择依据，不会被直接拼进
+* `npx skills add` 的工作目录。
+*
+* 两个服务都是可选的：没装 workers 插件或运行在 headless 组合里时，对应列表
+* 标记成 `available: false`，页面给出说明而不是整页失败。
+*
+* @module @buka/dsh-plugin-skills/install-targets
+*/
+/**
+* 把任意错误转成一句话，避免服务抛出的非 Error 值让页面显示 `[object Object]`。
+*
+* @param error 抛出的值
+*/
+function describeError(error) {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+/**
+* 安全地取一个可选服务：`ctx.get()` 在服务未提供时返回 undefined。
+*
+* @param ctx 插件上下文
+* @param name 服务名
+*/
+function optionalService(ctx, name) {
+	try {
+		return ctx.get?.(name) ?? void 0;
+	} catch {
+		return;
+	}
+}
+/**
+* 规范化打工人列表：只要智能体、目录存在、名字与路径都非空的条目。
+*
+* workers 插件的 `list()` 返回 `workers` 数组，字段随版本可能增减；这里按字段
+* 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
+* 确认一次目录）。
+*
+* @param result `bukaWorkers.list()` 的返回值
+*/
+function normalizeWorkers(result) {
+	const workers = result?.workers;
+	if (!Array.isArray(workers)) return [];
+	const byName = /* @__PURE__ */ new Map();
+	for (const value of workers) {
+		if (value === null || typeof value !== "object") continue;
+		const record = value;
+		if (record.driver === "robot" || record.exists === false) continue;
+		const name = typeof record.name === "string" ? record.name.trim() : "";
+		const workerPath = typeof record.path === "string" ? record.path.trim() : "";
+		if (name === "" || workerPath === "" || byName.has(name)) continue;
+		byName.set(name, {
+			name,
+			path: workerPath,
+			description: typeof record.description === "string" ? record.description : ""
+		});
+	}
+	return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+/**
+* 规范化工作区列表：路径非空的都保留，标题缺失时用目录名兜底。
+*
+* @param result `workspaceRegistry.list()` 的返回值
+*/
+function normalizeWorkspaces(result) {
+	if (!Array.isArray(result)) return [];
+	const byPath = /* @__PURE__ */ new Map();
+	for (const value of result) {
+		if (value === null || typeof value !== "object") continue;
+		const record = value;
+		const workspacePath = typeof record.path === "string" ? record.path.trim() : "";
+		if (workspacePath === "" || byPath.has(workspacePath)) continue;
+		const title = typeof record.title === "string" && record.title.trim() !== "" ? record.title.trim() : path.basename(workspacePath);
+		byPath.set(workspacePath, {
+			id: typeof record.id === "string" ? record.id : "",
+			title,
+			path: workspacePath
+		});
+	}
+	return [...byPath.values()].sort((left, right) => left.title.localeCompare(right.title));
+}
+/**
+* 读打工人列表；服务缺失时 `available: false`，读取失败时带上原因。
+*
+* @param ctx 插件上下文
+*/
+async function readWorkers(ctx) {
+	const service = optionalService(ctx, "bukaWorkers");
+	if (service === void 0 || typeof service?.list !== "function") return {
+		available: false,
+		error: null,
+		items: []
+	};
+	try {
+		return {
+			available: true,
+			error: null,
+			items: normalizeWorkers(await service.list())
+		};
+	} catch (error) {
+		return {
+			available: true,
+			error: describeError(error),
+			items: []
+		};
+	}
+}
+/**
+* 读工作区列表；注册表缺失时 `available: false`，读取失败时带上原因。
+*
+* 注册表的 `list()` 是同步的；服务尚未启动时可能抛错，按读取失败处理。
+*
+* @param ctx 插件上下文
+*/
+function readWorkspaces(ctx) {
+	const registry = optionalService(ctx, "workspaceRegistry");
+	if (registry === void 0 || typeof registry?.list !== "function") return {
+		available: false,
+		error: null,
+		items: []
+	};
+	try {
+		return {
+			available: true,
+			error: null,
+			items: normalizeWorkspaces(registry.list())
+		};
+	} catch (error) {
+		return {
+			available: true,
+			error: describeError(error),
+			items: []
+		};
+	}
+}
+/**
+* 收集页面选择框需要的两份目标列表。
+*
+* @param ctx 插件上下文
+*/
+async function listInstallTargets(ctx) {
+	return {
+		workers: await readWorkers(ctx),
+		workspaces: readWorkspaces(ctx)
+	};
+}
+/**
+* 确认目标目录仍然存在，并把解析结果整理成安装流程使用的形状。
+*
+* @param directory 候选目录
+* @param label 展示名（打工人名 / 工作区标题）
+*/
+async function confirmDirectory(directory, label) {
+	let stat;
+	try {
+		stat = await promises.stat(directory);
+	} catch {
+		return {
+			ok: false,
+			code: "missing-target",
+			message: `目标目录不存在：${directory}`
+		};
+	}
+	if (!stat.isDirectory()) return {
+		ok: false,
+		code: "missing-target",
+		message: `目标路径不是目录：${directory}`
+	};
+	return {
+		ok: true,
+		path: directory,
+		label
+	};
+}
+/**
+* 安装时把浏览器选中的目标解析成一个可信目录。
+*
+* - 打工人按名字在 `ctx.bukaWorkers` 的列表里找；
+* - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
+*
+* 找不到、服务缺失或目录已消失都返回稳定的错误码，由路由映射成 HTTP 状态码。
+*
+* @param ctx 插件上下文
+* @param request 浏览器选中的目标
+*/
+async function resolveInstallTarget(ctx, request) {
+	if (request?.target === "worker") {
+		const name = typeof request.worker === "string" ? request.worker.trim() : "";
+		if (name === "") return {
+			ok: false,
+			code: "invalid-target",
+			message: "缺少打工人名称"
+		};
+		const workers = await readWorkers(ctx);
+		if (!workers.available) return {
+			ok: false,
+			code: "workers-unavailable",
+			message: "没有找到打工人插件（@buka/dsh-plugin-workers），无法安装到打工人"
+		};
+		if (workers.error !== null) return {
+			ok: false,
+			code: "workers-unavailable",
+			message: workers.error
+		};
+		const found = workers.items.find((worker) => worker.name === name);
+		if (found === void 0) return {
+			ok: false,
+			code: "unknown-worker",
+			message: `没有找到这个打工人（可能只支持智能体）：${name}`
+		};
+		return confirmDirectory(found.path, found.name);
+	}
+	if (request?.target === "workspace") {
+		const wanted = typeof request.workspace === "string" ? request.workspace.trim() : "";
+		if (wanted === "") return {
+			ok: false,
+			code: "invalid-target",
+			message: "缺少工作区路径"
+		};
+		const workspaces = readWorkspaces(ctx);
+		if (!workspaces.available) return {
+			ok: false,
+			code: "workspaces-unavailable",
+			message: "当前运行环境没有工作区注册表，无法安装到工作区"
+		};
+		if (workspaces.error !== null) return {
+			ok: false,
+			code: "workspaces-unavailable",
+			message: workspaces.error
+		};
+		const found = workspaces.items.find((workspace) => workspace.path === wanted || workspace.id !== "" && workspace.id === wanted);
+		if (found === void 0) return {
+			ok: false,
+			code: "unknown-workspace",
+			message: `没有找到这个工作区（可能已被移除）：${wanted}`
+		};
+		return confirmDirectory(found.path, found.title);
+	}
+	return {
+		ok: false,
+		code: "invalid-target",
+		message: `未知的安装目标：${String(request?.target)}`
+	};
 }
 // .build/skills/frontmatter.js
 /**
@@ -1496,7 +1752,8 @@ async function removeSavedRepo({ homes = resolveHomes(), id } = {}) {
 * 规范副本 `~/.agents/skills`，指定它只写这一处，不碰其它 agent 目录。
 *
 * 新版本 CLI 若改掉了这个 agent 名，`npx skills add` 会以 `Invalid agents` 失败，
-* 调用方会退回不带 agent 的默认命令（见 `installGlobalSkill()`）。
+* 调用方会退回不带 agent 的默认命令（见 `installGlobalSkill()` /
+* `installProjectSkill()`）。
 */
 const INSTALL_AGENT = "universal";
 /**
@@ -1597,6 +1854,44 @@ function isInvalidAgentFailure(result) {
 	return /Invalid agents?:/iu.test(text);
 }
 /**
+* 安装前共用的来源 / 名字校验：全局、打工人、工作区三处都必须过这一关。
+*
+* @param source 仓库来源
+* @param name skill 名
+*/
+function checkSourceAndName(source, name) {
+	if (typeof source !== "string" || source.trim() === "") return {
+		ok: false,
+		result: {
+			ok: false,
+			code: "invalid-source",
+			message: "缺少仓库来源"
+		}
+	};
+	const trimmedSource = source.trim();
+	if (trimmedSource.startsWith("-")) return {
+		ok: false,
+		result: {
+			ok: false,
+			code: "invalid-source",
+			message: `来源不能以 - 开头：${trimmedSource}`
+		}
+	};
+	if (!isInstallableSkillName(name)) return {
+		ok: false,
+		result: {
+			ok: false,
+			code: "invalid-skill-name",
+			message: `这个 skill 的名字不能用于安装：${typeof name === "string" ? name : String(name)}`
+		}
+	};
+	return {
+		ok: true,
+		source: trimmedSource,
+		name
+	};
+}
+/**
 * 把单个 skill 从某个 `npx skills` 来源安装到全局 `~/.agents/skills`。
 *
 * 失败码：
@@ -1611,22 +1906,9 @@ function isInvalidAgentFailure(result) {
 * - `install-incomplete`：命令退出码为 0 但目标目录或 `SKILL.md` 不在。
 */
 async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), source, name, runNpx }) {
-	if (typeof source !== "string" || source.trim() === "") return {
-		ok: false,
-		code: "invalid-source",
-		message: "缺少仓库来源"
-	};
-	const trimmedSource = source.trim();
-	if (trimmedSource.startsWith("-")) return {
-		ok: false,
-		code: "invalid-source",
-		message: `来源不能以 - 开头：${trimmedSource}`
-	};
-	if (!isInstallableSkillName(name)) return {
-		ok: false,
-		code: "invalid-skill-name",
-		message: `这个 skill 的名字不能用于安装：${typeof name === "string" ? name : String(name)}`
-	};
+	const checked = checkSourceAndName(source, name);
+	if (!checked.ok) return checked.result;
+	const { source: trimmedSource, name: skillName } = checked;
 	if (typeof runNpx !== "function") return {
 		ok: false,
 		code: "no-runner",
@@ -1637,8 +1919,7 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 		code: "unsupported-home",
 		message: `npx skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, "skills")}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, "skills")}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`
 	};
-	const id = skillDirName(name);
-	const skillName = name;
+	const id = skillDirName(skillName);
 	const existing = await findInstalledElsewhere(homes, id, skillName);
 	if (existing.status === "failed") return {
 		ok: false,
@@ -1694,19 +1975,130 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 		ok: true,
 		id,
 		name: skillName,
+		target: "global",
 		scope: "agents",
 		path: target,
 		output: result.output ?? ""
 	};
 }
 /**
-* 页面「安装」按钮的完整流程：校验来源是收藏、skill 在仓库列表里，再交给
-* `installGlobalSkill()` 执行。
+* 把单个 skill 从某个 `npx skills` 来源安装到打工人或工作区目录。
+*
+* 目标目录由调用方（`install-targets.ts`）从 Host 的登记表解析，浏览器不能
+* 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个打工人 /
+* 工作区是正常操作，重复执行交给 `npx skills` 自己处理。
+*
+* 打工人目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
+* （`-a universal -a claude-code`）；工作区只写 DSH 会扫描的 `.agents/skills`，
+* 不碰用户其它 agent 目录。
+*
+* 失败码在全局安装的基础上增加：
+*
+* - `invalid-target`：目标目录为空；
+* - `missing-target`：目标目录不存在或不是目录；
+* - `no-target`：调用方没给目标目录；
+* - `npx-failed` / `install-incomplete`：与全局安装相同。
+*/
+async function installProjectSkill({ targetDir, target = "workspace", source, name, runNpx }) {
+	const checked = checkSourceAndName(source, name);
+	if (!checked.ok) return checked.result;
+	const { source: trimmedSource, name: skillName } = checked;
+	if (typeof runNpx !== "function") return {
+		ok: false,
+		code: "no-runner",
+		message: "缺少执行 npx 的能力"
+	};
+	if (typeof targetDir !== "string" || targetDir.trim() === "") return {
+		ok: false,
+		code: "no-target",
+		message: "缺少安装目标目录"
+	};
+	const directory = targetDir.trim();
+	let stat;
+	try {
+		stat = await promises.stat(directory);
+	} catch {
+		return {
+			ok: false,
+			code: "missing-target",
+			message: `目标目录不存在：${directory}`
+		};
+	}
+	if (!stat.isDirectory()) return {
+		ok: false,
+		code: "missing-target",
+		message: `目标路径不是目录：${directory}`
+	};
+	const agents = target === "worker" ? ["universal", "claude-code"] : ["universal"];
+	const args = [
+		"add",
+		trimmedSource,
+		"--skill",
+		skillName
+	];
+	for (const agent of agents) args.push("-a", agent);
+	args.push("-y");
+	let result;
+	try {
+		result = await runNpx(args, directory);
+		if (!result?.ok && isInvalidAgentFailure(result)) result = await runNpx([
+			"add",
+			trimmedSource,
+			"--skill",
+			skillName,
+			"-y"
+		], directory);
+	} catch (error) {
+		return {
+			ok: false,
+			code: "npx-failed",
+			message: errorText$3(error)
+		};
+	}
+	if (!result?.ok) return {
+		ok: false,
+		code: "npx-failed",
+		message: result?.message ?? "npx skills add 失败",
+		output: result?.output ?? ""
+	};
+	const id = skillDirName(skillName);
+	const targetPath = path.join(directory, AGENTS_DIR, "skills", id);
+	if (!await pathExists(path.join(targetPath, "SKILL.md"))) return {
+		ok: false,
+		code: "install-incomplete",
+		message: `npx skills add 已退出，但没有在 ${targetPath} 找到 SKILL.md`,
+		output: result.output ?? ""
+	};
+	return {
+		ok: true,
+		id,
+		name: skillName,
+		target,
+		path: targetPath,
+		output: result.output ?? ""
+	};
+}
+/**
+* 页面「安装」按钮的完整流程：校验来源是收藏、skill 在仓库列表里，再按
+* `target` 交给全局安装或某个打工人 / 工作区的项目级安装。
 *
 * 浏览器只传来源与 skill 的仓库路径：名字、是否真的存在都以 Host 这次读到的
-* 仓库列表为准，避免页面缓存过期或请求被伪造时装错东西。
+* 仓库列表为准；打工人 / 工作区也只传页面选中的名字或路径，真正的工作目录由
+* `resolveTarget()` 从 Host 的登记表解析，避免页面缓存过期或请求被伪造时装错
+* 位置。
 */
-async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPath, name, runNpx }) {
+async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPath, name, target = "global", worker, workspace, resolveTarget, runNpx }) {
+	if (target !== "global" && target !== "worker" && target !== "workspace") return {
+		ok: false,
+		code: "invalid-target",
+		message: `未知的安装目标：${String(target)}`
+	};
+	const resolver = typeof resolveTarget === "function" ? resolveTarget : null;
+	if (target !== "global" && resolver === null) return {
+		ok: false,
+		code: "no-target-resolver",
+		message: "缺少解析安装目标的能力"
+	};
 	const normalized = normalizeRepoSource(source);
 	if (normalized === null) return {
 		ok: false,
@@ -1739,6 +2131,20 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 		code: "no-catalog",
 		message: "缺少读取仓库的能力"
 	};
+	let targetDir = null;
+	if (target !== "global") {
+		const resolved = await resolver({
+			target,
+			worker,
+			workspace
+		});
+		if (!resolved.ok) return {
+			ok: false,
+			code: resolved.code,
+			message: resolved.message
+		};
+		targetDir = resolved.path;
+	}
 	let listed;
 	try {
 		listed = await catalog.listSkills({ source: repo.source });
@@ -1763,9 +2169,24 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 		code: "skill-not-found",
 		message: "仓库列表里没有这个 skill，仓库可能已经更新，请刷新后再试"
 	};
-	const installed = await installGlobalSkill({
-		homes,
-		canonicalAgentsHome,
+	if (target === "global") {
+		const installed = await installGlobalSkill({
+			homes,
+			canonicalAgentsHome,
+			source: repo.source,
+			name: match.name,
+			runNpx
+		});
+		if (!installed.ok) return installed;
+		return {
+			...installed,
+			repo: repo.source,
+			plugin: match.plugin ?? null
+		};
+	}
+	const installed = await installProjectSkill({
+		targetDir: targetDir ?? "",
+		target,
 		source: repo.source,
 		name: match.name,
 		runNpx
@@ -1781,11 +2202,14 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 /**
 * 给浏览器一半的侧边栏「Skills」页面用的包内 HTTP 路由。
 *
-* 六个路由：
+* 七个路由：
 *
 * - `GET /buka-skills/list` 列出全局 skills；
 * - `POST /buka-skills/uninstall` 卸载一个；
-* - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局；
+* - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
+*   （`ctx.workspaceRegistry`）；
+* - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局、
+*   某个打工人目录或某个工作区目录；
 * - `GET /buka-skills/repos` 列出用户收藏的仓库，
 * - `POST /buka-skills/repos` 收藏一个，
 * - `POST /buka-skills/repos/remove` 移除一个，
@@ -1801,7 +2225,9 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 const LIST_ROUTE = "/buka-skills/list";
 /** 页面卸载 skill 用的路由。 */
 const UNINSTALL_ROUTE = "/buka-skills/uninstall";
-/** 页面把收藏仓库里的一个 skill 安装到全局用的路由。 */
+/** 页面读取可安装目标（打工人 / 工作区）用的路由。 */
+const TARGETS_ROUTE = "/buka-skills/targets";
+/** 页面把收藏仓库里的一个 skill 安装到全局 / 打工人 / 工作区用的路由。 */
 const INSTALL_ROUTE = "/buka-skills/install";
 /** 收藏仓库的列表 / 添加路由。 */
 const REPOS_ROUTE = "/buka-skills/repos";
@@ -1848,7 +2274,7 @@ function registerRoutes(ctx, deps) {
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
@@ -1877,11 +2303,33 @@ function registerRoutes(ctx, deps) {
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
 		}), `buka-skills: POST ${UNINSTALL_ROUTE}`);
+		webCtx.effect(() => webCtx.webServer.register({
+			kind: "exact",
+			path: TARGETS_ROUTE,
+			handler: async (req, res) => {
+				if (rejected(req, res)) return;
+				if (req.method !== "GET") {
+					sendMethodNotAllowed(res, "GET");
+					return;
+				}
+				try {
+					sendJson(res, 200, {
+						ok: true,
+						...await listInstallTargets(webCtx)
+					});
+				} catch (error) {
+					sendJson(res, 500, {
+						ok: false,
+						message: describeError$1(error)
+					});
+				}
+			}
+		}), `buka-skills: GET ${TARGETS_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: INSTALL_ROUTE,
@@ -1900,14 +2348,18 @@ function registerRoutes(ctx, deps) {
 						catalog,
 						source: fields?.source,
 						skillPath: fields?.path,
+						target: fields?.target,
+						worker: fields?.worker,
+						workspace: fields?.workspace,
+						resolveTarget: (request) => resolveInstallTarget(webCtx, request),
 						runNpx
 					}));
-					if (result.ok) webCtx.logger?.info?.("buka-skills: 已安装 %s（%s）", String(result.name), String(result.repo));
+					if (result.ok) webCtx.logger?.info?.("buka-skills: 已安装 %s（%s，%s）", String(result.name), String(result.repo), result.target ?? "global");
 					sendJson(res, result.ok ? 200 : installStatusFor(result.code), result);
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
@@ -1932,7 +2384,7 @@ function registerRoutes(ctx, deps) {
 					} catch (error) {
 						sendJson(res, 500, {
 							ok: false,
-							message: describeError(error)
+							message: describeError$1(error)
 						});
 					}
 					return;
@@ -1955,7 +2407,7 @@ function registerRoutes(ctx, deps) {
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
@@ -1982,7 +2434,7 @@ function registerRoutes(ctx, deps) {
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
@@ -2012,7 +2464,7 @@ function registerRoutes(ctx, deps) {
 				} catch (error) {
 					sendJson(res, 500, {
 						ok: false,
-						message: describeError(error)
+						message: describeError$1(error)
 					});
 				}
 			}
@@ -2033,19 +2485,21 @@ function statusFor(code) {
 /**
 * 安装操作的失败码 → HTTP 状态码。
 *
-* `not-saved` / `invalid-source` / `invalid-skill-name` / `unsupported-source` 是
-* 请求本身的问题（400）；`skill-not-found` 与仓库不存在是 404；
-* `already-installed` / `store-unreadable` 是当前状态不允许这次写入（409）；
-* 仓库不可用 422；限流 429；`unsupported-home` 与 `git-unavailable` 是本机环境
-* 问题（500）；其余（`npx-failed`、`fetch-failed`、`git-failed` 等上游失败）
-* 按 502 处理。
+* `not-saved` / `invalid-source` / `invalid-skill-name` / `invalid-target` /
+* `invalid-worker` / `invalid-workspace` 是请求本身的问题（400）；
+* `skill-not-found`、仓库不存在、`unknown-worker` / `unknown-workspace` 是 404；
+* `already-installed` / `store-unreadable` / `missing-target` /
+* `workers-unavailable` / `workspaces-unavailable` / `no-target-resolver` 是当前
+* 状态不允许这次写入（409）；仓库不可用 422；限流 429；`unsupported-home` 与
+* `git-unavailable` 是本机环境问题（500）；其余（`npx-failed`、`fetch-failed`、
+* `git-failed`、`install-incomplete` 等上游失败）按 502 处理。
 *
 * @param code skill-install 返回的错误码
 */
 function installStatusFor(code) {
-	if (code === "invalid-source" || code === "invalid-skill-name" || code === "not-saved" || code === "unsupported-source") return 400;
-	if (code === "skill-not-found" || code === "repo-not-found" || code === "not-found") return 404;
-	if (code === "already-installed" || code === "store-unreadable") return 409;
+	if (code === "invalid-source" || code === "invalid-skill-name" || code === "not-saved" || code === "unsupported-source" || code === "invalid-target" || code === "invalid-worker" || code === "invalid-workspace") return 400;
+	if (code === "skill-not-found" || code === "repo-not-found" || code === "not-found" || code === "unknown-worker" || code === "unknown-workspace") return 404;
+	if (code === "already-installed" || code === "store-unreadable" || code === "missing-target" || code === "workers-unavailable" || code === "workspaces-unavailable" || code === "no-target-resolver") return 409;
 	if (code === "repo-unavailable") return 422;
 	if (code === "rate-limited") return 429;
 	if (code === "unsupported-home" || code === "git-unavailable") return 500;
@@ -4322,7 +4776,7 @@ async function readSnapshot(ctx, homes) {
 	try {
 		summaries = await ctx.skills.list({ cwd: homes.agentsHome });
 	} catch (error) {
-		ctx.logger?.warn?.("buka-skills: 无法读取 skills 注册表：%s", describeError(error));
+		ctx.logger?.warn?.("buka-skills: 无法读取 skills 注册表：%s", describeError$1(error));
 	}
 	return collectGlobalSkills({
 		homes,
@@ -4428,7 +4882,9 @@ function registerTools(ctx, deps) {
 *
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
 *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
-*   `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局；
+*   `GET /buka-skills/targets` 列出可安装的打工人（可选的 `ctx.bukaWorkers`）与
+*   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
+*   里的一个 skill 安装到全局、某个打工人目录或某个工作区目录；
 *   `GET /buka-skills/repos` 列出用户收藏的仓库，
 *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
 *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
@@ -4468,6 +4924,7 @@ function apply(ctx) {
 	const homes = resolveHomes();
 	const runNpx = createNpxRunner({
 		cwd: homes.agentsHome,
+		timeoutMs: 18e4,
 		missingMessage: `没有找到 npx。请先安装 Node.js（含 npm），或手动管理 ${path.join(homes.agentsHome, "skills")} 下的 skill。`
 	});
 	const catalog = new SkillsCatalogService({ homes });

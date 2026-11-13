@@ -1,9 +1,10 @@
 /**
  * 收藏卡片展开后的树：加载中 / 失败可重试 / 空 / 递归树。
  *
- * 树的状态来自页面（`trees`、`collapsedDirs`、`installing` 与已安装键集合），
- * 这里只负责渲染与把点击转回页面动作，因此用 `createTreeRenderer()` 把这份
- * 状态绑成 `renderTree` / `renderTreeNode` 两个函数，供「收藏」面板复用。
+ * 树的状态来自页面（`trees`、`collapsedDirs`、`installing`、目标安装状态与
+ * 已安装键集合），这里只负责渲染与把点击转回页面动作，因此用
+ * `createTreeRenderer()` 把这份状态绑成 `renderTree` / `renderTreeNode` 两个
+ * 函数，供「收藏」面板复用。
  *
  * @module @buka/dsh-plugin-skills/client/components/tree
  */
@@ -21,7 +22,13 @@ import {
   IconDownloadOutlineRegular,
   StateDot,
 } from '../primitives.ts'
-import type { RepoRef, SkillTreeChild, SkillTreeLeaf, TreeState } from '../types.ts'
+import type {
+  RepoRef,
+  SkillTreeChild,
+  SkillTreeLeaf,
+  TargetDialogKind,
+  TreeState,
+} from '../types.ts'
 
 /**
  * tree 加载失败时的展示文本；已知错误码说清楚原因，其余带 Host 诊断。
@@ -62,12 +69,16 @@ export interface TreeRendererState {
   readonly installedSkillKeys: ReadonlySet<string>
   /** 正在安装的树 skill（`installKeyOf()` 的组合键）。 */
   readonly installing: string | null
+  /** 是否正在把 skill 安装到打工人 / 工作区。 */
+  readonly targetInstalling: boolean
   /** 取一个仓库的 skills 树。 */
   readonly loadTree: (repo: RepoRef, options?: { refresh?: boolean }) => Promise<void>
   /** 收起 / 展开树里的一个目录。 */
   readonly toggleDir: (repo: RepoRef, dirPath: string) => void
-  /** 安装树里的一个 skill。 */
+  /** 安装树里的一个 skill 到全局。 */
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
+  /** 打开「安装到打工人 / 工作区」对话框。 */
+  readonly openTargetDialog: (kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf) => void
 }
 
 /** 绑定好状态的树渲染函数。 */
@@ -90,9 +101,11 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
     collapsedDirs,
     installedSkillKeys,
     installing,
+    targetInstalling,
     loadTree,
     toggleDir,
     installSkill,
+    openTargetDialog,
   } = props
 
   /**
@@ -146,13 +159,16 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
   }
 
   /**
-   * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 安装入口）。
+   * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 三个安装入口）。
    *
-   * skill 叶子右侧根据状态显示「安装」按钮 / 「安装中…」/ 禁用的「已安装」按钮：
-   * 已安装的判断只看全局安装列表（名字按 npx 的 sanitize 规则归一），
-   * 不依赖仓库来源，所以同一个 skill 从别的仓库装过也不给重复安装按钮。
-   * 已安装用禁用按钮而不是 `Tag`：它和其它行的安装按钮占同一个操作位，
-   * 按钮外形让「这里本来能点、只是已装过」一眼可见。
+   * skill 叶子右侧固定三个按钮：「全局安装」「安装到打工人」「安装到工作区」。
+   * 只有全局安装会在已安装时变成禁用的「全局已安装」：它的判断只看全局安装
+   * 列表（名字按 npx 的 sanitize 规则归一），不依赖仓库来源，所以同一个 skill
+   * 从别的仓库装过也不给重复安装按钮；打工人 / 工作区是每次临时选的目标，
+   * 不做已安装判断。
+   *
+   * 全局按钮正在安装时显示「安装中…」并占据同一个操作位；三个入口都要等
+   * Host 侧串行队列空出来，所以任何安装进行中时三个按钮统一禁用。
    *
    * @param repo 一条收藏
    * @param node Host 返回的树节点
@@ -213,9 +229,9 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
                   size: 'sm',
                   disabled: true,
                   icon: h(IconCheckOutlineRegular, { size: 13 }),
-                  'aria-label': `${t('installedBadge')} ${node.name}`,
+                  'aria-label': `${t('installedBadgeGlobal')} ${node.name}`,
                 },
-                t('installedBadge'),
+                t('installedBadgeGlobal'),
               )
             : busy
               ? h(
@@ -230,12 +246,34 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
                     variant: 'outline',
                     size: 'sm',
                     icon: h(IconDownloadOutlineRegular, { size: 13 }),
-                    'aria-label': `${t('install')} ${node.name}`,
-                    disabled: installing !== null,
+                    'aria-label': `${t('installGlobal')} ${node.name}`,
+                    disabled: installing !== null || targetInstalling,
                     onClick: () => installSkill(repo, node),
                   },
-                  t('install'),
+                  t('installGlobal'),
                 ),
+          h(
+            Button,
+            {
+              variant: 'outline',
+              size: 'sm',
+              'aria-label': `${t('installWorker')} ${node.name}`,
+              disabled: installing !== null || targetInstalling,
+              onClick: () => openTargetDialog('worker', repo, node),
+            },
+            t('installWorker'),
+          ),
+          h(
+            Button,
+            {
+              variant: 'outline',
+              size: 'sm',
+              'aria-label': `${t('installWorkspace')} ${node.name}`,
+              disabled: installing !== null || targetInstalling,
+              onClick: () => openTargetDialog('workspace', repo, node),
+            },
+            t('installWorkspace'),
+          ),
         ),
       ),
     )

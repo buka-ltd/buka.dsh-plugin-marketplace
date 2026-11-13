@@ -1,11 +1,14 @@
 /**
  * 给浏览器一半的侧边栏「Skills」页面用的包内 HTTP 路由。
  *
- * 六个路由：
+ * 七个路由：
  *
  * - `GET /buka-skills/list` 列出全局 skills；
  * - `POST /buka-skills/uninstall` 卸载一个；
- * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局；
+ * - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
+ *   （`ctx.workspaceRegistry`）；
+ * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局、
+ *   某个打工人目录或某个工作区目录；
  * - `GET /buka-skills/repos` 列出用户收藏的仓库，
  * - `POST /buka-skills/repos` 收藏一个，
  * - `POST /buka-skills/repos/remove` 移除一个，
@@ -23,6 +26,7 @@ import type { NpxRunner } from '@buka/plugin-kit'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { describeError, parseQuery, readJsonBody, sendJson, sendMethodNotAllowed } from './http.ts'
+import { listInstallTargets, resolveInstallTarget } from './install-targets.ts'
 import { addSavedRepo, listSavedRepos, removeSavedRepo } from './repo-store.ts'
 import type { SkillsCatalogService } from './service.ts'
 import { installSavedSkill } from './skill-install.ts'
@@ -35,7 +39,10 @@ const LIST_ROUTE = '/buka-skills/list'
 /** 页面卸载 skill 用的路由。 */
 const UNINSTALL_ROUTE = '/buka-skills/uninstall'
 
-/** 页面把收藏仓库里的一个 skill 安装到全局用的路由。 */
+/** 页面读取可安装目标（打工人 / 工作区）用的路由。 */
+const TARGETS_ROUTE = '/buka-skills/targets'
+
+/** 页面把收藏仓库里的一个 skill 安装到全局 / 打工人 / 工作区用的路由。 */
 const INSTALL_ROUTE = '/buka-skills/install'
 
 /** 收藏仓库的列表 / 添加路由。 */
@@ -54,6 +61,9 @@ interface RequestBody {
   source?: unknown
   note?: unknown
   path?: unknown
+  target?: unknown
+  worker?: unknown
+  workspace?: unknown
 }
 
 /** 路由需要的共享依赖：都由入口装配好后传进来。 */
@@ -157,10 +167,38 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       `buka-skills: POST ${UNINSTALL_ROUTE}`,
     )
 
+    // ---- 可安装目标：打工人 / 工作区 ---------------------------------------
+    // 两份列表都来自 Host 的登记表（可选的 `bukaWorkers` 服务与 DSH 的
+    // `workspaceRegistry`），浏览器只拿到名字 / 标题 / 路径，安装时再把选中的
+    // 字符串换回可信目录。
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: TARGETS_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'GET') {
+              sendMethodNotAllowed(res, 'GET')
+              return
+            }
+            try {
+              const targets = await listInstallTargets(webCtx)
+              sendJson(res, 200, { ok: true, ...targets })
+            } catch (error) {
+              sendJson(res, 500, { ok: false, message: describeError(error) })
+            }
+          },
+        }),
+      `buka-skills: GET ${TARGETS_ROUTE}`,
+    )
+
     // ---- 从收藏列表一键安装 ------------------------------------------------
     // 只接受收藏过的来源；skill 是否存在、叫什么以 Host 这次读到的仓库列表
-    // 为准（浏览器只传仓库路径）。安装与卸载共用串行队列，避免两者同时改写
-    // npx skills 的 lockfile。
+    // 为准（浏览器只传仓库路径）。安装目标默认全局；打工人 / 工作区由
+    // `resolveInstallTarget()` 从登记表解析成目录。三类安装与卸载共用串行队列，
+    // 避免同时改写 npx skills 的 lockfile。
 
     webCtx.effect(
       () =>
@@ -183,14 +221,19 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
                   catalog,
                   source: fields?.source,
                   skillPath: fields?.path,
+                  target: fields?.target,
+                  worker: fields?.worker,
+                  workspace: fields?.workspace,
+                  resolveTarget: (request) => resolveInstallTarget(webCtx, request),
                   runNpx,
                 }),
               )
               if (result.ok) {
                 webCtx.logger?.info?.(
-                  'buka-skills: 已安装 %s（%s）',
+                  'buka-skills: 已安装 %s（%s，%s）',
                   String(result.name),
                   String(result.repo),
+                  result.target ?? 'global',
                 )
               }
               sendJson(res, result.ok ? 200 : installStatusFor(result.code), result)
@@ -329,12 +372,14 @@ function statusFor(code: string | undefined): number {
 /**
  * 安装操作的失败码 → HTTP 状态码。
  *
- * `not-saved` / `invalid-source` / `invalid-skill-name` / `unsupported-source` 是
- * 请求本身的问题（400）；`skill-not-found` 与仓库不存在是 404；
- * `already-installed` / `store-unreadable` 是当前状态不允许这次写入（409）；
- * 仓库不可用 422；限流 429；`unsupported-home` 与 `git-unavailable` 是本机环境
- * 问题（500）；其余（`npx-failed`、`fetch-failed`、`git-failed` 等上游失败）
- * 按 502 处理。
+ * `not-saved` / `invalid-source` / `invalid-skill-name` / `invalid-target` /
+ * `invalid-worker` / `invalid-workspace` 是请求本身的问题（400）；
+ * `skill-not-found`、仓库不存在、`unknown-worker` / `unknown-workspace` 是 404；
+ * `already-installed` / `store-unreadable` / `missing-target` /
+ * `workers-unavailable` / `workspaces-unavailable` / `no-target-resolver` 是当前
+ * 状态不允许这次写入（409）；仓库不可用 422；限流 429；`unsupported-home` 与
+ * `git-unavailable` 是本机环境问题（500）；其余（`npx-failed`、`fetch-failed`、
+ * `git-failed`、`install-incomplete` 等上游失败）按 502 处理。
  *
  * @param code skill-install 返回的错误码
  */
@@ -343,12 +388,32 @@ function installStatusFor(code: string | undefined): number {
     code === 'invalid-source' ||
     code === 'invalid-skill-name' ||
     code === 'not-saved' ||
-    code === 'unsupported-source'
+    code === 'unsupported-source' ||
+    code === 'invalid-target' ||
+    code === 'invalid-worker' ||
+    code === 'invalid-workspace'
   ) {
     return 400
   }
-  if (code === 'skill-not-found' || code === 'repo-not-found' || code === 'not-found') return 404
-  if (code === 'already-installed' || code === 'store-unreadable') return 409
+  if (
+    code === 'skill-not-found' ||
+    code === 'repo-not-found' ||
+    code === 'not-found' ||
+    code === 'unknown-worker' ||
+    code === 'unknown-workspace'
+  ) {
+    return 404
+  }
+  if (
+    code === 'already-installed' ||
+    code === 'store-unreadable' ||
+    code === 'missing-target' ||
+    code === 'workers-unavailable' ||
+    code === 'workspaces-unavailable' ||
+    code === 'no-target-resolver'
+  ) {
+    return 409
+  }
   if (code === 'repo-unavailable') return 422
   if (code === 'rate-limited') return 429
   if (code === 'unsupported-home' || code === 'git-unavailable') return 500
