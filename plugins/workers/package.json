@@ -1,0 +1,43 @@
+{
+  "name": "@buka/dsh-plugin-workers",
+  "version": "1.0.0",
+  "description": "在侧边栏管理打工人：智能体 / 机器人两种驱动、助理标记、项目 skills 与 AGENTS.md；自动迁移旧 robots 插件的数据。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.20",
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

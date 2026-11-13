@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "../../.build/workers",
+    "tsBuildInfoFile": "../../.build/workers.tsbuildinfo"
+  },
+  "include": ["src", "../../types"]
+}

@@ -109,13 +109,13 @@ importers:
         specifier: ~3.18.5
         version: 3.18.5
 
-  plugins/robots:
+  plugins/skills: {}
+
+  plugins/workers:
     dependencies:
       '@deepseek-ai/schemastery':
         specifier: ~3.18.5
         version: 3.18.5
-
-  plugins/skills: {}
 
   plugins/workflows:
     dependencies:

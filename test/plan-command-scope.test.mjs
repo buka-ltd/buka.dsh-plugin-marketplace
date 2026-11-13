@@ -1,6 +1,6 @@
 /**
  * DSH 的 `commands` 服务按 agent 作用域解析命令：挂载在某个会话上下文之下的
- * 命令只对该 agent 可见。robots 的 plan 模式入口依赖这条语义——它无法读取
+ * 命令只对该 agent 可见。workers 的 plan 模式入口依赖这条语义——它无法读取
  * 被 `isolate` 在会话 preset 内的 `planMode` 服务，只能对目标 agent 执行
  * `/plan`。
  *

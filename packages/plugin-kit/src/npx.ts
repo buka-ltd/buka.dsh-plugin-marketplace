@@ -16,13 +16,13 @@
  *
  * 两个插件的已知差异都保留成显式参数，不在这里悄悄统一：
  *
- * - 工作目录：skills 的全局安装固定在 `agentsHome` 下，robots 每次调用传项目
+ * - 工作目录：skills 的全局安装固定在 `agentsHome` 下，workers 每次调用传项目
  *   目录（`cwd` 既可以在工厂里绑定，也可以在调用时覆盖）；
- * - 超时：skills 用默认的 120 s，robots 显式传 180 s；
+ * - 超时：skills 用默认的 120 s，workers 显式传 180 s；
  * - 失败信息：找不到 npx 时的完整文案由调用方传入；命令名默认是
- *   `npx skills`，robots 传一个按子命令生成的函数；
+ *   `npx skills`，workers 传一个按子命令生成的函数；
  * - 「没跑到子进程」的失败（找不到 npx、spawn 直接抛错）是否带 `output: ''`：
- *   robots 的返回形状要求有，skills 原本没有。
+ *   workers 的返回形状要求有，skills 原本没有。
  *
  * 本模块只依赖 Node 内置模块，便于单独测试。
  */
@@ -69,7 +69,7 @@ export interface NpxCommand {
 export interface NpxRunnerOptions {
   /**
    * 默认工作目录：`npx skills` 在这里写 lockfile、安装 skill。
-   * 调用时传的 `cwd` 优先（robots 按工作区传）。
+   * 调用时传的 `cwd` 优先（workers 按工作区传）。
    */
   readonly cwd?: string
   /** 子进程环境；默认 `process.env`。 */
@@ -80,7 +80,7 @@ export interface NpxRunnerOptions {
   readonly maxOutputBytes?: number
   /**
    * 失败信息里指代这条命令的名称；默认 `npx skills`。
-   * 传函数时按每次调用的参数生成（robots 用 `npx skills add` 这种带子命令的形式）。
+   * 传函数时按每次调用的参数生成（workers 用 `npx skills add` 这种带子命令的形式）。
    */
   readonly label?: string | ((args: string[]) => string)
   /**
@@ -89,7 +89,7 @@ export interface NpxRunnerOptions {
   readonly missingMessage: string
   /**
    * 「没跑到子进程」的失败（找不到 npx、spawn 直接抛错）是否带 `output: ''`。
-   * robots 的返回形状要求有；skills 原本没有。
+   * workers 的返回形状要求有；skills 原本没有。
    */
   readonly emptyOutputOnSetupFailure?: boolean
 }
@@ -110,7 +110,7 @@ const CARRIAGE_RETURN = /\r/gu
 /**
  * 生成调用 `npx skills` 的函数。
  *
- * 参数与 `uninstallGlobalSkill` / robots 安装路由里的 `runNpx` 一致：传入子命令
+ * 参数与 `uninstallGlobalSkill` / workers 安装路由里的 `runNpx` 一致：传入子命令
  * 参数，解析为 `{ ok, message?, output? }`；不抛错（工作目录缺失属于调用方
  * 编程错误，会直接抛出）。
  *

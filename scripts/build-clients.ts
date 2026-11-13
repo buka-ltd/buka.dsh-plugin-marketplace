@@ -12,7 +12,7 @@
  *
  * 用法：
  *   node scripts/build-clients.ts            # 构建全部插件
- *   node scripts/build-clients.ts bell robots  # 只构建指定插件
+ *   node scripts/build-clients.ts bell workers  # 只构建指定插件
  */
 
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'

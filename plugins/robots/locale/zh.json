@@ -1,7 +1,0 @@
-{
-  "meta": {
-    "title": "Buka 机器人",
-    "description": "在侧边栏管理机器人：agent 型机器人有自己的目录、AGENTS.md 与项目 skills，program 型是固定程序（v1 内建 clock）；带 assistant 标记的机器人可以替人任务做沟通。登记表升级为 version 2（driver / assistant），并删除会话压缩与结果追问。",
-    "detail": "docs/DETAIL.zh.md"
-  }
-}

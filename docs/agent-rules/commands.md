@@ -67,7 +67,7 @@ test -z "$(git ls-files --others --exclude-standard -- 'plugins/*/lib')"
 pnpm run build --out /tmp/market
 pnpm run build --source-url https://github.com/buka-ltd/buka.dsh-plugin-marketplace
 pnpm run serve --port 4180 --host 127.0.0.1 --dir dist
-pnpm run build:clients bell robots        # 只构建指定插件
+pnpm run build:clients bell workers        # 只构建指定插件
 ```
 
 - `--source-url` 一般不用给：默认取 `origin` 并归一成 https（`git@` / `ssh://` 都认）。

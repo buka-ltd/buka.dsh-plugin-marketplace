@@ -31,9 +31,9 @@ window.__ModuleLoader__.load({
     /**
     * 预设头像：id → emoji / 底色 / 词典 key。
     *
-    * 机器人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
+    * 打工人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
     * 所以统一收在这里，两个浏览器一半都从这里派生。id 与 Host 的
-    * `plugins/robots/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
+    * `plugins/workers/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
     * **id 是跨插件的稳定契约**：增删预设时两边一起改，顺序也不要动。
     *
     * @module plugin-ui/avatars
@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
     * 创建 React 元素的小包装。
     *
     * 页面直接手写 `createElement`（不用 JSX）。短名保持 `React.createElement` 的
-    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：机器人 / 技能
+    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：打工人 / 技能
     * 页有些 props 是自带的宽对象或带 `data-*` 的元素属性，类型系统不必逐个展开。
     *
     * @module plugin-ui/h

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Buka 打工人",
+    "description": "在侧边栏管理打工人：智能体有自己的目录、AGENTS.md 与项目 skills，机器人是固定程序（v1 内建 clock）；带 assistant 标记的智能体可以替人任务做沟通；每个智能体还可以配置新会话使用的模型。登记表为 version 3（driver / assistant），旧 robots 插件的数据会自动迁移；已删除会话压缩与结果追问。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

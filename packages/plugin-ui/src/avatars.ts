@@ -1,9 +1,9 @@
 /**
  * 预设头像：id → emoji / 底色 / 词典 key。
  *
- * 机器人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
+ * 打工人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
  * 所以统一收在这里，两个浏览器一半都从这里派生。id 与 Host 的
- * `plugins/robots/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
+ * `plugins/workers/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
  * **id 是跨插件的稳定契约**：增删预设时两边一起改，顺序也不要动。
  *
  * @module plugin-ui/avatars
@@ -57,7 +57,7 @@ export const DEFAULT_AVATAR_ID: string = AVATARS[0].id
 /**
  * 头像 id → 预设；不认识的 id 返回 `undefined`。
  *
- * 两个浏览器一半的兜底不同：机器人页退回第一个预设，节点图当作没有头像，
+ * 两个浏览器一半的兜底不同：打工人页退回第一个预设，节点图当作没有头像，
  * 所以这里只做查表，兜底留在各自的 `avatarPreset` 里。
  *
  * @param id 头像 id

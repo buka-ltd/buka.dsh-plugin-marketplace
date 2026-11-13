@@ -161,7 +161,7 @@ window.__ModuleLoader__.load({
 - `id` 在整个 composition 里唯一，建议用 `<用途>-<插件>`；插件入口的 `name` 与它保持一致，便于在 `--dump-config` 输出里检索。
 - `name` 必须是包名，由 profile 的依赖解析；不要写相对路径或 `link:`。
 - 需要改其他行的配置用 `config`；需要插多个插件就写多条。官方就是用同一个 bundle 同时插入 Host 服务与界面两行。
-- 随插件发布 agent preset（新建会话时可选里的“模式”）时，再加一行 `name: '@deepseek-ai/dsh-agent-preset'`，`config.id` 是 preset 身份，`config.plugins` 列它挂的子插件，`config.name` / `config.description` 是界面上的名字与说明。参考 [plugins/robots](../../plugins/robots/cordis.patch.yml) 与 [plugins/workflows](../../plugins/workflows/cordis.patch.yml)。
+- 随插件发布 agent preset（新建会话时可选里的“模式”）时，再加一行 `name: '@deepseek-ai/dsh-agent-preset'`，`config.id` 是 preset 身份，`config.plugins` 列它挂的子插件，`config.name` / `config.description` 是界面上的名字与说明。参考 [plugins/workers](../../plugins/workers/cordis.patch.yml) 与 [plugins/workflows](../../plugins/workflows/cordis.patch.yml)。
 - 补丁层只声明“有哪些行”，不声明“依赖哪些包”；依赖仍由 `package.json` 表达。
 
 ## 文案：locale 与 DETAIL
@@ -227,7 +227,7 @@ DSH 官方包没有把全部宿主服务与客户端服务导出成类型，仓�
 - `parameters`：属性名 → `{ type, description, required? }`；没有参数就写 `{}`。
 - `output`：`{ schema, render }`；`schema` 的 `required: true` 写在属性对象里，`render` 把结构化结果转成对话里的文本。
 
-要把工具只开放给随插件发布的 preset，用 `ctx.tools.register(tool, { when })`：`when` 收到 `{ agent }`，用 `ctx.get('sessions')` 拿到会话、再用 `ctx.get('agentPresets').presetForSession(session)` 读出它的 preset，只放行点名的 preset 根会话。写操作在 `sessions` / `agentPresets` 缺失时应**收紧为不可见**；`when` 之外还要在 `execute` 里再校验一次。参考 [plugins/workflows/src/access.ts](../../plugins/workflows/src/access.ts) 与 [plugins/robots/src/access.ts](../../plugins/robots/src/access.ts)。
+要把工具只开放给随插件发布的 preset，用 `ctx.tools.register(tool, { when })`：`when` 收到 `{ agent }`，用 `ctx.get('sessions')` 拿到会话、再用 `ctx.get('agentPresets').presetForSession(session)` 读出它的 preset，只放行点名的 preset 根会话。写操作在 `sessions` / `agentPresets` 缺失时应**收紧为不可见**；`when` 之外还要在 `execute` 里再校验一次。参考 [plugins/workflows/src/access.ts](../../plugins/workflows/src/access.ts) 与 [plugins/workers/src/access.ts](../../plugins/workers/src/access.ts)。
 
 ## 发布前
 

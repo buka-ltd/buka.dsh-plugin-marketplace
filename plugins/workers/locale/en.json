@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Buka Workers",
+    "description": "Manage workers in the sidebar: agents have a directory, AGENTS.md and project skills, while robots are fixed programs (v1 ships clock); an agent marked assistant can talk to people for human tasks, and each agent can pick the model for its new sessions. The registry is version 3 (driver / assistant), data from the old robots plugin is migrated automatically, and session compaction and result retries are removed.",
+    "detail": "docs/DETAIL.md"
+  }
+}
