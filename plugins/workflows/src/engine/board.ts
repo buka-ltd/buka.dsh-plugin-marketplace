@@ -15,9 +15,9 @@ import type {
   AttemptRecord,
   JobRecord,
   PositionDefinition,
-  RobotInfo,
   TaskRecord,
   TaskStatus,
+  WorkerInfo,
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
@@ -26,17 +26,17 @@ import { positionLabel, taskTypeLabel } from './prompt.ts'
 /** 摘要文本上限。 */
 const SUMMARY_BYTES = 240
 
-/** 把机器人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
+/** 把打工人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
 function executorView(
   executor: PositionDefinition['executor'],
-  robots: ReadonlyMap<string, RobotInfo> | undefined,
+  workers: ReadonlyMap<string, WorkerInfo> | undefined,
 ): Record<string, unknown> {
-  if (executor.kind === 'human' || robots === undefined) return executor
-  const robot = robots.get(executor.name)
+  if (executor.kind === 'human' || workers === undefined) return executor
+  const worker = workers.get(executor.name)
   return {
     ...executor,
-    ...(robot === undefined ? {} : { driver: robot.driver }),
-    ...(robot?.avatar === undefined ? {} : { avatar: robot.avatar }),
+    ...(worker === undefined ? {} : { driver: worker.driver }),
+    ...(worker?.avatar === undefined ? {} : { avatar: worker.avatar }),
   }
 }
 
@@ -218,7 +218,7 @@ export function jobSummary(job: JobRecord, tasks: readonly TaskRecord[]): Record
  */
 export function jobDefinition(
   definition: WorkflowDefinition,
-  robots?: ReadonlyMap<string, RobotInfo>,
+  workers?: ReadonlyMap<string, WorkerInfo>,
 ): Record<string, unknown> {
   return {
     name: definition.name,
@@ -227,7 +227,7 @@ export function jobDefinition(
       id: position.id,
       label: position.label,
       ...(position.description === undefined ? {} : { description: position.description }),
-      executor: executorView(position.executor, robots),
+      executor: executorView(position.executor, workers),
       taskTypes: position.taskTypes.map((taskType) => ({
         id: taskType.id,
         label: taskType.label,
@@ -253,9 +253,9 @@ export function jobDefinition(
  */
 export function workflowGraph(
   definition: WorkflowDefinition,
-  robots?: ReadonlyMap<string, RobotInfo>,
+  workers?: ReadonlyMap<string, WorkerInfo>,
 ): Record<string, unknown> {
-  const summary = jobDefinition(definition, robots)
+  const summary = jobDefinition(definition, workers)
   return {
     positions: (summary.positions as PositionDefinition[]).map((position) => ({
       id: position.id,

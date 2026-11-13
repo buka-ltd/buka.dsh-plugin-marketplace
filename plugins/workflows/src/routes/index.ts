@@ -57,6 +57,7 @@ function statusForError(error: unknown): number {
       case 'not-found':
         return 404
       case 'workflow-not-active':
+      case 'workflow-retired':
         return 409
       case 'job-not-running':
       case 'task-not-running':
@@ -155,7 +156,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
         return sendError(res, 400, 'invalid-version', 'version must be a positive integer')
       }
       const engine = await ready()
-      const detail = engine.readWorkflowDetail(workflowId, version)
+      const detail = await engine.readWorkflowDetail(workflowId, version)
       if (detail === null)
         return sendError(res, 404, 'not-found', `workflow not found: ${workflowId}`)
       sendJson(res, 200, { ok: true, ...detail })
@@ -206,7 +207,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
       const jobId = (query(req).get('id') ?? '').trim()
       if (jobId === '') return sendError(res, 400, 'invalid-id', 'id is required')
       const engine = await ready()
-      const detail = engine.jobDetail(jobId)
+      const detail = await engine.jobDetail(jobId)
       if (detail === null) return sendError(res, 404, 'not-found', `job not found: ${jobId}`)
       sendJson(res, 200, { ok: true, ...detail })
     })

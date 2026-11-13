@@ -5,6 +5,7 @@
  */
 
 import type { Translate } from './types.ts'
+import { isRecord } from './types.ts'
 
 /**
  * 把失败原因转成展示文本。
@@ -15,6 +16,20 @@ import type { Translate } from './types.ts'
 export function messageOf(failure: unknown): string {
   if (failure instanceof Error) return failure.message
   return String(failure)
+}
+
+/**
+ * 失败原因 → 展示文本；字符串原样，对象优先取 message。
+ *
+ * @param failure
+ * @returns
+ */
+export function errorTextOf(failure: unknown): string {
+  if (failure === null || failure === undefined) return ''
+  if (failure instanceof Error) return failure.message
+  if (typeof failure === 'string') return failure
+  if (isRecord(failure) && typeof failure.message === 'string') return failure.message
+  return jsonText(failure)
 }
 
 /**
@@ -115,8 +130,8 @@ export function stateClass(status: unknown): string {
  */
 export function actorKindKey(kind: unknown): string {
   switch (kind) {
-    case 'robot':
-      return 'actorRobot'
+    case 'worker':
+      return 'actorWorker'
     case 'human':
       return 'actorHuman'
     case 'assistant':

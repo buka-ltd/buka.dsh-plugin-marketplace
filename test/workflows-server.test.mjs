@@ -2,7 +2,7 @@
  * workflows 宿主侧单测：作业创建、调度、任务创建校验、助理、结束投递、结算、
  * 重试 / 取消、重启恢复、clock、附件与可见性、路由桩。
  *
- * 用内存版 storageDomain + 假的 robots / 启动者投递，直接驱动真实引擎；
+ * 用内存版 storageDomain + 假的 workers / 启动者投递，直接驱动真实引擎；
  * 不依赖 DSH 宿主。运行：
  *
  *   node --test test/workflows-server.test.mjs
@@ -91,18 +91,18 @@ class FakeDomain {
 }
 
 // ---------------------------------------------------------------------------
-// 测试夹具：机器人、会话句柄、启动者投递、工作流定义
+// 测试夹具：打工人、会话句柄、启动者投递、工作流定义
 // ---------------------------------------------------------------------------
 
-/** 测试里的机器人登记表。 */
-const ROBOT_ENTRIES = [
-  { name: '软件工程师', driver: 'agent', assistant: false },
-  { name: '质量保障工程师', driver: 'agent', assistant: false },
-  { name: '沟通助理', driver: 'agent', assistant: true },
-  { name: 'clock', driver: 'program', program: 'clock', assistant: false },
+/** 测试里的打工人登记表。 */
+const WORKER_ENTRIES = [
+  { name: '软件工程师', driver: 'agent', assistant: false, avatar: 'rocket' },
+  { name: '质量保障工程师', driver: 'agent', assistant: false, avatar: 'owl' },
+  { name: '沟通助理', driver: 'agent', assistant: true, avatar: 'panda' },
+  { name: 'clock', driver: 'robot', program: 'clock', assistant: false, avatar: 'bee' },
 ]
 
-/** 一个可操纵的 robots 句柄。 */
+/** 一个可操纵的 workers 句柄。 */
 function makeHandle(sessionId) {
   const state = { turnEnded: false, cancelled: false }
   return {
@@ -136,15 +136,15 @@ function makeHandle(sessionId) {
   }
 }
 
-/** 假的 robots 服务。 */
-function makeRobots(entries = ROBOT_ENTRIES) {
+/** 假的 workers 服务。 */
+function makeWorkers(entries = WORKER_ENTRIES) {
   const dispatched = []
   const handles = new Map()
   return {
     dispatched,
     handles,
     async list() {
-      return { robots: entries, corrupt: false }
+      return { workers: entries, corrupt: false }
     },
     async dispatchSession(request) {
       const sessionId = `session-${dispatched.length + 1}`
@@ -187,7 +187,7 @@ function makeOptions(dataDir) {
     maxInlineAttachmentBytes: 1024 * 1024,
     maxResultTextBytes: 1024 * 1024,
     orchestratorPresets: ['workflow-orchestrator'],
-    robotPreset: 'standard',
+    workerPreset: 'standard',
   }
 }
 
@@ -242,7 +242,7 @@ function simpleDevDefinition() {
       {
         id: 'dev',
         label: '研发',
-        executor: { kind: 'robot', name: '软件工程师' },
+        executor: { kind: 'worker', name: '软件工程师' },
         taskTypes: [
           {
             id: 'dev.implement',
@@ -309,7 +309,7 @@ function reviewDefinition() {
       {
         id: 'dev',
         label: '研发',
-        executor: { kind: 'robot', name: '软件工程师' },
+        executor: { kind: 'worker', name: '软件工程师' },
         taskTypes: [
           {
             id: 'dev.implement',
@@ -340,7 +340,7 @@ function reviewDefinition() {
       {
         id: 'qa',
         label: '测试',
-        executor: { kind: 'robot', name: '质量保障工程师' },
+        executor: { kind: 'worker', name: '质量保障工程师' },
         taskTypes: [
           {
             id: 'qa.verify',
@@ -436,7 +436,7 @@ function assistantDefinition() {
   }
 }
 
-/** clock 程序机器人：start → wait(clock) → end。 */
+/** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
   return {
     version: 4,
@@ -473,7 +473,7 @@ function clockDefinition() {
       {
         id: 'wait',
         label: '等待',
-        executor: { kind: 'robot', name: 'clock' },
+        executor: { kind: 'worker', name: 'clock' },
         taskTypes: [
           {
             id: 'wait.until',
@@ -526,14 +526,14 @@ async function setup(definition) {
   const domain = new FakeDomain()
   const store = new WorkflowStore({ domain, dataDir })
   await store.init()
-  const robots = makeRobots()
+  const workers = makeWorkers()
   const delivery = makeDelivery()
   const engine = new WorkflowEngine({
     ctx: {},
     store,
     options: makeOptions(dataDir),
     logger: undefined,
-    robots: () => robots,
+    workers: () => workers,
     delivery,
   })
   await engine.start()
@@ -543,7 +543,7 @@ async function setup(definition) {
     engine,
     store,
     domain,
-    robots,
+    workers,
     delivery,
     dataDir,
     workflowId: workflow.id,
@@ -602,11 +602,11 @@ test('engine: a human-started job completes the start task and dispatches the fi
     const start = taskAt(env.store, job.id, 'start')
     assert.equal(start.status, 'completed')
     assert.deepEqual(start.result.output, { requirement: '登录页需求' })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
     assert.equal(dev.status, 'running')
-    const dispatch = env.robots.dispatched[0]
-    assert.equal(dispatch.request.robot, '软件工程师')
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.worker, '软件工程师')
     assert.match(dispatch.request.prompt, /登录页需求/u)
     assert.match(dispatch.request.prompt, /buka_task_complete/u)
     assert.equal(env.engine.taskForSession(dispatch.sessionId)?.taskId, dev.id)
@@ -634,9 +634,9 @@ test('engine: end task delivery completes the job', async () => {
       rawInput: { request: '发布 v1' },
       structuredInput: { requirement: '发布需求' },
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
-    const sessionId = env.robots.dispatched[0].sessionId
+    const sessionId = env.workers.dispatched[0].sessionId
     await env.engine.createTaskFromSession({
       sessionId,
       position: 'end',
@@ -652,8 +652,8 @@ test('engine: end task delivery completes the job', async () => {
       attachments: [],
     })
     await waitFor(() => taskAt(env.store, job.id, 'end').status === 'completed')
-    assert.equal(env.store.getJob(job.id).status, 'completed')
-    assert.equal(env.engine.jobDetail(job.id).canRetryDelivery, false)
+    await waitFor(() => env.store.getJob(job.id).status === 'completed')
+    assert.equal((await env.engine.jobDetail(job.id)).canRetryDelivery, false)
   } finally {
     await env.cleanup()
   }
@@ -689,11 +689,11 @@ test('engine: a session-started job runs the start task in the starter session',
       text: '',
       attachments: [],
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const stored = env.store.getJob(job.id)
     assert.deepEqual(stored.input.structured, { requirement: '注册页需求' })
     assert.equal(taskAt(env.store, job.id, 'start').status, 'completed')
-    assert.match(env.robots.dispatched[0].request.prompt, /注册页需求/u)
+    assert.match(env.workers.dispatched[0].request.prompt, /注册页需求/u)
   } finally {
     await env.cleanup()
   }
@@ -711,9 +711,9 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       rawInput: { request: '实现登录' },
       structuredInput: { requirement: '登录' },
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
-    const sessionId = env.robots.dispatched[0].sessionId
+    const sessionId = env.workers.dispatched[0].sessionId
 
     const qa = await env.engine.createTaskFromSession({
       sessionId,
@@ -821,9 +821,9 @@ test('engine: an edge type whitelist rejects a declared task type', async () => 
       rawInput: { request: 'x' },
       structuredInput: { requirement: 'x' },
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
-    const devSession = env.robots.dispatched[0].sessionId
+    const devSession = env.workers.dispatched[0].sessionId
     const qa = await env.engine.createTaskFromSession({
       sessionId: devSession,
       position: 'qa',
@@ -837,8 +837,8 @@ test('engine: an edge type whitelist rejects a declared task type', async () => 
       text: '',
       attachments: [],
     })
-    await waitFor(() => env.robots.dispatched.length === 2)
-    const qaSession = env.robots.dispatched[1].sessionId
+    await waitFor(() => env.workers.dispatched.length === 2)
+    const qaSession = env.workers.dispatched[1].sessionId
     assert.equal(env.store.getTask(qa.id).status, 'running')
     await assert.rejects(
       () =>
@@ -888,9 +888,9 @@ test('engine: a named assistant takes a human task and can complete the job', as
       rawInput: { request: '发布' },
       structuredInput: {},
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
-    const dispatch = env.robots.dispatched[0]
-    assert.equal(dispatch.request.robot, '沟通助理')
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.worker, '沟通助理')
     const approve = taskAt(env.store, job.id, 'approve')
     assert.equal(approve.status, 'running')
     assert.equal(approve.claimant.kind, 'assistant')
@@ -923,8 +923,8 @@ test('engine: a failed assistant returns the human task to 待认领 and a human
       rawInput: { request: '发布' },
       structuredInput: {},
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
-    env.robots.dispatched[0].handle.endTurn()
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
     await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
     const approve = taskAt(env.store, job.id, 'approve')
     assert.equal(approve.assistantBlocked, true)
@@ -960,16 +960,16 @@ test('engine: a task session that ends without completing fails the task, and re
       rawInput: { request: 'x' },
       structuredInput: { requirement: 'x' },
     })
-    await waitFor(() => env.robots.dispatched.length === 1)
+    await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
-    env.robots.dispatched[0].handle.endTurn()
+    env.workers.dispatched[0].handle.endTurn()
     await waitFor(() => env.store.getTask(dev.id).status === 'failed')
     // 失败任务等待人工决定，作业仍是 running。
     assert.equal(env.store.getJob(job.id).status, 'running')
     assert.match(env.store.getTask(dev.id).error, /without calling buka_task_complete/u)
 
     await env.engine.retryTask(job.id, dev.id)
-    await waitFor(() => env.robots.dispatched.length === 2)
+    await waitFor(() => env.workers.dispatched.length === 2)
     assert.equal(env.store.getTask(dev.id).status, 'running')
     assert.deepEqual(
       env.store.listAttempts(dev.id).map((attempt) => attempt.status),
@@ -979,7 +979,7 @@ test('engine: a task session that ends without completing fails the task, and re
     const cancelled = await env.engine.cancelJob(job.id)
     assert.equal(cancelled.status, 'cancelled')
     assert.equal(env.store.getTask(dev.id).status, 'cancelled')
-    assert.equal(env.robots.dispatched[1].handle.state.cancelled, true)
+    assert.equal(env.workers.dispatched[1].handle.state.cancelled, true)
   } finally {
     await env.cleanup()
   }
@@ -995,7 +995,7 @@ test('engine: restart resumes the same agent session for a running task', async 
     const domain = new FakeDomain()
     const store = new WorkflowStore({ domain, dataDir })
     await store.init()
-    const robots = makeRobots()
+    const workers = makeWorkers()
     const delivery = makeDelivery()
     const options = makeOptions(dataDir)
     const first = new WorkflowEngine({
@@ -1003,7 +1003,7 @@ test('engine: restart resumes the same agent session for a running task', async 
       store,
       options,
       logger: undefined,
-      robots: () => robots,
+      workers: () => workers,
       delivery,
     })
     await first.start()
@@ -1014,9 +1014,9 @@ test('engine: restart resumes the same agent session for a running task', async 
       rawInput: { request: 'x' },
       structuredInput: { requirement: 'x' },
     })
-    await waitFor(() => robots.dispatched.length === 1)
+    await waitFor(() => workers.dispatched.length === 1)
     const dev = taskAt(store, job.id, 'dev')
-    const sessionId = robots.dispatched[0].sessionId
+    const sessionId = workers.dispatched[0].sessionId
     first.dispose()
 
     const second = new WorkflowEngine({
@@ -1024,7 +1024,7 @@ test('engine: restart resumes the same agent session for a running task', async 
       store,
       options,
       logger: undefined,
-      robots: () => robots,
+      workers: () => workers,
       delivery,
     })
     await second.start()
@@ -1044,7 +1044,7 @@ test('engine: restart resumes the same agent session for a running task', async 
 })
 
 // ---------------------------------------------------------------------------
-// program 机器人
+// 机器人
 // ---------------------------------------------------------------------------
 
 test('engine: clock program tasks complete without a session', async () => {
@@ -1055,14 +1055,63 @@ test('engine: clock program tasks complete without a session', async () => {
       rawInput: { request: '到点提醒' },
       structuredInput: { until: new Date(Date.now() - 1000).toISOString() },
     })
-    assert.equal(env.robots.dispatched.length, 0)
+    assert.equal(env.workers.dispatched.length, 0)
     const wait = taskAt(env.store, job.id, 'wait')
     await waitFor(() => env.store.getTask(wait.id).status === 'completed')
     const stored = env.store.getTask(wait.id)
     assert.equal(typeof stored.result.output.completedAt, 'string')
-    assert.equal(stored.claimant.kind, 'robot')
+    assert.equal(stored.claimant.kind, 'worker')
   } finally {
     await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 头像：workers 服务晚于 workflows 就绪时，定义图仍要拿到打工人头像
+// ---------------------------------------------------------------------------
+
+test('engine: workflow detail resolves worker avatars even when the workers service starts late', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-avatar-'))
+  const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
+  await store.init()
+  const workers = makeWorkers()
+  const delivery = makeDelivery()
+  const options = makeOptions(dataDir)
+  let workersReady = true
+  let engine
+  try {
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => (workersReady ? workers : null),
+      delivery,
+    })
+    await engine.start()
+    const workflow = await engine.saveWorkflow({ definition: simpleDevDefinition() })
+    await engine.setWorkflowActive(workflow.id, true)
+    engine.dispose()
+
+    // 重启：workflows 先于 workers 插件初始化，start() 时读不到登记表。
+    workersReady = false
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => (workersReady ? workers : null),
+      delivery,
+    })
+    await engine.start()
+    workersReady = true
+
+    const detail = await engine.readWorkflowDetail(workflow.id)
+    const positions = detail?.graph?.positions ?? []
+    assert.equal(positions[0]?.executor?.avatar, 'rocket', 'the worker avatar reaches the graph')
+  } finally {
+    engine?.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
   }
 })
 
@@ -1075,8 +1124,8 @@ test('attachments: a task result attaches files and downstream tasks can read th
   try {
     await fs.mkdir(path.join(workspace, 'artifacts'), { recursive: true })
     await fs.writeFile(path.join(workspace, 'artifacts', 'report.txt'), 'hello attachment', 'utf8')
-    // 机器人工作区指向临时目录（附件相对路径的根）。
-    const robots = makeRobots([
+    // 打工人工作区指向临时目录（附件相对路径的根）。
+    const workers = makeWorkers([
       { name: '软件工程师', driver: 'agent', assistant: false, path: workspace },
       { name: '质量保障工程师', driver: 'agent', assistant: false, path: workspace },
     ])
@@ -1091,7 +1140,7 @@ test('attachments: a task result attaches files and downstream tasks can read th
         store,
         options: makeOptions(dataDir),
         logger: undefined,
-        robots: () => robots,
+        workers: () => workers,
         delivery,
       })
       await engine.start()
@@ -1102,9 +1151,9 @@ test('attachments: a task result attaches files and downstream tasks can read th
         rawInput: { request: 'x' },
         structuredInput: { requirement: 'x' },
       })
-      await waitFor(() => robots.dispatched.length === 1)
+      await waitFor(() => workers.dispatched.length === 1)
       const dev = taskAt(store, job.id, 'dev')
-      const devSession = robots.dispatched[0].sessionId
+      const devSession = workers.dispatched[0].sessionId
       await engine.createTaskFromSession({
         sessionId: devSession,
         position: 'qa',
@@ -1129,8 +1178,8 @@ test('attachments: a task result attaches files and downstream tasks can read th
       assert.equal(await fs.readFile(opened.file, 'utf8'), 'hello attachment')
 
       // 下游 qa 任务可见 dev 的附件；无关任务不可见。
-      await waitFor(() => robots.dispatched.length === 2)
-      const qaSession = robots.dispatched[1].sessionId
+      await waitFor(() => workers.dispatched.length === 2)
+      const qaSession = workers.dispatched[1].sessionId
       const visible = engine.searchAttachmentsForSession(qaSession, '')
       assert.equal(visible.length, 1)
       const inline = await engine.readAttachmentForSession(qaSession, attachments[0].id)

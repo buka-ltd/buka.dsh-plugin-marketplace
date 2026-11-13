@@ -26,7 +26,7 @@ import { resolveWorkflowAccess } from './access.ts'
 import { registerJobCommand } from './commands/job.ts'
 import { WorkflowEngine } from './engine/engine.ts'
 import { createHostSessionDelivery } from './engine/session.ts'
-import type { RobotsServiceLike } from './engine/types.ts'
+import type { WorkersServiceLike } from './engine/types.ts'
 import { describeError } from './engine/types.ts'
 import { runMigrations } from './migration.ts'
 import type { WorkflowsConfig } from './options.ts'
@@ -41,7 +41,7 @@ export { Config, defaultDataDir, resolveDataDir } from './options.ts'
 /** Cordis 插件名；与 cordis.patch.yml 的补丁行 id 保持一致。 */
 export const name = 'tool-buka-workflows'
 
-/** 依赖的服务：工具注册表。其余服务（storageDomain / webServer / commands / bukaRobots）按需可选获取。 */
+/** 依赖的服务：工具注册表。其余服务（storageDomain / webServer / commands / bukaWorkers）按需可选获取。 */
 export const inject = ['tools']
 
 /**
@@ -81,7 +81,7 @@ export function apply(ctx: Context, config: WorkflowsConfig): void {
         store,
         options,
         logger: ctx.logger,
-        robots: () => (ctx.get('bukaRobots') ?? null) as RobotsServiceLike | null,
+        workers: () => (ctx.get('bukaWorkers') ?? null) as WorkersServiceLike | null,
         delivery: createHostSessionDelivery(ctx),
       })
       engine = created

@@ -75,19 +75,20 @@ export type TaskStatus =
   | 'blocked'
   | 'cancelled'
 
-/** 岗位执行者：机器人或人。 */
+/** 岗位执行者：打工人或人。 */
 export interface Executor {
   kind?: string
   name?: string
-  /** 机器人头像 id（Host 若给出就画）。 */
+  /** 打工人头像 id（Host 若给出就画）。 */
   avatar?: string
-  /** 机器人驱动：agent / program（只读展示用）。 */
+  /** 打工人驱动：agent / robot（只读展示用）。 */
   driver?: string
 }
 
 /** 受限 JSON Schema 子集（与 `src/output.ts` 的规则一致，这里只做展示与表单）。 */
 export interface JsonSchema {
   type?: string | string[]
+  description?: string
   properties?: Record<string, JsonSchema>
   required?: string[]
   additionalProperties?: boolean
@@ -181,7 +182,7 @@ export interface JobSummary {
   updatedAt?: string
 }
 
-/** 承办者（人 / 助理机器人 / 执行机器人）。 */
+/** 承办者（人 / 助理打工人 / 执行打工人）。 */
 export interface Claimant {
   kind?: string
   name?: string
@@ -309,16 +310,38 @@ export interface JobDetail {
   }
   definition?: JobDefinition
   tasks?: TaskSummary[]
+  canRetryDelivery?: boolean
 }
 
 /** 作业详情页的视图页签。 */
-export type JobView = 'board' | 'graph' | 'tasks' | 'attachments' | 'timeline'
+export type JobView = 'overview' | 'flow' | 'board' | 'outputs'
 
-/** 页面路由：工作流列表 → 工作流详情 → 作业详情。 */
+/** 工作流页签。 */
+export type WorkflowTab = 'jobs' | 'definition'
+
+/** 作业列表筛选。 */
+export type JobFilter = 'all' | 'running' | 'completed' | 'problem'
+
+/** 定义结构画布上的选中项：节点、边或全局信息。 */
+export type DefinitionSelection =
+  | { kind: 'position'; id: string }
+  | { kind: 'edge'; index: number }
+  | { kind: 'start' }
+  | { kind: 'end' }
+  | { kind: 'info' }
+  | null
+
+/** 实时流程里打开的节点任务列表。 */
+export interface NodeTasksSelection {
+  positionId: string
+  label: string
+}
+
+/** 页面路由：工作流列表 → 工作流（作业 / 定义）→ 作业（四个视图）。 */
 export type Route =
   | { kind: 'workflows' }
-  | { kind: 'workflow'; workflowId: string }
-  | { kind: 'job'; workflowId: string; jobId: string }
+  | { kind: 'workflow'; workflowId: string; tab: WorkflowTab }
+  | { kind: 'job'; workflowId: string; jobId: string; view: JobView }
 
 /** 一次异步读取的状态。 */
 export interface Loadable<T> {
@@ -376,8 +399,15 @@ export interface PageState {
   workflows: Loadable<WorkflowSummary[]>
   workflow: Loadable<WorkflowDetail>
   job: Loadable<JobDetail>
-  jobView: JobView
-  /** 作业附件库；进入附件库视图时读取。 */
+  /** 结束任务的详情：概览里的最终交付物。 */
+  finalTask: Loadable<TaskDetail>
+  /** 作业列表筛选。 */
+  jobFilter: JobFilter
+  /** 定义结构画布的选中项。 */
+  definitionSelection: DefinitionSelection
+  /** 实时流程里打开的节点任务列表。 */
+  nodeTasks: NodeTasksSelection | null
+  /** 作业附件库；进入产出视图时读取。 */
   attachments: Loadable<AttachmentMeta[]>
   taskId: string | null
   task: Loadable<TaskDetail>

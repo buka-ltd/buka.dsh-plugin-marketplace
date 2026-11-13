@@ -40,38 +40,38 @@ export type TaskStatus =
   | 'blocked'
   | 'cancelled'
 
-/** 机器人驱动方式。 */
-export type RobotDriver = 'agent' | 'program'
+/** 打工人驱动方式。 */
+export type WorkerDriver = 'agent' | 'robot'
 
-/** robots 登记表里本插件用到的一条机器人信息（由 robots 服务提供）。 */
-export interface RobotInfo {
+/** workers 登记表里本插件用到的一条打工人信息（由 workers 服务提供）。 */
+export interface WorkerInfo {
   readonly name: string
-  readonly driver: RobotDriver
-  /** program 型机器人的驱动 id（例如 `clock`）；agent 型没有。 */
+  readonly driver: WorkerDriver
+  /** 机器人的驱动 id（例如 `clock`）；智能体没有。 */
   readonly program?: string | undefined
   readonly assistant: boolean
   readonly description?: string | undefined
   readonly avatar?: string | undefined
-  /** agent 机器人的工作目录（附件相对路径的根）。 */
+  /** 智能体的工作目录（附件相对路径的根）。 */
   readonly path?: string | undefined
 }
 
-/** robots 服务里本插件用到的部分。 */
-export interface RobotCatalog {
-  readonly robots: readonly RobotInfo[]
+/** workers 服务里本插件用到的部分。 */
+export interface WorkerCatalog {
+  readonly workers: readonly WorkerInfo[]
 }
 
-/** 岗位执行者：人，或登记表里的机器人。 */
+/** 岗位执行者：人，或登记表里的打工人。 */
 export type ExecutorSpec =
-  | { readonly kind: 'robot'; readonly name: string }
+  | { readonly kind: 'worker'; readonly name: string }
   | { readonly kind: 'human' }
 
-/** 任务创建时钉住的执行者：机器人额外记录 driver，避免之后登记表变化影响已创建的作业。 */
+/** 任务创建时钉住的执行者：打工人额外记录 driver，避免之后登记表变化影响已创建的作业。 */
 export type StoredExecutor =
   | {
-      readonly kind: 'robot'
+      readonly kind: 'worker'
       readonly name: string
-      readonly driver: RobotDriver
+      readonly driver: WorkerDriver
       readonly program?: string | undefined
       readonly avatar?: string | undefined
     }
@@ -80,7 +80,7 @@ export type StoredExecutor =
   | { readonly kind: 'session'; readonly sessionId: string }
 
 /** 承办者：实际接走任务的一方。 */
-export type ClaimantKind = 'human' | 'robot' | 'assistant'
+export type ClaimantKind = 'human' | 'worker' | 'assistant'
 
 /** 承办者记录。 */
 export interface Claimant {
@@ -105,7 +105,7 @@ export interface TaskTypeDefinition {
   readonly output: OutputSchema
   /** 创建时校验：依赖集合里必须至少有一个指定类型的任务。 */
   readonly requires?: readonly { readonly types: readonly string[] }[] | undefined
-  /** 仅人岗位：承担沟通的助理机器人名；null / 省略表示无助理。 */
+  /** 仅人岗位：承担沟通的助理打工人名；null / 省略表示无助理。 */
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
   readonly mode?: 'plan' | null | undefined

@@ -1,9 +1,8 @@
 /**
  * 侧边栏「工作流」页面：装配状态、数据 effect 与动作，渲染只做分发。
  *
- * 导航只有一条链：工作流列表 → 工作流详情（图 + 岗位 / 类型 / 边 + 作业列表）
- * → 作业详情（看板 / 流程图 / 任务 / 附件库 / 时间线）。不存在跨工作流的作业
- * 列表。
+ * 导航只有一条链：工作流列表 → 工作流（作业 / 定义结构）→ 作业（概览 /
+ * 实时流程 / 看板 / 资产）。不存在跨工作流的作业列表。
  */
 
 import type React from 'react'
@@ -14,6 +13,7 @@ import { createActions } from './state/use-actions.ts'
 import { useWorkflowEffects } from './state/use-effects.ts'
 import { usePageState } from './state/use-page-state.ts'
 import type { WorkflowsPageProps } from './types.ts'
+import { useIsNarrow } from './use-narrow.ts'
 
 export { createInitialState } from './state/use-page-state.ts'
 
@@ -29,7 +29,8 @@ export function WorkflowsPage(props: WorkflowsPageProps): React.ReactElement {
 
   const store = usePageState()
   useWorkflowEffects(store)
+  const narrow = useIsNarrow()
   const actions = createActions(store, { t, getService })
-  const page: AppContext = { t, getService, state: store.state, actions }
+  const page: AppContext = { t, getService, state: store.state, actions, narrow }
   return renderPage(page)
 }

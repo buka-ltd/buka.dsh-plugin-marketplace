@@ -26,11 +26,11 @@ import { newTaskId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import type {
   JobRecord,
   JsonValue,
-  RobotInfo,
   StartRouteDefinition,
   StoredExecutor,
   TaskRecord,
   TaskTypeDefinition,
+  WorkerInfo,
   WorkflowDefinition,
 } from '../domain/types.ts'
 import { resolveOutputPath } from '../output.ts'
@@ -45,8 +45,8 @@ export interface CreateTaskInput {
   readonly payload: JsonValue
   readonly deps: readonly string[]
   readonly tasks: readonly TaskRecord[]
-  /** 机器人登记表（按名字）；program 型带 driver/program。 */
-  readonly robots: ReadonlyMap<string, RobotInfo>
+  /** 打工人登记表（按名字）；机器人带 driver/program。 */
+  readonly workers: ReadonlyMap<string, WorkerInfo>
 }
 
 /** 构造出的任务与派生信息。 */
@@ -62,14 +62,14 @@ export interface CreateTaskResult {
  * @param definition 定义
  * @param positionId 岗位 id
  * @param job 作业
- * @param robots 机器人登记表
+ * @param workers 打工人登记表
  * @returns 钉住的执行者
  */
 export function resolveExecutor(
   definition: WorkflowDefinition,
   positionId: string,
   job: JobRecord,
-  robots: ReadonlyMap<string, RobotInfo>,
+  workers: ReadonlyMap<string, WorkerInfo>,
 ): StoredExecutor {
   if (positionId === 'start' || positionId === 'end') {
     return job.starter.kind === 'human'
@@ -81,19 +81,19 @@ export function resolveExecutor(
     throw new WorkflowError('unknown-position', `unknown position "${positionId}"`)
   }
   if (position.executor.kind === 'human') return { kind: 'human' }
-  const robot = robots.get(position.executor.name)
-  if (robot === undefined) {
+  const worker = workers.get(position.executor.name)
+  if (worker === undefined) {
     throw new WorkflowError(
-      'unknown-robot',
-      `position "${positionId}" uses robot "${position.executor.name}", which is not registered`,
+      'unknown-worker',
+      `position "${positionId}" uses worker "${position.executor.name}", which is not registered`,
     )
   }
   return {
-    kind: 'robot',
-    name: robot.name,
-    driver: robot.driver,
-    ...(robot.program === undefined ? {} : { program: robot.program }),
-    ...(robot.avatar === undefined ? {} : { avatar: robot.avatar }),
+    kind: 'worker',
+    name: worker.name,
+    driver: worker.driver,
+    ...(worker.program === undefined ? {} : { program: worker.program }),
+    ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
   }
 }
 
@@ -188,7 +188,7 @@ export function findDependencyCycle(tasks: readonly TaskRecord[]): string[] | nu
  * @throws `WorkflowError`（code 稳定）表示创建被拒绝
  */
 export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
-  const { job, creator, position, type, payload, deps, tasks, robots } = input
+  const { job, creator, position, type, payload, deps, tasks, workers } = input
   const definition = job.definition
   if (job.status !== 'running') {
     throw new WorkflowError('job-not-running', `job ${job.id} is not running`)
@@ -299,7 +299,7 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
     deps: dependencyIds,
     status: ready ? 'ready' : 'pending',
     createdBy: { taskId: creator.id, position: creator.position },
-    assignee: resolveExecutor(definition, position, job, robots),
+    assignee: resolveExecutor(definition, position, job, workers),
     claimant: null,
     attemptIds: [],
     result: null,
@@ -361,16 +361,16 @@ export function resolveTargetTaskType(
  * 启动任务已完成：结构化输入是它们的唯一依赖（定义里的 `$start`，落盘为
  * `START_TASK_ID`），所以初始状态都是 `ready`（本版不允许依赖别的初始任务）。
  *
- * @param input 作业、启动任务、模板、已有任务与机器人表
+ * @param input 作业、启动任务、模板、已有任务与打工人表
  * @returns 新任务记录
  */
 export function buildInitialTasks(input: {
   readonly job: JobRecord
   readonly startTask: TaskRecord
   readonly tasks: readonly TaskRecord[]
-  readonly robots: ReadonlyMap<string, RobotInfo>
+  readonly workers: ReadonlyMap<string, WorkerInfo>
 }): TaskRecord[] {
-  const { job, startTask, robots } = input
+  const { job, startTask, workers } = input
   const definition = job.definition
   const tasks = [...input.tasks]
   const created: TaskRecord[] = []
@@ -381,7 +381,7 @@ export function buildInitialTasks(input: {
         `workflow budget maxTasks=${definition.budgets.maxTasks} would be exceeded by initial task ${index}`,
       )
     }
-    const task = buildInitialTask({ job, route, startTask, tasks, robots, definition })
+    const task = buildInitialTask({ job, route, startTask, tasks, workers, definition })
     tasks.push(task)
     created.push(task)
   }
@@ -394,10 +394,10 @@ function buildInitialTask(input: {
   readonly route: StartRouteDefinition
   readonly startTask: TaskRecord
   readonly tasks: readonly TaskRecord[]
-  readonly robots: ReadonlyMap<string, RobotInfo>
+  readonly workers: ReadonlyMap<string, WorkerInfo>
   readonly definition: WorkflowDefinition
 }): TaskRecord {
-  const { job, route, startTask, tasks, robots, definition } = input
+  const { job, route, startTask, tasks, workers, definition } = input
   const position = findPosition(definition, route.position)
   if (position === undefined) {
     throw new WorkflowError(
@@ -433,7 +433,7 @@ function buildInitialTask(input: {
     deps: [START_TASK_ID],
     status: 'ready',
     createdBy: { taskId: startTask.id, position: 'start' },
-    assignee: resolveExecutor(definition, route.position, job, robots),
+    assignee: resolveExecutor(definition, route.position, job, workers),
     claimant: null,
     attemptIds: [],
     result: null,

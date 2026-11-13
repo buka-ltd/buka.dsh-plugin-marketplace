@@ -1,15 +1,15 @@
 /**
- * program 型机器人驱动：v1 只有内建 `clock`。
+ * 机器人驱动：v1 只有内建 `clock`。
  *
  * `clock` 任务在 payload 里带 `until`（ISO 时间）；到点完成，不建会话、不占
- * 机器人实例。重启时按 `until` 重新计时：已过则立即完成。
+ * 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
  *
  * @module @buka/dsh-plugin-workflows/program/clock
  */
 
 import type { JsonValue } from '../domain/types.ts'
 
-/** 内建 `clock` 驱动 id；与 robots 登记表里的 program id 一致。 */
+/** 内建 `clock` 驱动 id；与 workers 登记表里的 program id 一致。 */
 export const CLOCK_PROGRAM_ID = 'clock'
 
 /** 一个 program 驱动的执行结果。 */

@@ -12,4 +12,6 @@ export interface AppContext {
   getService: (name: string) => unknown
   state: PageState
   actions: AppActions
+  /** 当前视口是否窄屏（看板等视图据此切换布局）。 */
+  narrow: boolean
 }

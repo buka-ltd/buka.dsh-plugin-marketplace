@@ -3,9 +3,9 @@
  *
  * 页面源码是 TypeScript（Node 24 默认做类型剥离），这里用 `module.registerHooks`
  * 把 `react` 与 DSH 的界面基座替换成最小桩，再直接调用注册到 `main` 的页面
- * 组件：工作流列表 / 工作流详情 / 作业看板 / 任务抽屉 / 人任务表单 / 新建作业
- * 对话框 / 附件库与时间线都会被渲染一遍，能在不启动 DSH、也不先构建 `lib/`
- * 的情况下抓到渲染函数里的运行时错误与 props 形状错误。
+ * 组件：工作流列表 / 工作流页（作业 / 定义）/ 作业四视图 / 任务抽屉 / 新建作业
+ * 对话框 / 资产池都会被渲染一遍，能在不启动 DSH、也不先构建 `lib/` 的情况下
+ * 抓到渲染函数里的运行时错误与 props 形状错误。
  *
  * 它不是浏览器测试，也不验证轮询定时器（`useEffect` 是桩）。
  */
@@ -29,10 +29,7 @@ const harness = {
 }
 globalThis.__WF_TEST__ = harness
 
-/**
- * React 桩：元素只记录 type / props / children；useState 从注入队列取值，
- * setState 支持函数式更新并记录结果。
- */
+/** React 桩。 */
 const REACT_STUB = `
 const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
 export default {
@@ -59,13 +56,7 @@ export default {
 export const memo = (component) => component
 `
 
-/**
- * 界面基座桩：只保留页面真正依赖的元素 / 组件语义。
- *
- * - `Tag` / `Button` / `SegmentedTabs` 等把 children 渲染出来，便于读文本；
- * - `Modal` 在 `open: false` 时不渲染内容；
- * - 图标与 StateDot / Toast 渲染为空。
- */
+/** 界面基座桩。 */
 const PRIMITIVES_STUB = `
 const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
 const passthrough = (tag) => (props) => h(tag, props, ...(props.children ?? []))
@@ -83,6 +74,7 @@ export const IconChevronRightOutlineRegular = () => null
 export const IconCloseOutlineRegular = () => null
 export const IconRefreshOutlineRegular = () => null
 export const IconWarningOutlineRegular = () => null
+export const IconInfoOutlineRegular = () => null
 export const IconDownloadOutlineRegular = () => null
 export const IconNewChatOutlineRegular = () => null
 export const IconFolderOpenOutlineRegular = () => null
@@ -109,14 +101,9 @@ function registerStubs() {
   })
 }
 
-/** 每次载入换一个查询串，绕过 ESM 模块缓存。 */
 let loadSequence = 0
 
-/**
- * 载入客户端 `apply` 与页面组件。
- *
- * @returns {Promise<{ Page: Function, zh: Record<string,string>, createInitialState: Function }>}
- */
+/** 载入客户端 `apply` 与页面组件。 */
 async function loadClient() {
   registerStubs()
   /** @type {Record<string, Function>} */
@@ -169,12 +156,7 @@ async function loadClient() {
   }
 }
 
-/**
- * 走一遍渲染树；函数组件在这里展开。
- *
- * @param {any} node
- * @param {(node: Record<string, any>) => void} visit
- */
+/** 走一遍渲染树；函数组件在这里展开。 */
 function walk(node, visit) {
   if (node === null || node === undefined || node === false || node === true) return
   if (Array.isArray(node)) {
@@ -194,12 +176,7 @@ function walk(node, visit) {
   for (const child of node.children ?? []) walk(child, visit)
 }
 
-/**
- * 收集渲染树里的文本、类名与路径。
- *
- * @param {any} tree
- * @returns {{ texts: string[], classes: string[], paths: string[] }}
- */
+/** 收集文本、类名与边路径。 */
 function collect(tree) {
   const texts = []
   const classes = []
@@ -207,11 +184,10 @@ function collect(tree) {
   walk(tree, (node) => {
     const className = node.props?.className
     if (typeof className === 'string') classes.push(...className.split(/\s+/).filter(Boolean))
-    const classNameValue = node.props?.className
     if (
       typeof node.props?.d === 'string' &&
-      typeof classNameValue === 'string' &&
-      classNameValue.includes('buka-workflows-edge')
+      typeof className === 'string' &&
+      className.split(/\s+/).includes('buka-workflows-edge')
     ) {
       paths.push(node.props.d)
     }
@@ -222,13 +198,7 @@ function collect(tree) {
   return { texts, classes, paths }
 }
 
-/**
- * 找到第一个满足条件的元素（函数组件节点也算）。
- *
- * @param {any} tree
- * @param {(node: Record<string, any>) => boolean} predicate
- * @returns {Record<string, any> | null}
- */
+/** 找到第一个满足条件的元素。 */
 function findBy(tree, predicate) {
   let found = null
   walk(tree, (node) => {
@@ -237,12 +207,7 @@ function findBy(tree, predicate) {
   return found
 }
 
-/**
- * 展开一个节点后的全部文本。
- *
- * @param {any} node
- * @returns {string}
- */
+/** 展开一个节点后的全部文本。 */
 function textOf(node) {
   const texts = []
   walk(node, (current) => {
@@ -253,12 +218,7 @@ function textOf(node) {
   return texts.join(' ')
 }
 
-/**
- * 按文本找到可点击按钮并点它。
- *
- * @param {any} tree
- * @param {string} label
- */
+/** 按文本找可点击按钮并点它。 */
 function clickButton(tree, label) {
   const node = findBy(
     tree,
@@ -266,15 +226,10 @@ function clickButton(tree, label) {
   )
   assert.ok(node !== null, `button with label ${label} should exist`)
   node.props.onClick({})
+  return node
 }
 
-/**
- * 渲染一次页面。`patch` 覆盖初始状态里的任意切片。
- *
- * @param {{ Page: Function, zh: Record<string,string>, createInitialState: Function }} client
- * @param {Record<string, any>} patch
- * @returns {{ tree: any, texts: string[], classes: string[], paths: string[], state: any }}
- */
+/** 渲染一次页面。 */
 function render(client, patch) {
   const state = { ...client.createInitialState(), ...patch }
   harness.queue = [state]
@@ -286,7 +241,7 @@ function render(client, patch) {
   return { tree, ...collected, state }
 }
 
-/** 工作流定义（spec §5.7 的简化版）。 */
+/** 工作流定义。 */
 const DEFINITION = {
   version: 4,
   name: '研发交付',
@@ -296,13 +251,16 @@ const DEFINITION = {
     task: {
       payload: {
         type: 'object',
-        properties: { request: { type: 'string' } },
+        properties: { request: { type: 'string', description: '这次要做什么' } },
         required: ['request'],
         additionalProperties: false,
       },
       output: {
         type: 'object',
-        properties: { requirement: { type: 'string' }, acceptance: { type: 'string' } },
+        properties: {
+          requirement: { type: 'string', description: '需求说明' },
+          acceptance: { type: 'string', description: '验收标准' },
+        },
         required: ['requirement'],
         additionalProperties: false,
       },
@@ -313,7 +271,7 @@ const DEFINITION = {
     task: {
       payload: {
         type: 'object',
-        properties: { summary: { type: 'string' } },
+        properties: { summary: { type: 'string', description: '交付说明' } },
         required: ['summary'],
         additionalProperties: false,
       },
@@ -324,7 +282,7 @@ const DEFINITION = {
       id: 'dev',
       label: '研发',
       description: '负责实现与返工',
-      executor: { kind: 'robot', name: '软件工程师' },
+      executor: { kind: 'worker', name: '软件工程师' },
       taskTypes: [
         {
           id: 'dev.implement',
@@ -338,7 +296,7 @@ const DEFINITION = {
     {
       id: 'qa',
       label: '测试',
-      executor: { kind: 'robot', name: '质量保障工程师' },
+      executor: { kind: 'worker', name: '质量保障工程师' },
       taskTypes: [
         {
           id: 'qa.verify',
@@ -411,7 +369,7 @@ const WORKFLOW_DETAIL = {
       seq: 7,
       status: 'running',
       inputSummary: '实现登录页',
-      taskCounts: { running: 1, ready: 1 },
+      taskCounts: { running: 1, ready: 1, pending: 1 },
       createdAt: '2026-11-12T10:00:00.000Z',
       updatedAt: '2026-11-12T10:05:00.000Z',
     },
@@ -436,7 +394,10 @@ const JOB_DETAIL = {
     workflowName: '研发交付',
     workflowVersion: 3,
     starter: { kind: 'human' },
-    input: { request: '实现登录页' },
+    input: {
+      raw: { request: '实现登录页' },
+      structured: { requirement: '实现登录页', acceptance: '可以登录' },
+    },
     createdAt: '2026-11-12T10:00:00.000Z',
     updatedAt: '2026-11-12T10:05:00.000Z',
     error: null,
@@ -472,7 +433,7 @@ const JOB_DETAIL = {
       deps: ['task-0'],
       createdAt: '2026-11-12T10:01:00.000Z',
       startedAt: '2026-11-12T10:01:05.000Z',
-      claimant: { kind: 'robot', name: '软件工程师', sessionId: 'session-1' },
+      claimant: { kind: 'worker', name: '软件工程师', sessionId: 'session-1' },
       attemptCount: 1,
       attachmentCount: 1,
     },
@@ -502,9 +463,28 @@ const JOB_DETAIL = {
       createdAt: '2026-11-12T10:02:00.000Z',
     },
   ],
+  canRetryDelivery: true,
 }
 
-/** 机器人任务详情。 */
+/** 结束任务详情（概览里的最终交付物）。 */
+const FINAL_TASK = {
+  task: {
+    id: 'task-4',
+    jobId: 'job-1',
+    position: 'end',
+    positionLabel: '结束',
+    type: 'end',
+    typeLabel: '结束',
+    status: 'ready',
+    payload: { summary: '最终交付说明' },
+    deps: [],
+    attempts: [],
+    result: null,
+    allowedActions: [],
+  },
+}
+
+/** 打工人任务详情。 */
 const TASK_DETAIL = {
   task: {
     id: 'task-1',
@@ -528,7 +508,7 @@ const TASK_DETAIL = {
     createdAt: '2026-11-12T10:01:00.000Z',
     startedAt: '2026-11-12T10:01:05.000Z',
     finishedAt: null,
-    claimant: { kind: 'robot', name: '软件工程师', sessionId: 'session-1' },
+    claimant: { kind: 'worker', name: '软件工程师', sessionId: 'session-1' },
     attempts: [
       {
         id: 'att-1',
@@ -542,7 +522,7 @@ const TASK_DETAIL = {
     ],
     result: {
       text: '登录页已实现',
-      output: { ok: true },
+      output: { summary: '登录页已实现' },
       attachments: [
         {
           id: 'att-file-1',
@@ -557,7 +537,7 @@ const TASK_DETAIL = {
   },
 }
 
-/** 人任务详情：等待按产出契约填表。 */
+/** 人任务详情。 */
 const HUMAN_TASK_DETAIL = {
   task: {
     id: 'task-3',
@@ -580,9 +560,9 @@ const HUMAN_TASK_DETAIL = {
   },
 }
 
-test('工作流列表渲染名称、版本、状态与作业数', async () => {
+test('工作流列表：停用的工作流灰显并排在后面', async () => {
   const client = await loadClient()
-  const { texts } = render(client, {
+  const { texts, classes } = render(client, {
     workflows: {
       status: 'ready',
       data: [
@@ -599,8 +579,8 @@ test('工作流列表渲染名称、版本、状态与作业数', async () => {
           id: 'wf-2',
           name: '内容审核',
           version: 1,
-          status: 'draft',
-          jobCount: 0,
+          status: 'retired',
+          jobCount: 2,
         },
       ],
       error: null,
@@ -609,41 +589,166 @@ test('工作流列表渲染名称、版本、状态与作业数', async () => {
   const text = texts.join(' ')
   assert.match(text, /研发交付/u)
   assert.match(text, /内容审核/u)
+  assert.match(text, /已停用/u)
   assert.match(text, /12 个作业/u)
-  assert.match(text, /已激活/u)
-  assert.match(text, /草稿/u)
+  assert.ok(classes.includes('is-disabled'), 'retired card is greyed out')
+  assert.ok(
+    text.indexOf('研发交付') < text.indexOf('内容审核'),
+    'active workflows come before retired ones',
+  )
 })
 
-test('工作流详情渲染流程图、岗位 / 任务类型、边与作业列表', async () => {
+test('工作流页：作业 Tab 默认，筛选、卡片与进入作业', async () => {
   const client = await loadClient()
-  const { texts, paths } = render(client, {
-    route: { kind: 'workflow', workflowId: 'wf-1' },
+  const { tree, texts } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
   })
   const text = texts.join(' ')
-  // 图：start / 3 个岗位 / end 共 5 个节点、5 条边，全部画成 path。
-  assert.equal(paths.length, DEFINITION.edges.length, 'every defined edge should be drawn')
-  for (const label of ['研发', '测试', '发布审批', '开始', '结束']) {
-    assert.match(text, new RegExp(label, 'u'))
+  for (const label of ['全部', '进行中', '已完成', '异常']) {
+    assert.match(text, new RegExp(label, 'u'), `filter ${label}`)
   }
-  // 任务类型与契约。
-  assert.match(text, /开发/u)
-  assert.match(text, /批准发布/u)
-  assert.match(text, /沟通助理/u)
-  assert.match(text, /回边/u)
-  assert.match(text, /全部任务类型|qa\.verify/u)
-  assert.match(text, /任务上限/u)
-  assert.match(text, /200/u)
-  // 作业列表。
   assert.match(text, /作业 #7/u)
   assert.match(text, /实现登录页/u)
   assert.match(text, /作业 #6/u)
+  assert.match(text, /研发交付/u)
+
+  clickButton(tree, '作业 #7')
+  assert.equal(harness.updates.length, 1)
+  assert.equal(harness.updates[0].route.kind, 'job')
+  assert.equal(harness.updates[0].route.view, 'overview')
 })
 
-test('作业看板按岗位 × 状态分组，点卡片打开任务抽屉', async () => {
+test('定义结构：画边、点节点打开抽屉、点连线记录选中', async () => {
+  const client = await loadClient()
+  const { tree, texts, paths } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  assert.equal(paths.length, DEFINITION.edges.length, 'every defined edge should be drawn')
+  const firstEdge = paths[0].match(/-?\d+(?:\.\d+)?/gu)?.map(Number) ?? []
+  assert.ok(firstEdge[1] < firstEdge.at(-1), 'edges flow from top to bottom')
+  assert.equal(firstEdge[0], firstEdge.at(-2), 'a straight edge keeps one column')
+  const widths = new Map()
+  walk(tree, (node) => {
+    if (node.props?.className === 'buka-workflows-nodeWrap') {
+      widths.set(textOf(node).trim(), Number.parseFloat(node.props.style?.width ?? '0'))
+    }
+  })
+  assert.ok(
+    (widths.get('研发') ?? 0) < (widths.get('发布审批') ?? 0),
+    'node width follows the label instead of a fixed card width',
+  )
+  const text = texts.join(' ')
+  for (const label of ['研发', '测试', '发布审批', '开始', '结束']) {
+    assert.match(text, new RegExp(label, 'u'))
+  }
+  assert.match(text, /定义信息/u)
+  assert.match(text, /点节点或连线查看详情/u)
+
+  clickButton(tree, '研发')
+  assert.equal(harness.updates.length, 1)
+  assert.deepEqual(harness.updates[0].definitionSelection, { kind: 'position', id: 'dev' })
+
+  const edgeHit = findBy(
+    tree,
+    (node) =>
+      typeof node.props?.className === 'string' &&
+      node.props.className.split(/\s+/).includes('buka-workflows-hitPath') &&
+      typeof node.props?.onClick === 'function',
+  )
+  assert.ok(edgeHit !== null, 'edge hit area should be clickable')
+  assert.equal(edgeHit.props['aria-label'], '开始 → 研发', 'edge carries a readable name')
+  assert.equal(typeof edgeHit.props.onMouseEnter, 'function', 'hovering an edge shows its name')
+  edgeHit.props.onClick()
+  assert.deepEqual(harness.updates[1].definitionSelection, { kind: 'edge', index: 0 })
+})
+
+test('定义结构：节点头像来自打工人登记，而不是定义快照', async () => {
+  const client = await loadClient()
+  const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
+    position.id === 'dev'
+      ? { ...position, executor: { ...position.executor, avatar: 'rocket' } }
+      : position,
+  )
+  const { texts, classes } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: {
+      status: 'ready',
+      data: {
+        ...WORKFLOW_DETAIL,
+        graph: { ...WORKFLOW_DETAIL.graph, positions: graphPositions },
+      },
+      error: null,
+    },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /🚀/u, 'the worker avatar is drawn on the node')
+  assert.ok(classes.includes('buka-workflows-avatar'), 'avatar chip rendered')
+})
+
+test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
+  const client = await loadClient()
+  const { texts } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    definitionSelection: { kind: 'position', id: 'dev' },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /研发/u)
+  assert.match(text, /打工人 · 软件工程师/u, 'executor identity lives in the drawer header')
+  assert.match(text, /开发/u)
+  assert.match(text, /实现功能/u)
+  assert.match(text, /requirement/u, 'schema fields are listed')
+  assert.doesNotMatch(text, /执行者:/u, 'the executor is no longer a loose key-value row')
+  assert.doesNotMatch(text, /原始 schema/u, 'no raw schema dump')
+})
+
+test('作业概览：需求、结构化输入、最终交付物与启动信息', async () => {
+  const client = await loadClient()
+  const { texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    finalTask: { status: 'ready', data: FINAL_TASK.task, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /这次要做什么/u)
+  assert.match(text, /实现登录页/u)
+  assert.match(text, /结构化输入/u)
+  assert.match(text, /需求说明/u)
+  assert.match(text, /最终交付物/u)
+  assert.match(text, /最终交付说明/u)
+  assert.match(text, /启动信息/u)
+  assert.match(text, /人（页面启动）/u)
+  assert.match(text, /重试交付/u)
+  assert.doesNotMatch(text, /排队 1/u, 'progress counts are not shown in overview')
+  assert.doesNotMatch(text, /原始需求|原始结构化输入/u, 'readable sections replace raw JSON')
+})
+
+test('实时流程：节点聚合、待认领徽标、已走过的边与点节点开任务', async () => {
+  const client = await loadClient()
+  const { tree, texts, classes } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'flow' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /待认领/u)
+  assert.match(text, /1\/1/u, 'dev node shows one of one done')
+  assert.ok(classes.includes('buka-workflows-nodeCorner'), 'live nodes show a task corner badge')
+  assert.ok(classes.includes('is-taken'), 'traversed edges should be marked')
+  assert.match(text, /点节点查看/u)
+
+  clickButton(tree, '研发')
+  assert.equal(harness.updates.length, 1)
+  assert.equal(harness.updates[0].taskId, 'task-1', 'a single task opens its drawer directly')
+})
+
+test('看板：五列、岗位行（开始 / 结束合并为启动者）、卡片打开任务抽屉', async () => {
   const client = await loadClient()
   const { tree, texts } = render(client, {
-    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     job: { status: 'ready', data: JOB_DETAIL, error: null },
   })
@@ -651,23 +756,48 @@ test('作业看板按岗位 × 状态分组，点卡片打开任务抽屉', asyn
   for (const header of ['排队', '待认领', '进行中', '已完成', '异常']) {
     assert.match(text, new RegExp(header, 'u'), `board column ${header}`)
   }
-  for (const row of ['开始', '研发', '测试', '发布审批', '结束']) {
-    assert.match(text, new RegExp(row, 'u'), `board row ${row}`)
+
+  const rowTitle = (node) => {
+    const className = node.props?.className
+    return (
+      typeof className === 'string' &&
+      className.split(/\s+/).includes('buka-workflows-boardRowTitle')
+    )
   }
+  const titles = []
+  walk(tree, (node) => {
+    if (rowTitle(node)) titles.push(textOf(node))
+  })
+  assert.deepEqual(
+    titles,
+    ['启动者', '研发', '测试', '发布审批'],
+    'start / end share one starter row',
+  )
+
+  const starterRow = findBy(
+    tree,
+    (node) =>
+      typeof node.props?.className === 'string' &&
+      node.props.className.split(/\s+/).includes('buka-workflows-boardRow') &&
+      textOf(node).includes('启动者'),
+  )
+  assert.ok(starterRow !== null, 'the starter row should exist')
+  assert.match(textOf(starterRow), /人（页面启动）/u, 'the row names the starter')
+  assert.match(textOf(starterRow), /2 个任务/u, 'start and end tasks sit in the same row')
+
   assert.match(text, /开发/u)
   assert.match(text, /验证/u)
   assert.match(text, /软件工程师/u)
 
   clickButton(tree, '开发')
-  assert.equal(harness.updates.length, 1, 'clicking a card should update state')
+  assert.equal(harness.updates.length, 1)
   assert.equal(harness.updates[0].taskId, 'task-1')
-  assert.equal(harness.updates[0].task.status, 'loading')
 })
 
-test('任务抽屉渲染 payload、依赖、执行记录、结果与操作', async () => {
+test('任务抽屉：输入按契约、结果与操作', async () => {
   const client = await loadClient()
   const { texts } = render(client, {
-    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     job: { status: 'ready', data: JOB_DETAIL, error: null },
     taskId: 'task-1',
@@ -675,6 +805,7 @@ test('任务抽屉渲染 payload、依赖、执行记录、结果与操作', asy
   })
   const text = texts.join(' ')
   assert.match(text, /实现登录页/u, 'payload rendered')
+  assert.doesNotMatch(text, /原始输入|原始产出/u, 'no raw JSON dumps')
   assert.match(text, /依赖/u)
   assert.match(text, /已结构化/u)
   assert.match(text, /执行记录/u)
@@ -684,9 +815,58 @@ test('任务抽屉渲染 payload、依赖、执行记录、结果与操作', asy
   assert.match(text, /重试/u)
   assert.match(text, /取消任务/u)
   assert.match(text, /打开会话/u)
+  assert.match(text, /研发 · 软件工程师/u, 'header carries position and claimant')
+  assert.match(text, /更多信息/u, 'audit details are folded away')
 })
 
-test('人任务按 output schema 渲染表单，提交走 task/action complete', async () => {
+test('节点任务抽屉：岗位身份、任务数与任务卡', async () => {
+  const client = await loadClient()
+  const { tree, texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'flow' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    nodeTasks: { positionId: 'qa', label: '测试' },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /测试 · 任务/u)
+  assert.match(text, /1 个任务/u)
+  assert.match(text, /打工人 · 质量保障工程师/u)
+
+  clickButton(tree, '验证')
+  assert.equal(harness.updates[0].taskId, 'task-2', 'the first task card opens its drawer')
+})
+
+test('只读值：没有 payload 契约时按字段逐行展示，不铺原始 JSON', async () => {
+  const client = await loadClient()
+  const definition = {
+    ...DEFINITION,
+    positions: DEFINITION.positions.map((position) =>
+      position.id === 'dev'
+        ? {
+            ...position,
+            taskTypes: position.taskTypes.map((type) => ({ ...type, payload: undefined })),
+          }
+        : position,
+    ),
+  }
+  const { texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: {
+      status: 'ready',
+      data: { ...WORKFLOW_DETAIL, workflow: { ...WORKFLOW_DETAIL.workflow, definition } },
+      error: null,
+    },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    taskId: 'task-1',
+    task: { status: 'ready', data: TASK_DETAIL.task, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /requirement/u, 'field names still carry the structure')
+  assert.match(text, /实现登录页/u)
+  assert.doesNotMatch(text, /"requirement"/u, 'no raw JSON dump')
+})
+
+test('人任务：按 output schema 渲染表单，提交走 task/action complete', async () => {
   const client = await loadClient()
   const requests = []
   const originalFetch = globalThis.fetch
@@ -699,7 +879,7 @@ test('人任务按 output schema 渲染表单，提交走 task/action complete',
   }
   try {
     const { tree, texts } = render(client, {
-      route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
+      route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
       workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
       job: { status: 'ready', data: JOB_DETAIL, error: null },
       taskId: 'task-3',
@@ -708,9 +888,7 @@ test('人任务按 output schema 渲染表单，提交走 task/action complete',
     })
     const text = texts.join(' ')
     assert.match(text, /填写结果/u)
-    assert.match(text, /最终交付物|提交结果/u)
 
-    // 产出 schema 的枚举字段渲染成 select，且带着注入的值。
     const approved = findBy(
       tree,
       (node) => node.props?.id === 'buka-workflows-task-task-3-approved',
@@ -719,7 +897,6 @@ test('人任务按 output schema 渲染表单，提交走 task/action complete',
     assert.equal(approved.props.value, 'yes')
 
     clickButton(tree, '提交结果')
-    // 等 requestJson 的 fetch / json 两个微任务。
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(requests.length, 1, 'complete should POST exactly once')
     assert.equal(requests[0].url, '/buka-workflows/task/action')
@@ -734,22 +911,17 @@ test('人任务按 output schema 渲染表单，提交走 task/action complete',
   }
 })
 
-test('新建作业对话框按开始契约渲染原始输入与结构化输入', async () => {
+test('新建作业：需求在前、结构化输入按契约渲染', async () => {
   const client = await loadClient()
   const { tree } = render(client, {
-    route: { kind: 'workflow', workflowId: 'wf-1' },
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     newJob: { open: true, raw: {}, structured: {}, error: null, submitting: false },
   })
-  const raw = findBy(tree, (node) =>
-    typeof node.props?.id === 'string'
-      ? node.props.id === 'buka-workflows-newjob-raw-request'
-      : false,
-  )
-  const structured = findBy(tree, (node) =>
-    typeof node.props?.id === 'string'
-      ? node.props.id === 'buka-workflows-newjob-structured-requirement'
-      : false,
+  const raw = findBy(tree, (node) => node.props?.id === 'buka-workflows-newjob-raw-request')
+  const structured = findBy(
+    tree,
+    (node) => node.props?.id === 'buka-workflows-newjob-structured-requirement',
   )
   assert.ok(raw !== null, 'raw input field should render from start.task.payload')
   assert.ok(structured !== null, 'structured field should render from start.task.output')
@@ -760,13 +932,12 @@ test('新建作业对话框按开始契约渲染原始输入与结构化输入',
   assert.ok(submit !== null, 'submit button should render')
 })
 
-test('附件库、时间线与作业流程图各自渲染', async () => {
+test('资产：资产池按来源任务分组，最终交付物带标记', async () => {
   const client = await loadClient()
-  const attachments = render(client, {
-    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
+  const { texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'outputs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     job: { status: 'ready', data: JOB_DETAIL, error: null },
-    jobView: 'attachments',
     attachments: {
       status: 'ready',
       data: [
@@ -781,32 +952,24 @@ test('附件库、时间线与作业流程图各自渲染', async () => {
           createdBy: '软件工程师',
           createdAt: '2026-11-12T10:03:00.000Z',
         },
+        {
+          id: 'att-file-2',
+          name: 'delivery.md',
+          bytes: 1024,
+          mime: 'text/markdown',
+          sourceTaskId: 'task-4',
+          sourcePositionId: 'end',
+          createdAt: '2026-11-12T10:04:00.000Z',
+        },
       ],
       error: null,
     },
   })
-  const attachmentText = attachments.texts.join(' ')
-  assert.match(attachmentText, /trace\.zip/u)
-  assert.match(attachmentText, /失败用例 trace/u)
-  assert.match(attachmentText, /2\.0 KiB/u)
-
-  const timeline = render(client, {
-    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
-    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
-    job: { status: 'ready', data: JOB_DETAIL, error: null },
-    jobView: 'timeline',
-  })
-  const timelineText = timeline.texts.join(' ')
-  assert.match(timelineText, /作业创建/u)
-  assert.match(timelineText, /任务创建/u)
-  assert.match(timelineText, /任务完成/u)
-
-  const graph = render(client, {
-    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1' },
-    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
-    job: { status: 'ready', data: JOB_DETAIL, error: null },
-    jobView: 'graph',
-  })
-  assert.equal(graph.paths.length, DEFINITION.edges.length, 'job graph should draw every edge')
-  assert.match(graph.texts.join(' '), /研发/u)
+  const text = texts.join(' ')
+  assert.match(text, /trace\.zip/u)
+  assert.match(text, /失败用例 trace/u)
+  assert.match(text, /2\.0 KiB/u)
+  assert.match(text, /delivery\.md/u)
+  assert.match(text, /最终/u)
+  assert.match(text, /产出者/u)
 })

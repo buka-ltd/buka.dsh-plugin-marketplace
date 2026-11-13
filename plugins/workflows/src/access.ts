@@ -3,7 +3,7 @@
  *
  * 工具本身注册在 Host 上，默认每个会话都能看到。这里把可见性收窄到配置里
  * 点名的 agent preset，并且只放行该 preset 的**根会话**：由编排器 spawn 出来
- * 的子会话（机器人节点）拿不到工具，避免机器人在节点里自己去开新工作流。
+ * 的子会话（打工人节点）拿不到工具，避免打工人在节点里自己去开新工作流。
  *
  * 另外可以按工作区放行（`orchestratorWorkspaces`）：在点名目录（含子目录）
  * 里启动的会话直接可见，不必切到编排 preset——开发者工作区就是这种用法。
@@ -114,7 +114,7 @@ export function resolveWorkflowAccess(input: ResolveWorkflowAccessInput = {}): W
     return { visible: true, preset: null, reason: 'unavailable' }
   }
 
-  // 子会话（机器人节点自己）继承的是编排器 preset，但不应再编排工作流。
+  // 子会话（打工人节点自己）继承的是编排器 preset，但不应再编排工作流。
   if (session.header?.parentSession !== undefined) {
     return { visible: false, preset: null, reason: 'child-session' }
   }

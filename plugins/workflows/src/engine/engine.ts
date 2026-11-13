@@ -4,7 +4,7 @@
  * 设计要点（`.tmp/workflow-v4-spec.md` §6-§12、ADR 0006-0012）：
  *
  * - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
- * - 一个 agent 机器人岗位一次只跑一条任务（FIFO），program 机器人直接完成，
+ * - 一个智能体岗位一次只跑一条任务（FIFO），机器人直接完成，
  *   人任务由被点名的助理承办或停在「待认领」；
  * - 记状态变更全部串行化到 per-job 队列；长等待的会话 / 定时器在队列外执行，
  *   完成时再回队列提交状态；
@@ -37,10 +37,10 @@ import type {
   Claimant,
   JobRecord,
   JsonValue,
-  RobotInfo,
   Starter,
   TaskRecord,
   TaskStatus,
+  WorkerInfo,
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
@@ -68,14 +68,14 @@ import {
 } from './prompt.ts'
 import { handleSessionId, handleStartSeq, poll, readHandleResult } from './session.ts'
 import { buildCreatedTask, buildInitialTasks } from './tasks.ts'
-import type { EngineDeps, RobotHandleLike, RobotsServiceLike, TurnSnapshot } from './types.ts'
+import type { EngineDeps, TurnSnapshot, WorkerHandleLike, WorkersServiceLike } from './types.ts'
 import { describeError, WorkflowError } from './types.ts'
 
 /** 任务结果文本在记录里的预览上限。 */
 const RESULT_PREVIEW_BYTES = 4096
 
-/** 机器人登记表缓存时间。 */
-const ROBOT_CACHE_MS = 5000
+/** 打工人登记表缓存时间。 */
+const WORKER_CACHE_MS = 5000
 
 /** 一次等待中的执行。 */
 interface ActiveExecution {
@@ -84,7 +84,7 @@ interface ActiveExecution {
   readonly attemptId: string
   readonly kind: 'agent' | 'assistant' | 'program' | 'start'
   sessionId: string | null
-  handle: RobotHandleLike | null
+  handle: WorkerHandleLike | null
   stopPoll: (() => void) | null
   readonly controller: AbortController
   timeout: NodeJS.Timeout | null
@@ -97,7 +97,7 @@ type Launch =
       readonly jobId: string
       readonly taskId: string
       readonly attemptId: string
-      readonly robot: string
+      readonly worker: string
       readonly prompt: string
       readonly planMode: boolean
     }
@@ -126,20 +126,23 @@ type Launch =
 /** 引擎构造参数。 */
 export interface WorkflowEngineOptions extends EngineDeps {}
 
-/** 从 robots 服务读登记表，转成本插件关心的形状。 */
-function parseRobotCatalog(raw: unknown): Map<string, RobotInfo> {
-  const catalog = new Map<string, RobotInfo>()
+/** 从 workers 服务读登记表，转成本插件关心的形状。 */
+function parseWorkerCatalog(raw: unknown): Map<string, WorkerInfo> {
+  const catalog = new Map<string, WorkerInfo>()
   const entries = Array.isArray(raw)
     ? raw
-    : raw !== null && typeof raw === 'object' && Array.isArray((raw as { robots?: unknown }).robots)
-      ? ((raw as { robots?: unknown[] }).robots ?? [])
+    : raw !== null &&
+        typeof raw === 'object' &&
+        Array.isArray((raw as { workers?: unknown }).workers)
+      ? ((raw as { workers?: unknown[] }).workers ?? [])
       : []
   for (const entry of entries) {
     if (entry === null || typeof entry !== 'object') continue
     const record = entry as Record<string, unknown>
     const name = typeof record.name === 'string' ? record.name.trim() : ''
     if (name === '') continue
-    const driver = record.driver === 'program' ? 'program' : 'agent'
+    // 旧版 workers 服务把固定程序驱动写成 program；新版写成 robot。两者都按机器人处理。
+    const driver = record.driver === 'robot' || record.driver === 'program' ? 'robot' : 'agent'
     catalog.set(name, {
       name,
       driver,
@@ -171,13 +174,13 @@ export class WorkflowEngine {
   private readonly store: WorkflowStore
   private readonly options: ResolvedOptions
   private readonly logger: LoggerLike | undefined
-  private readonly robotsOf: () => RobotsServiceLike | null
+  private readonly workersOf: () => WorkersServiceLike | null
   private readonly delivery: EngineDeps['delivery']
   private readonly active = new Map<string, ActiveExecution>()
   private readonly sessionTasks = new Map<string, { jobId: string; taskId: string }>()
   private readonly busyAssistants = new Set<string>()
   private readonly deliveryBlocked = new Set<string>()
-  private catalog = new Map<string, RobotInfo>()
+  private catalog = new Map<string, WorkerInfo>()
   private catalogAt = 0
   private started = false
   private disposed = false
@@ -186,7 +189,7 @@ export class WorkflowEngine {
     this.store = deps.store
     this.options = deps.options
     this.logger = deps.logger
-    this.robotsOf = deps.robots
+    this.workersOf = deps.workers
     this.delivery = deps.delivery
   }
 
@@ -194,11 +197,11 @@ export class WorkflowEngine {
   // 生命周期
   // ---------------------------------------------------------------------
 
-  /** 启动引擎：刷新机器人登记表并恢复未完成的作业。 */
+  /** 启动引擎：刷新打工人登记表并恢复未完成的作业。 */
   async start(): Promise<void> {
     if (this.started || this.disposed) return
     this.started = true
-    await this.refreshRobots(true)
+    await this.refreshWorkers(true)
     await this.recover()
   }
 
@@ -223,8 +226,8 @@ export class WorkflowEngine {
     this.sessionTasks.clear()
   }
 
-  /** 释放一个 robots 句柄。 */
-  private disposeHandle(handle: RobotHandleLike | null): void {
+  /** 释放一个 workers 句柄。 */
+  private disposeHandle(handle: WorkerHandleLike | null): void {
     if (handle === null) return
     try {
       if (typeof handle.dispose === 'function') void handle.dispose()
@@ -233,21 +236,28 @@ export class WorkflowEngine {
     }
   }
 
-  /** 刷新机器人登记表（默认 5s 缓存）。 */
-  private async refreshRobots(force = false): Promise<Map<string, RobotInfo>> {
-    if (!force && Date.now() - this.catalogAt < ROBOT_CACHE_MS) return this.catalog
-    const robots = this.robotsOf()
-    if (robots === null) {
+  /**
+   * 刷新打工人登记表（默认 5s 缓存）。
+   *
+   * 空表不缓存：workers 插件可能晚于本插件注册服务，缓存空表会让定义图 / 作业页
+   * 一直拿不到头像，直到某个写操作恰好触发下一次刷新。
+   */
+  private async refreshWorkers(force = false): Promise<Map<string, WorkerInfo>> {
+    if (!force && this.catalog.size > 0 && Date.now() - this.catalogAt < WORKER_CACHE_MS) {
+      return this.catalog
+    }
+    const workers = this.workersOf()
+    if (workers === null) {
       this.catalog = new Map()
       this.catalogAt = Date.now()
       return this.catalog
     }
     try {
-      const listed = typeof robots.list === 'function' ? await robots.list() : undefined
-      this.catalog = parseRobotCatalog(listed ?? robots)
+      const listed = typeof workers.list === 'function' ? await workers.list() : undefined
+      this.catalog = parseWorkerCatalog(listed ?? workers)
     } catch (error) {
       this.logger?.warn?.(
-        `buka-workflows: could not read the robots registry: ${describeError(error)}`,
+        `buka-workflows: could not read the workers registry: ${describeError(error)}`,
       )
       this.catalog = new Map()
     }
@@ -255,9 +265,9 @@ export class WorkflowEngine {
     return this.catalog
   }
 
-  /** 取机器人登记表（按名字）。 */
-  private async robots(): Promise<Map<string, RobotInfo>> {
-    return await this.refreshRobots()
+  /** 取打工人登记表（按名字）。 */
+  private async workers(): Promise<Map<string, WorkerInfo>> {
+    return await this.refreshWorkers()
   }
 
   // ---------------------------------------------------------------------
@@ -265,7 +275,7 @@ export class WorkflowEngine {
   // ---------------------------------------------------------------------
 
   /**
-   * 校验并保存工作流定义：没有 id 时新建，有 id 时追加一个版本。
+   * 校验并保存工作流定义：没有 id 时新建（默认启用），有 id 时追加一个版本。
    *
    * @param input 定义与可选工作流 id
    * @returns 保存后的工作流记录
@@ -274,8 +284,8 @@ export class WorkflowEngine {
     readonly definition: unknown
     readonly workflowId?: string | undefined
   }): Promise<WorkflowRecord> {
-    const robots = await this.robots()
-    const validated = validateWorkflowDefinition(input.definition, { robots })
+    const workers = await this.workers()
+    const validated = validateWorkflowDefinition(input.definition, { workers })
     if (!validated.ok) {
       throw new WorkflowError(
         'invalid-definition',
@@ -294,7 +304,7 @@ export class WorkflowEngine {
       name: definition.name,
       description: definition.description ?? '',
       definition,
-      status: 'draft',
+      status: 'active',
     })
   }
 
@@ -320,13 +330,20 @@ export class WorkflowEngine {
   /**
    * 读工作流详情（含某个版本的完整定义）。
    *
+   * 展示投影要在读取时刷新打工人登记表：图上岗位头像来自 workers 服务，而服务
+   * 可能晚于本插件就绪。
+   *
    * @param workflowId 工作流 id
    * @param version 版本；省略取最新
    * @returns 工作流详情；不存在时 null
    */
-  readWorkflowDetail(workflowId: string, version?: number): Record<string, unknown> | null {
+  async readWorkflowDetail(
+    workflowId: string,
+    version?: number,
+  ): Promise<Record<string, unknown> | null> {
     const found = this.store.readWorkflowVersion(workflowId, version)
     if (found === null) return null
+    const workers = await this.workers()
     const jobs = this.store
       .listJobs(workflowId)
       .map((job) => jobSummary(job, this.store.listTasks(job.id)))
@@ -339,16 +356,16 @@ export class WorkflowEngine {
         status: found.record.status,
         definition: found.versionRecord.definition,
       },
-      graph: workflowGraph(found.versionRecord.definition, this.catalog),
+      graph: workflowGraph(found.versionRecord.definition, workers),
       jobs,
     }
   }
 
   /**
-   * 激活 / 停用工作流。
+   * 停用 / 重新启用工作流。
    *
    * @param workflowId 工作流 id
-   * @param active 是否激活
+   * @param active 是否可用
    * @returns 更新后的记录
    */
   async setWorkflowActive(workflowId: string, active: boolean): Promise<WorkflowRecord> {
@@ -374,7 +391,7 @@ export class WorkflowEngine {
     readonly structuredInput: JsonValue
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    const robots = await this.robots()
+    const workers = await this.workers()
     const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput)
     if (inputProblems.length > 0) {
       throw new WorkflowError('invalid-input', `raw input: ${inputProblems.join('; ')}`)
@@ -426,7 +443,7 @@ export class WorkflowEngine {
           job,
           startTask,
           tasks: [startTask],
-          robots,
+          workers,
         })
         for (const task of initial) {
           await this.store.insertTask(task)
@@ -506,7 +523,7 @@ export class WorkflowEngine {
     return this.store.getJob(job.id) ?? job
   }
 
-  /** 取一个可启动的工作流：必须存在且已激活。 */
+  /** 取一个可启动的工作流：必须存在且未停用。 */
   private requireStartableWorkflow(workflowId: string): {
     workflow: WorkflowRecord
     definition: WorkflowDefinition
@@ -515,8 +532,8 @@ export class WorkflowEngine {
     if (found === null) throw new WorkflowError('not-found', `workflow not found: ${workflowId}`)
     if (found.record.status !== 'active') {
       throw new WorkflowError(
-        'workflow-not-active',
-        `workflow "${found.record.name}" is ${found.record.status}; activate it before starting a job`,
+        'workflow-retired',
+        `workflow "${found.record.name}" is not enabled; enable it before starting a job`,
       )
     }
     return { workflow: found.record, definition: found.versionRecord.definition }
@@ -566,12 +583,15 @@ export class WorkflowEngine {
   /**
    * 作业详情（契约形状）。
    *
+   * 与工作流详情一样，展示投影在读取时刷新打工人登记表，让岗位头像保持最新。
+   *
    * @param jobId 作业 id
    * @returns 作业详情；不存在时 null
    */
-  jobDetail(jobId: string): Record<string, unknown> | null {
+  async jobDetail(jobId: string): Promise<Record<string, unknown> | null> {
     const job = this.store.getJob(jobId)
     if (job === undefined) return null
+    const workers = await this.workers()
     const tasks = this.store.listTasks(jobId)
     return {
       job: {
@@ -587,7 +607,7 @@ export class WorkflowEngine {
         updatedAt: job.updatedAt,
         error: job.error,
       },
-      definition: jobDefinition(job.definition, this.catalog),
+      definition: jobDefinition(job.definition, workers),
       tasks: tasks.map((task) => taskSummary(task, job.definition)),
       canRetryDelivery: canRetryDelivery(tasks),
     }
@@ -781,7 +801,7 @@ export class WorkflowEngine {
         'this session is not executing a workflow task; only an executing task can create tasks',
       )
     }
-    const robots = await this.robots()
+    const workers = await this.workers()
     return await this.store.runExclusive(reference.jobId, async () => {
       const job = this.store.getJob(reference.jobId)
       if (job === undefined) throw new WorkflowError('not-found', 'job not found')
@@ -796,7 +816,7 @@ export class WorkflowEngine {
         payload: input.payload,
         deps: input.deps,
         tasks,
-        robots,
+        workers,
       })
       await this.store.insertTask(created.task)
       await this.appendEvent(job.id, 'task/created', {
@@ -1164,7 +1184,7 @@ export class WorkflowEngine {
         continue
       }
       const executor = task.assignee
-      if (executor.kind === 'robot' && executor.driver === 'program') {
+      if (executor.kind === 'worker' && executor.driver === 'robot') {
         if (attempt !== undefined)
           void this.launchProgram(jobId, task.id, attempt.id, executor.program ?? '')
         continue
@@ -1178,7 +1198,7 @@ export class WorkflowEngine {
         continue
       }
       const sessionId = attempt.sessionId
-      if (sessionId === null || executor.kind !== 'robot') {
+      if (sessionId === null || executor.kind !== 'worker') {
         await this.failTaskLocked(
           jobId,
           task.id,
@@ -1256,14 +1276,14 @@ export class WorkflowEngine {
     jobId: string,
     task: TaskRecord,
     attempt: AttemptRecord,
-    robot: string,
+    worker: string,
     sessionId: string,
   ): Promise<boolean> {
-    const robots = this.robotsOf()
-    if (robots === null || typeof robots.openSession !== 'function') return false
-    let handle: RobotHandleLike
+    const workers = this.workersOf()
+    if (workers === null || typeof workers.openSession !== 'function') return false
+    let handle: WorkerHandleLike
     try {
-      handle = (await robots.openSession({ robot, sessionId })) as RobotHandleLike
+      handle = (await workers.openSession({ worker, sessionId })) as WorkerHandleLike
     } catch (error) {
       this.logger?.warn?.(
         `buka-workflows: could not resume session ${sessionId}: ${describeError(error)}`,
@@ -1287,7 +1307,7 @@ export class WorkflowEngine {
       sessionId,
       handle,
       startSeq,
-      robot,
+      worker,
     })
     return true
   }
@@ -1351,14 +1371,14 @@ export class WorkflowEngine {
     for (const launch of launches) this.launch(launch)
   }
 
-  /** 生成可执行任务：结束任务投递、启动任务、agent / program / 助理任务。 */
+  /** 生成可执行任务：结束任务投递、启动任务、agent / robot / 助理任务。 */
   private async scheduleReadyLocked(jobId: string): Promise<Launch[]> {
     const job = this.store.getJob(jobId)
     if (job === undefined || job.status !== 'running') return []
     const tasks = this.store.listTasks(jobId)
     const ready = tasks.filter((task) => task.status === 'ready')
     if (ready.length === 0) return []
-    const robots = await this.robots()
+    const workers = await this.workers()
     const launches: Launch[] = []
     const busyPositions = new Set<string>()
     for (const task of tasks) {
@@ -1398,15 +1418,15 @@ export class WorkflowEngine {
         }
         continue
       }
-      if (executor.kind !== 'robot') continue
-      if (executor.driver === 'program') {
+      if (executor.kind !== 'worker') continue
+      if (executor.driver === 'robot') {
         const programId = executor.program ?? ''
         const launch = await this.claimProgramTask(job, task, programId)
         if (launch !== null) launches.push(launch)
         continue
       }
       if (busyPositions.has(task.position)) continue
-      const launch = await this.claimAgentTask(job, task, tasks, robots)
+      const launch = await this.claimAgentTask(job, task, tasks, workers)
       if (launch !== null) {
         busyPositions.add(task.position)
         launches.push(launch)
@@ -1482,10 +1502,10 @@ export class WorkflowEngine {
     job: JobRecord,
     task: TaskRecord,
     tasks: readonly TaskRecord[],
-    robots: ReadonlyMap<string, RobotInfo>,
+    workers: ReadonlyMap<string, WorkerInfo>,
   ): Promise<Launch | null> {
     const position = positionOf(job.definition, task.position)
-    if (position === undefined || position.executor.kind !== 'robot') return null
+    if (position === undefined || position.executor.kind !== 'worker') return null
     const taskType = this.taskTypeOf(job.definition, task.type)
     if (taskType === undefined) {
       await this.failTaskLocked(
@@ -1502,7 +1522,7 @@ export class WorkflowEngine {
       taskType,
       tasks,
       attachments: this.store.listAttachments(job.id),
-      workspace: robots.get(position.executor.name)?.path,
+      workspace: workers.get(position.executor.name)?.path,
     })
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
     const promptFile = await this.store
@@ -1514,7 +1534,7 @@ export class WorkflowEngine {
     await this.claimTaskRecord(
       job,
       task,
-      { kind: 'robot', name: position.executor.name, sessionId: null },
+      { kind: 'worker', name: position.executor.name, sessionId: null },
       attempt.id,
     )
     return {
@@ -1522,7 +1542,7 @@ export class WorkflowEngine {
       jobId: job.id,
       taskId: task.id,
       attemptId: attempt.id,
-      robot: position.executor.name,
+      worker: position.executor.name,
       prompt,
       planMode: taskType.mode === 'plan',
     }
@@ -1565,7 +1585,7 @@ export class WorkflowEngine {
       jobId: job.id,
       taskId: task.id,
       attemptId: attempt.id,
-      robot: assistantName,
+      worker: assistantName,
       prompt,
       planMode: false,
     }
@@ -1582,8 +1602,8 @@ export class WorkflowEngine {
       job,
       task,
       {
-        kind: 'robot',
-        name: task.assignee.kind === 'robot' ? task.assignee.name : programId,
+        kind: 'worker',
+        name: task.assignee.kind === 'worker' ? task.assignee.name : programId,
         sessionId: null,
       },
       attempt.id,
@@ -1598,7 +1618,7 @@ export class WorkflowEngine {
     await this.claimTaskRecord(
       job,
       task,
-      { kind: 'robot', name: 'starter', sessionId: job.starter.sessionId },
+      { kind: 'worker', name: 'starter', sessionId: job.starter.sessionId },
       attempt.id,
     )
     return {
@@ -1641,28 +1661,28 @@ export class WorkflowEngine {
   private async launchAgent(
     launch: Extract<Launch, { kind: 'agent' | 'assistant' }>,
   ): Promise<void> {
-    const robots = this.robotsOf()
-    if (robots === null || typeof robots.dispatchSession !== 'function') {
+    const workers = this.workersOf()
+    if (workers === null || typeof workers.dispatchSession !== 'function') {
       await this.failOutside(
         launch.jobId,
         launch.taskId,
-        'the Buka Robots service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-robots',
+        'the Buka Workers service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-workers',
       )
       return
     }
     const task = this.store.getTask(launch.taskId)
     if (task === undefined || task.status !== 'running') return
-    let handle: RobotHandleLike
+    let handle: WorkerHandleLike
     try {
-      handle = (await robots.dispatchSession({
-        robot: launch.robot,
+      handle = (await workers.dispatchSession({
+        worker: launch.worker,
         prompt: launch.prompt,
         title: `工作流任务 ${task.id}`,
-        agentPreset: this.options.robotPreset,
+        agentPreset: this.options.workerPreset,
         approval: 'ask',
         planMode: launch.planMode,
         newSessionId: randomUUID(),
-      })) as RobotHandleLike
+      })) as WorkerHandleLike
     } catch (error) {
       await this.failOutside(
         launch.jobId,
@@ -1701,7 +1721,7 @@ export class WorkflowEngine {
       sessionId,
       handle,
       startSeq,
-      robot: launch.robot,
+      worker: launch.worker,
     })
   }
 
@@ -1712,9 +1732,9 @@ export class WorkflowEngine {
     readonly attemptId: string
     readonly kind: ActiveExecution['kind']
     readonly sessionId: string | null
-    readonly handle: RobotHandleLike
+    readonly handle: WorkerHandleLike
     readonly startSeq: number
-    readonly robot: string
+    readonly worker: string
   }): void {
     const controller = new AbortController()
     const execution: ActiveExecution = {
@@ -1748,7 +1768,7 @@ export class WorkflowEngine {
       if (!snapshot.turnEnded) return false
       finish()
       if (input.kind === 'assistant') {
-        await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.robot)
+        await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.worker)
       } else {
         await this.failOutside(
           input.jobId,
@@ -1761,7 +1781,7 @@ export class WorkflowEngine {
     this.active.set(input.taskId, execution)
     if (this.options.taskTimeoutMs > 0) {
       execution.timeout = setTimeout(() => {
-        void this.timeoutOutside(input.jobId, input.taskId, input.robot)
+        void this.timeoutOutside(input.jobId, input.taskId, input.worker)
       }, this.options.taskTimeoutMs)
       execution.timeout.unref?.()
     }
@@ -1778,7 +1798,7 @@ export class WorkflowEngine {
     if (task === undefined || task.status !== 'running') return
     const driver = programDriver(programId === '' ? 'clock' : programId)
     if (driver === undefined) {
-      await this.failOutside(jobId, taskId, `unknown program robot driver "${programId}"`)
+      await this.failOutside(jobId, taskId, `unknown robot driver "${programId}"`)
       return
     }
     const job = this.store.getJob(jobId)
@@ -1841,7 +1861,7 @@ export class WorkflowEngine {
         this.sessionTasks.set(launch.sessionId, { jobId: launch.jobId, taskId: launch.taskId })
         await this.store.updateTask(launch.taskId, (record) => ({
           ...record,
-          claimant: { kind: 'robot', name: 'starter', sessionId: launch.sessionId },
+          claimant: { kind: 'worker', name: 'starter', sessionId: launch.sessionId },
           updatedAt: nowIso(),
         }))
       })
@@ -1910,7 +1930,7 @@ export class WorkflowEngine {
   }
 
   /** 尝试结束任务之外的其它任务在超时后失败。 */
-  private async timeoutOutside(jobId: string, taskId: string, robot: string): Promise<void> {
+  private async timeoutOutside(jobId: string, taskId: string, worker: string): Promise<void> {
     await this.store.runExclusive(jobId, async () => {
       const task = this.store.getTask(taskId)
       if (task === undefined || task.status !== 'running') return
@@ -1928,7 +1948,7 @@ export class WorkflowEngine {
       await this.failTaskLocked(
         jobId,
         taskId,
-        `task timed out after ${this.options.taskTimeoutMs}ms (robot: ${robot})`,
+        `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`,
       )
       await this.recomputeLocked(jobId)
     })
@@ -1957,11 +1977,11 @@ export class WorkflowEngine {
     jobId: string,
     taskId: string,
     snapshot: TurnSnapshot,
-    robot: string,
+    worker: string,
   ): Promise<void> {
     try {
       await this.store.runExclusive(jobId, async () => {
-        this.busyAssistants.delete(robot)
+        this.busyAssistants.delete(worker)
         await this.releaseAssistantLocked(
           jobId,
           this.requireTask(jobId, taskId),
@@ -2144,7 +2164,7 @@ export class WorkflowEngine {
       status: 'completed',
       result: resultRecord,
       claimant: current.claimant ?? {
-        kind: job.starter.kind === 'human' ? 'human' : 'robot',
+        kind: job.starter.kind === 'human' ? 'human' : 'worker',
         name: result.createdBy,
         sessionId: job.starter.kind === 'session' ? job.starter.sessionId : null,
       },
@@ -2156,12 +2176,12 @@ export class WorkflowEngine {
 
   /** 启动任务完成后创建初始任务。 */
   private async spawnInitialTasksLocked(job: JobRecord, startTask: TaskRecord): Promise<void> {
-    const robots = await this.robots()
+    const workers = await this.workers()
     const initial = buildInitialTasks({
       job,
       startTask,
       tasks: this.store.listTasks(job.id),
-      robots,
+      workers,
     })
     for (const task of initial) {
       await this.store.insertTask(task)
@@ -2298,9 +2318,9 @@ export class WorkflowEngine {
     return schemaProblems(taskType.output, output)
   }
 
-  /** 任务执行者的工作区（机器人目录）。 */
+  /** 任务执行者的工作区（打工人目录）。 */
   private workspaceFor(task: TaskRecord): string | undefined {
-    if (task.assignee.kind === 'robot') return this.catalog.get(task.assignee.name)?.path
+    if (task.assignee.kind === 'worker') return this.catalog.get(task.assignee.name)?.path
     if (task.claimant !== null && task.claimant.kind === 'assistant') {
       return this.catalog.get(task.claimant.name)?.path
     }

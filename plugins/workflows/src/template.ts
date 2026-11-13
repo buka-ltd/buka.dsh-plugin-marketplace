@@ -6,11 +6,11 @@
  *
  * - `{{goal}}` / `{{runId}}` / `{{step}}`；
  * - `{{nodes.<id>.text}}`：该节点最近一次执行的最终文本；
- * - `{{nodes.<id>.data.<path>}}`：机器人通过 `structured_output` 回报的结构化结果；
- * - 需要时也可以引用 `{{nodes.<id>.robot}}`、`{{nodes.<id>.sessionId}}`。
+ * - `{{nodes.<id>.data.<path>}}`：打工人通过 `structured_output` 回报的结构化结果；
+ * - 需要时也可以引用 `{{nodes.<id>.worker}}`、`{{nodes.<id>.sessionId}}`。
  *
  * 路径不存在时抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
- * 不会把空提示词交给机器人。
+ * 不会把空提示词交给打工人。
  *
  * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
  * `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。

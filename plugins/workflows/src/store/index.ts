@@ -15,7 +15,9 @@ import { newWorkflowId, nowIso } from '../domain/ids.ts'
 import type {
   AttachmentRecord,
   AttemptRecord,
+  Claimant,
   JobRecord,
+  StoredExecutor,
   TaskRecord,
   WorkflowDefinition,
   WorkflowRecord,
@@ -71,6 +73,55 @@ export interface WorkflowStoreOptions {
   readonly logger?: LoggerLike | undefined
 }
 
+/** 把术语改名前的 `kind: "robot"` 归一成 `worker`；其它记录原样返回。 */
+function normalizeStoredExecutor(executor: StoredExecutor): StoredExecutor {
+  if (executor === null || typeof executor !== 'object') return executor
+  const legacy = executor as { kind?: string }
+  if (legacy.kind !== 'robot') return executor
+  const record = executor as unknown as {
+    name: string
+    driver?: string
+    program?: string
+    avatar?: string
+  }
+  const driver = record.driver === 'robot' || record.driver === 'program' ? 'robot' : 'agent'
+  return {
+    kind: 'worker',
+    name: record.name,
+    driver,
+    ...(record.program === undefined ? {} : { program: record.program }),
+    ...(record.avatar === undefined ? {} : { avatar: record.avatar }),
+  }
+}
+
+/** 把术语改名前的承办者 `kind: "robot"` 归一成 `worker`。 */
+function normalizeClaimant(claimant: Claimant | null): Claimant | null {
+  if (claimant === null || (claimant as { kind?: string }).kind !== 'robot') return claimant
+  return { ...claimant, kind: 'worker' }
+}
+
+/** 把定义快照里岗位执行者的 `kind: "robot"` 归一成 `worker`。 */
+function normalizeDefinitionExecutors(definition: WorkflowDefinition): WorkflowDefinition {
+  // 容错：单测和手工数据里可能有缺 definition / positions 的记录。
+  if (
+    definition === null ||
+    typeof definition !== 'object' ||
+    !Array.isArray((definition as { positions?: unknown }).positions)
+  ) {
+    return definition
+  }
+  let changed = false
+  const positions = definition.positions.map((position) => {
+    if ((position.executor as { kind?: string }).kind !== 'robot') return position
+    changed = true
+    return {
+      ...position,
+      executor: { kind: 'worker' as const, name: (position.executor as { name: string }).name },
+    }
+  })
+  return changed ? { ...definition, positions } : definition
+}
+
 /** 创建一条工作流记录的入参。 */
 export interface CreateWorkflowInput {
   readonly name: string
@@ -104,7 +155,50 @@ export class WorkflowStore {
     return WORKFLOW_DOMAIN_VERSION
   }
 
-  /** 打开域之后的初始化：键唯一性、作业编号回填。 */
+  /**
+   * 把术语改名前的旧记录（执行者 / 承办者 `kind: "robot"`、driver `"program"`）
+   * 归一成当前取值。只改标记为旧值的记录，幂等；迁移后字段与新建记录一致。
+   */
+  private async normalizeLegacyWorkerKinds(): Promise<void> {
+    let tasks = 0
+    for (const [id, record] of this.domain.table('tasks').entries()) {
+      const assignee = normalizeStoredExecutor(record.assignee)
+      const claimant = normalizeClaimant(record.claimant)
+      if (assignee === record.assignee && claimant === record.claimant) continue
+      await this.domain.table('tasks').update(id, (current) => ({ ...current, assignee, claimant }))
+      tasks += 1
+    }
+
+    let jobs = 0
+    for (const [id, record] of this.domain.table('jobs').entries()) {
+      const definition = normalizeDefinitionExecutors(record.definition)
+      if (definition === record.definition) continue
+      await this.domain.table('jobs').update(id, (current) => ({ ...current, definition }))
+      jobs += 1
+    }
+
+    let workflows = 0
+    for (const [id, record] of this.domain.table('workflows').entries()) {
+      let changed = false
+      const versions: Record<string, WorkflowVersionRecord> = {}
+      for (const [version, snapshot] of Object.entries(record.versions)) {
+        const definition = normalizeDefinitionExecutors(snapshot.definition)
+        if (definition !== snapshot.definition) changed = true
+        versions[version] = { ...snapshot, definition }
+      }
+      if (!changed) continue
+      await this.domain.table('workflows').update(id, (current) => ({ ...current, versions }))
+      workflows += 1
+    }
+
+    if (tasks > 0 || jobs > 0 || workflows > 0) {
+      this.logger?.info?.(
+        `buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s), ${workflows} workflow(s))`,
+      )
+    }
+  }
+
+  /** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
   async init(): Promise<void> {
     for (const [key, record] of this.domain.table('workflows').entries()) {
       if (key !== record.id)
@@ -123,6 +217,21 @@ export class WorkflowStore {
       if (key !== record.id) {
         throw new Error(`attachments: stored key "${key}" differs from record id`)
       }
+    }
+    await this.normalizeLegacyWorkerKinds()
+    // 旧版本把新建工作流保存为 draft，要求人工激活；现在新建即启用。
+    // 这里把遗留草稿一次性归一为启用，且只做一次幂等更新。
+    let promoted = 0
+    for (const [id, record] of this.domain.table('workflows').entries()) {
+      if (record.status !== 'draft') continue
+      await this.domain.table('workflows').update(id, (current) => ({
+        ...current,
+        status: 'active',
+      }))
+      promoted += 1
+    }
+    if (promoted > 0) {
+      this.logger?.info?.(`buka-workflows: enabled ${promoted} legacy draft workflow(s)`)
     }
     // 作业编号在所属工作流内递增；记录损坏或迁移丢字段时按已有作业回填。
     const maxSeq = new Map<string, number>()
@@ -158,7 +267,7 @@ export class WorkflowStore {
   // ---------------------------------------------------------------------
 
   /**
-   * 新建一条工作流（版本 1，默认草稿）。
+   * 新建一条工作流（版本 1，默认启用）。
    *
    * @param input 名称、描述与定义
    * @returns 新建的记录
@@ -174,7 +283,7 @@ export class WorkflowStore {
       id: newWorkflowId(),
       name: input.name,
       description: input.description,
-      status: input.status ?? 'draft',
+      status: input.status ?? 'active',
       latestVersion: 1,
       versions: { '1': versionRecord },
       jobSeq: 0,
@@ -235,7 +344,7 @@ export class WorkflowStore {
   }
 
   /**
-   * 改工作流状态（草稿 / 已激活 / 已停用）。
+   * 改工作流状态；`retired` 表示停用，`active` 表示可用。
    *
    * @param workflowId 工作流 id
    * @param status 新状态
@@ -250,10 +359,10 @@ export class WorkflowStore {
   }
 
   /**
-   * 激活 / 停用；停用后状态是 `retired`。
+   * 停用 / 重新启用；停用后状态是 `retired`。
    *
    * @param workflowId 工作流 id
-   * @param active 是否激活
+   * @param active 是否可用
    * @returns 更新后的记录
    */
   async activateWorkflow(workflowId: string, active: boolean): Promise<WorkflowRecord> {

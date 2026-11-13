@@ -3,7 +3,7 @@
  *
  * 语法：
  *
- * - `/job`：列出已激活工作流与它们的启动输入要求；
+ * - `/job`：列出可用工作流与它们的启动输入要求；
  * - `/job <workflowId> <原始输入>`：创建作业，启动任务回到本会话执行（下一轮
  *   agent 按提示调用 `buka_task_complete` 交回结构化输入）。
  *
@@ -52,7 +52,7 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
   }
   const dispose = commands.register({
     name: 'job',
-    description: '启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出已激活的工作流。',
+    description: '启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出可用的工作流。',
     async handler(invocation) {
       const engine = await ready()
       const agentId = typeof invocation.agent?.id === 'string' ? invocation.agent.id : ''
@@ -67,7 +67,7 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
       if (workflowId === '' || request === '') {
         return {
           kind: 'error',
-          text: '用法：/job <workflowId> <原始输入>；不带参数可列出已激活的工作流',
+          text: '用法：/job <workflowId> <原始输入>；不带参数可列出可用的工作流',
         }
       }
       try {
@@ -95,15 +95,15 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
   return true
 }
 
-/** 列出已激活工作流与启动输入要求。 */
+/** 列出可用工作流与启动输入要求。 */
 function describeAvailableWorkflows(engine: WorkflowEngine): string {
   const workflows = engine
     .listWorkflowSummaries()
     .filter((workflow) => workflow.status === 'active')
   if (workflows.length === 0) {
-    return '没有已激活的工作流。先在「工作流」页面创建工作流并激活，或让编排会话保存一份定义。'
+    return '没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。'
   }
-  const lines = ['已激活的工作流：']
+  const lines = ['可用的工作流：']
   for (const workflow of workflows) {
     const id = typeof workflow.id === 'string' ? workflow.id : ''
     const name = typeof workflow.name === 'string' ? workflow.name : id

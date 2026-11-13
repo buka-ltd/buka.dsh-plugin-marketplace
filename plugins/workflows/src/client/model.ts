@@ -5,6 +5,7 @@
  */
 
 import type {
+  AttachmentMeta,
   Claimant,
   EdgeDefinition,
   Executor,
@@ -13,9 +14,11 @@ import type {
   JsonSchema,
   PageState,
   PositionDefinition,
+  Starter,
   TaskDetail,
   TaskSummary,
   TaskTypeDefinition,
+  Translate,
   WorkflowDefinition,
   WorkflowDetail,
 } from './types.ts'
@@ -38,19 +41,38 @@ export interface EdgeView {
   back: boolean
 }
 
-/** 看板的一行（岗位，含开始 / 结束）。 */
+/**
+ * 看板的一行：启动者（开始 / 结束任务合并）或岗位。
+ *
+ * 开始与结束任务的执行者是同一个启动者，合成一行才不会把同一个人画两次。
+ */
 export interface BoardRow {
   id: string
-  kind: 'start' | 'position' | 'end'
+  kind: 'starter' | 'position'
   label: string
   executor: Executor | null
   tasks: TaskSummary[]
 }
 
-/** 取当前工作流详情里的定义快照。 */
+/** 取当前工作流详情里的定义快照；执行者补上打工人登记里的展示字段。 */
 export function currentDefinition(state: PageState): WorkflowDefinition | null {
-  const definition = state.workflow.data?.workflow?.definition
-  return isRecord(definition) ? definition : null
+  const detail = state.workflow.data
+  const definition = detail?.workflow?.definition
+  if (!isRecord(definition)) return null
+  // 定义快照只存打工人名字；avatar / driver 在 graph 投影里，展示前合并回来。
+  const executors = new Map<string, Executor>()
+  for (const position of detail?.graph?.positions ?? []) {
+    if (typeof position.id === 'string' && isRecord(position.executor)) {
+      executors.set(position.id, position.executor)
+    }
+  }
+  if (executors.size === 0) return definition
+  const positions = asArray<PositionDefinition>(definition.positions).map((position) =>
+    typeof position.id === 'string' && executors.has(position.id)
+      ? { ...position, executor: executors.get(position.id) as Executor }
+      : position,
+  )
+  return { ...definition, positions }
 }
 
 /** 取当前作业绑定的定义快照（任务类型的唯一来源）。 */
@@ -215,6 +237,23 @@ export function jobRecord(state: PageState): JobDetail['job'] | null {
   return state.job.data?.job ?? null
 }
 
+/** 当前作业的启动者（开始 / 结束任务的执行者）；没有作业时为 null。 */
+export function currentStarter(state: PageState): Starter | null {
+  return state.job.data?.job?.starter ?? null
+}
+
+/**
+ * 启动者的展示文本：人（页面启动）或会话。
+ *
+ * @param starter
+ * @param t
+ * @returns 未知启动者时返回空串
+ */
+export function starterText(starter: Starter | null | undefined, t: Translate): string {
+  if (!isRecord(starter)) return ''
+  return starter.kind === 'session' ? t('starterSession') : t('starterHuman')
+}
+
 /** 某个任务摘要；找不到返回 null。 */
 export function taskSummary(state: PageState, taskId: unknown): TaskSummary | null {
   if (typeof taskId !== 'string' || taskId === '') return null
@@ -244,7 +283,10 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 }
 
 /**
- * 看板行：开始 + 岗位（定义顺序）+ 结束。
+ * 看板行：启动者（开始 + 结束任务）+ 岗位（定义顺序）。
+ *
+ * 内建开始 / 结束任务的执行者是同一个启动者，因此合并成一行；岗位行只放
+ * 定义里仍存在的岗位，契约外任务由调用方补行。
  *
  * @param definition
  * @param tasks
@@ -254,14 +296,21 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 export function boardRows(
   definition: WorkflowDefinition | null,
   tasks: TaskSummary[],
-  builtin: { start: string; end: string },
+  builtin: { starter: string },
 ): BoardRow[] {
   const positions = positionsOf(definition)
   const known = new Set(positions.map((position) => position.id))
-  const startTasks = tasks.filter((task) => task.position === 'start')
-  const endTasks = tasks.filter((task) => task.position === 'end')
+  const starterTasks = sortTasks(
+    tasks.filter((task) => task.position === 'start' || task.position === 'end'),
+  )
   const rows: BoardRow[] = [
-    { id: 'start', kind: 'start', label: builtin.start, executor: null, tasks: startTasks },
+    {
+      id: 'starter',
+      kind: 'starter',
+      label: builtin.starter,
+      executor: null,
+      tasks: starterTasks,
+    },
     ...positions.map((position) => ({
       id: position.id,
       kind: 'position' as const,
@@ -269,7 +318,6 @@ export function boardRows(
       executor: position.executor,
       tasks: sortTasks(tasks.filter((task) => task.position === position.id)),
     })),
-    { id: 'end', kind: 'end', label: builtin.end, executor: null, tasks: endTasks },
   ]
   // 契约外任务（岗位已从定义里删掉）仍然要显示，否则看板会丢卡。
   const extras = tasks.filter(
@@ -283,7 +331,7 @@ export function boardRows(
     let row = rows.find((item) => item.id === id)
     if (row === undefined) {
       row = { id, kind: 'position', label: id, executor: null, tasks: [] }
-      rows.splice(rows.length - 1, 0, row)
+      rows.push(row)
     }
     row.tasks.push(task)
   }
@@ -377,8 +425,8 @@ export function claimantName(
  */
 function actorKindKeySafe(kind: string): string {
   switch (kind) {
-    case 'robot':
-      return 'actorRobot'
+    case 'worker':
+      return 'actorWorker'
     case 'human':
       return 'actorHuman'
     case 'assistant':
@@ -436,8 +484,9 @@ export function mergedDefinition(
     }
   })
   const jobEdges = Array.isArray(jobDefinition.edges) ? jobDefinition.edges : []
-  const start = jobDefinition.start ?? workflowDefinition.start
-  const end = jobDefinition.end ?? workflowDefinition.end
+  // 作业详情里的 start / end 只是图标签；契约以工作流完整定义为准。
+  const start = workflowDefinition.start ?? jobDefinition.start
+  const end = workflowDefinition.end ?? jobDefinition.end
   return {
     ...workflowDefinition,
     positions: merged,
@@ -480,4 +529,223 @@ export function taskTypeOf(
     task?.position,
     task?.type,
   )
+}
+
+/** 一个节点的任务进度。 */
+export interface TaskProgress {
+  done: number
+  total: number
+  running: number
+  ready: number
+  failed: number
+  pending: number
+}
+
+/**
+ * 任务进度：节点卡片与作业列表共用。
+ *
+ * @param tasks
+ * @returns
+ */
+export function taskProgress(tasks: TaskSummary[]): TaskProgress {
+  const progress: TaskProgress = {
+    done: 0,
+    total: tasks.length,
+    running: 0,
+    ready: 0,
+    failed: 0,
+    pending: 0,
+  }
+  for (const task of tasks) {
+    switch (task.status) {
+      case 'completed':
+        progress.done += 1
+        break
+      case 'running':
+        progress.running += 1
+        break
+      case 'ready':
+        progress.ready += 1
+        break
+      case 'failed':
+      case 'blocked':
+        progress.failed += 1
+        break
+      case 'cancelled':
+        break
+      default:
+        progress.pending += 1
+    }
+  }
+  return progress
+}
+
+/**
+ * 实时流程里哪些边已经被走过：任务依赖跨越了岗位。
+ *
+ * @param tasks
+ * @returns `from->to` 的集合
+ */
+export function takenEdges(tasks: TaskSummary[]): Set<string> {
+  const byId = new Map<string, TaskSummary>()
+  for (const task of tasks) byId.set(task.id, task)
+  const taken = new Set<string>()
+  for (const task of tasks) {
+    const to = typeof task.position === 'string' ? task.position : ''
+    if (to === '') continue
+    const deps = Array.isArray(task.deps) ? task.deps : []
+    for (const depId of deps) {
+      const dep = byId.get(depId)
+      const from = typeof dep?.position === 'string' ? dep.position : ''
+      if (from === '' || from === to) continue
+      taken.add(`${from}->${to}`)
+    }
+  }
+  return taken
+}
+
+/**
+ * 结束任务（最终交付物的来源）。
+ *
+ * @param tasks
+ * @returns
+ */
+export function endTaskSummary(tasks: TaskSummary[]): TaskSummary | null {
+  return tasks.find((task) => task.position === 'end') ?? null
+}
+
+/**
+ * 作业列表筛选。
+ *
+ * @param jobs
+ * @param filter
+ * @returns
+ */
+export function filterJobs(jobs: JobSummary[], filter: string): JobSummary[] {
+  return jobs.filter((job) => {
+    switch (filter) {
+      case 'running':
+        return job.status === 'running'
+      case 'completed':
+        return job.status === 'completed'
+      case 'problem':
+        return job.status === 'failed' || job.status === 'cancelled'
+      default:
+        return true
+    }
+  })
+}
+
+/**
+ * 作业列表排序：运行中优先，其次编号倒序。
+ *
+ * @param jobs
+ * @returns
+ */
+export function sortJobs(jobs: JobSummary[]): JobSummary[] {
+  return [...jobs].sort((left, right) => {
+    const leftRunning = left.status === 'running' ? 0 : 1
+    const rightRunning = right.status === 'running' ? 0 : 1
+    if (leftRunning !== rightRunning) return leftRunning - rightRunning
+    const leftSeq = typeof left.seq === 'number' ? left.seq : 0
+    const rightSeq = typeof right.seq === 'number' ? right.seq : 0
+    if (leftSeq !== rightSeq) return rightSeq - leftSeq
+    const leftTime = typeof left.updatedAt === 'string' ? left.updatedAt : ''
+    const rightTime = typeof right.updatedAt === 'string' ? right.updatedAt : ''
+    return rightTime.localeCompare(leftTime)
+  })
+}
+
+/**
+ * 任务类型 id → 展示名。
+ *
+ * @param definition
+ * @returns
+ */
+export function taskTypeLabels(definition: WorkflowDefinition | null): Map<string, string> {
+  const labels = new Map<string, string>()
+  for (const { type } of allTaskTypes(definition)) {
+    if (typeof type.id === 'string') labels.set(type.id, type.label ?? type.id)
+  }
+  return labels
+}
+
+/** 资产池里的一个分组（按来源任务）。 */
+export interface AssetGroup {
+  key: string
+  taskId: string
+  label: string
+  positionLabel: string
+  final: boolean
+  items: AttachmentMeta[]
+}
+
+/**
+ * 资产池：附件按来源任务分组；结束任务产出的组排在最前。
+ *
+ * @param attachments
+ * @param tasks
+ * @param definition
+ * @param builtin
+ * @returns
+ */
+export function assetGroups(
+  attachments: AttachmentMeta[],
+  tasks: TaskSummary[],
+  definition: WorkflowDefinition | null,
+  builtin: { start: string; end: string },
+): AssetGroup[] {
+  const byTask = new Map<string, TaskSummary>()
+  for (const task of tasks) byTask.set(task.id, task)
+  const positionLabels = new Map(
+    positionsOf(definition).map((position) => [position.id, position.label]),
+  )
+  const groups = new Map<string, AssetGroup>()
+
+  for (const attachment of attachments) {
+    const taskId =
+      typeof attachment.sourceTaskId === 'string' && attachment.sourceTaskId !== ''
+        ? attachment.sourceTaskId
+        : ''
+    const task = taskId === '' ? null : (byTask.get(taskId) ?? null)
+    const key = taskId === '' ? '__unlinked' : taskId
+    let group = groups.get(key)
+    if (group === undefined) {
+      const position = typeof task?.position === 'string' ? task.position : ''
+      const builtinLabel =
+        position === 'start' ? builtin.start : position === 'end' ? builtin.end : ''
+      const positionLabel =
+        builtinLabel !== '' ? '' : position === '' ? '' : (positionLabels.get(position) ?? position)
+      group = {
+        key,
+        taskId,
+        label:
+          builtinLabel !== ''
+            ? builtinLabel
+            : task === null
+              ? ''
+              : (task.typeLabel ?? task.type ?? taskId),
+        positionLabel,
+        final: position === 'end',
+        items: [],
+      }
+      groups.set(key, group)
+    }
+    group.items.push(attachment)
+  }
+
+  const sorted = [...groups.values()].sort((left, right) => {
+    if (left.final !== right.final) return left.final ? -1 : 1
+    if (left.key === '__unlinked') return 1
+    if (right.key === '__unlinked') return -1
+    return 0
+  })
+  for (const group of sorted) {
+    group.items.sort((left, right) => {
+      const leftTime = typeof left.createdAt === 'string' ? left.createdAt : ''
+      const rightTime = typeof right.createdAt === 'string' ? right.createdAt : ''
+      return leftTime.localeCompare(rightTime)
+    })
+  }
+  return sorted
 }

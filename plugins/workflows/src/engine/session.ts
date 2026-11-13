@@ -1,5 +1,5 @@
 /**
- * 启动者会话投递与机器人句柄读取。
+ * 启动者会话投递与打工人句柄读取。
  *
  * 开始 / 结束任务的执行者是启动者。启动者可能是普通会话：插件通过宿主
  * `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { Context } from '@deepseek-ai/cordis'
 
-import type { RobotHandleLike, SessionDelivery, TurnSnapshot } from './types.ts'
+import type { SessionDelivery, TurnSnapshot, WorkerHandleLike } from './types.ts'
 import { describeError } from './types.ts'
 
 /** live agent 的最小形状。 */
@@ -129,13 +129,13 @@ export function createHostSessionDelivery(ctx: Context): SessionDelivery {
 }
 
 /**
- * 读一次机器人句柄的观测结果。
+ * 读一次打工人句柄的观测结果。
  *
- * @param handle robots 句柄
+ * @param handle workers 句柄
  * @param sinceSeq 起点 seq
  * @returns 本轮快照
  */
-export function readHandleResult(handle: RobotHandleLike, sinceSeq: number): TurnSnapshot {
+export function readHandleResult(handle: WorkerHandleLike, sinceSeq: number): TurnSnapshot {
   let raw: Record<string, unknown> | undefined
   if (typeof handle.readResult === 'function') {
     const value = handle.readResult({ sinceSeq })
@@ -155,10 +155,10 @@ export function readHandleResult(handle: RobotHandleLike, sinceSeq: number): Tur
 /**
  * 读句柄的起点 seq。
  *
- * @param handle robots 句柄
+ * @param handle workers 句柄
  * @returns 起点 seq；未知时是 null
  */
-export function handleStartSeq(handle: RobotHandleLike): number | null {
+export function handleStartSeq(handle: WorkerHandleLike): number | null {
   return typeof handle.startSeq === 'number' && Number.isInteger(handle.startSeq)
     ? handle.startSeq
     : null
@@ -167,10 +167,10 @@ export function handleStartSeq(handle: RobotHandleLike): number | null {
 /**
  * 读句柄的会话 id。
  *
- * @param handle robots 句柄
+ * @param handle workers 句柄
  * @returns 会话 id；未知时是 null
  */
-export function handleSessionId(handle: RobotHandleLike): string | null {
+export function handleSessionId(handle: WorkerHandleLike): string | null {
   return typeof handle.sessionId === 'string' && handle.sessionId !== '' ? handle.sessionId : null
 }
 

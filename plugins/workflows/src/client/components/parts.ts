@@ -1,9 +1,9 @@
 /**
- * 页面通用小部件：状态标签、加载 / 失败 / 空态、键值行、只读 schema 与 JSON 块。
+ * 页面通用小部件：状态标签、加载 / 失败 / 空态、键值行、只读 schema 与二次确认按钮。
  */
 
 import { Button, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
-import type React from 'react'
+import React from 'react'
 
 import { h } from '../element.ts'
 import {
@@ -67,7 +67,22 @@ export function renderEmpty(title: string, hint?: string | null): React.ReactEle
   )
 }
 
-/** 状态标签（任务 / 作业通用）。 */
+/** 空态 + 一个动作。 */
+export function renderEmptyAction(
+  title: string,
+  hint: string | null,
+  action: React.ReactNode,
+): React.ReactElement {
+  return h(
+    'div',
+    { className: 'buka-workflows-emptyBox' },
+    h('p', { className: 'buka-workflows-empty' }, title),
+    hint === null || hint === '' ? null : h('p', { className: 'buka-workflows-hint' }, hint),
+    action,
+  )
+}
+
+/** 状态标签（任务 / 作业 / 工作流通用）。 */
 export function renderStatusTag(
   t: Translate,
   status: unknown,
@@ -99,6 +114,165 @@ export function renderKv(rows: Array<[string, React.ReactNode]>): React.ReactEle
   )
 }
 
+/** 抽屉头部：标题 / 状态 / 头像 / 元信息，右侧是动作与关闭。 */
+export function renderDrawerHead(options: {
+  title: string
+  tag?: React.ReactNode
+  avatar?: React.ReactNode
+  meta?: React.ReactNode
+  actions?: React.ReactNode
+  onClose: () => void
+  closeLabel: string
+}): React.ReactElement {
+  return h(
+    'div',
+    { className: 'buka-workflows-drawerHead' },
+    h(
+      'div',
+      { className: 'buka-workflows-drawerHeadRow' },
+      options.avatar ?? null,
+      h(
+        'div',
+        { className: 'buka-workflows-drawerHeading' },
+        h(
+          'div',
+          { className: 'buka-workflows-drawerTitleRow' },
+          h('h2', { className: 'buka-workflows-drawerTitle' }, options.title),
+          options.tag ?? null,
+        ),
+        options.meta === undefined || options.meta === null || options.meta === ''
+          ? null
+          : h('div', { className: 'buka-workflows-drawerMeta' }, options.meta),
+      ),
+      h(
+        'div',
+        { className: 'buka-workflows-drawerActions' },
+        options.actions ?? null,
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'buka-workflows-drawerClose',
+            'aria-label': options.closeLabel,
+            title: options.closeLabel,
+            onClick: options.onClose,
+          },
+          h('span', { 'aria-hidden': true }, '×'),
+        ),
+      ),
+    ),
+  )
+}
+
+/** 长说明：默认收成三行，需要时展开；短文本原样显示。 */
+export function ClampedText(props: {
+  text: string
+  className?: string
+  expandLabel: string
+  collapseLabel: string
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false)
+  const long = props.text.length > 120 || props.text.includes('\n')
+  const className = props.className ?? ''
+  return h(
+    'div',
+    { className: 'buka-workflows-clamped' },
+    h(
+      'p',
+      {
+        className: `buka-workflows-clampedText${className === '' ? '' : ` ${className}`}${
+          long && !open ? ' is-clamped' : ''
+        }`,
+      },
+      props.text,
+    ),
+    long
+      ? h(
+          'button',
+          {
+            type: 'button',
+            className: 'buka-workflows-textButton',
+            onClick: () => setOpen((value) => !value),
+          },
+          open ? props.collapseLabel : props.expandLabel,
+        )
+      : null,
+  )
+}
+
+/** 抽屉里的折叠区：默认收起，展开后才铺技术细节。 */
+export function renderFold(title: string, children: React.ReactNode): React.ReactElement {
+  return h(
+    'details',
+    { className: 'buka-workflows-fold' },
+    h('summary', { className: 'buka-workflows-foldSummary' }, title),
+    h('div', { className: 'buka-workflows-foldBody' }, children),
+  )
+}
+
+/** 一行指标条：值在上、标签在下。 */
+export function renderStatStrip(rows: Array<[string, string]>): React.ReactElement {
+  return h(
+    'div',
+    { className: 'buka-workflows-statStrip' },
+    ...rows.map(([label, value]) =>
+      h(
+        'div',
+        { key: label, className: 'buka-workflows-stat' },
+        h('span', { className: 'buka-workflows-statValue' }, value),
+        h('span', { className: 'buka-workflows-statLabel' }, label),
+      ),
+    ),
+  )
+}
+
+/**
+ * 契约字段的紧凑展示：字段名、类型与说明收在同一个可换行的小标签里。
+ *
+ * @param page 页面上下文
+ * @param schema 契约
+ * @returns React 元素
+ */
+export function renderContractFields(
+  page: AppContext,
+  schema: JsonSchema | null | undefined,
+): React.ReactElement {
+  const { t } = page
+  const fields = schemaFields(schema)
+  if (fields.length === 0)
+    return h('span', { className: 'buka-workflows-hint' }, t('schemaNoFields'))
+  return h(
+    'div',
+    { className: 'buka-workflows-contractFields' },
+    ...fields.map((field) => {
+      const description =
+        typeof field.schema.description === 'string' && field.schema.description !== ''
+          ? field.schema.description
+          : ''
+      return h(
+        'span',
+        { key: field.name, className: 'buka-workflows-contractField' },
+        h('code', { className: 'buka-workflows-inlineCode' }, field.name),
+        h('span', { className: 'buka-workflows-contractType' }, schemaTypeLabel(field.schema)),
+        field.required
+          ? h(
+              'span',
+              {
+                className: 'buka-workflows-required',
+                title: t('schemaFieldRequired'),
+                'aria-label': t('schemaFieldRequired'),
+              },
+              '*',
+            )
+          : null,
+        description === ''
+          ? null
+          : h('span', { className: 'buka-workflows-contractDesc' }, description),
+      )
+    }),
+  )
+}
+
 /** 区块：标题 + 内容。 */
 export function renderSection(
   title: string,
@@ -118,39 +292,14 @@ export function renderSection(
   )
 }
 
-/** 执行者展示：机器人 / 人 + 名字。 */
+/** 执行者展示：打工人 / 人 + 名字。 */
 export function renderExecutor(page: AppContext, executor: Executor | null | undefined): string {
   const { t } = page
   if (!isRecord(executor)) return t('taskTypeUnset')
   if (executor.kind === 'human') return t('actorHuman')
-  const kind = executor.kind === 'robot' ? t('actorRobot') : t('taskTypeUnset')
+  const kind = executor.kind === 'worker' ? t('actorWorker') : t('taskTypeUnset')
   const name = typeof executor.name === 'string' && executor.name !== '' ? executor.name : ''
   return name === '' ? kind : `${kind} · ${name}`
-}
-
-/** 只读展示一组 schema 字段。 */
-export function renderSchema(
-  page: AppContext,
-  schema: JsonSchema | null | undefined,
-): React.ReactElement {
-  const { t } = page
-  const fields = schemaFields(schema)
-  if (fields.length === 0) return h('p', { className: 'buka-workflows-hint' }, t('schemaNoFields'))
-  return h(
-    'ul',
-    { className: 'buka-workflows-schemaList' },
-    ...fields.map((field) =>
-      h(
-        'li',
-        { key: field.name, className: 'buka-workflows-schemaField' },
-        h('code', { className: 'buka-workflows-inlineCode' }, field.name),
-        h('span', { className: 'buka-workflows-schemaType' }, schemaTypeLabel(field.schema)),
-        field.required
-          ? h('span', { className: 'buka-workflows-required' }, t('schemaFieldRequired'))
-          : null,
-      ),
-    ),
-  )
 }
 
 /** 字段类型 → 展示文本。 */
@@ -161,15 +310,76 @@ function schemaTypeLabel(schema: JsonSchema): string {
   return typeof type === 'string' && type !== '' ? type : 'any'
 }
 
-/** JSON 块；空值显示提示。 */
-export function renderJsonBlock(
+/**
+ * 只读展示一个值：有 schema 时按字段逐行展示、字段名用说明替代；没有 schema
+ * 时按对象自身的键逐行展示。展示层不重复渲染原始 JSON。
+ *
+ * @param page 页面上下文
+ * @param schema 契约
+ * @param value 值
+ * @param emptyText 空值提示
+ * @returns React 元素
+ */
+export function renderReadonlyValue(
+  page: AppContext,
+  schema: JsonSchema | null | undefined,
   value: unknown,
   emptyText: string,
-  maxHeight = false,
 ): React.ReactElement {
-  const text = jsonText(value)
-  if (text === '') return h('p', { className: 'buka-workflows-hint' }, emptyText)
-  return h('pre', { className: `buka-workflows-pre${maxHeight ? ' is-tall' : ''}` }, text)
+  const { t } = page
+  if (value === undefined || value === null) {
+    return h('p', { className: 'buka-workflows-hint' }, emptyText)
+  }
+  if (!isRecord(value)) {
+    return h(
+      'div',
+      { className: 'buka-workflows-values' },
+      h(
+        'div',
+        { className: 'buka-workflows-valueRow' },
+        h('div', { className: 'buka-workflows-valueValue' }, renderValue(value, t)),
+      ),
+    )
+  }
+  const fields = schemaFields(schema)
+  const entries =
+    fields.length > 0
+      ? fields.map((field) => ({ name: field.name, description: field.schema.description }))
+      : Object.keys(value).map((name) => ({ name, description: undefined }))
+  if (entries.length === 0) {
+    return h('p', { className: 'buka-workflows-hint' }, emptyText)
+  }
+  return h(
+    'div',
+    { className: 'buka-workflows-values' },
+    ...entries.map((entry) => {
+      const description =
+        typeof entry.description === 'string' && entry.description !== '' ? entry.description : ''
+      return h(
+        'div',
+        { key: entry.name, className: 'buka-workflows-valueRow' },
+        h(
+          'span',
+          { className: 'buka-workflows-valueKey' },
+          description === '' ? entry.name : description,
+          description === ''
+            ? null
+            : h('code', { className: 'buka-workflows-inlineCode' }, entry.name),
+        ),
+        h('div', { className: 'buka-workflows-valueValue' }, renderValue(value[entry.name], t)),
+      )
+    }),
+  )
+}
+
+/** 单个值的展示。 */
+function renderValue(value: unknown, t: Translate): React.ReactNode {
+  if (value === undefined || value === null || value === '') {
+    return h('span', { className: 'buka-workflows-hint' }, t('taskTypeUnset'))
+  }
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return h('pre', { className: 'buka-workflows-pre is-inline' }, jsonText(value))
 }
 
 /** 可点击的附件名按钮。 */
@@ -196,4 +406,65 @@ export function renderAttachmentLink(
 /** 时间文本（null 显示 —）。 */
 export function timeText(value: unknown): string {
   return formatTime(value)
+}
+
+/** 二次确认按钮：第一次点击换成确认 / 取消，不弹系统对话框。 */
+export function ConfirmButton(props: {
+  label: string
+  confirmLabel: string
+  cancelLabel: string
+  onConfirm: () => void
+  className?: string
+  confirmText?: string
+  disabled?: boolean
+  variant?: 'outline' | 'primary'
+}): React.ReactElement {
+  const [pending, setPending] = React.useState(false)
+  const variant = props.variant ?? 'outline'
+  const className = props.className ?? 'buka-workflows-smallButton'
+  if (!pending) {
+    return h(
+      Button,
+      {
+        variant,
+        size: 'sm',
+        className,
+        disabled: props.disabled === true,
+        onClick: () => setPending(true),
+      },
+      props.label,
+    )
+  }
+  return h(
+    'span',
+    { className: 'buka-workflows-confirm' },
+    props.confirmText === undefined
+      ? null
+      : h('span', { className: 'buka-workflows-confirmText' }, props.confirmText),
+    h(
+      Button,
+      {
+        variant: 'outline',
+        size: 'sm',
+        className: `${className} is-danger`,
+        disabled: props.disabled === true,
+        onClick: () => {
+          setPending(false)
+          props.onConfirm()
+        },
+      },
+      props.confirmLabel,
+    ),
+    h(
+      Button,
+      {
+        variant: 'outline',
+        size: 'sm',
+        className,
+        disabled: props.disabled === true,
+        onClick: () => setPending(false),
+      },
+      props.cancelLabel,
+    ),
+  )
 }

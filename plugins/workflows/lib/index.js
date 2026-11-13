@@ -12,7 +12,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 *
 * 工具本身注册在 Host 上，默认每个会话都能看到。这里把可见性收窄到配置里
 * 点名的 agent preset，并且只放行该 preset 的**根会话**：由编排器 spawn 出来
-* 的子会话（机器人节点）拿不到工具，避免机器人在节点里自己去开新工作流。
+* 的子会话（打工人节点）拿不到工具，避免打工人在节点里自己去开新工作流。
 *
 * 另外可以按工作区放行（`orchestratorWorkspaces`）：在点名目录（含子目录）
 * 里启动的会话直接可见，不必切到编排 preset——开发者工作区就是这种用法。
@@ -153,7 +153,7 @@ function normalizePresets(value) {
 /**
 * 引擎依赖的宿主服务形状与公共类型。
 *
-* 跨插件只走服务：robots 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
+* 跨插件只走服务：workers 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
 * 结构类型；启动者会话投递用宿主 `sessionController` / `agents` 的「解析 live
 * agent + followup」能力（与官方 schedule 插件同一机制）。
 *
@@ -179,7 +179,7 @@ function describeError$1(error) {
 *
 * 语法：
 *
-* - `/job`：列出已激活工作流与它们的启动输入要求；
+* - `/job`：列出可用工作流与它们的启动输入要求；
 * - `/job <workflowId> <原始输入>`：创建作业，启动任务回到本会话执行（下一轮
 *   agent 按提示调用 `buka_task_complete` 交回结构化输入）。
 *
@@ -199,7 +199,7 @@ function registerJobCommand({ ctx, ready }) {
 	if (commands === void 0 || commands === null || typeof commands.register !== "function") return false;
 	const dispose = commands.register({
 		name: "job",
-		description: "启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出已激活的工作流。",
+		description: "启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出可用的工作流。",
 		async handler(invocation) {
 			const engine = await ready();
 			const agentId = typeof invocation.agent?.id === "string" ? invocation.agent.id : "";
@@ -217,7 +217,7 @@ function registerJobCommand({ ctx, ready }) {
 			const request = space < 0 ? "" : raw.slice(space + 1).trim();
 			if (workflowId === "" || request === "") return {
 				kind: "error",
-				text: "用法：/job <workflowId> <原始输入>；不带参数可列出已激活的工作流"
+				text: "用法：/job <workflowId> <原始输入>；不带参数可列出可用的工作流"
 			};
 			try {
 				const job = await engine.createJobFromSession({
@@ -240,11 +240,11 @@ function registerJobCommand({ ctx, ready }) {
 	ctx.effect(() => dispose, "buka-workflows: /job command");
 	return true;
 }
-/** 列出已激活工作流与启动输入要求。 */
+/** 列出可用工作流与启动输入要求。 */
 function describeAvailableWorkflows(engine) {
 	const workflows = engine.listWorkflowSummaries().filter((workflow) => workflow.status === "active");
-	if (workflows.length === 0) return "没有已激活的工作流。先在「工作流」页面创建工作流并激活，或让编排会话保存一份定义。";
-	const lines = ["已激活的工作流："];
+	if (workflows.length === 0) return "没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。";
+	const lines = ["可用的工作流："];
 	for (const workflow of workflows) {
 		const id = typeof workflow.id === "string" ? workflow.id : "";
 		const name = typeof workflow.name === "string" ? workflow.name : id;
@@ -347,7 +347,7 @@ function nowIso() {
 * - 附件对「产出它的任务、直接或传递依赖它的任务（下游）、启动者、看板页面」
 *   可见；引擎在任务上下文与检索时按这个集合过滤。
 *
-* 路径安全：相对路径基于任务执行者（机器人）的工作区；绝对路径必须位于工作区
+* 路径安全：相对路径基于任务执行者（打工人）的工作区；绝对路径必须位于工作区
 * 内；符号链接先 `realpath` 再判断。
 *
 * @module @buka/dsh-plugin-workflows/attachments
@@ -500,7 +500,7 @@ function isInside(root, candidate) {
 * 解析并校验附件源文件。
 *
 * @param request 附件请求
-* @param workspace 机器人工作区（可省略）
+* @param workspace 打工人工作区（可省略）
 * @returns 真实源文件路径与字节数
 */
 async function resolveSource(request, workspace) {
@@ -520,9 +520,9 @@ async function resolveSource(request, workspace) {
 		try {
 			root = await promises.realpath(workspace);
 		} catch {
-			throw new Error(`attachment source "${display}" is outside the robot workspace`);
+			throw new Error(`attachment source "${display}" is outside the worker workspace`);
 		}
-		if (!isInside(root, source)) throw new Error(`attachment source "${display}" is outside the robot workspace`);
+		if (!isInside(root, source)) throw new Error(`attachment source "${display}" is outside the worker workspace`);
 	}
 	let stat;
 	try {
@@ -1206,11 +1206,11 @@ function schemaJson(schema) {
 *
 * - `{{goal}}` / `{{runId}}` / `{{step}}`；
 * - `{{nodes.<id>.text}}`：该节点最近一次执行的最终文本；
-* - `{{nodes.<id>.data.<path>}}`：机器人通过 `structured_output` 回报的结构化结果；
-* - 需要时也可以引用 `{{nodes.<id>.robot}}`、`{{nodes.<id>.sessionId}}`。
+* - `{{nodes.<id>.data.<path>}}`：打工人通过 `structured_output` 回报的结构化结果；
+* - 需要时也可以引用 `{{nodes.<id>.worker}}`、`{{nodes.<id>.sessionId}}`。
 *
 * 路径不存在时抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
-* 不会把空提示词交给机器人。
+* 不会把空提示词交给打工人。
 *
 * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
 * `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。
@@ -1481,8 +1481,8 @@ function buildTemplateContext(input) {
 /**
 * 工作流 v4 定义校验（`.tmp/workflow-v4-spec.md` §5.8）。
 *
-* 纯函数：不读盘、不依赖 DSH。机器人存在性由调用方传入 `robots` 目录，
-* 这样 `buka_workflow_save` 用 robots 服务的登记表，单测用固定目录。
+* 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
+* 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
 *
 * 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回边、模板引用）。
 * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
@@ -1511,7 +1511,7 @@ var Issues = class {
 * 校验一份工作流 v4 定义。
 *
 * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
-* @param options 机器人目录
+* @param options 打工人目录
 * @returns 规范化定义，或全部校验错误
 */
 function validateWorkflowDefinition(raw, options) {
@@ -1527,7 +1527,7 @@ function validateWorkflowDefinition(raw, options) {
 	const name = readName(raw, "name", "", issues);
 	const description = readOptionalString(raw, "description", "description", issues) ?? "";
 	const budgets = readBudgets(raw.budgets, issues);
-	const positions = readPositions(raw.positions, options.robots, issues);
+	const positions = readPositions(raw.positions, options.workers, issues);
 	const positionById = new Map(positions.map((position) => [position.id, position]));
 	const typeById = /* @__PURE__ */ new Map();
 	for (const position of positions) for (const taskType of position.taskTypes) typeById.set(taskType.id, taskType);
@@ -1608,7 +1608,7 @@ function readBudgets(raw, issues) {
 	};
 }
 /** 解析岗位列表。 */
-function readPositions(raw, robots, issues) {
+function readPositions(raw, workers, issues) {
 	if (!Array.isArray(raw) || raw.length === 0) {
 		issues.add("positions", "must be a non-empty array");
 		return [];
@@ -1626,8 +1626,8 @@ function readPositions(raw, robots, issues) {
 		if (id === null) continue;
 		const label = readName(entry, "label", path, issues);
 		const description = readOptionalString(entry, "description", `${path}.description`, issues);
-		const executor = readExecutor(entry.executor, `${path}.executor`, robots, issues);
-		const taskTypes = readTaskTypes(entry.taskTypes, `${path}.taskTypes`, id, executor, robots, seenTypes, issues);
+		const executor = readExecutor(entry.executor, `${path}.executor`, workers, issues);
+		const taskTypes = readTaskTypes(entry.taskTypes, `${path}.taskTypes`, id, executor, workers, seenTypes, issues);
 		if (label === null || executor === null) continue;
 		if (taskTypes.length === 0) issues.add(`${path}.taskTypes`, "a position must declare at least one task type");
 		positions.push({
@@ -1659,32 +1659,32 @@ function readPositionId(entry, path, seen, issues) {
 	return id;
 }
 /** 解析岗位执行者。 */
-function readExecutor(raw, path, robots, issues) {
+function readExecutor(raw, path, workers, issues) {
 	if (!isPlainObject$1(raw)) {
-		issues.add(path, "must be { kind: \"robot\", name } or { kind: \"human\" }");
+		issues.add(path, "must be { kind: \"worker\", name } or { kind: \"human\" }");
 		return null;
 	}
 	if (raw.kind === "human") return { kind: "human" };
-	if (raw.kind !== "robot") {
-		issues.add(`${path}.kind`, "must be \"robot\" or \"human\"");
+	if (raw.kind !== "worker") {
+		issues.add(`${path}.kind`, "must be \"worker\" or \"human\"");
 		return null;
 	}
 	const name = typeof raw.name === "string" ? raw.name.trim() : "";
 	if (name === "") {
-		issues.add(`${path}.name`, "must be a non-empty robot name");
+		issues.add(`${path}.name`, "must be a non-empty worker name");
 		return null;
 	}
-	if (!robots.has(name)) {
-		issues.add(`${path}.name`, `unknown robot "${name}": register it with the Buka Robots plugin first`);
+	if (!workers.has(name)) {
+		issues.add(`${path}.name`, `unknown worker "${name}": register it with the Buka Workers plugin first`);
 		return null;
 	}
 	return {
-		kind: "robot",
+		kind: "worker",
 		name
 	};
 }
 /** 解析一个岗位的任务类型列表。 */
-function readTaskTypes(raw, path, positionId, executor, robots, seenTypes, issues) {
+function readTaskTypes(raw, path, positionId, executor, workers, seenTypes, issues) {
 	if (!Array.isArray(raw) || raw.length === 0) {
 		issues.add(path, "must be a non-empty array");
 		return [];
@@ -1696,13 +1696,13 @@ function readTaskTypes(raw, path, positionId, executor, robots, seenTypes, issue
 			issues.add(at, "must be an object");
 			continue;
 		}
-		const taskType = readTaskType(entry, at, positionId, executor, robots, seenTypes, issues);
+		const taskType = readTaskType(entry, at, positionId, executor, workers, seenTypes, issues);
 		if (taskType !== null) taskTypes.push(taskType);
 	}
 	return taskTypes;
 }
 /** 解析一个任务类型。 */
-function readTaskType(entry, path, positionId, executor, robots, seenTypes, issues) {
+function readTaskType(entry, path, positionId, executor, workers, seenTypes, issues) {
 	const id = entry.id;
 	if (typeof id !== "string" || !ID_PATTERN.test(id)) {
 		issues.add(`${path}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -1718,8 +1718,8 @@ function readTaskType(entry, path, positionId, executor, robots, seenTypes, issu
 	const payload = readSchema(entry.payload, `${path}.payload`, issues) ?? { type: "object" };
 	const output = readSchema(entry.output, `${path}.output`, issues) ?? { type: "object" };
 	const requires = readRequires(entry.requires, `${path}.requires`, issues);
-	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, executor, robots, issues);
-	const mode = readMode(entry.mode, `${path}.mode`, path, executor, robots, issues);
+	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, executor, workers, issues);
+	const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues);
 	if (label === null) return null;
 	return {
 		id,
@@ -1764,7 +1764,7 @@ function readRequires(raw, path, issues) {
 	return requirements.length > 0 ? requirements : void 0;
 }
 /** 解析助理字段；只对人岗位有效。 */
-function readAssistant(raw, path, positionId, executor, robots, issues) {
+function readAssistant(raw, path, positionId, executor, workers, issues) {
 	if (raw === void 0) return void 0;
 	if (executor !== null && executor.kind !== "human") {
 		issues.add(path, `assistant is only valid on human positions (position "${positionId}")`);
@@ -1772,40 +1772,40 @@ function readAssistant(raw, path, positionId, executor, robots, issues) {
 	}
 	if (raw === null) return null;
 	if (typeof raw !== "string" || raw.trim() === "") {
-		issues.add(path, "must be a robot name or null");
+		issues.add(path, "must be a worker name or null");
 		return;
 	}
 	const name = raw.trim();
-	const robot = robots.get(name);
-	if (robot === void 0) {
-		issues.add(path, `unknown assistant robot "${name}": register it with the Buka Robots plugin first`);
+	const worker = workers.get(name);
+	if (worker === void 0) {
+		issues.add(path, `unknown assistant worker "${name}": register it with the Buka Workers plugin first`);
 		return;
 	}
-	if (robot.driver !== "agent") {
-		issues.add(path, `assistant "${name}" must be an agent robot, not a program robot`);
+	if (worker.driver !== "agent") {
+		issues.add(path, `assistant "${name}" must be an agent, not a robot`);
 		return;
 	}
-	if (!robot.assistant) {
-		issues.add(path, `robot "${name}" is not marked as an assistant in the Buka Robots plugin`);
+	if (!worker.assistant) {
+		issues.add(path, `worker "${name}" is not marked as an assistant in the Buka Workers plugin`);
 		return;
 	}
 	return name;
 }
-/** 解析 plan 模式；只对 agent 型机器人有效。 */
-function readMode(raw, path, ownerPath, executor, robots, issues) {
+/** 解析 plan 模式；只对智能体有效。 */
+function readMode(raw, path, ownerPath, executor, workers, issues) {
 	if (raw === void 0 || raw === null) return void 0;
 	if (raw !== "plan") {
 		issues.add(path, "must be \"plan\" or null");
 		return;
 	}
 	if (executor === null) return void 0;
-	if (executor.kind !== "robot") {
-		issues.add(path, "mode \"plan\" is only valid for agent robot positions");
+	if (executor.kind !== "worker") {
+		issues.add(path, "mode \"plan\" is only valid for agent positions");
 		return;
 	}
-	const robot = robots.get(executor.name);
-	if (robot === void 0 || robot.driver !== "agent") {
-		issues.add(`${ownerPath}.executor`, "mode \"plan\" requires an agent robot executor");
+	const worker = workers.get(executor.name);
+	if (worker === void 0 || worker.driver !== "agent") {
+		issues.add(`${ownerPath}.executor`, "mode \"plan\" requires an agent executor");
 		return;
 	}
 	return "plan";
@@ -2417,14 +2417,14 @@ function assertJobTransition(jobId, from, to) {
 }
 // .build/workflows/program/clock.js
 /**
-* program 型机器人驱动：v1 只有内建 `clock`。
+* 机器人驱动：v1 只有内建 `clock`。
 *
 * `clock` 任务在 payload 里带 `until`（ISO 时间）；到点完成，不建会话、不占
-* 机器人实例。重启时按 `until` 重新计时：已过则立即完成。
+* 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
 *
 * @module @buka/dsh-plugin-workflows/program/clock
 */
-/** 内建 `clock` 驱动 id；与 robots 登记表里的 program id 一致。 */
+/** 内建 `clock` 驱动 id；与 workers 登记表里的 program id 一致。 */
 const CLOCK_PROGRAM_ID = "clock";
 /** Node `setTimeout` 的最大延迟；超过时分段计时。 */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
@@ -2737,14 +2737,14 @@ function buildAssistantPrompt(input) {
 */
 /** 摘要文本上限。 */
 const SUMMARY_BYTES = 240;
-/** 把机器人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
-function executorView(executor, robots) {
-	if (executor.kind === "human" || robots === void 0) return executor;
-	const robot = robots.get(executor.name);
+/** 把打工人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
+function executorView(executor, workers) {
+	if (executor.kind === "human" || workers === void 0) return executor;
+	const worker = workers.get(executor.name);
 	return {
 		...executor,
-		...robot === void 0 ? {} : { driver: robot.driver },
-		...robot?.avatar === void 0 ? {} : { avatar: robot.avatar }
+		...worker === void 0 ? {} : { driver: worker.driver },
+		...worker?.avatar === void 0 ? {} : { avatar: worker.avatar }
 	};
 }
 /** 任务计数。 */
@@ -2883,7 +2883,7 @@ function jobSummary(job, tasks) {
 * @param definition 定义
 * @returns 契约形状
 */
-function jobDefinition(definition, robots) {
+function jobDefinition(definition, workers) {
 	return {
 		name: definition.name,
 		...definition.description === void 0 ? {} : { description: definition.description },
@@ -2891,7 +2891,7 @@ function jobDefinition(definition, robots) {
 			id: position.id,
 			label: position.label,
 			...position.description === void 0 ? {} : { description: position.description },
-			executor: executorView(position.executor, robots),
+			executor: executorView(position.executor, workers),
 			taskTypes: position.taskTypes.map((taskType) => ({
 				id: taskType.id,
 				label: taskType.label,
@@ -2914,9 +2914,9 @@ function jobDefinition(definition, robots) {
 * @param definition 定义
 * @returns 契约形状
 */
-function workflowGraph(definition, robots) {
+function workflowGraph(definition, workers) {
 	return {
-		positions: jobDefinition(definition, robots).positions.map((position) => ({
+		positions: jobDefinition(definition, workers).positions.map((position) => ({
 			id: position.id,
 			label: position.label,
 			executor: position.executor
@@ -2974,7 +2974,7 @@ async function appendJobEvent(store, logger, jobId, type, data) {
 }
 // .build/workflows/engine/session.js
 /**
-* 启动者会话投递与机器人句柄读取。
+* 启动者会话投递与打工人句柄读取。
 *
 * 开始 / 结束任务的执行者是启动者。启动者可能是普通会话：插件通过宿主
 * `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
@@ -3046,9 +3046,9 @@ function createHostSessionDelivery(ctx) {
 	} };
 }
 /**
-* 读一次机器人句柄的观测结果。
+* 读一次打工人句柄的观测结果。
 *
-* @param handle robots 句柄
+* @param handle workers 句柄
 * @param sinceSeq 起点 seq
 * @returns 本轮快照
 */
@@ -3068,7 +3068,7 @@ function readHandleResult(handle, sinceSeq) {
 /**
 * 读句柄的起点 seq。
 *
-* @param handle robots 句柄
+* @param handle workers 句柄
 * @returns 起点 seq；未知时是 null
 */
 function handleStartSeq(handle) {
@@ -3077,7 +3077,7 @@ function handleStartSeq(handle) {
 /**
 * 读句柄的会话 id。
 *
-* @param handle robots 句柄
+* @param handle workers 句柄
 * @returns 会话 id；未知时是 null
 */
 function handleSessionId(handle) {
@@ -3134,10 +3134,10 @@ function poll(intervalMs, check) {
 * @param definition 定义
 * @param positionId 岗位 id
 * @param job 作业
-* @param robots 机器人登记表
+* @param workers 打工人登记表
 * @returns 钉住的执行者
 */
-function resolveExecutor(definition, positionId, job, robots) {
+function resolveExecutor(definition, positionId, job, workers) {
 	if (positionId === "start" || positionId === "end") return job.starter.kind === "human" ? { kind: "human" } : {
 		kind: "session",
 		sessionId: job.starter.sessionId
@@ -3145,14 +3145,14 @@ function resolveExecutor(definition, positionId, job, robots) {
 	const position = findPosition(definition, positionId);
 	if (position === void 0) throw new WorkflowError("unknown-position", `unknown position "${positionId}"`);
 	if (position.executor.kind === "human") return { kind: "human" };
-	const robot = robots.get(position.executor.name);
-	if (robot === void 0) throw new WorkflowError("unknown-robot", `position "${positionId}" uses robot "${position.executor.name}", which is not registered`);
+	const worker = workers.get(position.executor.name);
+	if (worker === void 0) throw new WorkflowError("unknown-worker", `position "${positionId}" uses worker "${position.executor.name}", which is not registered`);
 	return {
-		kind: "robot",
-		name: robot.name,
-		driver: robot.driver,
-		...robot.program === void 0 ? {} : { program: robot.program },
-		...robot.avatar === void 0 ? {} : { avatar: robot.avatar }
+		kind: "worker",
+		name: worker.name,
+		driver: worker.driver,
+		...worker.program === void 0 ? {} : { program: worker.program },
+		...worker.avatar === void 0 ? {} : { avatar: worker.avatar }
 	};
 }
 /**
@@ -3229,7 +3229,7 @@ function findDependencyCycle(tasks) {
 * @throws `WorkflowError`（code 稳定）表示创建被拒绝
 */
 function buildCreatedTask(input) {
-	const { job, creator, position, type, payload, deps, tasks, robots } = input;
+	const { job, creator, position, type, payload, deps, tasks, workers } = input;
 	const definition = job.definition;
 	if (job.status !== "running") throw new WorkflowError("job-not-running", `job ${job.id} is not running`);
 	if (creator.status !== "running") throw new WorkflowError("creator-not-running", `task ${creator.id} is not running; only an executing task can create tasks`);
@@ -3272,7 +3272,7 @@ function buildCreatedTask(input) {
 				taskId: creator.id,
 				position: creator.position
 			},
-			assignee: resolveExecutor(definition, position, job, robots),
+			assignee: resolveExecutor(definition, position, job, workers),
 			claimant: null,
 			attemptIds: [],
 			result: null,
@@ -3316,11 +3316,11 @@ function resolveTargetTaskType(definition, position, type) {
 * 启动任务已完成：结构化输入是它们的唯一依赖（定义里的 `$start`，落盘为
 * `START_TASK_ID`），所以初始状态都是 `ready`（本版不允许依赖别的初始任务）。
 *
-* @param input 作业、启动任务、模板、已有任务与机器人表
+* @param input 作业、启动任务、模板、已有任务与打工人表
 * @returns 新任务记录
 */
 function buildInitialTasks(input) {
-	const { job, startTask, robots } = input;
+	const { job, startTask, workers } = input;
 	const definition = job.definition;
 	const tasks = [...input.tasks];
 	const created = [];
@@ -3331,7 +3331,7 @@ function buildInitialTasks(input) {
 			route,
 			startTask,
 			tasks,
-			robots,
+			workers,
 			definition
 		});
 		tasks.push(task);
@@ -3341,7 +3341,7 @@ function buildInitialTasks(input) {
 }
 /** 构造单条初始任务。 */
 function buildInitialTask(input) {
-	const { job, route, startTask, tasks, robots, definition } = input;
+	const { job, route, startTask, tasks, workers, definition } = input;
 	if (findPosition(definition, route.position) === void 0) throw new WorkflowError("unknown-position", `start.next targets unknown position "${route.position}"`);
 	const taskType = resolveTargetTaskType(definition, route.position, route.type);
 	const edge = findEdge(definition, "start", route.position);
@@ -3361,7 +3361,7 @@ function buildInitialTask(input) {
 			taskId: startTask.id,
 			position: "start"
 		},
-		assignee: resolveExecutor(definition, route.position, job, robots),
+		assignee: resolveExecutor(definition, route.position, job, workers),
 		claimant: null,
 		attemptIds: [],
 		result: null,
@@ -3380,7 +3380,7 @@ function buildInitialTask(input) {
 * 设计要点（`.tmp/workflow-v4-spec.md` §6-§12、ADR 0006-0012）：
 *
 * - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
-* - 一个 agent 机器人岗位一次只跑一条任务（FIFO），program 机器人直接完成，
+* - 一个智能体岗位一次只跑一条任务（FIFO），机器人直接完成，
 *   人任务由被点名的助理承办或停在「待认领」；
 * - 记状态变更全部串行化到 per-job 队列；长等待的会话 / 定时器在队列外执行，
 *   完成时再回队列提交状态；
@@ -3390,18 +3390,18 @@ function buildInitialTask(input) {
 */
 /** 任务结果文本在记录里的预览上限。 */
 const RESULT_PREVIEW_BYTES = 4096;
-/** 机器人登记表缓存时间。 */
-const ROBOT_CACHE_MS = 5e3;
-/** 从 robots 服务读登记表，转成本插件关心的形状。 */
-function parseRobotCatalog(raw) {
+/** 打工人登记表缓存时间。 */
+const WORKER_CACHE_MS = 5e3;
+/** 从 workers 服务读登记表，转成本插件关心的形状。 */
+function parseWorkerCatalog(raw) {
 	const catalog = /* @__PURE__ */ new Map();
-	const entries = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" && Array.isArray(raw.robots) ? raw.robots ?? [] : [];
+	const entries = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" && Array.isArray(raw.workers) ? raw.workers ?? [] : [];
 	for (const entry of entries) {
 		if (entry === null || typeof entry !== "object") continue;
 		const record = entry;
 		const name = typeof record.name === "string" ? record.name.trim() : "";
 		if (name === "") continue;
-		const driver = record.driver === "program" ? "program" : "agent";
+		const driver = record.driver === "robot" || record.driver === "program" ? "robot" : "agent";
 		catalog.set(name, {
 			name,
 			driver,
@@ -3427,7 +3427,7 @@ var WorkflowEngine = class {
 	store;
 	options;
 	logger;
-	robotsOf;
+	workersOf;
 	delivery;
 	active = /* @__PURE__ */ new Map();
 	sessionTasks = /* @__PURE__ */ new Map();
@@ -3441,14 +3441,14 @@ var WorkflowEngine = class {
 		this.store = deps.store;
 		this.options = deps.options;
 		this.logger = deps.logger;
-		this.robotsOf = deps.robots;
+		this.workersOf = deps.workers;
 		this.delivery = deps.delivery;
 	}
-	/** 启动引擎：刷新机器人登记表并恢复未完成的作业。 */
+	/** 启动引擎：刷新打工人登记表并恢复未完成的作业。 */
 	async start() {
 		if (this.started || this.disposed) return;
 		this.started = true;
-		await this.refreshRobots(true);
+		await this.refreshWorkers(true);
 		await this.recover();
 	}
 	/** 停掉所有等待中的执行与定时器。 */
@@ -3467,45 +3467,50 @@ var WorkflowEngine = class {
 		this.active.clear();
 		this.sessionTasks.clear();
 	}
-	/** 释放一个 robots 句柄。 */
+	/** 释放一个 workers 句柄。 */
 	disposeHandle(handle) {
 		if (handle === null) return;
 		try {
 			if (typeof handle.dispose === "function") handle.dispose();
 		} catch {}
 	}
-	/** 刷新机器人登记表（默认 5s 缓存）。 */
-	async refreshRobots(force = false) {
-		if (!force && Date.now() - this.catalogAt < ROBOT_CACHE_MS) return this.catalog;
-		const robots = this.robotsOf();
-		if (robots === null) {
+	/**
+	* 刷新打工人登记表（默认 5s 缓存）。
+	*
+	* 空表不缓存：workers 插件可能晚于本插件注册服务，缓存空表会让定义图 / 作业页
+	* 一直拿不到头像，直到某个写操作恰好触发下一次刷新。
+	*/
+	async refreshWorkers(force = false) {
+		if (!force && this.catalog.size > 0 && Date.now() - this.catalogAt < WORKER_CACHE_MS) return this.catalog;
+		const workers = this.workersOf();
+		if (workers === null) {
 			this.catalog = /* @__PURE__ */ new Map();
 			this.catalogAt = Date.now();
 			return this.catalog;
 		}
 		try {
-			const listed = typeof robots.list === "function" ? await robots.list() : void 0;
-			this.catalog = parseRobotCatalog(listed ?? robots);
+			const listed = typeof workers.list === "function" ? await workers.list() : void 0;
+			this.catalog = parseWorkerCatalog(listed ?? workers);
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not read the robots registry: ${describeError$1(error)}`);
+			this.logger?.warn?.(`buka-workflows: could not read the workers registry: ${describeError$1(error)}`);
 			this.catalog = /* @__PURE__ */ new Map();
 		}
 		this.catalogAt = Date.now();
 		return this.catalog;
 	}
-	/** 取机器人登记表（按名字）。 */
-	async robots() {
-		return await this.refreshRobots();
+	/** 取打工人登记表（按名字）。 */
+	async workers() {
+		return await this.refreshWorkers();
 	}
 	/**
-	* 校验并保存工作流定义：没有 id 时新建，有 id 时追加一个版本。
+	* 校验并保存工作流定义：没有 id 时新建（默认启用），有 id 时追加一个版本。
 	*
 	* @param input 定义与可选工作流 id
 	* @returns 保存后的工作流记录
 	*/
 	async saveWorkflow(input) {
-		const robots = await this.robots();
-		const validated = validateWorkflowDefinition(input.definition, { robots });
+		const workers = await this.workers();
+		const validated = validateWorkflowDefinition(input.definition, { workers });
 		if (!validated.ok) throw new WorkflowError("invalid-definition", validated.issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"));
 		const definition = validated.definition;
 		if (input.workflowId !== void 0 && input.workflowId !== "") {
@@ -3516,7 +3521,7 @@ var WorkflowEngine = class {
 			name: definition.name,
 			description: definition.description ?? "",
 			definition,
-			status: "draft"
+			status: "active"
 		});
 	}
 	/**
@@ -3540,13 +3545,17 @@ var WorkflowEngine = class {
 	/**
 	* 读工作流详情（含某个版本的完整定义）。
 	*
+	* 展示投影要在读取时刷新打工人登记表：图上岗位头像来自 workers 服务，而服务
+	* 可能晚于本插件就绪。
+	*
 	* @param workflowId 工作流 id
 	* @param version 版本；省略取最新
 	* @returns 工作流详情；不存在时 null
 	*/
-	readWorkflowDetail(workflowId, version) {
+	async readWorkflowDetail(workflowId, version) {
 		const found = this.store.readWorkflowVersion(workflowId, version);
 		if (found === null) return null;
+		const workers = await this.workers();
 		const jobs = this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id)));
 		return {
 			workflow: {
@@ -3557,15 +3566,15 @@ var WorkflowEngine = class {
 				status: found.record.status,
 				definition: found.versionRecord.definition
 			},
-			graph: workflowGraph(found.versionRecord.definition, this.catalog),
+			graph: workflowGraph(found.versionRecord.definition, workers),
 			jobs
 		};
 	}
 	/**
-	* 激活 / 停用工作流。
+	* 停用 / 重新启用工作流。
 	*
 	* @param workflowId 工作流 id
-	* @param active 是否激活
+	* @param active 是否可用
 	* @returns 更新后的记录
 	*/
 	async setWorkflowActive(workflowId, active) {
@@ -3580,7 +3589,7 @@ var WorkflowEngine = class {
 	*/
 	async createJobFromHuman(input) {
 		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
-		const robots = await this.robots();
+		const workers = await this.workers();
 		const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput);
 		if (inputProblems.length > 0) throw new WorkflowError("invalid-input", `raw input: ${inputProblems.join("; ")}`);
 		const structuredProblems = schemaProblems(definition.start.task.output, input.structuredInput);
@@ -3638,7 +3647,7 @@ var WorkflowEngine = class {
 					job,
 					startTask,
 					tasks: [startTask],
-					robots
+					workers
 				});
 				for (const task of initial) {
 					await this.store.insertTask(task);
@@ -3716,11 +3725,11 @@ var WorkflowEngine = class {
 		});
 		return this.store.getJob(job.id) ?? job;
 	}
-	/** 取一个可启动的工作流：必须存在且已激活。 */
+	/** 取一个可启动的工作流：必须存在且未停用。 */
 	requireStartableWorkflow(workflowId) {
 		const found = this.store.readWorkflowVersion(workflowId);
 		if (found === null) throw new WorkflowError("not-found", `workflow not found: ${workflowId}`);
-		if (found.record.status !== "active") throw new WorkflowError("workflow-not-active", `workflow "${found.record.name}" is ${found.record.status}; activate it before starting a job`);
+		if (found.record.status !== "active") throw new WorkflowError("workflow-retired", `workflow "${found.record.name}" is not enabled; enable it before starting a job`);
 		return {
 			workflow: found.record,
 			definition: found.versionRecord.definition
@@ -3758,12 +3767,15 @@ var WorkflowEngine = class {
 	/**
 	* 作业详情（契约形状）。
 	*
+	* 与工作流详情一样，展示投影在读取时刷新打工人登记表，让岗位头像保持最新。
+	*
 	* @param jobId 作业 id
 	* @returns 作业详情；不存在时 null
 	*/
-	jobDetail(jobId) {
+	async jobDetail(jobId) {
 		const job = this.store.getJob(jobId);
 		if (job === void 0) return null;
+		const workers = await this.workers();
 		const tasks = this.store.listTasks(jobId);
 		return {
 			job: {
@@ -3779,7 +3791,7 @@ var WorkflowEngine = class {
 				updatedAt: job.updatedAt,
 				error: job.error
 			},
-			definition: jobDefinition(job.definition, this.catalog),
+			definition: jobDefinition(job.definition, workers),
 			tasks: tasks.map((task) => taskSummary(task, job.definition)),
 			canRetryDelivery: canRetryDelivery(tasks)
 		};
@@ -3936,7 +3948,7 @@ var WorkflowEngine = class {
 	async createTaskFromSession(input) {
 		const reference = this.sessionTasks.get(input.sessionId);
 		if (reference === void 0) throw new WorkflowError("no-task", "this session is not executing a workflow task; only an executing task can create tasks");
-		const robots = await this.robots();
+		const workers = await this.workers();
 		return await this.store.runExclusive(reference.jobId, async () => {
 			const job = this.store.getJob(reference.jobId);
 			if (job === void 0) throw new WorkflowError("not-found", "job not found");
@@ -3951,7 +3963,7 @@ var WorkflowEngine = class {
 				payload: input.payload,
 				deps: input.deps,
 				tasks,
-				robots
+				workers
 			});
 			await this.store.insertTask(created.task);
 			await this.appendEvent(job.id, "task/created", {
@@ -4248,7 +4260,7 @@ var WorkflowEngine = class {
 			}
 			if (task.position === "end") continue;
 			const executor = task.assignee;
-			if (executor.kind === "robot" && executor.driver === "program") {
+			if (executor.kind === "worker" && executor.driver === "robot") {
 				if (attempt !== void 0) this.launchProgram(jobId, task.id, attempt.id, executor.program ?? "");
 				continue;
 			}
@@ -4257,7 +4269,7 @@ var WorkflowEngine = class {
 				continue;
 			}
 			const sessionId = attempt.sessionId;
-			if (sessionId === null || executor.kind !== "robot") {
+			if (sessionId === null || executor.kind !== "worker") {
 				await this.failTaskLocked(jobId, task.id, "host restarted and the execution session was lost");
 				continue;
 			}
@@ -4303,13 +4315,13 @@ var WorkflowEngine = class {
 		}
 	}
 	/** 续接一个 agent / 助理任务会话。 */
-	async resumeAgentAttempt(jobId, task, attempt, robot, sessionId) {
-		const robots = this.robotsOf();
-		if (robots === null || typeof robots.openSession !== "function") return false;
+	async resumeAgentAttempt(jobId, task, attempt, worker, sessionId) {
+		const workers = this.workersOf();
+		if (workers === null || typeof workers.openSession !== "function") return false;
 		let handle;
 		try {
-			handle = await robots.openSession({
-				robot,
+			handle = await workers.openSession({
+				worker,
 				sessionId
 			});
 		} catch (error) {
@@ -4336,7 +4348,7 @@ var WorkflowEngine = class {
 			sessionId,
 			handle,
 			startSeq,
-			robot
+			worker
 		});
 		return true;
 	}
@@ -4384,14 +4396,14 @@ var WorkflowEngine = class {
 		await this.settleLocked(jobId);
 		for (const launch of launches) this.launch(launch);
 	}
-	/** 生成可执行任务：结束任务投递、启动任务、agent / program / 助理任务。 */
+	/** 生成可执行任务：结束任务投递、启动任务、agent / robot / 助理任务。 */
 	async scheduleReadyLocked(jobId) {
 		const job = this.store.getJob(jobId);
 		if (job === void 0 || job.status !== "running") return [];
 		const tasks = this.store.listTasks(jobId);
 		const ready = tasks.filter((task) => task.status === "ready");
 		if (ready.length === 0) return [];
-		const robots = await this.robots();
+		const workers = await this.workers();
 		const launches = [];
 		const busyPositions = /* @__PURE__ */ new Set();
 		for (const task of tasks) if (task.status === "running") busyPositions.add(task.position);
@@ -4425,15 +4437,15 @@ var WorkflowEngine = class {
 				}
 				continue;
 			}
-			if (executor.kind !== "robot") continue;
-			if (executor.driver === "program") {
+			if (executor.kind !== "worker") continue;
+			if (executor.driver === "robot") {
 				const programId = executor.program ?? "";
 				const launch = await this.claimProgramTask(job, task, programId);
 				if (launch !== null) launches.push(launch);
 				continue;
 			}
 			if (busyPositions.has(task.position)) continue;
-			const launch = await this.claimAgentTask(job, task, tasks, robots);
+			const launch = await this.claimAgentTask(job, task, tasks, workers);
 			if (launch !== null) {
 				busyPositions.add(task.position);
 				launches.push(launch);
@@ -4484,9 +4496,9 @@ var WorkflowEngine = class {
 		return updated;
 	}
 	/** 认领 agent 任务并写 prompt。 */
-	async claimAgentTask(job, task, tasks, robots) {
+	async claimAgentTask(job, task, tasks, workers) {
 		const position = positionOf(job.definition, task.position);
-		if (position === void 0 || position.executor.kind !== "robot") return null;
+		if (position === void 0 || position.executor.kind !== "worker") return null;
 		const taskType = this.taskTypeOf(job.definition, task.type);
 		if (taskType === void 0) {
 			await this.failTaskLocked(job.id, task.id, `task type "${task.type}" is not declared in the workflow`);
@@ -4499,7 +4511,7 @@ var WorkflowEngine = class {
 			taskType,
 			tasks,
 			attachments: this.store.listAttachments(job.id),
-			workspace: robots.get(position.executor.name)?.path
+			workspace: workers.get(position.executor.name)?.path
 		});
 		const attempt = await this.createAttempt({
 			jobId: job.id,
@@ -4512,7 +4524,7 @@ var WorkflowEngine = class {
 			promptFile
 		}));
 		await this.claimTaskRecord(job, task, {
-			kind: "robot",
+			kind: "worker",
 			name: position.executor.name,
 			sessionId: null
 		}, attempt.id);
@@ -4521,7 +4533,7 @@ var WorkflowEngine = class {
 			jobId: job.id,
 			taskId: task.id,
 			attemptId: attempt.id,
-			robot: position.executor.name,
+			worker: position.executor.name,
 			prompt,
 			planMode: taskType.mode === "plan"
 		};
@@ -4560,7 +4572,7 @@ var WorkflowEngine = class {
 			jobId: job.id,
 			taskId: task.id,
 			attemptId: attempt.id,
-			robot: assistantName,
+			worker: assistantName,
 			prompt,
 			planMode: false
 		};
@@ -4573,8 +4585,8 @@ var WorkflowEngine = class {
 			promptFile: null
 		});
 		await this.claimTaskRecord(job, task, {
-			kind: "robot",
-			name: task.assignee.kind === "robot" ? task.assignee.name : programId,
+			kind: "worker",
+			name: task.assignee.kind === "worker" ? task.assignee.name : programId,
 			sessionId: null
 		}, attempt.id);
 		return {
@@ -4594,7 +4606,7 @@ var WorkflowEngine = class {
 			promptFile: null
 		});
 		await this.claimTaskRecord(job, task, {
-			kind: "robot",
+			kind: "worker",
 			name: "starter",
 			sessionId: job.starter.sessionId
 		}, attempt.id);
@@ -4644,20 +4656,20 @@ var WorkflowEngine = class {
 	}
 	/** 启动一个 agent / 助理会话。 */
 	async launchAgent(launch) {
-		const robots = this.robotsOf();
-		if (robots === null || typeof robots.dispatchSession !== "function") {
-			await this.failOutside(launch.jobId, launch.taskId, "the Buka Robots service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-robots");
+		const workers = this.workersOf();
+		if (workers === null || typeof workers.dispatchSession !== "function") {
+			await this.failOutside(launch.jobId, launch.taskId, "the Buka Workers service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-workers");
 			return;
 		}
 		const task = this.store.getTask(launch.taskId);
 		if (task === void 0 || task.status !== "running") return;
 		let handle;
 		try {
-			handle = await robots.dispatchSession({
-				robot: launch.robot,
+			handle = await workers.dispatchSession({
+				worker: launch.worker,
 				prompt: launch.prompt,
 				title: `工作流任务 ${task.id}`,
-				agentPreset: this.options.robotPreset,
+				agentPreset: this.options.workerPreset,
 				approval: "ask",
 				planMode: launch.planMode,
 				newSessionId: randomUUID()
@@ -4702,7 +4714,7 @@ var WorkflowEngine = class {
 			sessionId,
 			handle,
 			startSeq,
-			robot: launch.robot
+			worker: launch.worker
 		});
 	}
 	/** 注册一个等待中的执行（轮询会话轮次、硬超时）。 */
@@ -4737,14 +4749,14 @@ var WorkflowEngine = class {
 			const snapshot = readHandleResult(input.handle, input.startSeq);
 			if (!snapshot.turnEnded) return false;
 			finish();
-			if (input.kind === "assistant") await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.robot);
+			if (input.kind === "assistant") await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.worker);
 			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
 			return true;
 		});
 		this.active.set(input.taskId, execution);
 		if (this.options.taskTimeoutMs > 0) {
 			execution.timeout = setTimeout(() => {
-				this.timeoutOutside(input.jobId, input.taskId, input.robot);
+				this.timeoutOutside(input.jobId, input.taskId, input.worker);
 			}, this.options.taskTimeoutMs);
 			execution.timeout.unref?.();
 		}
@@ -4755,7 +4767,7 @@ var WorkflowEngine = class {
 		if (task === void 0 || task.status !== "running") return;
 		const driver = programDriver(programId === "" ? "clock" : programId);
 		if (driver === void 0) {
-			await this.failOutside(jobId, taskId, `unknown program robot driver "${programId}"`);
+			await this.failOutside(jobId, taskId, `unknown robot driver "${programId}"`);
 			return;
 		}
 		const job = this.store.getJob(jobId);
@@ -4817,7 +4829,7 @@ var WorkflowEngine = class {
 				await this.store.updateTask(launch.taskId, (record) => ({
 					...record,
 					claimant: {
-						kind: "robot",
+						kind: "worker",
 						name: "starter",
 						sessionId: launch.sessionId
 					},
@@ -4882,7 +4894,7 @@ var WorkflowEngine = class {
 		});
 	}
 	/** 尝试结束任务之外的其它任务在超时后失败。 */
-	async timeoutOutside(jobId, taskId, robot) {
+	async timeoutOutside(jobId, taskId, worker) {
 		await this.store.runExclusive(jobId, async () => {
 			const task = this.store.getTask(taskId);
 			if (task === void 0 || task.status !== "running") return;
@@ -4893,7 +4905,7 @@ var WorkflowEngine = class {
 			} catch {}
 			this.active.delete(taskId);
 			if (execution?.stopPoll != null) execution.stopPoll();
-			await this.failTaskLocked(jobId, taskId, `task timed out after ${this.options.taskTimeoutMs}ms (robot: ${robot})`);
+			await this.failTaskLocked(jobId, taskId, `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`);
 			await this.recomputeLocked(jobId);
 		});
 	}
@@ -4909,10 +4921,10 @@ var WorkflowEngine = class {
 		}
 	}
 	/** 助理失败（会话结束但未提交）：回到待认领。 */
-	async releaseAssistantOutside(jobId, taskId, snapshot, robot) {
+	async releaseAssistantOutside(jobId, taskId, snapshot, worker) {
 		try {
 			await this.store.runExclusive(jobId, async () => {
-				this.busyAssistants.delete(robot);
+				this.busyAssistants.delete(worker);
 				await this.releaseAssistantLocked(jobId, this.requireTask(jobId, taskId), `assistant session ended without completing the task (stopReason: ${snapshot.stopReason ?? "unknown"})`);
 				await this.recomputeLocked(jobId);
 			});
@@ -5053,7 +5065,7 @@ var WorkflowEngine = class {
 			status: "completed",
 			result: resultRecord,
 			claimant: current.claimant ?? {
-				kind: job.starter.kind === "human" ? "human" : "robot",
+				kind: job.starter.kind === "human" ? "human" : "worker",
 				name: result.createdBy,
 				sessionId: job.starter.kind === "session" ? job.starter.sessionId : null
 			},
@@ -5064,12 +5076,12 @@ var WorkflowEngine = class {
 	}
 	/** 启动任务完成后创建初始任务。 */
 	async spawnInitialTasksLocked(job, startTask) {
-		const robots = await this.robots();
+		const workers = await this.workers();
 		const initial = buildInitialTasks({
 			job,
 			startTask,
 			tasks: this.store.listTasks(job.id),
-			robots
+			workers
 		});
 		for (const task of initial) {
 			await this.store.insertTask(task);
@@ -5173,9 +5185,9 @@ var WorkflowEngine = class {
 		if (taskType === void 0) return [`unknown task type "${task.type}"`];
 		return schemaProblems(taskType.output, output);
 	}
-	/** 任务执行者的工作区（机器人目录）。 */
+	/** 任务执行者的工作区（打工人目录）。 */
 	workspaceFor(task) {
-		if (task.assignee.kind === "robot") return this.catalog.get(task.assignee.name)?.path;
+		if (task.assignee.kind === "worker") return this.catalog.get(task.assignee.name)?.path;
 		if (task.claimant !== null && task.claimant.kind === "assistant") return this.catalog.get(task.claimant.name)?.path;
 	}
 	/** 取消一条任务的等待中执行。 */
@@ -5262,7 +5274,7 @@ async function runMigrations(options) {
 * 插件配置与数据目录解析。
 *
 * v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
-* 轮询间隔、附件限额、编排 preset / 工作区与机器人会话 preset。作业 / 任务
+* 轮询间隔、附件限额、编排 preset / 工作区与打工人会话 preset。作业 / 任务
 * 元数据进 `ctx.storageDomain`，不在这里配置。
 *
 * @module @buka/dsh-plugin-workflows/options
@@ -5281,7 +5293,7 @@ const DEFAULTS = {
 	maxResultTextBytes: 2097152,
 	orchestratorPresets: ["workflow-orchestrator"],
 	orchestratorWorkspaces: [],
-	robotPreset: "standard"
+	workerPreset: "standard"
 };
 /** 插件配置。 */
 const Config = z.object({
@@ -5295,7 +5307,7 @@ const Config = z.object({
 	maxResultTextBytes: z.number().step(1).min(1).default(DEFAULTS.maxResultTextBytes).description("写入作业目录的结果全文上限；超出部分截断并在记录里标注。"),
 	orchestratorPresets: z.array(z.string()).default(DEFAULTS.orchestratorPresets).description("能保存 / 读取工作流定义的 agent preset 名单。留空表示不做收窄（所有会话可见）。推荐只保留随插件发布的 `workflow-orchestrator`。"),
 	orchestratorWorkspaces: z.array(z.string()).default(DEFAULTS.orchestratorWorkspaces).description("按工作区放行工作流定义工具：在这些目录（含子目录，支持 ~ 前缀）里启动的会话，即使 preset 不在 orchestratorPresets 里也能保存 / 读取定义。留空表示只按 preset 判定。"),
-	robotPreset: z.string().default(DEFAULTS.robotPreset).description("机器人任务会话使用的 agent preset。")
+	workerPreset: z.string().default(DEFAULTS.workerPreset).description("智能体任务会话使用的 agent preset。")
 });
 /**
 * 合并配置与默认值。
@@ -5305,7 +5317,7 @@ const Config = z.object({
 */
 function resolveOptions(config) {
 	const orchestratorPresets = Array.isArray(config?.orchestratorPresets) ? config.orchestratorPresets.map((preset) => String(preset).trim()).filter((preset) => preset !== "") : DEFAULTS.orchestratorPresets;
-	const robotPreset = typeof config?.robotPreset === "string" ? config.robotPreset.trim() : "";
+	const workerPreset = typeof config?.workerPreset === "string" ? config.workerPreset.trim() : "";
 	return {
 		dataDir: resolveDataDir(config?.dataDir),
 		taskTimeoutMs: nonNegative(config?.taskTimeoutMs) ?? DEFAULTS.taskTimeoutMs,
@@ -5317,7 +5329,7 @@ function resolveOptions(config) {
 		maxResultTextBytes: positive(config?.maxResultTextBytes) ?? DEFAULTS.maxResultTextBytes,
 		orchestratorPresets,
 		orchestratorWorkspaces: resolveWorkspaceRoots(config?.orchestratorWorkspaces),
-		robotPreset: robotPreset === "" ? DEFAULTS.robotPreset : robotPreset
+		workerPreset: workerPreset === "" ? DEFAULTS.workerPreset : workerPreset
 	};
 }
 /**
@@ -5564,7 +5576,8 @@ const ROUTES = {
 function statusForError(error) {
 	if (error instanceof WorkflowError) switch (error.code) {
 		case "not-found": return 404;
-		case "workflow-not-active": return 409;
+		case "workflow-not-active":
+		case "workflow-retired": return 409;
 		case "job-not-running":
 		case "task-not-running":
 		case "invalid-status":
@@ -5638,7 +5651,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			const version = versionRaw === null || versionRaw === "" ? void 0 : Number.parseInt(versionRaw, 10);
 			if (workflowId === "") return sendError(res, 400, "invalid-id", "id is required");
 			if (version !== void 0 && (!Number.isInteger(version) || version < 1)) return sendError(res, 400, "invalid-version", "version must be a positive integer");
-			const detail = (await ready()).readWorkflowDetail(workflowId, version);
+			const detail = await (await ready()).readWorkflowDetail(workflowId, version);
 			if (detail === null) return sendError(res, 404, "not-found", `workflow not found: ${workflowId}`);
 			sendJson(res, 200, {
 				ok: true,
@@ -5693,7 +5706,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
 			const jobId = (query(req).get("id") ?? "").trim();
 			if (jobId === "") return sendError(res, 400, "invalid-id", "id is required");
-			const detail = (await ready()).jobDetail(jobId);
+			const detail = await (await ready()).jobDetail(jobId);
 			if (detail === null) return sendError(res, 404, "not-found", `job not found: ${jobId}`);
 			sendJson(res, 200, {
 				ok: true,
@@ -10331,14 +10344,25 @@ const taskStatusSchema = _enum([
 	"blocked",
 	"cancelled"
 ]);
-/** 执行者：机器人或人。 */
+/** 执行者：打工人或人。 */
+const workerExecutorShape = {
+	name: string(),
+	driver: _enum([
+		"agent",
+		"robot",
+		"program"
+	]),
+	program: string().optional(),
+	avatar: string().optional()
+};
 const storedExecutorSchema = discriminatedUnion("kind", [
 	object({
+		kind: literal("worker"),
+		...workerExecutorShape
+	}).passthrough(),
+	object({
 		kind: literal("robot"),
-		name: string(),
-		driver: _enum(["agent", "program"]),
-		program: string().optional(),
-		avatar: string().optional()
+		...workerExecutorShape
 	}).passthrough(),
 	object({ kind: literal("human") }).passthrough(),
 	object({
@@ -10350,8 +10374,9 @@ const storedExecutorSchema = discriminatedUnion("kind", [
 const claimantSchema = object({
 	kind: _enum([
 		"human",
-		"robot",
-		"assistant"
+		"worker",
+		"assistant",
+		"robot"
 	]),
 	name: string(),
 	sessionId: string().nullable()
@@ -10473,7 +10498,8 @@ const attachmentRecordSchema = object({
 */
 const workflowDomain = defineDomain({
 	name: WORKFLOW_DOMAIN_NAME,
-	version: 1,
+	version: 2,
+	compatibleVersions: [1],
 	layout: "per-record",
 	tables: {
 		workflows: domainTable(workflowRecordSchema),
@@ -10496,6 +10522,48 @@ const workflowDomain = defineDomain({
 *
 * @module @buka/dsh-plugin-workflows/store
 */
+/** 把术语改名前的 `kind: "robot"` 归一成 `worker`；其它记录原样返回。 */
+function normalizeStoredExecutor(executor) {
+	if (executor === null || typeof executor !== "object") return executor;
+	if (executor.kind !== "robot") return executor;
+	const record = executor;
+	const driver = record.driver === "robot" || record.driver === "program" ? "robot" : "agent";
+	return {
+		kind: "worker",
+		name: record.name,
+		driver,
+		...record.program === void 0 ? {} : { program: record.program },
+		...record.avatar === void 0 ? {} : { avatar: record.avatar }
+	};
+}
+/** 把术语改名前的承办者 `kind: "robot"` 归一成 `worker`。 */
+function normalizeClaimant(claimant) {
+	if (claimant === null || claimant.kind !== "robot") return claimant;
+	return {
+		...claimant,
+		kind: "worker"
+	};
+}
+/** 把定义快照里岗位执行者的 `kind: "robot"` 归一成 `worker`。 */
+function normalizeDefinitionExecutors(definition) {
+	if (definition === null || typeof definition !== "object" || !Array.isArray(definition.positions)) return definition;
+	let changed = false;
+	const positions = definition.positions.map((position) => {
+		if (position.executor.kind !== "robot") return position;
+		changed = true;
+		return {
+			...position,
+			executor: {
+				kind: "worker",
+				name: position.executor.name
+			}
+		};
+	});
+	return changed ? {
+		...definition,
+		positions
+	} : definition;
+}
 /** 存储根对象。 */
 var WorkflowStore = class {
 	domain;
@@ -10509,15 +10577,74 @@ var WorkflowStore = class {
 	}
 	/** 存储域版本；迁移入口在 `init` 里按它检查。 */
 	get domainVersion() {
-		return 1;
+		return 2;
 	}
-	/** 打开域之后的初始化：键唯一性、作业编号回填。 */
+	/**
+	* 把术语改名前的旧记录（执行者 / 承办者 `kind: "robot"`、driver `"program"`）
+	* 归一成当前取值。只改标记为旧值的记录，幂等；迁移后字段与新建记录一致。
+	*/
+	async normalizeLegacyWorkerKinds() {
+		let tasks = 0;
+		for (const [id, record] of this.domain.table("tasks").entries()) {
+			const assignee = normalizeStoredExecutor(record.assignee);
+			const claimant = normalizeClaimant(record.claimant);
+			if (assignee === record.assignee && claimant === record.claimant) continue;
+			await this.domain.table("tasks").update(id, (current) => ({
+				...current,
+				assignee,
+				claimant
+			}));
+			tasks += 1;
+		}
+		let jobs = 0;
+		for (const [id, record] of this.domain.table("jobs").entries()) {
+			const definition = normalizeDefinitionExecutors(record.definition);
+			if (definition === record.definition) continue;
+			await this.domain.table("jobs").update(id, (current) => ({
+				...current,
+				definition
+			}));
+			jobs += 1;
+		}
+		let workflows = 0;
+		for (const [id, record] of this.domain.table("workflows").entries()) {
+			let changed = false;
+			const versions = {};
+			for (const [version, snapshot] of Object.entries(record.versions)) {
+				const definition = normalizeDefinitionExecutors(snapshot.definition);
+				if (definition !== snapshot.definition) changed = true;
+				versions[version] = {
+					...snapshot,
+					definition
+				};
+			}
+			if (!changed) continue;
+			await this.domain.table("workflows").update(id, (current) => ({
+				...current,
+				versions
+			}));
+			workflows += 1;
+		}
+		if (tasks > 0 || jobs > 0 || workflows > 0) this.logger?.info?.(`buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s), ${workflows} workflow(s))`);
+	}
+	/** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
 	async init() {
 		for (const [key, record] of this.domain.table("workflows").entries()) if (key !== record.id) throw new Error(`workflows: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("jobs").entries()) if (key !== record.id) throw new Error(`jobs: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("tasks").entries()) if (key !== record.id) throw new Error(`tasks: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("attempts").entries()) if (key !== record.id) throw new Error(`attempts: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("attachments").entries()) if (key !== record.id) throw new Error(`attachments: stored key "${key}" differs from record id`);
+		await this.normalizeLegacyWorkerKinds();
+		let promoted = 0;
+		for (const [id, record] of this.domain.table("workflows").entries()) {
+			if (record.status !== "draft") continue;
+			await this.domain.table("workflows").update(id, (current) => ({
+				...current,
+				status: "active"
+			}));
+			promoted += 1;
+		}
+		if (promoted > 0) this.logger?.info?.(`buka-workflows: enabled ${promoted} legacy draft workflow(s)`);
 		const maxSeq = /* @__PURE__ */ new Map();
 		for (const [, job] of this.domain.table("jobs").entries()) maxSeq.set(job.workflowId, Math.max(maxSeq.get(job.workflowId) ?? 0, job.seq));
 		for (const [workflowId, seq] of maxSeq) {
@@ -10543,7 +10670,7 @@ var WorkflowStore = class {
 		await this.domain.close();
 	}
 	/**
-	* 新建一条工作流（版本 1，默认草稿）。
+	* 新建一条工作流（版本 1，默认启用）。
 	*
 	* @param input 名称、描述与定义
 	* @returns 新建的记录
@@ -10559,7 +10686,7 @@ var WorkflowStore = class {
 			id: newWorkflowId(),
 			name: input.name,
 			description: input.description,
-			status: input.status ?? "draft",
+			status: input.status ?? "active",
 			latestVersion: 1,
 			versions: { "1": versionRecord },
 			jobSeq: 0,
@@ -10616,7 +10743,7 @@ var WorkflowStore = class {
 		});
 	}
 	/**
-	* 改工作流状态（草稿 / 已激活 / 已停用）。
+	* 改工作流状态；`retired` 表示停用，`active` 表示可用。
 	*
 	* @param workflowId 工作流 id
 	* @param status 新状态
@@ -10630,10 +10757,10 @@ var WorkflowStore = class {
 		}));
 	}
 	/**
-	* 激活 / 停用；停用后状态是 `retired`。
+	* 停用 / 重新启用；停用后状态是 `retired`。
 	*
 	* @param workflowId 工作流 id
-	* @param active 是否激活
+	* @param active 是否可用
 	* @returns 更新后的记录
 	*/
 	async activateWorkflow(workflowId, active) {
@@ -10998,11 +11125,11 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
   "end": { "task": { "payload": <JSON Schema object: the final deliverable> } },
   "positions": [
     { "id": "dev", "label": "研发", "description": "...",
-      "executor": { "kind": "robot", "name": "<registered robot>" } | { "kind": "human" },
+      "executor": { "kind": "worker", "name": "<registered worker>" } | { "kind": "human" },
       "taskTypes": [
         { "id": "dev.implement", "label": "开发", "description": "...",
           "payload": <JSON Schema object>, "output": <JSON Schema object>,
-          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant robot>" | null,
+          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant worker>" | null,
           "mode": "plan" | null }
       ] }
   ],
@@ -11026,7 +11153,7 @@ function registerWorkflowTools(deps) {
 	};
 	register(defineTool({
 		name: "buka_workflow_save",
-		description: `Validate and save a workflow definition as a new version (draft). Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
 		parameters: {
 			definition: {
 				type: "json",
@@ -11137,7 +11264,7 @@ function registerWorkflowTools(deps) {
 		},
 		async execute(args, exec) {
 			assertOrchestrator(exec.agent);
-			const detail = (await ready()).readWorkflowDetail(args.id, typeof args.version === "number" ? args.version : void 0);
+			const detail = await (await ready()).readWorkflowDetail(args.id, typeof args.version === "number" ? args.version : void 0);
 			if (detail === null) throw new Error(`workflow not found: ${args.id}`);
 			return {
 				workflow: toolJson(detail.workflow),
@@ -11249,7 +11376,7 @@ function defineJobStatusTool(ready) {
 			const sessionId = sessionIdOf(exec);
 			const jobId = typeof args.jobId === "string" && args.jobId.trim() !== "" ? args.jobId.trim() : engine.jobIdForSession(sessionId);
 			if (jobId === null) throw new Error("this session has not started a workflow job");
-			const detail = engine.jobDetail(jobId);
+			const detail = await engine.jobDetail(jobId);
 			if (detail === null) throw new Error(`job not found: ${jobId}`);
 			return {
 				job: toolJson(detail.job),
@@ -11455,7 +11582,7 @@ function defineBoardTool(ready) {
 			const engine = await ready();
 			const reference = engine.taskForSession(sessionId);
 			if (reference === null) throw new Error("this session is not executing a workflow task");
-			const detail = engine.jobDetail(reference.jobId);
+			const detail = await engine.jobDetail(reference.jobId);
 			if (detail === null) throw new Error("job not found");
 			return {
 				job: toolJson(detail.job),
@@ -11558,7 +11685,7 @@ function defineAttachmentsTool(ready) {
 */
 /** Cordis 插件名；与 cordis.patch.yml 的补丁行 id 保持一致。 */
 const name = "tool-buka-workflows";
-/** 依赖的服务：工具注册表。其余服务（storageDomain / webServer / commands / bukaRobots）按需可选获取。 */
+/** 依赖的服务：工具注册表。其余服务（storageDomain / webServer / commands / bukaWorkers）按需可选获取。 */
 const inject = ["tools"];
 /**
 * 装配插件。
@@ -11594,7 +11721,7 @@ function apply(ctx, config) {
 				}),
 				options,
 				logger: ctx.logger,
-				robots: () => ctx.get("bukaRobots") ?? null,
+				workers: () => ctx.get("bukaWorkers") ?? null,
 				delivery: createHostSessionDelivery(ctx)
 			});
 			engine = created;

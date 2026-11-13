@@ -2,7 +2,7 @@
  * 插件配置与数据目录解析。
  *
  * v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
- * 轮询间隔、附件限额、编排 preset / 工作区与机器人会话 preset。作业 / 任务
+ * 轮询间隔、附件限额、编排 preset / 工作区与打工人会话 preset。作业 / 任务
  * 元数据进 `ctx.storageDomain`，不在这里配置。
  *
  * @module @buka/dsh-plugin-workflows/options
@@ -28,7 +28,7 @@ const DEFAULTS = {
   maxResultTextBytes: 2 * 1024 * 1024,
   orchestratorPresets: ['workflow-orchestrator'],
   orchestratorWorkspaces: [],
-  robotPreset: 'standard',
+  workerPreset: 'standard',
 }
 
 /** `Config` 解析后的形状。 */
@@ -43,7 +43,7 @@ export interface WorkflowsConfig {
   readonly maxResultTextBytes: number
   readonly orchestratorPresets: string[]
   readonly orchestratorWorkspaces: string[]
-  readonly robotPreset: string
+  readonly workerPreset: string
 }
 
 /** 合并默认值之后的配置。 */
@@ -58,7 +58,7 @@ export interface ResolvedOptions {
   maxResultTextBytes: number
   orchestratorPresets: string[]
   orchestratorWorkspaces: string[]
-  robotPreset: string
+  workerPreset: string
 }
 
 /** 插件配置。 */
@@ -123,10 +123,10 @@ export const Config = z.object({
     .description(
       '按工作区放行工作流定义工具：在这些目录（含子目录，支持 ~ 前缀）里启动的会话，即使 preset 不在 orchestratorPresets 里也能保存 / 读取定义。留空表示只按 preset 判定。',
     ),
-  robotPreset: z
+  workerPreset: z
     .string()
-    .default(DEFAULTS.robotPreset)
-    .description('机器人任务会话使用的 agent preset。'),
+    .default(DEFAULTS.workerPreset)
+    .description('智能体任务会话使用的 agent preset。'),
 })
 
 /**
@@ -141,7 +141,7 @@ export function resolveOptions(config: WorkflowsConfig | undefined): ResolvedOpt
         .map((preset) => String(preset).trim())
         .filter((preset) => preset !== '')
     : DEFAULTS.orchestratorPresets
-  const robotPreset = typeof config?.robotPreset === 'string' ? config.robotPreset.trim() : ''
+  const workerPreset = typeof config?.workerPreset === 'string' ? config.workerPreset.trim() : ''
   return {
     dataDir: resolveDataDir(config?.dataDir),
     taskTimeoutMs: nonNegative(config?.taskTimeoutMs) ?? DEFAULTS.taskTimeoutMs,
@@ -156,7 +156,7 @@ export function resolveOptions(config: WorkflowsConfig | undefined): ResolvedOpt
     maxResultTextBytes: positive(config?.maxResultTextBytes) ?? DEFAULTS.maxResultTextBytes,
     orchestratorPresets,
     orchestratorWorkspaces: resolveWorkspaceRoots(config?.orchestratorWorkspaces),
-    robotPreset: robotPreset === '' ? DEFAULTS.robotPreset : robotPreset,
+    workerPreset: workerPreset === '' ? DEFAULTS.workerPreset : workerPreset,
   }
 }
 

@@ -1,134 +1,17 @@
 /**
- * 作业附件库与附件预览抽屉。
+ * 附件预览抽屉：头部是文件身份与下载 / 关闭，正文按 Host 返回的 `kind` 分派。
  */
 
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type React from 'react'
 
 import { ClientModal, h } from '../element.ts'
-import { formatBytes, formatTime } from '../format.ts'
+import { formatBytes } from '../format.ts'
 import type { AppContext } from '../page-context.ts'
 import { attachmentUrl } from '../request.ts'
-import type { AttachmentMeta } from '../types.ts'
-import { renderEmpty, renderFailure, renderLoading } from './parts.ts'
+import { renderDrawerHead } from './parts.ts'
 
-/**
- * 附件库视图。
- *
- * @param page
- * @returns React 元素
- */
-export function renderAttachments(page: AppContext): React.ReactElement {
-  const { t, state, actions } = page
-  const loaded = state.attachments
-  if (loaded.error !== null && loaded.data === null) {
-    return renderFailure(page, loaded.error, actions.refresh)
-  }
-  if (loaded.status !== 'ready' && loaded.data === null) return renderLoading(page)
-  const items = loaded.data ?? []
-  if (items.length === 0) return renderEmpty(t('attachmentsEmpty'), t('attachmentsHint'))
-  const jobId = jobIdOf(page)
-
-  return h(
-    'div',
-    { className: 'buka-workflows-listPane' },
-    h('p', { className: 'buka-workflows-hint' }, t('attachmentsHint')),
-    h(
-      'ul',
-      { className: 'buka-workflows-attachmentList' },
-      ...items.map((attachment) => renderAttachmentRow(page, jobId, attachment)),
-    ),
-  )
-}
-
-/**
- * 附件库的一行。
- *
- * @param page
- * @param jobId
- * @param attachment
- * @returns React 元素
- */
-function renderAttachmentRow(
-  page: AppContext,
-  jobId: string,
-  attachment: AttachmentMeta,
-): React.ReactElement {
-  const { t, actions, state } = page
-  const meta = [
-    formatBytes(attachment.bytes),
-    attachment.mime,
-    formatTime(attachment.createdAt),
-  ].filter((part) => typeof part === 'string' && part !== '')
-  const sourcePosition =
-    typeof attachment.sourcePositionId === 'string' && attachment.sourcePositionId !== ''
-      ? attachment.sourcePositionId
-      : ''
-  // 来源任务可能已经不在当前任务摘要里；只有找得到时才给入口。
-  const sourceKnown =
-    typeof attachment.sourceTaskId === 'string' &&
-    attachment.sourceTaskId !== '' &&
-    (state.job.data?.tasks ?? []).some((task) => task.id === attachment.sourceTaskId)
-
-  return h(
-    'li',
-    { key: attachment.id, className: 'buka-workflows-attachment' },
-    h(
-      'span',
-      { className: 'buka-workflows-attachmentMain' },
-      h(
-        'button',
-        {
-          type: 'button',
-          className: 'buka-workflows-attachmentLink',
-          title: t('attachmentPreview'),
-          onClick: () => actions.openAttachment(attachment.id, attachment.name),
-        },
-        attachment.name,
-      ),
-      sourceKnown
-        ? h(
-            'button',
-            {
-              type: 'button',
-              className: 'buka-workflows-attachmentSource',
-              onClick: () =>
-                actions.openTask(
-                  typeof attachment.sourceTaskId === 'string' ? attachment.sourceTaskId : '',
-                ),
-            },
-            `${t('attachmentSource')}: ${sourcePosition || attachment.sourceTaskId}`,
-          )
-        : sourcePosition === ''
-          ? null
-          : h(
-              'span',
-              { className: 'buka-workflows-attachmentSource' },
-              `${t('attachmentSource')}: ${sourcePosition}`,
-            ),
-      typeof attachment.description === 'string' && attachment.description !== ''
-        ? h('span', { className: 'buka-workflows-attachmentDescription' }, attachment.description)
-        : null,
-    ),
-    h('span', { className: 'buka-workflows-attachmentMeta' }, meta.join(' · ')),
-    h(
-      'a',
-      {
-        className: 'buka-workflows-attachmentDownload',
-        href: attachmentUrl(jobId, attachment.id),
-        download: attachment.name,
-      },
-      t('attachmentDownload'),
-    ),
-  )
-}
-
-/**
- * 附件预览抽屉：头部是文件身份与下载 / 关闭，正文按 Host 返回的 `kind` 分派。
- *
- * @param page
- * @returns React 元素；没有打开附件时为 null
- */
+/** 附件预览抽屉。 */
 export function renderAttachmentDrawer(page: AppContext): React.ReactElement | null {
   const { t, state, actions } = page
   const viewer = state.attachment
@@ -222,50 +105,26 @@ export function renderAttachmentDrawer(page: AppContext): React.ReactElement | n
       backdropBlur: false,
       className: 'buka-workflows-drawer',
     },
-    h(
-      'div',
-      { className: 'buka-workflows-drawerHead' },
-      h(
-        'div',
-        { className: 'buka-workflows-drawerTitleRow' },
-        h('span', { className: 'buka-workflows-drawerTitle' }, viewer.name),
+    renderDrawerHead({
+      title: viewer.name,
+      meta,
+      actions: h(
+        'a',
+        {
+          className: 'buka-workflows-drawerDownload',
+          href: attachmentUrl(jobId, viewer.id),
+          download: viewer.name,
+        },
+        t('attachmentDownload'),
       ),
-      meta === '' ? null : h('span', { className: 'buka-workflows-drawerMeta' }, meta),
-      h(
-        'div',
-        { className: 'buka-workflows-drawerActions' },
-        h(
-          'a',
-          {
-            className: 'buka-workflows-drawerDownload',
-            href: attachmentUrl(jobId, viewer.id),
-            download: viewer.name,
-          },
-          t('attachmentDownload'),
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'buka-workflows-drawerClose',
-            'aria-label': t('attachmentPreviewClose'),
-            title: t('attachmentPreviewClose'),
-            onClick: actions.closeAttachment,
-          },
-          h('span', { 'aria-hidden': true }, '×'),
-        ),
-      ),
-    ),
+      onClose: actions.closeAttachment,
+      closeLabel: t('attachmentPreviewClose'),
+    }),
     h('div', { className: 'buka-workflows-drawerBody' }, ...body),
   )
 }
 
-/**
- * 当前作业 id。
- *
- * @param page
- * @returns
- */
+/** 当前作业 id。 */
 function jobIdOf(page: AppContext): string {
   if (page.state.route.kind === 'job') return page.state.route.jobId
   return page.state.job.data?.job?.id ?? ''

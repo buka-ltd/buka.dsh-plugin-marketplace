@@ -1,7 +1,7 @@
 /**
  * 预设头像：id → emoji / 底色。
  *
- * 预设表统一在界面侧公共包里，与 robots 页共用同一份；图模型只带 id，
+ * 预设表统一在界面侧公共包里，与 workers 页共用同一份；图模型只带 id，
  * 不认识的 id 当作没有头像。
  */
 
@@ -22,7 +22,7 @@ export function avatarPreset(id: unknown): { emoji: string; color: string } | nu
 }
 
 /**
- * 机器人头像小圆片：emoji 画在预设色的浅底上。[size] 是直径（px），`className`
+ * 打工人头像小圆片：emoji 画在预设色的浅底上。[size] 是直径（px），`className`
  * 给胶囊 / 详情标题这类不同位置补间距。
  *
  * @param avatar 头像 id

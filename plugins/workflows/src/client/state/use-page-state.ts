@@ -8,6 +8,7 @@
 
 import React from 'react'
 
+import { initialRoute } from '../routing.ts'
 import type { PageState } from '../types.ts'
 
 /**
@@ -17,11 +18,14 @@ import type { PageState } from '../types.ts'
  */
 export function createInitialState(): PageState {
   return {
-    route: { kind: 'workflows' },
+    route: initialRoute(),
     workflows: { status: 'idle', data: null, error: null },
     workflow: { status: 'idle', data: null, error: null },
     job: { status: 'idle', data: null, error: null },
-    jobView: 'board',
+    finalTask: { status: 'idle', data: null, error: null },
+    jobFilter: 'all',
+    definitionSelection: null,
+    nodeTasks: null,
     attachments: { status: 'idle', data: null, error: null },
     taskId: null,
     task: { status: 'idle', data: null, error: null },

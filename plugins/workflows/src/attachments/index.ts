@@ -8,7 +8,7 @@
  * - 附件对「产出它的任务、直接或传递依赖它的任务（下游）、启动者、看板页面」
  *   可见；引擎在任务上下文与检索时按这个集合过滤。
  *
- * 路径安全：相对路径基于任务执行者（机器人）的工作区；绝对路径必须位于工作区
+ * 路径安全：相对路径基于任务执行者（打工人）的工作区；绝对路径必须位于工作区
  * 内；符号链接先 `realpath` 再判断。
  *
  * @module @buka/dsh-plugin-workflows/attachments
@@ -100,9 +100,9 @@ export interface IngestAttachmentsInput {
   readonly jobDirectory: string
   readonly taskId: string
   readonly position: string
-  /** 创建者展示名（机器人 / 助理 / 人）。 */
+  /** 创建者展示名（打工人 / 助理 / 人）。 */
   readonly createdBy: string
-  /** 机器人工作区；人任务可省略。 */
+  /** 打工人工作区；人任务可省略。 */
   readonly workspace?: string | undefined
   readonly limits: AttachmentLimits
 }
@@ -260,7 +260,7 @@ function isInside(root: string, candidate: string): boolean {
  * 解析并校验附件源文件。
  *
  * @param request 附件请求
- * @param workspace 机器人工作区（可省略）
+ * @param workspace 打工人工作区（可省略）
  * @returns 真实源文件路径与字节数
  */
 async function resolveSource(
@@ -291,10 +291,10 @@ async function resolveSource(
     try {
       root = await fs.realpath(workspace)
     } catch {
-      throw new Error(`attachment source "${display}" is outside the robot workspace`)
+      throw new Error(`attachment source "${display}" is outside the worker workspace`)
     }
     if (!isInside(root, source)) {
-      throw new Error(`attachment source "${display}" is outside the robot workspace`)
+      throw new Error(`attachment source "${display}" is outside the worker workspace`)
     }
   }
 

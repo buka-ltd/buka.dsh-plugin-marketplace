@@ -1,6 +1,6 @@
 {
   "name": "@buka/dsh-plugin-workflows",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "持久工作流 + 作业看板：岗位图约束任务流转，看板按任务分发与认领。",
   "type": "module",
   "main": "lib/index.js",

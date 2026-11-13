@@ -1,7 +1,7 @@
 /**
  * 引擎依赖的宿主服务形状与公共类型。
  *
- * 跨插件只走服务：robots 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
+ * 跨插件只走服务：workers 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
  * 结构类型；启动者会话投递用宿主 `sessionController` / `agents` 的「解析 live
  * agent + followup」能力（与官方 schedule 插件同一机制）。
  *
@@ -14,8 +14,8 @@ import type { JsonValue } from '../domain/types.ts'
 import type { ResolvedOptions } from '../options.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 
-/** robots 列表里的一行（本插件只关心执行者契约）。 */
-export interface RobotListEntryLike {
+/** workers 列表里的一行（本插件只关心执行者契约）。 */
+export interface WorkerListEntryLike {
   readonly name?: unknown
   readonly driver?: unknown
   readonly program?: unknown
@@ -25,8 +25,8 @@ export interface RobotListEntryLike {
   readonly path?: unknown
 }
 
-/** robots 服务句柄（契约见 API 文档）。 */
-export interface RobotHandleLike {
+/** workers 服务句柄（契约见 API 文档）。 */
+export interface WorkerHandleLike {
   readonly sessionId?: unknown
   readonly startSeq?: unknown
   readonly resumed?: unknown
@@ -38,8 +38,8 @@ export interface RobotHandleLike {
   setPlanMode?(active: boolean): unknown
 }
 
-/** robots 服务里本插件用到的部分。 */
-export interface RobotsServiceLike {
+/** workers 服务里本插件用到的部分。 */
+export interface WorkersServiceLike {
   list?(): unknown
   avatarMap?(): unknown
   dispatchSession?(request: Record<string, unknown>): unknown
@@ -72,8 +72,8 @@ export interface EngineDeps {
   readonly store: WorkflowStore
   readonly options: ResolvedOptions
   readonly logger: LoggerLike | undefined
-  /** 每次调用时现取 robots 服务（插件可能后装 / 卸载）。 */
-  readonly robots: () => RobotsServiceLike | null
+  /** 每次调用时现取 workers 服务（插件可能后装 / 卸载）。 */
+  readonly workers: () => WorkersServiceLike | null
   readonly delivery: SessionDelivery
 }
 

@@ -24,8 +24,12 @@ import type {
   WorkflowRecord,
 } from '../domain/types.ts'
 
-/** 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的 `init`）。 */
-export const WORKFLOW_DOMAIN_VERSION = 1
+/**
+ * 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的
+ * `init`）；version 2 把执行者 / 承办者的 `kind: "robot"` 改成 `worker`、
+ * driver `program` 改成 `robot`，version 1 的旧记录仍可读取。
+ */
+export const WORKFLOW_DOMAIN_VERSION = 2
 
 /** 域名称；与 storage backend 里的 unit 名一致。 */
 export const WORKFLOW_DOMAIN_NAME = 'buka_workflow'
@@ -46,17 +50,18 @@ const taskStatusSchema = z.enum([
   'cancelled',
 ])
 
-/** 执行者：机器人或人。 */
+/** 执行者：打工人或人。 */
+const workerExecutorShape = {
+  name: z.string(),
+  driver: z.enum(['agent', 'robot', 'program']),
+  program: z.string().optional(),
+  avatar: z.string().optional(),
+}
+
 const storedExecutorSchema = z.discriminatedUnion('kind', [
-  z
-    .object({
-      kind: z.literal('robot'),
-      name: z.string(),
-      driver: z.enum(['agent', 'program']),
-      program: z.string().optional(),
-      avatar: z.string().optional(),
-    })
-    .passthrough(),
+  z.object({ kind: z.literal('worker'), ...workerExecutorShape }).passthrough(),
+  // 术语改名前的作业快照把打工人写成 kind: "robot"；打开后由 store.init() 归一。
+  z.object({ kind: z.literal('robot'), ...workerExecutorShape }).passthrough(),
   z.object({ kind: z.literal('human') }).passthrough(),
   z.object({ kind: z.literal('session'), sessionId: z.string() }).passthrough(),
 ])
@@ -64,7 +69,7 @@ const storedExecutorSchema = z.discriminatedUnion('kind', [
 /** 承办者。 */
 const claimantSchema = z
   .object({
-    kind: z.enum(['human', 'robot', 'assistant']),
+    kind: z.enum(['human', 'worker', 'assistant', 'robot']),
     name: z.string(),
     sessionId: z.string().nullable(),
   })
@@ -199,6 +204,8 @@ const attachmentRecordSchema = z
 export const workflowDomain = defineDomain({
   name: WORKFLOW_DOMAIN_NAME,
   version: WORKFLOW_DOMAIN_VERSION,
+  // 当前 schema 同时接受 v1 旧取值；`store.init()` 打开后把旧记录归一。
+  compatibleVersions: [1],
   layout: 'per-record',
   tables: {
     workflows: domainTable<string, WorkflowRecord>(

@@ -84,7 +84,6 @@ export function fieldKind(schema: JsonSchema): FieldKind {
     case 'object':
     case 'array':
       return 'json'
-    case 'string':
     default:
       return 'string'
   }

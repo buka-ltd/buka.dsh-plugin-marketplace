@@ -1,5 +1,6 @@
 /**
- * 页面动作：导航、取数后的写回、工作流激活、作业启停、任务动作、会话与附件。
+ * 页面动作：导航、页签、筛选、定义选中、工作流停用、作业启停、任务动作、
+ * 会话与附件。
  *
  * 所有异步动作都走函数式 `setState`；动作失败只写页面错误 / Toast，不抛出去。
  */
@@ -9,12 +10,27 @@ import { fill } from '../i18n.ts'
 import {
   currentDefinition,
   currentJobDefinition,
+  jobTasks,
   mergedDefinition,
   outputSchemaFor,
 } from '../model.ts'
 import { postJson } from '../request.ts'
+import { writeRouteHash } from '../routing.ts'
 import { parseJson, parseSchemaValues, schemaFields } from '../schema.ts'
-import type { PageState, Translate } from '../types.ts'
+import type {
+  AttachmentMeta,
+  DefinitionSelection,
+  JobDetail,
+  JobFilter,
+  JobView,
+  Loadable,
+  PageState,
+  Route,
+  TaskDetail,
+  Translate,
+  WorkflowDetail,
+  WorkflowTab,
+} from '../types.ts'
 import {
   isRecord,
   JOB_ACTION_ROUTE,
@@ -30,17 +46,27 @@ export interface ActionDeps {
   getService: (name: string) => unknown
 }
 
+/** 空的可加载状态。 */
+function idle<T>(): Loadable<T> {
+  return { status: 'idle', data: null, error: null }
+}
+
 /** 页面动作。 */
 export interface AppActions extends ActionDeps {
   openWorkflow: (workflowId: string) => void
   backToWorkflows: () => void
+  setWorkflowTab: (tab: WorkflowTab) => void
   openJob: (workflowId: string, jobId: string) => void
   backToWorkflow: () => void
+  setJobView: (view: JobView) => void
+  setJobFilter: (filter: JobFilter) => void
+  selectDefinition: (selection: DefinitionSelection) => void
+  openPositionTasks: (positionId: string, label: string) => void
+  closeNodeTasks: () => void
   refresh: () => void
   flash: (kind: 'success' | 'error', text: string) => void
   dismissNotice: () => void
-  setJobView: (view: PageState['jobView']) => void
-  activateWorkflow: (active: boolean) => Promise<void>
+  setWorkflowEnabled: (active: boolean) => Promise<void>
   openNewJob: () => void
   closeNewJob: () => void
   setNewJobRaw: (name: string, value: string) => void
@@ -62,7 +88,7 @@ export interface AppActions extends ActionDeps {
  * 创建页面动作。
  *
  * @param store 状态与 setter
- * @param deps 词典、Service 取值器与 Toast
+ * @param deps 词典与 Service 取值器
  * @returns 动作集合
  */
 export function createActions(store: PageStore, deps: ActionDeps): AppActions {
@@ -103,39 +129,74 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
     dismissNotice: () => setState((current) => ({ ...current, notice: null })),
 
     openWorkflow(workflowId) {
+      const route: Route = { kind: 'workflow', workflowId, tab: 'jobs' }
+      writeRouteHash(route)
+      setState((current) => {
+        const keep =
+          current.route.kind !== 'workflows' &&
+          current.route.workflowId === workflowId &&
+          current.workflow.data !== null
+        return {
+          ...current,
+          route,
+          ...(keep ? {} : { workflow: idle<WorkflowDetail>() }),
+          jobFilter: 'all',
+          job: idle<JobDetail>(),
+          finalTask: idle<TaskDetail>(),
+          attachments: idle<AttachmentMeta[]>(),
+          definitionSelection: null,
+          nodeTasks: null,
+          taskId: null,
+          task: idle<TaskDetail>(),
+          attachment: null,
+          tick: current.tick + 1,
+        }
+      })
+    },
+
+    backToWorkflows() {
+      const route: Route = { kind: 'workflows' }
+      writeRouteHash(route)
       setState((current) => ({
         ...current,
-        route: { kind: 'workflow', workflowId },
-        workflow: { status: 'loading', data: null, error: null },
-        job: { status: 'idle', data: null, error: null },
+        route,
+        workflow: idle<WorkflowDetail>(),
+        job: idle<JobDetail>(),
+        finalTask: idle<TaskDetail>(),
+        attachments: idle<AttachmentMeta[]>(),
+        definitionSelection: null,
+        nodeTasks: null,
         taskId: null,
-        task: { status: 'idle', data: null, error: null },
+        task: idle<TaskDetail>(),
         attachment: null,
         tick: current.tick + 1,
       }))
     },
 
-    backToWorkflows() {
+    setWorkflowTab(tab) {
+      if (state.route.kind !== 'workflow') return
+      const route: Route = { ...state.route, tab }
+      writeRouteHash(route)
       setState((current) => ({
         ...current,
-        route: { kind: 'workflows' },
-        workflow: { status: 'idle', data: null, error: null },
-        job: { status: 'idle', data: null, error: null },
-        taskId: null,
-        task: { status: 'idle', data: null, error: null },
-        attachment: null,
-        tick: current.tick + 1,
+        route,
+        ...(tab === 'definition' ? {} : { definitionSelection: null }),
       }))
     },
 
     openJob(workflowId, jobId) {
+      const route: Route = { kind: 'job', workflowId, jobId, view: 'overview' }
+      writeRouteHash(route)
       setState((current) => ({
         ...current,
-        route: { kind: 'job', workflowId, jobId },
+        route,
         job: { status: 'loading', data: null, error: null },
-        jobView: 'board',
+        finalTask: idle<TaskDetail>(),
+        attachments: idle<AttachmentMeta[]>(),
+        definitionSelection: null,
+        nodeTasks: null,
         taskId: null,
-        task: { status: 'idle', data: null, error: null },
+        task: idle<TaskDetail>(),
         attachment: null,
         tick: current.tick + 1,
       }))
@@ -144,33 +205,80 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
     backToWorkflow() {
       const workflowId = workflowIdOf()
       if (workflowId === '') {
-        setState((current) => ({ ...current, route: { kind: 'workflows' } }))
+        const route: Route = { kind: 'workflows' }
+        writeRouteHash(route)
+        setState((current) => ({
+          ...current,
+          route,
+          workflow: idle<WorkflowDetail>(),
+          job: idle<JobDetail>(),
+          finalTask: idle<TaskDetail>(),
+          attachments: idle<AttachmentMeta[]>(),
+          taskId: null,
+          task: idle<TaskDetail>(),
+          attachment: null,
+        }))
         return
       }
+      const route: Route = { kind: 'workflow', workflowId, tab: 'jobs' }
+      writeRouteHash(route)
       setState((current) => ({
         ...current,
-        route: { kind: 'workflow', workflowId },
-        job: { status: 'idle', data: null, error: null },
+        route,
+        job: idle<JobDetail>(),
+        finalTask: idle<TaskDetail>(),
+        attachments: idle<AttachmentMeta[]>(),
+        nodeTasks: null,
         taskId: null,
-        task: { status: 'idle', data: null, error: null },
+        task: idle<TaskDetail>(),
         attachment: null,
         tick: current.tick + 1,
       }))
     },
 
     setJobView(view) {
-      setState((current) => ({ ...current, jobView: view }))
+      if (state.route.kind !== 'job') return
+      const route: Route = { ...state.route, view }
+      writeRouteHash(route)
+      setState((current) => ({ ...current, route, nodeTasks: null }))
     },
 
-    async activateWorkflow(active) {
+    setJobFilter(filter) {
+      setState((current) => ({ ...current, jobFilter: filter }))
+    },
+
+    selectDefinition(selection) {
+      setState((current) => ({ ...current, definitionSelection: selection }))
+    },
+
+    openPositionTasks(positionId, label) {
+      const list = jobTasks(state).filter((task) => task.position === positionId)
+      if (list.length === 1 && typeof list[0]?.id === 'string') {
+        setState((current) => ({
+          ...current,
+          nodeTasks: null,
+          taskId: list[0]?.id ?? null,
+          task: { status: 'loading', data: null, error: null },
+          taskForm: { values: {}, text: '', error: null, submitting: false },
+        }))
+        return
+      }
+      setState((current) => ({ ...current, nodeTasks: { positionId, label } }))
+    },
+
+    closeNodeTasks() {
+      setState((current) => ({ ...current, nodeTasks: null }))
+    },
+
+    async setWorkflowEnabled(active) {
       const workflowId = workflowIdOf()
       if (workflowId === '') return
-      setState((current) => ({ ...current, busy: 'activate' }))
+      setState((current) => ({ ...current, busy: 'workflow-status' }))
       try {
         await postJson(WORKFLOW_ACTIVATE_ROUTE, { id: workflowId, active })
+        const status = active ? 'active' : 'retired'
         setState((current) => {
           const detail = current.workflow.data
-          const status = active ? 'active' : 'retired'
           const nextDetail =
             detail === null || detail.workflow === undefined
               ? current.workflow
@@ -195,10 +303,10 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
             workflows: nextWorkflows,
           }
         })
-        flash('success', t('activateDone'))
+        flash('success', t(active ? 'workflowEnabled' : 'workflowDisabled'))
       } catch (failure) {
         setState((current) => ({ ...current, busy: null }))
-        flash('error', `${t('activateFailed')} ${messageOf(failure)}`)
+        flash('error', `${t('workflowStatusFailed')} ${messageOf(failure)}`)
       }
     },
 
@@ -306,14 +414,25 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
           structuredInput,
         })
         const jobId = typeof body.jobId === 'string' ? body.jobId : ''
-        setState((now) => ({
-          ...now,
-          newJob: { open: false, raw: {}, structured: {}, error: null, submitting: false },
-          route: jobId === '' ? now.route : { kind: 'job', workflowId, jobId },
-          job: { status: 'loading', data: null, error: null },
-          jobView: 'board',
-          tick: now.tick + 1,
-        }))
+        if (jobId !== '') {
+          writeRouteHash({ kind: 'job', workflowId, jobId, view: 'overview' })
+        }
+        setState((now) => {
+          const next = {
+            ...now,
+            newJob: { open: false, raw: {}, structured: {}, error: null, submitting: false },
+            job: { status: 'loading' as const, data: null, error: null },
+            finalTask: idle<TaskDetail>(),
+            attachments: idle<AttachmentMeta[]>(),
+            taskId: null,
+            task: idle<TaskDetail>(),
+            attachment: null,
+            tick: now.tick + 1,
+          }
+          return jobId === ''
+            ? next
+            : { ...next, route: { kind: 'job', workflowId, jobId, view: 'overview' } }
+        })
         flash('success', t('newJobStarted'))
       } catch (failure) {
         setState((now) => ({
@@ -357,6 +476,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
     openTask(taskId) {
       setState((current) => ({
         ...current,
+        nodeTasks: null,
         taskId,
         task: { status: 'loading', data: null, error: null },
         taskForm: { values: {}, text: '', error: null, submitting: false },
@@ -367,7 +487,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
       setState((current) => ({
         ...current,
         taskId: null,
-        task: { status: 'idle', data: null, error: null },
+        task: idle<TaskDetail>(),
         taskForm: { values: {}, text: '', error: null, submitting: false },
       }))
     },

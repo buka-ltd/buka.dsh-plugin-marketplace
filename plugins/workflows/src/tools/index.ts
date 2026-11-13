@@ -69,11 +69,11 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
   "end": { "task": { "payload": <JSON Schema object: the final deliverable> } },
   "positions": [
     { "id": "dev", "label": "研发", "description": "...",
-      "executor": { "kind": "robot", "name": "<registered robot>" } | { "kind": "human" },
+      "executor": { "kind": "worker", "name": "<registered worker>" } | { "kind": "human" },
       "taskTypes": [
         { "id": "dev.implement", "label": "开发", "description": "...",
           "payload": <JSON Schema object>, "output": <JSON Schema object>,
-          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant robot>" | null,
+          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant worker>" | null,
           "mode": "plan" | null }
       ] }
   ],
@@ -105,7 +105,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
   register(
     defineTool({
       name: 'buka_workflow_save',
-      description: `Validate and save a workflow definition as a new version (draft). Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
           type: 'json',
@@ -213,7 +213,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
       async execute(args, exec) {
         assertOrchestrator(exec.agent)
         const engine = await ready()
-        const detail = engine.readWorkflowDetail(
+        const detail = await engine.readWorkflowDetail(
           args.id,
           typeof args.version === 'number' ? args.version : undefined,
         )
@@ -313,7 +313,7 @@ function defineJobStatusTool(ready: () => Promise<WorkflowEngine>) {
           ? args.jobId.trim()
           : engine.jobIdForSession(sessionId)
       if (jobId === null) throw new Error('this session has not started a workflow job')
-      const detail = engine.jobDetail(jobId)
+      const detail = await engine.jobDetail(jobId)
       if (detail === null) throw new Error(`job not found: ${jobId}`)
       return { job: toolJson(detail.job), tasks: toolJson(detail.tasks) }
     },
@@ -499,7 +499,7 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
       const engine = await ready()
       const reference = engine.taskForSession(sessionId)
       if (reference === null) throw new Error('this session is not executing a workflow task')
-      const detail = engine.jobDetail(reference.jobId)
+      const detail = await engine.jobDetail(reference.jobId)
       if (detail === null) throw new Error('job not found')
       return { job: toolJson(detail.job), tasks: toolJson(detail.tasks) }
     },
