@@ -1,12 +1,14 @@
 /**
- * 任务创建校验与记录构造（`.tmp/workflow-v4-spec.md` §7.3 / §7.4）。
+ * 任务创建校验与记录构造（ADR 0015）。
  *
  * 创建任务的入口只有两个：引擎按 `start.next` 生成初始任务；执行中的任务通过
- * `buka_task_create` 派生任务。这里实现两条路径共享的纯校验：
+ * `buka_task_create` 派生任务。通道是派发单元：目标岗位由通道的 `to` 推出。
  *
- * 1. 目标岗位是创建者岗位的直接后继（边存在；`start` / `end` 同理）；
+ * 两条路径共享的纯校验：
+ *
+ * 1. 通道存在、起点是创建者岗位；
  * 2. 任务类型是目标岗位声明的类型（结束任务用 `end.task`）；
- * 3. 边写了类型白名单时，类型在白名单里；
+ * 3. 通道写了类型白名单时，类型在白名单里；
  * 4. payload 符合类型 schema，模板只引用已存在的数据路径；
  * 5. 依赖 id 属于本作业、已存在、不是自己、依赖图不成环；`requires` 满足；
  * 6. 作业预算未超。
@@ -16,14 +18,16 @@
 
 import { inspectPayload } from '../definition/payload.ts'
 import {
-  edgeAllowsType,
-  findEdge,
+  channelAllowsType,
+  channelsFrom,
+  findChannel,
   findPosition,
   findTaskType,
   templatedPayloadIssues,
 } from '../definition/validate.ts'
 import { newTaskId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import type {
+  ChannelDefinition,
   JobRecord,
   JsonValue,
   StartRouteDefinition,
@@ -40,7 +44,8 @@ import { WorkflowError } from './types.ts'
 export interface CreateTaskInput {
   readonly job: JobRecord
   readonly creator: TaskRecord
-  readonly position: string
+  /** 沿哪条通道派发；目标岗位由通道的 `to` 推出。 */
+  readonly channel: string
   readonly type: string
   readonly payload: JsonValue
   readonly deps: readonly string[]
@@ -188,7 +193,7 @@ export function findDependencyCycle(tasks: readonly TaskRecord[]): string[] | nu
  * @throws `WorkflowError`（code 稳定）表示创建被拒绝
  */
 export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
-  const { job, creator, position, type, payload, deps, tasks, workers } = input
+  const { job, creator, channel: channelId, type, payload, deps, tasks, workers } = input
   const definition = job.definition
   if (job.status !== 'running') {
     throw new WorkflowError('job-not-running', `job ${job.id} is not running`)
@@ -199,24 +204,19 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
       `task ${creator.id} is not running; only an executing task can create tasks`,
     )
   }
+  const channel = resolveDispatchChannel(definition, creator.position, channelId)
+  const position = channel.to
   if (position === 'start') {
     throw new WorkflowError(
       'invalid-target',
       'tasks cannot be dispatched to the built-in start node',
     )
   }
-  const edge = findEdge(definition, creator.position, position)
-  if (edge === undefined) {
-    throw new WorkflowError(
-      'no-edge',
-      `no edge "${creator.position} -> ${position}": the executing position cannot dispatch this target`,
-    )
-  }
   const taskType = resolveTargetTaskType(definition, position, type)
-  if (!edgeAllowsType(edge, taskType.id)) {
+  if (!channelAllowsType(channel, taskType.id)) {
     throw new WorkflowError(
       'type-not-allowed',
-      `edge "${creator.position} -> ${position}" does not allow task type "${taskType.id}"`,
+      `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`,
     )
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -295,6 +295,7 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
     jobId: job.id,
     position,
     type: taskType.id,
+    channel: channel.id,
     payload,
     deps: dependencyIds,
     status: ready ? 'ready' : 'pending',
@@ -311,6 +312,41 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
     updatedAt: now,
   }
   return { task, ready }
+}
+
+/**
+ * 解析一条可用的派发通道：必须存在、从创建者岗位出发。
+ *
+ * @param definition 定义
+ * @param from 创建者岗位（启动任务是 `start`）
+ * @param channelId 请求的通道 id
+ * @returns 通道
+ * @throws `WorkflowError` 通道不存在或起点不符
+ */
+function resolveDispatchChannel(
+  definition: WorkflowDefinition,
+  from: string,
+  channelId: string,
+): ChannelDefinition {
+  const channel = findChannel(definition, channelId)
+  if (channel === undefined) {
+    const available = channelsFrom(definition, from)
+    throw new WorkflowError(
+      'no-channel',
+      `unknown channel "${channelId}"; channels from "${from}": ${
+        available.length === 0
+          ? '(none)'
+          : available.map((item) => `${item.id}「${item.label}」-> ${item.to}`).join(', ')
+      }`,
+    )
+  }
+  if (channel.from !== from) {
+    throw new WorkflowError(
+      'channel-not-own',
+      `channel "${channel.id}" starts at "${channel.from}"; this task is at "${from}"`,
+    )
+  }
+  return channel
 }
 
 /**
@@ -398,19 +434,19 @@ function buildInitialTask(input: {
   readonly definition: WorkflowDefinition
 }): TaskRecord {
   const { job, route, startTask, tasks, workers, definition } = input
-  const position = findPosition(definition, route.position)
+  const channel = resolveDispatchChannel(definition, 'start', route.channel)
+  const position = findPosition(definition, channel.to)
   if (position === undefined) {
     throw new WorkflowError(
       'unknown-position',
-      `start.next targets unknown position "${route.position}"`,
+      `start.next channel "${channel.id}" leads to "${channel.to}", which is not a position`,
     )
   }
-  const taskType = resolveTargetTaskType(definition, route.position, route.type)
-  const edge = findEdge(definition, 'start', route.position)
-  if (edge === undefined || !edgeAllowsType(edge, taskType.id)) {
+  const taskType = resolveTargetTaskType(definition, position.id, route.type)
+  if (!channelAllowsType(channel, taskType.id)) {
     throw new WorkflowError(
-      'no-edge',
-      `start.next dispatches to "${route.position}" but no edge allows task type "${taskType.id}"`,
+      'type-not-allowed',
+      `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`,
     )
   }
   const templateIssues = templateReferenceIssues(
@@ -426,14 +462,15 @@ function buildInitialTask(input: {
   return {
     id: newTaskId(),
     jobId: job.id,
-    position: route.position,
+    position: position.id,
     type: taskType.id,
+    channel: channel.id,
     payload: route.payload as JsonValue,
     // 定义里的 `$start` 只是格式语法；记录间必须引用能当文件名的真实任务 id。
     deps: [START_TASK_ID],
     status: 'ready',
     createdBy: { taskId: startTask.id, position: 'start' },
-    assignee: resolveExecutor(definition, route.position, job, workers),
+    assignee: resolveExecutor(definition, position.id, job, workers),
     claimant: null,
     attemptIds: [],
     result: null,

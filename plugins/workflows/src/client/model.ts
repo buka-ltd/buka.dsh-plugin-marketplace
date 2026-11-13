@@ -1,13 +1,13 @@
 /**
  * 页面数据模型：把 Host 返回的定义快照 / 任务记录收口成看板与流程图直接消费的形状。
  *
- * 服务端只给「岗位、边、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
+ * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
  */
 
 import type {
   AttachmentMeta,
+  ChannelDefinition,
   Claimant,
-  EdgeDefinition,
   Executor,
   JobDetail,
   JobSummary,
@@ -33,8 +33,10 @@ export interface PositionView {
   taskTypes: TaskTypeDefinition[]
 }
 
-/** 归一化后的边。 */
-export interface EdgeView {
+/** 归一化后的通道：id 与 label 一定有值。 */
+export interface ChannelView {
+  id: string
+  label: string
   from: string
   to: string
   types: string[]
@@ -81,7 +83,7 @@ export function currentJobDefinition(state: PageState): WorkflowDefinition | nul
   if (detail === null) return null
   const definition = detail.definition
   if (!isRecord(definition)) return null
-  // 作业详情里的 definition 是精简版（岗位 + 边 + 开始 / 结束）；岗位可能带
+  // 作业详情里的 definition 是精简版（岗位 + 通道 + 开始 / 结束）；岗位可能带
   // `taskTypes`（新 Host）也可能不带（契约精简版）。这里保留原形状，由
   // `findTaskType` 再合并工作流完整定义。
   return definition as WorkflowDefinition
@@ -105,23 +107,39 @@ export function positionsOf(definition: WorkflowDefinition | null): PositionView
   return out
 }
 
-/** 把定义里的边归一化。 */
-export function edgesOf(definition: WorkflowDefinition | null): EdgeView[] {
-  const list = asArray<EdgeDefinition>(definition?.edges)
+/** 把定义里的通道归一化。 */
+export function channelsOf(definition: WorkflowDefinition | null): ChannelView[] {
+  const list = asArray<ChannelDefinition>(definition?.channels)
   return list
     .filter(
-      (edge) =>
-        typeof edge?.from === 'string' &&
-        edge.from !== '' &&
-        typeof edge.to === 'string' &&
-        edge.to !== '',
+      (channel) =>
+        typeof channel?.id === 'string' &&
+        channel.id !== '' &&
+        typeof channel.from === 'string' &&
+        channel.from !== '' &&
+        typeof channel.to === 'string' &&
+        channel.to !== '',
     )
-    .map((edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
-      types: asArray<string>(edge.types).filter((type) => typeof type === 'string'),
-      back: edge.back === true,
+    .map((channel) => ({
+      id: channel.id as string,
+      label:
+        typeof channel.label === 'string' && channel.label !== ''
+          ? channel.label
+          : (channel.id as string),
+      from: channel.from as string,
+      to: channel.to as string,
+      types: asArray<string>(channel.types).filter((type) => typeof type === 'string'),
+      back: channel.back === true,
     }))
+}
+
+/** 按 id 找通道；找不到时返回 null。 */
+export function channelOf(
+  definition: WorkflowDefinition | null,
+  channelId: unknown,
+): ChannelView | null {
+  if (typeof channelId !== 'string' || channelId === '') return null
+  return channelsOf(definition).find((channel) => channel.id === channelId) ?? null
 }
 
 /**
@@ -483,17 +501,17 @@ export function mergedDefinition(
       taskTypes: position.taskTypes,
     }
   })
-  const jobEdges = Array.isArray(jobDefinition.edges) ? jobDefinition.edges : []
+  const jobChannels = Array.isArray(jobDefinition.channels) ? jobDefinition.channels : []
   // 作业详情里的 start / end 只是图标签；契约以工作流完整定义为准。
   const start = workflowDefinition.start ?? jobDefinition.start
   const end = workflowDefinition.end ?? jobDefinition.end
   return {
     ...workflowDefinition,
     positions: merged,
-    ...(jobEdges.length > 0
-      ? { edges: jobEdges }
-      : workflowDefinition.edges !== undefined
-        ? { edges: workflowDefinition.edges }
+    ...(jobChannels.length > 0
+      ? { channels: jobChannels }
+      : workflowDefinition.channels !== undefined
+        ? { channels: workflowDefinition.channels }
         : {}),
     ...(start !== undefined ? { start } : {}),
     ...(end !== undefined ? { end } : {}),
@@ -581,25 +599,15 @@ export function taskProgress(tasks: TaskSummary[]): TaskProgress {
 }
 
 /**
- * 实时流程里哪些边已经被走过：任务依赖跨越了岗位。
+ * 实时流程里哪些通道已经被走过：任务记录自己走过的通道 id。
  *
  * @param tasks
- * @returns `from->to` 的集合
+ * @returns 通道 id 的集合
  */
-export function takenEdges(tasks: TaskSummary[]): Set<string> {
-  const byId = new Map<string, TaskSummary>()
-  for (const task of tasks) byId.set(task.id, task)
+export function takenChannels(tasks: TaskSummary[]): Set<string> {
   const taken = new Set<string>()
   for (const task of tasks) {
-    const to = typeof task.position === 'string' ? task.position : ''
-    if (to === '') continue
-    const deps = Array.isArray(task.deps) ? task.deps : []
-    for (const depId of deps) {
-      const dep = byId.get(depId)
-      const from = typeof dep?.position === 'string' ? dep.position : ''
-      if (from === '' || from === to) continue
-      taken.add(`${from}->${to}`)
-    }
+    if (typeof task.channel === 'string' && task.channel !== '') taken.add(task.channel)
   }
   return taken
 }

@@ -1,7 +1,7 @@
 /**
  * 工作流引擎：作业创建、调度、执行、派发校验、结算、取消、重试与恢复。
  *
- * 设计要点（`.tmp/workflow-v4-spec.md` §6-§12、ADR 0006-0012）：
+ * 设计要点（ADR 0006-0015）：
  *
  * - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
  * - 一个智能体岗位一次只跑一条任务（FIFO），机器人直接完成，
@@ -415,6 +415,7 @@ export class WorkflowEngine {
           jobId: job.id,
           position: 'start',
           type: 'start',
+          channel: null,
           payload: input.rawInput,
           deps: [],
           status: 'completed',
@@ -451,6 +452,7 @@ export class WorkflowEngine {
             taskId: task.id,
             position: task.position,
             type: task.type,
+            channel: task.channel,
             deps: task.deps,
           })
         }
@@ -501,6 +503,7 @@ export class WorkflowEngine {
         jobId: job.id,
         position: 'start',
         type: 'start',
+        channel: null,
         payload: input.rawInput,
         deps: [],
         status: 'pending',
@@ -782,14 +785,14 @@ export class WorkflowEngine {
   // ---------------------------------------------------------------------
 
   /**
-   * 执行中的任务创建派生任务。
+   * 执行中的任务沿一条通道创建派生任务。
    *
-   * @param input 会话、目标岗位、类型、payload 与依赖
+   * @param input 会话、通道、类型、payload 与依赖
    * @returns 新任务
    */
   async createTaskFromSession(input: {
     readonly sessionId: string
-    readonly position: string
+    readonly channel: string
     readonly type: string
     readonly payload: JsonValue
     readonly deps: readonly string[]
@@ -811,7 +814,7 @@ export class WorkflowEngine {
       const created = buildCreatedTask({
         job,
         creator,
-        position: input.position,
+        channel: input.channel,
         type: input.type,
         payload: input.payload,
         deps: input.deps,
@@ -823,6 +826,7 @@ export class WorkflowEngine {
         taskId: created.task.id,
         position: created.task.position,
         type: created.task.type,
+        channel: created.task.channel,
         deps: created.task.deps,
         createdBy: creator.id,
       })
@@ -2189,6 +2193,7 @@ export class WorkflowEngine {
         taskId: task.id,
         position: task.position,
         type: task.type,
+        channel: task.channel,
         deps: task.deps,
       })
     }

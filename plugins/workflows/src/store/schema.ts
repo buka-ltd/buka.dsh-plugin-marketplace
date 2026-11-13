@@ -27,9 +27,10 @@ import type {
 /**
  * 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的
  * `init`）；version 2 把执行者 / 承办者的 `kind: "robot"` 改成 `worker`、
- * driver `program` 改成 `robot`，version 1 的旧记录仍可读取。
+ * driver `program` 改成 `robot`，version 3 把定义升到 v5 并给任务补
+ * `channel`；旧版本记录仍可读取，打开后由 `init` 归一 / 升级。
  */
-export const WORKFLOW_DOMAIN_VERSION = 2
+export const WORKFLOW_DOMAIN_VERSION = 3
 
 /** 域名称；与 storage backend 里的 unit 名一致。 */
 export const WORKFLOW_DOMAIN_NAME = 'buka_workflow'
@@ -144,6 +145,8 @@ const taskRecordSchema = z
     jobId: z.string().min(1),
     position: z.string().min(1),
     type: z.string().min(1),
+    // v5 新增；v4 记录没有这个字段，由 store.init() 回填。
+    channel: z.string().nullable().optional(),
     payload: z.unknown(),
     deps: z.array(z.string()),
     status: taskStatusSchema,
@@ -204,8 +207,8 @@ const attachmentRecordSchema = z
 export const workflowDomain = defineDomain({
   name: WORKFLOW_DOMAIN_NAME,
   version: WORKFLOW_DOMAIN_VERSION,
-  // 当前 schema 同时接受 v1 旧取值；`store.init()` 打开后把旧记录归一。
-  compatibleVersions: [1],
+  // 当前 schema 同时接受 v1 / v2 旧取值；`store.init()` 打开后把旧记录归一。
+  compatibleVersions: [1, 2],
   layout: 'per-record',
   tables: {
     workflows: domainTable<string, WorkflowRecord>(

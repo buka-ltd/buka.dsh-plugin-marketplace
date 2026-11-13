@@ -768,7 +768,7 @@ function searchAttachments(attachments, visible, query) {
 /**
 * 受限 JSON Schema 子集：定义校验、运行期结果校验与模板路径检查。
 *
-* 工作流 v4 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
+* 工作流 v5 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
 * 执行者必须交回的结构化结果；开始 / 结束节点也各自声明任务契约。本模块
 * 只处理声明与值之间的纯逻辑（不读盘、不依赖 DSH）：
 *
@@ -1327,7 +1327,7 @@ function formatValue(value) {
 /**
 * payload 模板：路径解析、引用遍历与执行开始时的递归渲染。
 *
-* 工作流 v4 的 payload 是 JSON 对象，字符串里可以写模板占位符：
+* 工作流 v5 的 payload 是 JSON 对象，字符串里可以写模板占位符：
 *
 * - `{{start.output.<path>}}`：启动任务交回的结构化输入；
 * - `{{task.<id>.output.<path>}}`：依赖任务的结构化结果；
@@ -1479,18 +1479,20 @@ function buildTemplateContext(input) {
 }
 // .build/workflows/definition/validate.js
 /**
-* 工作流 v4 定义校验（`.tmp/workflow-v4-spec.md` §5.8）。
+* 工作流 v5 定义校验（ADR 0015）。
 *
 * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
 * 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
 *
-* 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回边、模板引用）。
+* 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回向通道、模板引用）。
 * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
 *
 * @module @buka/dsh-plugin-workflows/definition/validate
 */
 /** 岗位 id 与任务类型 id 的形状。 */
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+/** 通道 id 的形状：小写点分，首尾是字母或数字，便于在对话与报错里引用。 */
+const CHANNEL_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 /** 内建节点 id。 */
 const START_ID = "start";
 const END_ID = "end";
@@ -1508,7 +1510,7 @@ var Issues = class {
 	}
 };
 /**
-* 校验一份工作流 v4 定义。
+* 校验一份工作流 v5 定义。
 *
 * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
 * @param options 打工人目录
@@ -1523,7 +1525,7 @@ function validateWorkflowDefinition(raw, options) {
 			issues: issues.list
 		};
 	}
-	if (raw.version !== 4) issues.add("version", "must be 4");
+	if (raw.version !== 5) issues.add("version", "must be 5");
 	const name = readName(raw, "name", "", issues);
 	const description = readOptionalString(raw, "description", "description", issues) ?? "";
 	const budgets = readBudgets(raw.budgets, issues);
@@ -1535,13 +1537,13 @@ function validateWorkflowDefinition(raw, options) {
 		if (typeById.has(requiredType)) continue;
 		issues.add(`positions[${positionIndex}].taskTypes[${taskTypeIndex}].requires[${requirementIndex}].types`, `unknown task type "${requiredType}": requires may only reference task types declared in this workflow`);
 	}
-	const edges = readEdges(raw.edges, positionById, typeById, issues);
-	const start = readStart(raw.start, positionById, typeById, issues);
+	const channels = readChannels(raw.channels, positionById, typeById, issues);
+	const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+	const start = readStart(raw.start, positionById, typeById, channelById, issues);
 	const end = readEnd(raw.end, issues);
-	checkEdges(edges, positions, issues);
-	checkReachability(edges, positions, issues);
-	checkStartNext(start, positionById, typeById, edges, issues);
-	checkEnd(edges, positions, issues);
+	checkChannels(channels, positions, issues);
+	checkReachability(channels, positions, issues);
+	checkEnd(channels, positions, issues);
 	if (issues.failed) return {
 		ok: false,
 		issues: issues.list
@@ -1553,14 +1555,14 @@ function validateWorkflowDefinition(raw, options) {
 	return {
 		ok: true,
 		definition: {
-			version: 4,
+			version: 5,
 			name,
 			...description === "" ? {} : { description },
 			budgets,
 			start,
 			end,
 			positions,
-			edges
+			channels
 		}
 	};
 }
@@ -1810,18 +1812,32 @@ function readMode(raw, path, ownerPath, executor, workers, issues) {
 	}
 	return "plan";
 }
-/** 解析边列表。 */
-function readEdges(raw, positionById, typeById, issues) {
+/** 解析通道列表。 */
+function readChannels(raw, positionById, typeById, issues) {
 	if (!Array.isArray(raw)) {
-		issues.add("edges", "must be an array");
+		issues.add("channels", "must be an array");
 		return [];
 	}
-	const edges = [];
+	const channels = [];
 	const seen = /* @__PURE__ */ new Set();
 	for (const [index, entry] of raw.entries()) {
-		const path = `edges[${index}]`;
+		const path = `channels[${index}]`;
 		if (!isPlainObject$1(entry)) {
 			issues.add(path, "must be an object");
+			continue;
+		}
+		const id = typeof entry.id === "string" ? entry.id.trim() : "";
+		if (id === "" || !CHANNEL_ID_PATTERN.test(id)) {
+			issues.add(`${path}.id`, "must be a lowercase identifier (letters, digits, dots, hyphens or underscores), e.g. \"qa.dev.rework\"");
+			continue;
+		}
+		if (seen.has(id)) {
+			issues.add(`${path}.id`, `duplicate channel id "${id}"`);
+			continue;
+		}
+		const label = typeof entry.label === "string" ? entry.label.trim() : "";
+		if (label === "") {
+			issues.add(`${path}.label`, "must be a non-empty display label");
 			continue;
 		}
 		const from = typeof entry.from === "string" ? entry.from.trim() : "";
@@ -1843,35 +1859,32 @@ function readEdges(raw, positionById, typeById, issues) {
 			continue;
 		}
 		if (from === to) {
-			issues.add(path, "an edge must connect two different nodes");
+			issues.add(path, "a channel must connect two different nodes");
 			continue;
 		}
-		const key = `${from}->${to}`;
-		if (seen.has(key)) {
-			issues.add(path, `duplicate edge "${key}"`);
-			continue;
-		}
-		seen.add(key);
-		const types = readEdgeTypes(entry.types, `${path}.types`, to, positionById, typeById, issues);
+		seen.add(id);
+		const types = readChannelTypes(entry.types, `${path}.types`, to, positionById, typeById, issues);
 		if (entry.back !== void 0 && typeof entry.back !== "boolean") issues.add(`${path}.back`, "must be true or false");
-		edges.push({
+		channels.push({
+			id,
+			label,
 			from,
 			to,
 			...types === void 0 ? {} : { types },
 			...entry.back === true ? { back: true } : {}
 		});
 	}
-	return edges;
+	return channels;
 }
 /** 判断节点是否存在（岗位或内建 start / end）。 */
 function isKnownNode(id, positionById) {
 	return id === START_ID || id === END_ID || positionById.has(id);
 }
-/** 解析边上的任务类型白名单。 */
-function readEdgeTypes(raw, path, to, positionById, typeById, issues) {
+/** 解析通道上的任务类型白名单。 */
+function readChannelTypes(raw, path, to, positionById, typeById, issues) {
 	if (raw === void 0 || raw === null) return void 0;
 	if (to === END_ID) {
-		issues.add(path, "the built-in end node has a single contract; an edge into it cannot whitelist types");
+		issues.add(path, "the built-in end node has a single contract; a channel into it cannot whitelist types");
 		return;
 	}
 	const target = positionById.get(to);
@@ -1897,7 +1910,7 @@ function readEdgeTypes(raw, path, to, positionById, typeById, issues) {
 	return types.length > 0 ? types : void 0;
 }
 /** 解析开始节点。 */
-function readStart(raw, positionById, typeById, issues) {
+function readStart(raw, positionById, typeById, channelById, issues) {
 	if (!isPlainObject$1(raw)) {
 		issues.add("start", "must declare the built-in start node task contract");
 		return null;
@@ -1913,7 +1926,7 @@ function readStart(raw, positionById, typeById, issues) {
 		issues.add("start.task.output", "is required: it is the structured input later tasks consume");
 		return null;
 	}
-	const routes = readStartRoutes(raw.next, "start.next", positionById, typeById, output, issues);
+	const routes = readStartRoutes(raw.next, "start.next", positionById, typeById, channelById, output, issues);
 	return {
 		task: {
 			payload,
@@ -1923,7 +1936,7 @@ function readStart(raw, positionById, typeById, issues) {
 	};
 }
 /** 解析 `start.next` 模板列表。 */
-function readStartRoutes(raw, path, positionById, typeById, startOutput, issues) {
+function readStartRoutes(raw, path, positionById, typeById, channelById, startOutput, issues) {
 	if (!Array.isArray(raw) || raw.length === 0) {
 		issues.add(path, "must be a non-empty array of initial task templates");
 		return [];
@@ -1935,16 +1948,29 @@ function readStartRoutes(raw, path, positionById, typeById, startOutput, issues)
 			issues.add(at, "must be an object");
 			continue;
 		}
-		const position = typeof entry.position === "string" ? entry.position.trim() : "";
-		const target = positionById.get(position);
+		const channelId = typeof entry.channel === "string" ? entry.channel.trim() : "";
+		const channel = channelById.get(channelId);
+		if (channel === void 0) {
+			issues.add(`${at}.channel`, `unknown channel "${String(entry.channel)}"`);
+			continue;
+		}
+		if (channel.from !== START_ID) {
+			issues.add(`${at}.channel`, `initial tasks must leave the start node; channel "${channelId}" starts at "${channel.from}"`);
+			continue;
+		}
+		const target = positionById.get(channel.to);
 		if (target === void 0) {
-			issues.add(`${at}.position`, `unknown position "${String(entry.position)}"`);
+			issues.add(`${at}.channel`, `channel "${channelId}" does not lead to a position; initial tasks cannot target "${channel.to}"`);
 			continue;
 		}
 		const type = typeof entry.type === "string" ? entry.type.trim() : "";
 		const taskType = typeById.get(type);
 		if (taskType === void 0 || !target.taskTypes.some((candidate) => candidate.id === type)) {
-			issues.add(`${at}.type`, `"${String(entry.type)}" is not a task type of position "${position}"`);
+			issues.add(`${at}.type`, `"${String(entry.type)}" is not a task type of position "${target.id}"`);
+			continue;
+		}
+		if (!channelAllowsType(channel, type)) {
+			issues.add(`${at}.type`, `channel "${channelId}" does not allow task type "${type}"`);
 			continue;
 		}
 		if (!isPlainObject$1(entry.payload)) {
@@ -1954,7 +1980,7 @@ function readStartRoutes(raw, path, positionById, typeById, startOutput, issues)
 		const dependsOn = readStartDependsOn(entry.dependsOn, `${at}.dependsOn`, issues);
 		validateRoutePayload(entry.payload, `${at}.payload`, taskType, startOutput, issues);
 		routes.push({
-			position,
+			channel: channelId,
 			type,
 			payload: entry.payload,
 			...dependsOn === void 0 ? {} : { dependsOn }
@@ -2080,13 +2106,15 @@ function readEnd(raw, issues) {
 	return { task: { payload } };
 }
 /**
-* 边与节点的结构检查：回边闭合、环上至少一条回边、start/end 关系。
+* 通道与节点的结构检查：回向通道闭合、环上至少一条回向通道、同一对节点的
+* `back` 一致。
 *
-* 规则按 spec：环上的边必须有显式标记，回边必须真的闭合一个环。一个环只需要
-* 一条 `back: true`（例：`qa -> dev` 标 back，`dev -> qa` 是环里向前的边，
-* 不必再标），所以按强连通分量检查：每个多节点分量至少有一条内部回边。
+* 规则按 ADR 0015：环上的通道必须有显式标记，回向通道必须真的闭合一个环。
+* 一个环只需要一条 `back: true`（例：`qa -> dev` 标 back，`dev -> qa` 是环里
+* 向前的通道，不必再标），所以按强连通分量检查：每个多节点分量至少有一条
+* 内部回向通道。同一对有序节点可以有多条通道，但 `back` 必须一致。
 */
-function checkEdges(edges, positions, issues) {
+function checkChannels(channels, positions, issues) {
 	const nodes = /* @__PURE__ */ new Set([
 		START_ID,
 		END_ID,
@@ -2094,9 +2122,9 @@ function checkEdges(edges, positions, issues) {
 	]);
 	const adjacency = /* @__PURE__ */ new Map();
 	for (const node of nodes) adjacency.set(node, /* @__PURE__ */ new Set());
-	for (const edge of edges) {
-		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
-		adjacency.get(edge.from)?.add(edge.to);
+	for (const channel of channels) {
+		if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue;
+		adjacency.get(channel.from)?.add(channel.to);
 	}
 	const reach = (from) => {
 		const seen = /* @__PURE__ */ new Set();
@@ -2113,11 +2141,11 @@ function checkEdges(edges, positions, issues) {
 	};
 	const reachability = /* @__PURE__ */ new Map();
 	for (const node of nodes) reachability.set(node, reach(node));
-	for (const [index, edge] of edges.entries()) {
-		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
-		if (edge.back !== true) continue;
-		if (reachability.get(edge.to)?.has(edge.from) === true) continue;
-		issues.add(`edges[${index}].back`, `edge "${edge.from} -> ${edge.to}" does not close a cycle and cannot be marked back`);
+	for (const [index, channel] of channels.entries()) {
+		if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue;
+		if (channel.back !== true) continue;
+		if (reachability.get(channel.to)?.has(channel.from) === true) continue;
+		issues.add(`channels[${index}].back`, `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not close a cycle and cannot be marked back`);
 	}
 	const grouped = /* @__PURE__ */ new Set();
 	for (const node of nodes) {
@@ -2131,14 +2159,36 @@ function checkEdges(edges, positions, issues) {
 		}
 		if (members.size < 2) continue;
 		for (const member of members) grouped.add(member);
-		if (edges.flatMap((edge, index) => edge.back === true && members.has(edge.from) && members.has(edge.to) ? [index] : []).length > 0) continue;
-		const first = edges.findIndex((edge) => members.has(edge.from) && members.has(edge.to));
+		if (channels.flatMap((channel, index) => channel.back === true && members.has(channel.from) && members.has(channel.to) ? [index] : []).length > 0) continue;
+		const first = channels.findIndex((channel) => members.has(channel.from) && members.has(channel.to));
 		const cycle = [...members].join(" -> ");
-		issues.add(`edges[${Math.max(first, 0)}].back`, `cycle "${cycle}" has no explicit back edge: mark the edge that closes it with "back": true`);
+		issues.add(`channels[${Math.max(first, 0)}].back`, `cycle "${cycle}" has no explicit back channel: mark the channel that closes it with "back": true`);
+	}
+	const pairs = /* @__PURE__ */ new Map();
+	for (const [index, channel] of channels.entries()) {
+		if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue;
+		const key = `${channel.from}\u0000${channel.to}`;
+		const group = pairs.get(key);
+		const item = {
+			index,
+			back: channel.back === true,
+			from: channel.from,
+			to: channel.to
+		};
+		if (group === void 0) pairs.set(key, [item]);
+		else group.push(item);
+	}
+	for (const group of pairs.values()) {
+		const first = group[0];
+		if (first === void 0 || group.length < 2) continue;
+		for (const item of group.slice(1)) {
+			if (item.back === first.back) continue;
+			issues.add(`channels[${item.index}].back`, `channels between "${item.from}" and "${item.to}" must agree on "back"`);
+		}
 	}
 }
 /** 可达性：每个岗位都能从 start 到达，也能到达 end。 */
-function checkReachability(edges, positions, issues) {
+function checkReachability(channels, positions, issues) {
 	const nodes = /* @__PURE__ */ new Set([
 		START_ID,
 		END_ID,
@@ -2150,16 +2200,16 @@ function checkReachability(edges, positions, issues) {
 		forward.set(node, /* @__PURE__ */ new Set());
 		reverse.set(node, /* @__PURE__ */ new Set());
 	}
-	for (const edge of edges) {
-		if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue;
-		forward.get(edge.from)?.add(edge.to);
-		reverse.get(edge.to)?.add(edge.from);
+	for (const channel of channels) {
+		if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue;
+		forward.get(channel.from)?.add(channel.to);
+		reverse.get(channel.to)?.add(channel.from);
 	}
 	const fromStart = walkFrom(START_ID, forward);
 	const toEnd = walkFrom(END_ID, reverse);
 	for (const position of positions) {
-		if (!fromStart.has(position.id)) issues.add(`positions.${position.id}`, "is unreachable from the built-in start node: add an edge path from start");
-		if (!toEnd.has(position.id)) issues.add(`positions.${position.id}`, "cannot reach the built-in end node: add an edge path to end");
+		if (!fromStart.has(position.id)) issues.add(`positions.${position.id}`, "is unreachable from the built-in start node: add a channel path from start");
+		if (!toEnd.has(position.id)) issues.add(`positions.${position.id}`, "cannot reach the built-in end node: add a channel path to end");
 	}
 }
 /** 从某个节点出发的可达集合。 */
@@ -2176,54 +2226,52 @@ function walkFrom(from, adjacency) {
 	}
 	return seen;
 }
-/** `start.next` 的跨节点检查：直接后继、边白名单、模板只引用 start.output。 */
-function checkStartNext(start, positionById, typeById, edges, issues) {
-	if (start === null) return;
-	for (const [index, route] of start.next.entries()) {
-		if (positionById.get(route.position) === void 0) continue;
-		if (typeById.get(route.type) === void 0) continue;
-		const edge = edges.find((candidate) => candidate.from === START_ID && candidate.to === route.position);
-		if (edge === void 0) {
-			issues.add(`start.next[${index}].position`, `initial tasks must target a direct successor of the start node: no "start -> ${route.position}" edge`);
+/** 结束节点检查：至少一条入向通道；能派发结束任务的岗位必须与 end 有通道。 */
+function checkEnd(channels, positions, issues) {
+	const intoEnd = channels.flatMap((channel, index) => channel.to === END_ID ? [{
+		channel,
+		index
+	}] : []);
+	if (intoEnd.length === 0) issues.add("channels", "at least one position must have a channel into the built-in end node");
+	for (const { channel, index } of intoEnd) {
+		if (channel.from === START_ID) {
+			issues.add(`channels[${index}].from`, "the start node cannot dispatch the end task; only positions can");
 			continue;
 		}
-		if (edge.types !== void 0 && !edge.types.includes(route.type)) issues.add(`start.next[${index}].type`, `edge "start -> ${route.position}" does not allow task type "${route.type}"`);
-	}
-}
-/** 结束节点检查：至少一条入边；能派发结束任务的岗位必须与 end 有边。 */
-function checkEnd(edges, positions, issues) {
-	const intoEnd = edges.filter((edge) => edge.to === END_ID);
-	if (intoEnd.length === 0) issues.add("edges", "at least one position must have an edge into the built-in end node");
-	for (const [index, edge] of intoEnd.entries()) {
-		if (edge.from === START_ID) {
-			issues.add(`edges.end[${index}]`, "the start node cannot dispatch the end task; only positions can");
-			continue;
-		}
-		if (positions.every((position) => position.id !== edge.from)) issues.add(`edges.end[${index}].from`, `unknown position "${edge.from}"`);
+		if (positions.every((position) => position.id !== channel.from)) issues.add(`channels[${index}].from`, `unknown position "${channel.from}"`);
 	}
 }
 /**
-* 判断一个任务类型是否允许某个派发（边白名单）。
+* 判断一个任务类型是否允许某个派发（通道白名单）。
 *
 * 引擎创建任务时复用这里的规则。
 *
-* @param edge 边
+* @param channel 通道
 * @param type 任务类型 id
 * @returns 允许时为 true
 */
-function edgeAllowsType(edge, type) {
-	return edge.types === void 0 || edge.types.includes(type);
+function channelAllowsType(channel, type) {
+	return channel.types === void 0 || channel.types.includes(type);
 }
 /**
-* 在定义里找一条从 `from` 到 `to` 的边。
+* 按 id 取一条通道。
 *
 * @param definition 定义
-* @param from 创建者岗位
-* @param to 目标岗位
-* @returns 边；不存在时是 undefined
+* @param channelId 通道 id
+* @returns 通道；不存在时是 undefined
 */
-function findEdge(definition, from, to) {
-	return definition.edges.find((edge) => edge.from === from && edge.to === to);
+function findChannel(definition, channelId) {
+	return definition.channels.find((channel) => channel.id === channelId);
+}
+/**
+* 从某个节点出发的全部通道。
+*
+* @param definition 定义
+* @param from 起点节点 id
+* @returns 通道列表
+*/
+function channelsFrom(definition, from) {
+	return definition.channels.filter((channel) => channel.from === from);
 }
 /**
 * 按岗位 id 取岗位。
@@ -2490,7 +2538,7 @@ function programDriver(programId) {
 }
 // .build/workflows/engine/prompt.js
 /**
-* 任务执行上下文组装（`.tmp/workflow-v4-spec.md` §7.6）。
+* 任务执行上下文组装（ADR 0015：通道 / 入站通道 / 可派发通道）。
 *
 * 一个任务 = 一条全新会话，上下文由引擎按依赖与任务契约组装：
 *
@@ -2499,7 +2547,7 @@ function programDriver(programId) {
 * 3. 渲染后的 payload；
 * 4. 依赖任务摘要与可见附件清单；
 * 5. 产出契约（output schema + `buka_task_complete` + 附件规则）；
-* 6. 可派发的直接后继岗位 / 类型白名单。
+* 6. 可派发的通道（id、label、目标岗位与类型白名单）。
 *
 * 同时负责开始任务的「原始输入 → 结构化输入」提示与结束任务的投递文本。
 *
@@ -2568,7 +2616,9 @@ function renderTaskPayload(payload, tasks) {
 * @returns 可读摘要
 */
 function summarizeTaskResult(task, definition) {
-	const lines = [`- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}`];
+	const channel = task.channel === null ? void 0 : findChannel(definition, task.channel);
+	const via = channel === void 0 ? "" : `（经「${channel.label}」）`;
+	const lines = [`- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}${via}`];
 	if (task.error !== null) lines.push(`  error: ${clipUtf8(task.error, PREVIEW_BYTES)}`);
 	const text = task.result?.text ?? "";
 	if (text.trim() !== "") lines.push(`  text: ${clipUtf8(text.trim(), PREVIEW_BYTES)}`);
@@ -2576,26 +2626,33 @@ function summarizeTaskResult(task, definition) {
 	return lines.join("\n");
 }
 /**
-* 可派发的直接后继：目标岗位 + 允许的任务类型。
+* 可派发的通道：id、label、目标岗位与允许的任务类型。
 *
 * @param definition 定义
 * @param fromPosition 创建者岗位
-* @returns 后继说明
+* @returns 通道说明
 */
 function successorLines(definition, fromPosition) {
 	const lines = [];
-	for (const edge of definition.edges) {
-		if (edge.from !== fromPosition) continue;
-		if (edge.to === "end") {
-			lines.push("- end（结束任务：payload 为最终交付物，投递即完成）");
+	const fromLabel = positionLabel(definition, fromPosition);
+	for (const channel of channelsFrom(definition, fromPosition)) {
+		if (channel.to === "end") {
+			lines.push(`- 「${channel.label}」${fromLabel} → end（channel: ${channel.id}）: 结束任务（payload 为最终交付物，投递即完成）`);
 			continue;
 		}
-		const position = positionOf(definition, edge.to);
+		const position = positionOf(definition, channel.to);
 		if (position === void 0) continue;
-		const labels = (edge.types ? edge.types : position.taskTypes.map((taskType) => taskType.id)).map((type) => `${type}（${taskTypeLabel(definition, type)}）`).join("、");
-		lines.push(`- ${position.id}（${position.label}）: ${labels}`);
+		const labels = (channel.types ? channel.types : position.taskTypes.map((taskType) => taskType.id)).map((type) => `${type}（${taskTypeLabel(definition, type)}）`).join("、");
+		lines.push(`- 「${channel.label}」${fromLabel} → ${position.label}（channel: ${channel.id}）: ${labels}`);
 	}
 	return lines;
+}
+/** 入站通道说明：任务依据哪条通道抵达，启动任务没有。 */
+function inboundLine(definition, task) {
+	if (task.channel === null) return null;
+	const channel = findChannel(definition, task.channel);
+	if (channel === void 0) return `你由通道 "${task.channel}" 派发而来。`;
+	return `你由通道「${channel.label}」从 ${positionLabel(definition, channel.from)} 派发而来（channel: ${channel.id}）。`;
 }
 /**
 * 组装一个 agent 任务的完整 prompt。
@@ -2612,8 +2669,10 @@ function buildExecutionPrompt(input) {
 	const attachments = visibleAttachmentsForTask(input.tasks, task.id, input.attachments);
 	const attachmentLines = attachments.length === 0 ? "（依赖任务没有可见附件）" : attachments.map((attachment) => `- ${attachment.id} · ${attachment.name} (${attachment.bytes} bytes${attachment.mime === "" ? "" : `, ${attachment.mime}`})${attachment.description === "" ? "" : ` · ${attachment.description}`}`).join("\n");
 	const successors = successorLines(definition, position.id);
+	const inbound = inboundLine(definition, task);
 	return [
 		`你正在执行工作流${`作业 #${job.seq}「${job.workflowName}」 · task ${task.id}`}。`,
+		...inbound === null ? [] : [inbound],
 		"",
 		"## 岗位",
 		`- ${position.label}（${position.id}）${position.description === void 0 ? "" : `：${position.description}`}`,
@@ -2643,7 +2702,8 @@ function buildExecutionPrompt(input) {
 		"```",
 		"",
 		"## 你可以派发的任务",
-		"执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：position、type、payload、deps。",
+		"执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：channel、type、payload、deps。",
+		"channel 必须是本岗位出发的通道 id；目标岗位由通道决定，通道的类型白名单决定你能派哪些任务类型。",
 		"deps 只能引用本作业里已创建的任务 id（包括刚创建但未完成的任务）；依赖图不能成环。",
 		...successors.length === 0 ? ["- （本岗位没有后继岗位）"] : successors,
 		"",
@@ -2702,8 +2762,10 @@ function buildAssistantPrompt(input) {
 	const payload = renderTaskPayload(task.payload, input.tasks);
 	const dependencies = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
 	const dependencyText = dependencies.length === 0 ? "（无依赖任务）" : dependencies.map((dependency) => summarizeTaskResult(dependency, job.definition)).join("\n");
+	const inbound = inboundLine(job.definition, task);
 	return [
 		`你被指派为工作流「${job.workflowName}」作业 #${job.seq} 的人任务助理。执行者是人：${position.label}（${position.id}）。`,
+		...inbound === null ? [] : [inbound],
 		"你的职责：代表这条任务与人沟通（按你自己的 skill 选择方式），拿到人给出的决定 / 结果后，调用 `buka_task_complete` 提交。",
 		"你只能读取并完成这条任务，不能往工作流派任务。",
 		"",
@@ -2730,7 +2792,7 @@ function buildAssistantPrompt(input) {
 /**
 * 页面 / 工具用的只读投影：任务摘要、任务详情、作业摘要、定义摘要与看板计数。
 *
-* 形状以 `.tmp/workflow-v4-api.md` 为准；`GET /job` 的 `definition` 带完整
+* 形状以 ADR 0015 为准；`GET /job` 的 `definition` 带完整
 * positions[].taskTypes，客户端不需要再拉工作流兜底。
 *
 * @module @buka/dsh-plugin-workflows/engine/board
@@ -2766,6 +2828,7 @@ function taskSummary(task, definition) {
 		position: task.position,
 		type: task.type,
 		typeLabel: taskTypeLabel(definition, task.type),
+		channel: task.channel,
 		status: task.status,
 		deps: [...task.deps],
 		createdAt: task.createdAt,
@@ -2822,6 +2885,7 @@ function taskDetail(input) {
 	const { job, task } = input;
 	const definition = job.definition;
 	const taskType = findTaskType(definition, task.type);
+	const channel = task.channel === null ? void 0 : findChannel(definition, task.channel);
 	const dependencyTasks = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
 	const attachments = input.attachments.filter((attachment) => task.result?.attachmentIds.includes(attachment.id));
 	return {
@@ -2832,6 +2896,8 @@ function taskDetail(input) {
 		type: task.type,
 		typeLabel: taskTypeLabel(definition, task.type),
 		typeDescription: taskType?.description ?? "",
+		channel: task.channel,
+		channelLabel: channel?.label ?? "",
 		status: task.status,
 		payload: task.payload,
 		deps: dependencyTasks.map((dependency) => taskSummary(dependency, definition)),
@@ -2903,13 +2969,13 @@ function jobDefinition(definition, workers) {
 				...taskType.mode === void 0 ? {} : { mode: taskType.mode }
 			}))
 		})),
-		edges: definition.edges,
+		channels: definition.channels,
 		start: { label: "开始" },
 		end: { label: "结束" }
 	};
 }
 /**
-* 工作流详情里的图（positions / edges / start / end）。
+* 工作流详情里的图（positions / channels / start / end）。
 *
 * @param definition 定义
 * @returns 契约形状
@@ -2921,11 +2987,13 @@ function workflowGraph(definition, workers) {
 			label: position.label,
 			executor: position.executor
 		})),
-		edges: definition.edges.map((edge) => ({
-			from: edge.from,
-			to: edge.to,
-			types: edge.types ?? [],
-			back: edge.back === true
+		channels: definition.channels.map((channel) => ({
+			id: channel.id,
+			label: channel.label,
+			from: channel.from,
+			to: channel.to,
+			types: channel.types ?? [],
+			back: channel.back === true
 		})),
 		start: { label: "开始" },
 		end: { label: "结束" }
@@ -3114,14 +3182,16 @@ function poll(intervalMs, check) {
 }
 // .build/workflows/engine/tasks.js
 /**
-* 任务创建校验与记录构造（`.tmp/workflow-v4-spec.md` §7.3 / §7.4）。
+* 任务创建校验与记录构造（ADR 0015）。
 *
 * 创建任务的入口只有两个：引擎按 `start.next` 生成初始任务；执行中的任务通过
-* `buka_task_create` 派生任务。这里实现两条路径共享的纯校验：
+* `buka_task_create` 派生任务。通道是派发单元：目标岗位由通道的 `to` 推出。
 *
-* 1. 目标岗位是创建者岗位的直接后继（边存在；`start` / `end` 同理）；
+* 两条路径共享的纯校验：
+*
+* 1. 通道存在、起点是创建者岗位；
 * 2. 任务类型是目标岗位声明的类型（结束任务用 `end.task`）；
-* 3. 边写了类型白名单时，类型在白名单里；
+* 3. 通道写了类型白名单时，类型在白名单里；
 * 4. payload 符合类型 schema，模板只引用已存在的数据路径；
 * 5. 依赖 id 属于本作业、已存在、不是自己、依赖图不成环；`requires` 满足；
 * 6. 作业预算未超。
@@ -3229,15 +3299,15 @@ function findDependencyCycle(tasks) {
 * @throws `WorkflowError`（code 稳定）表示创建被拒绝
 */
 function buildCreatedTask(input) {
-	const { job, creator, position, type, payload, deps, tasks, workers } = input;
+	const { job, creator, channel: channelId, type, payload, deps, tasks, workers } = input;
 	const definition = job.definition;
 	if (job.status !== "running") throw new WorkflowError("job-not-running", `job ${job.id} is not running`);
 	if (creator.status !== "running") throw new WorkflowError("creator-not-running", `task ${creator.id} is not running; only an executing task can create tasks`);
+	const channel = resolveDispatchChannel(definition, creator.position, channelId);
+	const position = channel.to;
 	if (position === "start") throw new WorkflowError("invalid-target", "tasks cannot be dispatched to the built-in start node");
-	const edge = findEdge(definition, creator.position, position);
-	if (edge === void 0) throw new WorkflowError("no-edge", `no edge "${creator.position} -> ${position}": the executing position cannot dispatch this target`);
 	const taskType = resolveTargetTaskType(definition, position, type);
-	if (!edgeAllowsType(edge, taskType.id)) throw new WorkflowError("type-not-allowed", `edge "${creator.position} -> ${position}" does not allow task type "${taskType.id}"`);
+	if (!channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`);
 	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new WorkflowError("invalid-payload", "payload must be a JSON object");
 	const schemaIssues = templatedPayloadIssues(taskType.payload, payload);
 	if (schemaIssues.length > 0) throw new WorkflowError("invalid-payload", `payload does not match task type "${taskType.id}": ${schemaIssues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
@@ -3265,6 +3335,7 @@ function buildCreatedTask(input) {
 			jobId: job.id,
 			position,
 			type: taskType.id,
+			channel: channel.id,
 			payload,
 			deps: dependencyIds,
 			status: ready ? "ready" : "pending",
@@ -3285,6 +3356,24 @@ function buildCreatedTask(input) {
 		},
 		ready
 	};
+}
+/**
+* 解析一条可用的派发通道：必须存在、从创建者岗位出发。
+*
+* @param definition 定义
+* @param from 创建者岗位（启动任务是 `start`）
+* @param channelId 请求的通道 id
+* @returns 通道
+* @throws `WorkflowError` 通道不存在或起点不符
+*/
+function resolveDispatchChannel(definition, from, channelId) {
+	const channel = findChannel(definition, channelId);
+	if (channel === void 0) {
+		const available = channelsFrom(definition, from);
+		throw new WorkflowError("no-channel", `unknown channel "${channelId}"; channels from "${from}": ${available.length === 0 ? "(none)" : available.map((item) => `${item.id}「${item.label}」-> ${item.to}`).join(", ")}`);
+	}
+	if (channel.from !== from) throw new WorkflowError("channel-not-own", `channel "${channel.id}" starts at "${channel.from}"; this task is at "${from}"`);
+	return channel;
 }
 /**
 * 解析目标任务类型；`end` 用内建契约，既不是岗位类型也不存在。
@@ -3342,18 +3431,20 @@ function buildInitialTasks(input) {
 /** 构造单条初始任务。 */
 function buildInitialTask(input) {
 	const { job, route, startTask, tasks, workers, definition } = input;
-	if (findPosition(definition, route.position) === void 0) throw new WorkflowError("unknown-position", `start.next targets unknown position "${route.position}"`);
-	const taskType = resolveTargetTaskType(definition, route.position, route.type);
-	const edge = findEdge(definition, "start", route.position);
-	if (edge === void 0 || !edgeAllowsType(edge, taskType.id)) throw new WorkflowError("no-edge", `start.next dispatches to "${route.position}" but no edge allows task type "${taskType.id}"`);
+	const channel = resolveDispatchChannel(definition, "start", route.channel);
+	const position = findPosition(definition, channel.to);
+	if (position === void 0) throw new WorkflowError("unknown-position", `start.next channel "${channel.id}" leads to "${channel.to}", which is not a position`);
+	const taskType = resolveTargetTaskType(definition, position.id, route.type);
+	if (!channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`);
 	const templateIssues = templateReferenceIssues(route.payload, tasks, definition, definition.start.task.output);
 	if (templateIssues.length > 0) throw new WorkflowError("invalid-template", templateIssues.join("; "));
 	const now = nowIso();
 	return {
 		id: newTaskId(),
 		jobId: job.id,
-		position: route.position,
+		position: position.id,
 		type: taskType.id,
+		channel: channel.id,
 		payload: route.payload,
 		deps: [START_TASK_ID],
 		status: "ready",
@@ -3361,7 +3452,7 @@ function buildInitialTask(input) {
 			taskId: startTask.id,
 			position: "start"
 		},
-		assignee: resolveExecutor(definition, route.position, job, workers),
+		assignee: resolveExecutor(definition, position.id, job, workers),
 		claimant: null,
 		attemptIds: [],
 		result: null,
@@ -3377,7 +3468,7 @@ function buildInitialTask(input) {
 /**
 * 工作流引擎：作业创建、调度、执行、派发校验、结算、取消、重试与恢复。
 *
-* 设计要点（`.tmp/workflow-v4-spec.md` §6-§12、ADR 0006-0012）：
+* 设计要点（ADR 0006-0015）：
 *
 * - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
 * - 一个智能体岗位一次只跑一条任务（FIFO），机器人直接完成，
@@ -3609,6 +3700,7 @@ var WorkflowEngine = class {
 					jobId: job.id,
 					position: "start",
 					type: "start",
+					channel: null,
 					payload: input.rawInput,
 					deps: [],
 					status: "completed",
@@ -3655,6 +3747,7 @@ var WorkflowEngine = class {
 						taskId: task.id,
 						position: task.position,
 						type: task.type,
+						channel: task.channel,
 						deps: task.deps
 					});
 				}
@@ -3698,6 +3791,7 @@ var WorkflowEngine = class {
 				jobId: job.id,
 				position: "start",
 				type: "start",
+				channel: null,
 				payload: input.rawInput,
 				deps: [],
 				status: "pending",
@@ -3940,9 +4034,9 @@ var WorkflowEngine = class {
 		return this.jobIdForSession(sessionId) === jobId;
 	}
 	/**
-	* 执行中的任务创建派生任务。
+	* 执行中的任务沿一条通道创建派生任务。
 	*
-	* @param input 会话、目标岗位、类型、payload 与依赖
+	* @param input 会话、通道、类型、payload 与依赖
 	* @returns 新任务
 	*/
 	async createTaskFromSession(input) {
@@ -3958,7 +4052,7 @@ var WorkflowEngine = class {
 			const created = buildCreatedTask({
 				job,
 				creator,
-				position: input.position,
+				channel: input.channel,
 				type: input.type,
 				payload: input.payload,
 				deps: input.deps,
@@ -3970,6 +4064,7 @@ var WorkflowEngine = class {
 				taskId: created.task.id,
 				position: created.task.position,
 				type: created.task.type,
+				channel: created.task.channel,
 				deps: created.task.deps,
 				createdBy: creator.id
 			});
@@ -5089,6 +5184,7 @@ var WorkflowEngine = class {
 				taskId: task.id,
 				position: task.position,
 				type: task.type,
+				channel: task.channel,
 				deps: task.deps
 			});
 		}
@@ -5550,7 +5646,7 @@ function sendMethodNotAllowed(res, allow) {
 }
 // .build/workflows/routes/index.js
 /**
-* 浏览器一半的 HTTP 路由（`.tmp/workflow-v4-api.md`）：
+* 浏览器一半的 HTTP 路由（ADR 0015 的 v5 契约）：
 * 工作流 / 作业 / 任务 / 附件与动作。
 *
 * 所有路由沿用 web 组合的信任栅栏（`ctx.connection.requestRejection`），只接受
@@ -5907,6 +6003,127 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			});
 		});
 	});
+}
+// .build/workflows/definition/upgrade.js
+/**
+* v4 → v5 定义升级（ADR 0015）：一次性存储迁移与读取兜底共用。
+*
+* v4 的边 `{ from, to, types?, back? }` 升级成通道 `{ id, label, from, to, types?, back? }`：
+*
+* - `id` 派生为 `<from>.<to>`（小写；同一对节点在 v4 里唯一，冲突时追加 `.2`、
+*   `.3`），保证引用稳定；
+* - `label` 派生为端点显示名（`研发 → 测试`；内建节点用 `start` / `end`），迁移
+*   只做形式升级，不猜语义，真正的名字留给之后的编排 agent；
+* - `start.next` 的 `position` 换成对应的 `channel` id，目标岗位由通道推出；
+* - 任务按 `createdBy.position → position` + 类型反查通道，回填 `channel`。
+*
+* 纯函数：不读盘、不改记录；幂等（已是 v5 时返回 null）。
+*
+* @module @buka/dsh-plugin-workflows/definition/upgrade
+*/
+/** 判一个值是不是普通对象。 */
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/** 通道 id 的基础形式：小写、点分；超长时截断，冲突由调用方追加后缀。 */
+function baseChannelId(from, to) {
+	return (`${from}.${to}`.toLowerCase().replace(/[^a-z0-9._-]/gu, "-").replace(/[._-]+$/u, "") || "channel").slice(0, 58).replace(/[._-]+$/u, "") || "channel";
+}
+/** 判一个定义是不是已升级的 v5。 */
+function isV5Definition(raw) {
+	return isRecord(raw) && raw.version === 5 && Array.isArray(raw.channels);
+}
+/**
+* 把一份 v4 定义升级成 v5。
+*
+* @param raw 已通过 v4 校验的原始定义
+* @returns v5 定义；已经是 v5 或形状不完整时返回 null
+*/
+function upgradeV4Definition(raw) {
+	if (!isRecord(raw)) return null;
+	if (isV5Definition(raw)) return null;
+	const definition = raw;
+	if (definition.version !== 4) return null;
+	if (!Array.isArray(definition.positions)) return null;
+	if (!isRecord(definition.start) || !isRecord(definition.end)) return null;
+	if (!isRecord(definition.budgets)) return null;
+	if (!Array.isArray(definition.edges)) return null;
+	const edges = definition.edges.filter((edge) => isRecord(edge));
+	const positions = definition.positions;
+	const labelOf = (nodeId) => {
+		if (nodeId === "start" || nodeId === "end") return nodeId;
+		return positions.find((candidate) => candidate.id === nodeId)?.label ?? nodeId;
+	};
+	const used = /* @__PURE__ */ new Set();
+	const byPair = /* @__PURE__ */ new Map();
+	const channels = [];
+	for (const edge of edges) {
+		const from = typeof edge.from === "string" ? edge.from : "";
+		const to = typeof edge.to === "string" ? edge.to : "";
+		if (from === "" || to === "") continue;
+		const base = baseChannelId(from, to);
+		let id = base;
+		let suffix = 2;
+		while (used.has(id)) {
+			id = `${base}.${suffix}`;
+			suffix += 1;
+		}
+		used.add(id);
+		byPair.set(`${from}\u0000${to}`, id);
+		channels.push({
+			id,
+			label: `${labelOf(from)} → ${labelOf(to)}`,
+			from,
+			to,
+			...Array.isArray(edge.types) ? { types: edge.types.filter((type) => typeof type === "string") } : {},
+			...edge.back === true ? { back: true } : {}
+		});
+	}
+	const start = definition.start;
+	const rawRoutes = Array.isArray(start.next) ? start.next : [];
+	const routes = [];
+	for (const entry of rawRoutes) {
+		if (!isRecord(entry)) continue;
+		const route = entry;
+		const position = typeof route.position === "string" ? route.position : "";
+		const type = typeof route.type === "string" ? route.type : "";
+		if (position === "" || type === "" || !isRecord(route.payload)) continue;
+		routes.push({
+			channel: byPair.get(`start\u0000${position}`) ?? baseChannelId("start", position),
+			type,
+			payload: route.payload,
+			...Array.isArray(route.dependsOn) ? { dependsOn: route.dependsOn.filter((dependency) => typeof dependency === "string") } : {}
+		});
+	}
+	return {
+		version: 5,
+		name: typeof definition.name === "string" ? definition.name : "",
+		...typeof definition.description === "string" && definition.description !== "" ? { description: definition.description } : {},
+		budgets: definition.budgets,
+		start: {
+			task: start.task,
+			next: routes
+		},
+		end: definition.end,
+		positions,
+		channels
+	};
+}
+/**
+* 按 v4 的唯一派发关系，给一条历史任务回填通道 id。
+*
+* 启动任务没有入站通道，返回 null；推不出来时也返回 null，由调用方决定是否记日志。
+*
+* @param definition 已升级的 v5 定义
+* @param task 历史任务（v4 记录）
+* @returns 通道 id 或 null
+*/
+function upgradeV4TaskChannel(definition, task) {
+	if (task.id === "start-task") return null;
+	if (typeof task.position !== "string" || typeof task.type !== "string") return null;
+	const from = isRecord(task.createdBy) && typeof task.createdBy.position === "string" ? task.createdBy.position : null;
+	if (from === null) return null;
+	return (Array.isArray(definition.channels) ? definition.channels : []).find((candidate) => candidate.from === from && candidate.to === task.position && (candidate.types === void 0 || candidate.types.includes(task.type)))?.id ?? null;
 }
 // .build/workflows/store/dirs.js
 /**
@@ -10439,6 +10656,7 @@ const taskRecordSchema = object({
 	jobId: string().min(1),
 	position: string().min(1),
 	type: string().min(1),
+	channel: string().nullable().optional(),
 	payload: unknown(),
 	deps: array(string()),
 	status: taskStatusSchema,
@@ -10498,8 +10716,8 @@ const attachmentRecordSchema = object({
 */
 const workflowDomain = defineDomain({
 	name: WORKFLOW_DOMAIN_NAME,
-	version: 2,
-	compatibleVersions: [1],
+	version: 3,
+	compatibleVersions: [1, 2],
 	layout: "per-record",
 	tables: {
 		workflows: domainTable(workflowRecordSchema),
@@ -10577,7 +10795,7 @@ var WorkflowStore = class {
 	}
 	/** 存储域版本；迁移入口在 `init` 里按它检查。 */
 	get domainVersion() {
-		return 2;
+		return 3;
 	}
 	/**
 	* 把术语改名前的旧记录（执行者 / 承办者 `kind: "robot"`、driver `"program"`）
@@ -10627,6 +10845,67 @@ var WorkflowStore = class {
 		}
 		if (tasks > 0 || jobs > 0 || workflows > 0) this.logger?.info?.(`buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s), ${workflows} workflow(s))`);
 	}
+	/**
+	* v4 → v5 一次性迁移：把工作流（全部版本）与作业快照升级成通道定义，
+	* 并按 v4 的唯一派发关系给任务回填 `channel`。
+	*
+	* 幂等：已升级的定义返回 null，已带 `channel` 的任务跳过。某条记录升级失败
+	* 时只记日志、保留原样，避免一次坏数据让整个插件起不来。
+	*/
+	async upgradeDefinitionsToV5() {
+		let workflows = 0;
+		for (const [id, record] of this.domain.table("workflows").entries()) {
+			let changed = false;
+			const versions = {};
+			for (const [version, snapshot] of Object.entries(record.versions)) {
+				const upgraded = upgradeV4Definition(snapshot.definition);
+				if (upgraded === null) {
+					versions[version] = snapshot;
+					continue;
+				}
+				changed = true;
+				versions[version] = {
+					...snapshot,
+					definition: upgraded
+				};
+			}
+			if (!changed) continue;
+			await this.domain.table("workflows").update(id, (current) => ({
+				...current,
+				versions
+			}));
+			workflows += 1;
+		}
+		if (workflows > 0) this.logger?.info?.(`buka-workflows: upgraded ${workflows} workflow(s) to definition v5`);
+		let jobs = 0;
+		const definitions = /* @__PURE__ */ new Map();
+		for (const [id, record] of this.domain.table("jobs").entries()) {
+			const upgraded = upgradeV4Definition(record.definition);
+			if (upgraded === null) {
+				definitions.set(id, record.definition);
+				continue;
+			}
+			definitions.set(id, upgraded);
+			await this.domain.table("jobs").update(id, (current) => ({
+				...current,
+				definition: upgraded
+			}));
+			jobs += 1;
+		}
+		if (jobs > 0) this.logger?.info?.(`buka-workflows: upgraded ${jobs} job snapshot(s) to definition v5`);
+		let tasks = 0;
+		for (const [id, record] of this.domain.table("tasks").entries()) {
+			if (Object.hasOwn(record, "channel")) continue;
+			const definition = definitions.get(record.jobId);
+			const channel = definition === void 0 ? null : upgradeV4TaskChannel(definition, record);
+			await this.domain.table("tasks").update(id, (current) => ({
+				...current,
+				channel
+			}));
+			tasks += 1;
+		}
+		if (tasks > 0) this.logger?.info?.(`buka-workflows: backfilled channel on ${tasks} legacy task(s)`);
+	}
 	/** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
 	async init() {
 		for (const [key, record] of this.domain.table("workflows").entries()) if (key !== record.id) throw new Error(`workflows: stored key "${key}" differs from record id`);
@@ -10635,6 +10914,7 @@ var WorkflowStore = class {
 		for (const [key, record] of this.domain.table("attempts").entries()) if (key !== record.id) throw new Error(`attempts: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("attachments").entries()) if (key !== record.id) throw new Error(`attachments: stored key "${key}" differs from record id`);
 		await this.normalizeLegacyWorkerKinds();
+		await this.upgradeDefinitionsToV5();
 		let promoted = 0;
 		for (const [id, record] of this.domain.table("workflows").entries()) {
 			if (record.status !== "draft") continue;
@@ -11082,7 +11362,7 @@ function openWorkflowStore(ctx, options) {
 }
 // .build/workflows/tools/index.js
 /**
-* 模型工具注册（`.tmp/workflow-v4-spec.md` §13.2）。
+* 模型工具注册（ADR 0015）。
 *
 * 可见性：
 * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
@@ -11108,9 +11388,9 @@ function sessionIdOf(context) {
 	return typeof context.agent?.id === "string" ? context.agent.id : "";
 }
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v5) JSON shape:
 {
-  "version": 4, "name": "...", "description": "...",
+  "version": 5, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
     "task": {
@@ -11118,7 +11398,7 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
       "output":  <JSON Schema object: the first structured input>
     },
     "next": [
-      { "position": "<position id>", "type": "<task type id>",
+      { "channel": "<channel id leaving start>", "type": "<task type id>",
         "payload": { ...templates... }, "dependsOn": ["$start"] }
     ]
   },
@@ -11133,13 +11413,14 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
           "mode": "plan" | null }
       ] }
   ],
-  "edges": [
-    { "from": "start", "to": "dev" },
-    { "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
-    { "from": "deploy", "to": "end" }
+  "channels": [
+    { "id": "start.dev", "label": "受理", "from": "start", "to": "dev" },
+    { "id": "dev.qa", "label": "提测", "from": "dev", "to": "qa", "types": ["qa.verify"] },
+    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
+    { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back edge; a back edge must close a cycle. start.next entries must depend on "$start" and target a direct successor of start. Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Edges carry no prompt: instructions live in task payloads and task type contracts.`;
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Multiple channels may connect the same ordered pair and their type whitelists may overlap; tasks are created by channel id, and the target position comes from the channel. Channels into "end" cannot whitelist types. Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". start.next entries must leave the start node via a channel and depend on "$start". Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Channels carry no prompt: instructions live in task payloads and task type contracts.`;
 /**
 * 注册全部工作流工具。
 *
@@ -11153,12 +11434,12 @@ function registerWorkflowTools(deps) {
 	};
 	register(defineTool({
 		name: "buka_workflow_save",
-		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v5 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
 		parameters: {
 			definition: {
 				type: "json",
 				required: true,
-				description: "The complete workflow v4 definition object."
+				description: "The complete workflow v5 definition object."
 			},
 			id: {
 				type: "string",
@@ -11429,12 +11710,12 @@ function defineJobCancelTool(ready) {
 function defineTaskCreateTool(ready) {
 	return defineTool({
 		name: "buka_task_create",
-		description: "Create a task on the current job board (callable any number of times while executing a task). The engine validates the target position, task type, edge whitelist, payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.",
+		description: "Create a task on the current job board (callable any number of times while executing a task). The engine validates the channel (it must start at your position and allow the task type), payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.",
 		parameters: {
-			position: {
+			channel: {
 				type: "string",
 				required: true,
-				description: "Target position id (or \"end\" for the end task)."
+				description: "Channel id to dispatch along (listed in the prompt under \"你可以派发的任务\"). It must start at your position and allow the task type; the target position comes from the channel."
 			},
 			type: {
 				type: "string",
@@ -11474,7 +11755,7 @@ function defineTaskCreateTool(ready) {
 			if (sessionId === "") throw new Error("buka_task_create must be called from a task session");
 			const task = await (await ready()).createTaskFromSession({
 				sessionId,
-				position: args.position,
+				channel: args.channel,
 				type: args.type,
 				payload: args.payload ?? {},
 				deps: Array.isArray(args.deps) ? args.deps : []
@@ -11572,7 +11853,7 @@ function defineBoardTool(ready) {
 				const lines = [`作业 #${String(job.seq)}「${String(job.workflowName)}」状态 ${String(job.status)}`];
 				for (const task of tasks) {
 					const record = task;
-					lines.push(`- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] deps=${Array.isArray(record.deps) ? record.deps.join(",") : ""}`);
+					lines.push(`- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] via=${record.channel === null || record.channel === void 0 ? "-" : String(record.channel)} deps=${Array.isArray(record.deps) ? record.deps.join(",") : ""}`);
 				}
 				return text(lines.join("\n"));
 			}

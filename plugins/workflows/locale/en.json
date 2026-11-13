@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka Workflows",
-    "description": "Persistent workflows with a job board: a workflow is a position graph, a job is one workflow plus one input, and every job gets a board. Tasks are added by running positions at any time, can only be dispatched along drawn edges, become ready through explicit dependencies, and are claimed by workers or people; a named assistant worker can handle a human task on the person's behalf. Structure constrains risk, the board carries throughput, and the built-in start / end tasks carry the raw input in and the final deliverable back to the starter.",
+    "description": "Persistent workflows with a job board: a workflow is a position graph, a job is one workflow plus one input, and every job gets a board. Tasks are added by running positions at any time, can only be dispatched along drawn channels, become ready through explicit dependencies, and are claimed by workers or people; a named assistant worker can handle a human task on the person's behalf. Structure constrains risk, the board carries throughput, and the built-in start / end tasks carry the raw input in and the final deliverable back to the starter.",
     "detail": "docs/DETAIL.md"
   }
 }

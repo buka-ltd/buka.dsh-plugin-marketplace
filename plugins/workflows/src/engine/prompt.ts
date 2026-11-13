@@ -1,5 +1,5 @@
 /**
- * 任务执行上下文组装（`.tmp/workflow-v4-spec.md` §7.6）。
+ * 任务执行上下文组装（ADR 0015：通道 / 入站通道 / 可派发通道）。
  *
  * 一个任务 = 一条全新会话，上下文由引擎按依赖与任务契约组装：
  *
@@ -8,7 +8,7 @@
  * 3. 渲染后的 payload；
  * 4. 依赖任务摘要与可见附件清单；
  * 5. 产出契约（output schema + `buka_task_complete` + 附件规则）；
- * 6. 可派发的直接后继岗位 / 类型白名单。
+ * 6. 可派发的通道（id、label、目标岗位与类型白名单）。
  *
  * 同时负责开始任务的「原始输入 → 结构化输入」提示与结束任务的投递文本。
  *
@@ -17,7 +17,7 @@
 
 import { clipUtf8, visibleAttachmentsForTask } from '../attachments/index.ts'
 import { buildTemplateContext, renderPayload } from '../definition/payload.ts'
-import { findTaskType } from '../definition/validate.ts'
+import { channelsFrom, findChannel, findTaskType } from '../definition/validate.ts'
 import { START_TASK_ID } from '../domain/ids.ts'
 import type {
   AttachmentRecord,
@@ -117,8 +117,10 @@ export function renderTaskPayload(payload: JsonValue, tasks: readonly TaskRecord
  * @returns 可读摘要
  */
 export function summarizeTaskResult(task: TaskRecord, definition: WorkflowDefinition): string {
+  const channel = task.channel === null ? undefined : findChannel(definition, task.channel)
+  const via = channel === undefined ? '' : `（经「${channel.label}」）`
   const lines = [
-    `- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}`,
+    `- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}${via}`,
   ]
   if (task.error !== null) lines.push(`  error: ${clipUtf8(task.error, PREVIEW_BYTES)}`)
   const text = task.result?.text ?? ''
@@ -130,27 +132,39 @@ export function summarizeTaskResult(task: TaskRecord, definition: WorkflowDefini
 }
 
 /**
- * 可派发的直接后继：目标岗位 + 允许的任务类型。
+ * 可派发的通道：id、label、目标岗位与允许的任务类型。
  *
  * @param definition 定义
  * @param fromPosition 创建者岗位
- * @returns 后继说明
+ * @returns 通道说明
  */
 export function successorLines(definition: WorkflowDefinition, fromPosition: string): string[] {
   const lines: string[] = []
-  for (const edge of definition.edges) {
-    if (edge.from !== fromPosition) continue
-    if (edge.to === 'end') {
-      lines.push('- end（结束任务：payload 为最终交付物，投递即完成）')
+  const fromLabel = positionLabel(definition, fromPosition)
+  for (const channel of channelsFrom(definition, fromPosition)) {
+    if (channel.to === 'end') {
+      lines.push(
+        `- 「${channel.label}」${fromLabel} → end（channel: ${channel.id}）: 结束任务（payload 为最终交付物，投递即完成）`,
+      )
       continue
     }
-    const position = positionOf(definition, edge.to)
+    const position = positionOf(definition, channel.to)
     if (position === undefined) continue
-    const types = edge.types ? edge.types : position.taskTypes.map((taskType) => taskType.id)
+    const types = channel.types ? channel.types : position.taskTypes.map((taskType) => taskType.id)
     const labels = types.map((type) => `${type}（${taskTypeLabel(definition, type)}）`).join('、')
-    lines.push(`- ${position.id}（${position.label}）: ${labels}`)
+    lines.push(
+      `- 「${channel.label}」${fromLabel} → ${position.label}（channel: ${channel.id}）: ${labels}`,
+    )
   }
   return lines
+}
+
+/** 入站通道说明：任务依据哪条通道抵达，启动任务没有。 */
+function inboundLine(definition: WorkflowDefinition, task: TaskRecord): string | null {
+  if (task.channel === null) return null
+  const channel = findChannel(definition, task.channel)
+  if (channel === undefined) return `你由通道 "${task.channel}" 派发而来。`
+  return `你由通道「${channel.label}」从 ${positionLabel(definition, channel.from)} 派发而来（channel: ${channel.id}）。`
 }
 
 /**
@@ -181,10 +195,12 @@ export function buildExecutionPrompt(input: ExecutionPromptInput): string {
           )
           .join('\n')
   const successors = successorLines(definition, position.id)
+  const inbound = inboundLine(definition, task)
   const jobRef = `作业 #${job.seq}「${job.workflowName}」 · task ${task.id}`
 
   return [
     `你正在执行工作流${jobRef}。`,
+    ...(inbound === null ? [] : [inbound]),
     '',
     '## 岗位',
     `- ${position.label}（${position.id}）${position.description === undefined ? '' : `：${position.description}`}`,
@@ -214,7 +230,8 @@ export function buildExecutionPrompt(input: ExecutionPromptInput): string {
     '```',
     '',
     '## 你可以派发的任务',
-    '执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：position、type、payload、deps。',
+    '执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：channel、type、payload、deps。',
+    'channel 必须是本岗位出发的通道 id；目标岗位由通道决定，通道的类型白名单决定你能派哪些任务类型。',
     'deps 只能引用本作业里已创建的任务 id（包括刚创建但未完成的任务）；依赖图不能成环。',
     ...(successors.length === 0 ? ['- （本岗位没有后继岗位）'] : successors),
     '',
@@ -287,8 +304,10 @@ export function buildAssistantPrompt(input: ExecutionPromptInput): string {
     dependencies.length === 0
       ? '（无依赖任务）'
       : dependencies.map((dependency) => summarizeTaskResult(dependency, job.definition)).join('\n')
+  const inbound = inboundLine(job.definition, task)
   return [
     `你被指派为工作流「${job.workflowName}」作业 #${job.seq} 的人任务助理。执行者是人：${position.label}（${position.id}）。`,
+    ...(inbound === null ? [] : [inbound]),
     '你的职责：代表这条任务与人沟通（按你自己的 skill 选择方式），拿到人给出的决定 / 结果后，调用 `buka_task_complete` 提交。',
     '你只能读取并完成这条任务，不能往工作流派任务。',
     '',

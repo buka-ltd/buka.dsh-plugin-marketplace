@@ -334,12 +334,19 @@ const DEFINITION = {
       ],
     },
   ],
-  edges: [
-    { from: 'start', to: 'dev' },
-    { from: 'dev', to: 'qa', types: ['qa.verify'] },
-    { from: 'qa', to: 'dev', types: ['dev.implement'], back: true },
-    { from: 'qa', to: 'approve' },
-    { from: 'approve', to: 'end' },
+  channels: [
+    { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
+    { id: 'dev.qa', label: '提测', from: 'dev', to: 'qa', types: ['qa.verify'] },
+    {
+      id: 'qa.dev.rework',
+      label: '返工',
+      from: 'qa',
+      to: 'dev',
+      types: ['dev.implement'],
+      back: true,
+    },
+    { id: 'qa.approve', label: '送审', from: 'qa', to: 'approve' },
+    { id: 'approve.end', label: '交付', from: 'approve', to: 'end' },
   ],
 }
 
@@ -359,7 +366,7 @@ const WORKFLOW_DETAIL = {
       label: position.label,
       executor: position.executor,
     })),
-    edges: DEFINITION.edges,
+    channels: DEFINITION.channels,
     start: { label: '开始' },
     end: { label: '结束' },
   },
@@ -409,7 +416,7 @@ const JOB_DETAIL = {
       label: position.label,
       executor: position.executor,
     })),
-    edges: DEFINITION.edges,
+    channels: DEFINITION.channels,
     start: { label: '开始' },
     end: { label: '结束' },
   },
@@ -419,6 +426,7 @@ const JOB_DETAIL = {
       position: 'start',
       type: 'start',
       typeLabel: '启动',
+      channel: null,
       status: 'completed',
       createdAt: '2026-11-12T10:00:00.000Z',
       finishedAt: '2026-11-12T10:00:30.000Z',
@@ -429,6 +437,7 @@ const JOB_DETAIL = {
       position: 'dev',
       type: 'dev.implement',
       typeLabel: '开发',
+      channel: 'start.dev',
       status: 'running',
       deps: ['task-0'],
       createdAt: '2026-11-12T10:01:00.000Z',
@@ -442,6 +451,7 @@ const JOB_DETAIL = {
       position: 'qa',
       type: 'qa.verify',
       typeLabel: '验证',
+      channel: 'dev.qa',
       status: 'pending',
       deps: ['task-1'],
       createdAt: '2026-11-12T10:01:00.000Z',
@@ -451,6 +461,7 @@ const JOB_DETAIL = {
       position: 'approve',
       type: 'approve.release',
       typeLabel: '批准发布',
+      channel: 'qa.approve',
       status: 'ready',
       createdAt: '2026-11-12T10:02:00.000Z',
     },
@@ -459,6 +470,7 @@ const JOB_DETAIL = {
       position: 'end',
       type: 'end',
       typeLabel: '结束',
+      channel: 'approve.end',
       status: 'ready',
       createdAt: '2026-11-12T10:02:00.000Z',
     },
@@ -475,6 +487,7 @@ const FINAL_TASK = {
     positionLabel: '结束',
     type: 'end',
     typeLabel: '结束',
+    channel: 'approve.end',
     status: 'ready',
     payload: { summary: '最终交付说明' },
     deps: [],
@@ -494,6 +507,8 @@ const TASK_DETAIL = {
     type: 'dev.implement',
     typeLabel: '开发',
     typeDescription: '实现功能',
+    channel: 'start.dev',
+    channelLabel: '开始研发',
     status: 'running',
     payload: { requirement: '实现登录页' },
     deps: [
@@ -619,16 +634,16 @@ test('工作流页：作业 Tab 默认，筛选、卡片与进入作业', async 
   assert.equal(harness.updates[0].route.view, 'overview')
 })
 
-test('定义结构：画边、点节点打开抽屉、点连线记录选中', async () => {
+test('定义结构：画通道、点节点打开抽屉、点通道记录选中', async () => {
   const client = await loadClient()
   const { tree, texts, paths } = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
   })
-  assert.equal(paths.length, DEFINITION.edges.length, 'every defined edge should be drawn')
+  assert.equal(paths.length, DEFINITION.channels.length, 'every defined channel should be drawn')
   const firstEdge = paths[0].match(/-?\d+(?:\.\d+)?/gu)?.map(Number) ?? []
-  assert.ok(firstEdge[1] < firstEdge.at(-1), 'edges flow from top to bottom')
-  assert.equal(firstEdge[0], firstEdge.at(-2), 'a straight edge keeps one column')
+  assert.ok(firstEdge[1] < firstEdge.at(-1), 'channels flow from top to bottom')
+  assert.equal(firstEdge[0], firstEdge.at(-2), 'a straight channel keeps one column')
   const widths = new Map()
   walk(tree, (node) => {
     if (node.props?.className === 'buka-workflows-nodeWrap') {
@@ -644,7 +659,7 @@ test('定义结构：画边、点节点打开抽屉、点连线记录选中', as
     assert.match(text, new RegExp(label, 'u'))
   }
   assert.match(text, /定义信息/u)
-  assert.match(text, /点节点或连线查看详情/u)
+  assert.match(text, /点节点或通道查看详情/u)
 
   clickButton(tree, '研发')
   assert.equal(harness.updates.length, 1)
@@ -657,11 +672,48 @@ test('定义结构：画边、点节点打开抽屉、点连线记录选中', as
       node.props.className.split(/\s+/).includes('buka-workflows-hitPath') &&
       typeof node.props?.onClick === 'function',
   )
-  assert.ok(edgeHit !== null, 'edge hit area should be clickable')
-  assert.equal(edgeHit.props['aria-label'], '开始 → 研发', 'edge carries a readable name')
-  assert.equal(typeof edgeHit.props.onMouseEnter, 'function', 'hovering an edge shows its name')
+  assert.ok(edgeHit !== null, 'channel hit area should be clickable')
+  assert.equal(edgeHit.props['aria-label'], '开始研发', 'a channel carries its human label')
+  assert.equal(typeof edgeHit.props.onMouseEnter, 'function', 'hovering a channel shows its label')
   edgeHit.props.onClick()
-  assert.deepEqual(harness.updates[1].definitionSelection, { kind: 'edge', index: 0 })
+  assert.deepEqual(harness.updates[1].definitionSelection, {
+    kind: 'channel',
+    id: 'start.dev',
+  })
+})
+
+test('定义结构：同一对节点的并行通道分别画线并显示标签', async () => {
+  const client = await loadClient()
+  const extra = {
+    id: 'dev.qa.urgent',
+    label: '加急提测',
+    from: 'dev',
+    to: 'qa',
+    types: ['qa.verify'],
+  }
+  const parallel = {
+    ...WORKFLOW_DETAIL,
+    workflow: {
+      ...WORKFLOW_DETAIL.workflow,
+      definition: {
+        ...DEFINITION,
+        channels: [...DEFINITION.channels, extra],
+      },
+    },
+    graph: {
+      ...WORKFLOW_DETAIL.graph,
+      channels: [...DEFINITION.channels, extra],
+    },
+  }
+  const { texts, paths } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: parallel, error: null },
+  })
+  assert.equal(paths.length, DEFINITION.channels.length + 1, 'both parallel channels are drawn')
+  assert.notEqual(paths[1], paths[5], 'parallel channels take different lanes')
+  const text = texts.join(' ')
+  assert.match(text, /提测/u)
+  assert.match(text, /加急提测/u)
 })
 
 test('定义结构：节点头像来自打工人登记，而不是定义快照', async () => {
@@ -726,7 +778,7 @@ test('作业概览：需求、结构化输入、最终交付物与启动信息',
   assert.doesNotMatch(text, /原始需求|原始结构化输入/u, 'readable sections replace raw JSON')
 })
 
-test('实时流程：节点聚合、待认领徽标、已走过的边与点节点开任务', async () => {
+test('实时流程：节点聚合、待认领徽标、已走过的通道与点节点开任务', async () => {
   const client = await loadClient()
   const { tree, texts, classes } = render(client, {
     route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'flow' },
@@ -737,7 +789,7 @@ test('实时流程：节点聚合、待认领徽标、已走过的边与点节�
   assert.match(text, /待认领/u)
   assert.match(text, /1\/1/u, 'dev node shows one of one done')
   assert.ok(classes.includes('buka-workflows-nodeCorner'), 'live nodes show a task corner badge')
-  assert.ok(classes.includes('is-taken'), 'traversed edges should be marked')
+  assert.ok(classes.includes('is-taken'), 'traversed channels should be marked')
   assert.match(text, /点节点查看/u)
 
   clickButton(tree, '研发')

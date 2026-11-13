@@ -204,7 +204,7 @@ async function waitFor(check, timeoutMs = 1500) {
 /** 简单定义：start → dev(agent) → end。 */
 function simpleDevDefinition() {
   return {
-    version: 4,
+    version: 5,
     name: '简单研发',
     budgets: { maxTasks: 20, maxDurationHours: 24 },
     start: {
@@ -222,7 +222,7 @@ function simpleDevDefinition() {
       },
       next: [
         {
-          position: 'dev',
+          channel: 'start.dev',
           type: 'dev.implement',
           payload: { requirement: '{{start.output.requirement}}' },
           dependsOn: ['$start'],
@@ -261,9 +261,9 @@ function simpleDevDefinition() {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'dev' },
-      { from: 'dev', to: 'end' },
+    channels: [
+      { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
+      { id: 'dev.end', label: '直接交付', from: 'dev', to: 'end' },
     ],
   }
 }
@@ -271,7 +271,7 @@ function simpleDevDefinition() {
 /** 研发 + 测试：dev → qa（验证）→ dev（返工，回边）→ end。 */
 function reviewDefinition() {
   return {
-    version: 4,
+    version: 5,
     name: '研发与验证',
     budgets: { maxTasks: 40, maxDurationHours: 24 },
     start: {
@@ -289,7 +289,7 @@ function reviewDefinition() {
       },
       next: [
         {
-          position: 'dev',
+          channel: 'start.dev',
           type: 'dev.implement',
           payload: { requirement: '{{start.output.requirement}}' },
           dependsOn: ['$start'],
@@ -363,12 +363,19 @@ function reviewDefinition() {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'dev' },
-      { from: 'dev', to: 'qa', types: ['qa.verify'] },
-      { from: 'dev', to: 'end' },
-      { from: 'qa', to: 'dev', types: ['dev.rework'], back: true },
-      { from: 'qa', to: 'end' },
+    channels: [
+      { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
+      { id: 'dev.qa', label: '提测', from: 'dev', to: 'qa', types: ['qa.verify'] },
+      { id: 'dev.end', label: '直接交付', from: 'dev', to: 'end' },
+      {
+        id: 'qa.dev.rework',
+        label: '返工',
+        from: 'qa',
+        to: 'dev',
+        types: ['dev.rework'],
+        back: true,
+      },
+      { id: 'qa.end', label: '验证通过交付', from: 'qa', to: 'end' },
     ],
   }
 }
@@ -376,7 +383,7 @@ function reviewDefinition() {
 /** 人岗位 + 助理：start → approve(human) → end。 */
 function assistantDefinition() {
   return {
-    version: 4,
+    version: 5,
     name: '发布审批',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -390,7 +397,7 @@ function assistantDefinition() {
       },
       next: [
         {
-          position: 'approve',
+          channel: 'start.approve',
           type: 'approve.release',
           payload: {},
           dependsOn: ['$start'],
@@ -429,9 +436,9 @@ function assistantDefinition() {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'approve' },
-      { from: 'approve', to: 'end' },
+    channels: [
+      { id: 'start.approve', label: '送审', from: 'start', to: 'approve' },
+      { id: 'approve.end', label: '交付', from: 'approve', to: 'end' },
     ],
   }
 }
@@ -439,7 +446,7 @@ function assistantDefinition() {
 /** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
   return {
-    version: 4,
+    version: 5,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -457,7 +464,7 @@ function clockDefinition() {
       },
       next: [
         {
-          position: 'wait',
+          channel: 'start.wait',
           type: 'wait.until',
           payload: { until: '{{start.output.until}}' },
           dependsOn: ['$start'],
@@ -492,9 +499,9 @@ function clockDefinition() {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'wait' },
-      { from: 'wait', to: 'end' },
+    channels: [
+      { id: 'start.wait', label: '开始等待', from: 'start', to: 'wait' },
+      { id: 'wait.end', label: '等待结束', from: 'wait', to: 'end' },
     ],
   }
 }
@@ -505,13 +512,13 @@ function overBudgetDefinition() {
   definition.budgets.maxTasks = 1
   definition.start.next = [
     {
-      position: 'dev',
+      channel: 'start.dev',
       type: 'dev.implement',
       payload: { requirement: 'a' },
       dependsOn: ['$start'],
     },
     {
-      position: 'dev',
+      channel: 'start.dev',
       type: 'dev.implement',
       payload: { requirement: 'b' },
       dependsOn: ['$start'],
@@ -601,14 +608,18 @@ test('engine: a human-started job completes the start task and dispatches the fi
     assert.equal(job.seq, 1)
     const start = taskAt(env.store, job.id, 'start')
     assert.equal(start.status, 'completed')
+    assert.equal(start.channel, null, 'the start task has no inbound channel')
     assert.deepEqual(start.result.output, { requirement: '登录页需求' })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
     assert.equal(dev.status, 'running')
+    assert.equal(dev.channel, 'start.dev')
     const dispatch = env.workers.dispatched[0]
     assert.equal(dispatch.request.worker, '软件工程师')
     assert.match(dispatch.request.prompt, /登录页需求/u)
     assert.match(dispatch.request.prompt, /buka_task_complete/u)
+    assert.match(dispatch.request.prompt, /你由通道「开始研发」/u)
+    assert.match(dispatch.request.prompt, /channel: dev\.end/u)
     assert.equal(env.engine.taskForSession(dispatch.sessionId)?.taskId, dev.id)
 
     await env.engine.completeTaskFromSession({
@@ -639,7 +650,7 @@ test('engine: end task delivery completes the job', async () => {
     const sessionId = env.workers.dispatched[0].sessionId
     await env.engine.createTaskFromSession({
       sessionId,
-      position: 'end',
+      channel: 'dev.end',
       type: 'end',
       payload: { summary: '最终交付物' },
       deps: [dev.id],
@@ -703,7 +714,7 @@ test('engine: a session-started job runs the start task in the starter session',
 // 任务创建校验
 // ---------------------------------------------------------------------------
 
-test('engine: task creation enforces edges, types, payloads, dependencies, requires and budget', async () => {
+test('engine: task creation enforces channels, types, payloads, dependencies, requires and budget', async () => {
   const env = await setup(reviewDefinition())
   try {
     const job = await env.engine.createJobFromHuman({
@@ -717,29 +728,42 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
 
     const qa = await env.engine.createTaskFromSession({
       sessionId,
-      position: 'qa',
+      channel: 'dev.qa',
       type: 'qa.verify',
       payload: { focus: '登录流程' },
       deps: [dev.id],
     })
     assert.equal(qa.status, 'pending')
+    assert.equal(qa.channel, 'dev.qa')
+    assert.equal(qa.position, 'qa')
 
     await assert.rejects(
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'nobody',
+          channel: 'nobody',
           type: 'qa.verify',
           payload: {},
           deps: [],
         }),
-      /no edge/u,
+      /unknown channel/u,
     )
     await assert.rejects(
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'end',
+          channel: 'qa.dev.rework',
+          type: 'dev.rework',
+          payload: { summary: 'x' },
+          deps: [dev.id],
+        }),
+      /starts at "qa"/u,
+    )
+    await assert.rejects(
+      () =>
+        env.engine.createTaskFromSession({
+          sessionId,
+          channel: 'dev.end',
           type: 'qa.verify',
           payload: {},
           deps: [],
@@ -750,7 +774,7 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'qa',
+          channel: 'dev.qa',
           type: 'dev.rework',
           payload: { summary: 'x' },
           deps: [dev.id],
@@ -761,7 +785,7 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'qa',
+          channel: 'dev.qa',
           type: 'qa.verify',
           payload: {},
           deps: [dev.id],
@@ -772,7 +796,7 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'qa',
+          channel: 'dev.qa',
           type: 'qa.verify',
           payload: { focus: 'x' },
           deps: ['task-does-not-exist'],
@@ -783,7 +807,7 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'qa',
+          channel: 'dev.qa',
           type: 'qa.verify',
           payload: { focus: 'x' },
           deps: [],
@@ -794,7 +818,7 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
       () =>
         env.engine.createTaskFromSession({
           sessionId,
-          position: 'qa',
+          channel: 'dev.qa',
           type: 'qa.verify',
           payload: { focus: '{{task.missing.output.x}}' },
           deps: [dev.id],
@@ -806,13 +830,20 @@ test('engine: task creation enforces edges, types, payloads, dependencies, requi
   }
 })
 
-test('engine: an edge type whitelist rejects a declared task type', async () => {
+test('engine: a channel type whitelist rejects a declared task type', async () => {
   const definition = reviewDefinition()
-  definition.edges = [
-    { from: 'start', to: 'dev' },
-    { from: 'dev', to: 'qa', types: ['qa.verify'] },
-    { from: 'qa', to: 'dev', types: ['dev.rework'], back: true },
-    { from: 'qa', to: 'end' },
+  definition.channels = [
+    { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
+    { id: 'dev.qa', label: '提测', from: 'dev', to: 'qa', types: ['qa.verify'] },
+    {
+      id: 'qa.dev.rework',
+      label: '返工',
+      from: 'qa',
+      to: 'dev',
+      types: ['dev.rework'],
+      back: true,
+    },
+    { id: 'qa.end', label: '验证通过交付', from: 'qa', to: 'end' },
   ]
   const env = await setup(definition)
   try {
@@ -826,7 +857,7 @@ test('engine: an edge type whitelist rejects a declared task type', async () => 
     const devSession = env.workers.dispatched[0].sessionId
     const qa = await env.engine.createTaskFromSession({
       sessionId: devSession,
-      position: 'qa',
+      channel: 'dev.qa',
       type: 'qa.verify',
       payload: { focus: 'x' },
       deps: [dev.id],
@@ -844,13 +875,49 @@ test('engine: an edge type whitelist rejects a declared task type', async () => 
       () =>
         env.engine.createTaskFromSession({
           sessionId: qaSession,
-          position: 'dev',
+          channel: 'qa.dev.rework',
           type: 'dev.implement',
           payload: { requirement: 'again' },
           deps: [dev.id],
         }),
       /does not allow task type "dev.implement"/u,
     )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: parallel channels with overlapping types are chosen explicitly', async () => {
+  const definition = reviewDefinition()
+  definition.channels.push({
+    id: 'dev.qa.urgent',
+    label: '加急提测',
+    from: 'dev',
+    to: 'qa',
+    types: ['qa.verify'],
+  })
+  const env = await setup(definition)
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      rawInput: { request: 'x' },
+      structuredInput: { requirement: 'x' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    const sessionId = env.workers.dispatched[0].sessionId
+    const prompt = env.workers.dispatched[0].request.prompt
+    assert.match(prompt, /「提测」/u)
+    assert.match(prompt, /「加急提测」/u)
+    const qa = await env.engine.createTaskFromSession({
+      sessionId,
+      channel: 'dev.qa.urgent',
+      type: 'qa.verify',
+      payload: { focus: 'x' },
+      deps: [dev.id],
+    })
+    assert.equal(qa.channel, 'dev.qa.urgent')
+    assert.equal(qa.position, 'qa')
   } finally {
     await env.cleanup()
   }
@@ -897,7 +964,7 @@ test('engine: a named assistant takes a human task and can complete the job', as
 
     await env.engine.createTaskFromSession({
       sessionId: dispatch.sessionId,
-      position: 'end',
+      channel: 'approve.end',
       type: 'end',
       payload: { summary: '批准并发布' },
       deps: [approve.id],
@@ -1156,7 +1223,7 @@ test('attachments: a task result attaches files and downstream tasks can read th
       const devSession = workers.dispatched[0].sessionId
       await engine.createTaskFromSession({
         sessionId: devSession,
-        position: 'qa',
+        channel: 'dev.qa',
         type: 'qa.verify',
         payload: { focus: 'x' },
         deps: [dev.id],

@@ -1,7 +1,7 @@
 /**
  * payload 模板：路径解析、引用遍历与执行开始时的递归渲染。
  *
- * 工作流 v4 的 payload 是 JSON 对象，字符串里可以写模板占位符：
+ * 工作流 v5 的 payload 是 JSON 对象，字符串里可以写模板占位符：
  *
  * - `{{start.output.<path>}}`：启动任务交回的结构化输入；
  * - `{{task.<id>.output.<path>}}`：依赖任务的结构化结果；

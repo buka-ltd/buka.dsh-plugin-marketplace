@@ -10,13 +10,13 @@ import type React from 'react'
 import type { GraphEdgeInput, GraphNodeInput } from '../graph/layout.ts'
 import { renderWorkflowGraph } from '../graph/render.ts'
 import {
+  channelsOf,
   currentDefinition,
   currentJobDefinition,
-  edgesOf,
   jobTasks,
   mergedDefinition,
   positionsOf,
-  takenEdges,
+  takenChannels,
   taskProgress,
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
@@ -28,7 +28,7 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
   const tasks = jobTasks(state)
   const positions = positionsOf(definition)
-  const done = takenEdges(tasks)
+  const taken = takenChannels(tasks)
 
   const tasksOf = (positionId: string): TaskSummary[] =>
     tasks.filter((task) => task.position === positionId)
@@ -93,12 +93,14 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
       title: titleOf(t('boardEnd'), tasksOf('end')),
     },
   ]
-  const edges: GraphEdgeInput[] = edgesOf(definition).map((edge) => ({
-    from: edge.from,
-    to: edge.to,
-    types: edge.types,
-    back: edge.back,
-    state: done.has(`${edge.from}->${edge.to}`) ? 'taken' : 'open',
+  const edges: GraphEdgeInput[] = channelsOf(definition).map((channel) => ({
+    id: channel.id,
+    label: channel.label,
+    from: channel.from,
+    to: channel.to,
+    types: channel.types,
+    back: channel.back,
+    state: taken.has(channel.id) ? 'taken' : 'open',
   }))
 
   return renderWorkflowGraph(page, {

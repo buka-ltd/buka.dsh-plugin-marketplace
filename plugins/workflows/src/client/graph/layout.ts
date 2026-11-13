@@ -1,8 +1,8 @@
 /**
- * 流程图布局：岗位 / 内建开始结束节点按层从上到下排布，连线向下或从侧面绕行。
+ * 流程图布局：岗位 / 内建开始结束节点按层从上到下排布，通道向下或从侧面绕行。
  *
  * 这里不依赖宿主一半的 `src/graph.ts`：坐标全部在浏览器侧按定义快照计算，
- * 服务端只给「岗位 + 边 + 任务状态」。图不横向滚动，宽度超出时由外层整体缩放。
+ * 服务端只给「岗位 + 通道 + 任务状态」。图不横向滚动，宽度超出时由外层整体缩放。
  */
 
 import type { Executor } from '../types.ts'
@@ -23,16 +23,18 @@ export interface GraphNodeInput {
   title?: string
 }
 
-/** 输入边。 */
+/** 输入通道。 */
 export interface GraphEdgeInput {
+  /** 通道 id；同一对节点的多条通道靠它区分。 */
+  id: string
+  /** 人读名字；画在连线上、悬停时显示。 */
+  label?: string
   from: string
   to: string
   types?: string[]
   back?: boolean
-  /** 运行态：这条边是否已经被走过。 */
+  /** 运行态：这条通道是否已经被走过。 */
   state?: 'open' | 'taken'
-  /** 定义里的边序号（抽屉按它找定义）。 */
-  index?: number
 }
 
 /** 布局后的节点：`x` / `y` 是中心点。 */
@@ -44,15 +46,16 @@ export interface GraphLayoutNode extends GraphNodeInput {
   layer: number
 }
 
-/** 布局后的边。 */
+/** 布局后的通道。 */
 export interface GraphLayoutEdge {
   key: string
+  id: string
+  label: string
   from: string
   to: string
   kind: 'forward' | 'back'
   types: string[]
   state: 'open' | 'taken'
-  index: number
   d: string
   hit: string
   arrow: { x: number; y: number; angle: number }
@@ -100,20 +103,23 @@ const PAD = 24
 /** 画布左右留白。 */
 const SIDE_PAD = 24
 
-/** 回边绕行的基础横向偏移。 */
+/** 回向通道绕行的基础横向偏移。 */
 const BACK_OFFSET = 20
 
-/** 多条回边之间的横向间隔。 */
+/** 多条回向通道之间的横向间隔。 */
 const BACK_STEP = 10
 
-/** 回边绕行额外留白（单侧）。 */
+/** 同一对节点的多条前向通道之间的横向间隔。 */
+const LANE_STEP = 16
+
+/** 回向通道绕行额外留白（单侧）。 */
 const BACK_EXTRA = 12
 
 /**
- * 计算分层的上下坐标与连线路径。
+ * 计算分层的上下坐标与通道路径。
  *
  * @param nodes 节点
- * @param rawEdges 边
+ * @param rawEdges 通道
  * @returns 布局结果
  */
 export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[]): GraphLayout {
@@ -133,7 +139,14 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
   const backCount = edges.filter((edge) => isBackEdge(edge, layers)).length
   const backPad =
     backCount === 0 ? 0 : BACK_OFFSET + Math.max(0, backCount - 1) * BACK_STEP + BACK_EXTRA
-  const width = SIDE_PAD * 2 + rowWidth + backPad * 2
+  const pairCounts = new Map<string, number>()
+  for (const edge of edges) {
+    const pair = `${edge.from}->${edge.to}`
+    pairCounts.set(pair, (pairCounts.get(pair) ?? 0) + 1)
+  }
+  const maxParallel = Math.max(1, ...pairCounts.values())
+  const lanePad = (maxParallel - 1) * LANE_STEP
+  const width = SIDE_PAD * 2 + rowWidth + backPad * 2 + lanePad * 2
   const height =
     PAD * 2 + layerKeys.length * NODE_HEIGHT + Math.max(0, layerKeys.length - 1) * GAP_Y
 
@@ -161,6 +174,7 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
 
   const laidOutEdges: GraphLayoutEdge[] = []
   const usedKeys = new Map<string, number>()
+  const pairSeen = new Map<string, number>()
   let backLane = 0
   for (const edge of edges) {
     const from = byId.get(edge.from)
@@ -171,21 +185,25 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
     const seen = usedKeys.get(baseKey) ?? 0
     usedKeys.set(baseKey, seen + 1)
     const key = seen === 0 ? baseKey : `${baseKey}#${seen}`
+    const pair = pairCounts.get(baseKey) ?? 1
+    const lane = pairSeen.get(baseKey) ?? 0
+    pairSeen.set(baseKey, lane + 1)
     const types = Array.isArray(edge.types)
       ? edge.types.filter((type) => typeof type === 'string')
       : []
     const geometry = back
       ? backEdgeGeometry(from, to, backLane, width)
-      : forwardEdgeGeometry(from, to)
+      : forwardEdgeGeometry(from, to, pair <= 1 ? 0 : (lane - (pair - 1) / 2) * LANE_STEP)
     if (back) backLane += 1
     laidOutEdges.push({
       key,
+      id: edge.id,
+      label: typeof edge.label === 'string' ? edge.label : '',
       from: edge.from,
       to: edge.to,
       kind: back ? 'back' : 'forward',
       types,
       state: edge.state === 'taken' ? 'taken' : 'open',
-      index: typeof edge.index === 'number' ? edge.index : -1,
       ...geometry,
     })
   }
@@ -212,7 +230,7 @@ function rowWidthOf(group: GraphNodeInput[]): number {
 }
 
 /**
- * 是不是回边：显式标记，或指向同层 / 更上层。
+ * 是不是回向通道：显式标记，或指向同层 / 更上层。
  *
  * @param edge
  * @param layers
@@ -224,7 +242,7 @@ function isBackEdge(edge: GraphEdgeInput, layers: Map<string, number>): boolean 
 }
 
 /**
- * 最长路径分层：开始节点固定第 0 层，结束节点固定最后一层；回边不参与分层。
+ * 最长路径分层：开始节点固定第 0 层，结束节点固定最后一层；回向通道不参与分层。
  *
  * @param nodes
  * @param edges
@@ -268,15 +286,18 @@ function assignLayers(nodes: GraphNodeInput[], edges: GraphEdgeInput[]): Map<str
 }
 
 /**
- * 向下的边：从下层节点的底边中点连到目标节点的顶边中点。
+ * 向下的通道：从下层节点的底边中点连到目标节点的顶边中点；同一对节点的
+ * 多条通道用 `offset` 错开车道。
  *
  * @param from
  * @param to
+ * @param offset 横向车道偏移
  * @returns
  */
 function forwardEdgeGeometry(
   from: GraphLayoutNode,
   to: GraphLayoutNode,
+  offset = 0,
 ): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
   const x1 = from.x
   const y1 = from.y + from.height / 2
@@ -284,8 +305,8 @@ function forwardEdgeGeometry(
   const y2 = to.y - to.height / 2
   const control = Math.max(16, (y2 - y1) / 2)
   const p0 = { x: x1, y: y1 }
-  const p1 = { x: x1, y: y1 + control }
-  const p2 = { x: x2, y: y2 - control }
+  const p1 = { x: x1 + offset, y: y1 + control }
+  const p2 = { x: x2 + offset, y: y2 - control }
   const p3 = { x: x2, y: y2 }
   const d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(p1.x)} ${fmt(p1.y)} ${fmt(p2.x)} ${fmt(p2.y)} ${fmt(x2)} ${fmt(y2)}`
   const point = cubicPoint(p0, p1, p2, p3, 0.8)
@@ -299,11 +320,11 @@ function forwardEdgeGeometry(
 }
 
 /**
- * 回边：从节点右侧绕出去，再回到目标的右侧，避免穿过中间的节点。
+ * 回向通道：从节点右侧绕出去，再回到目标的右侧，避免穿过中间的节点。
  *
  * @param from
  * @param to
- * @param lane 第几条回边，用来错开绕行线
+ * @param lane 第几条回向通道，用来错开绕行线
  * @param width 画布宽度
  * @returns
  */

@@ -1,14 +1,14 @@
 /**
  * 页面 / 工具用的只读投影：任务摘要、任务详情、作业摘要、定义摘要与看板计数。
  *
- * 形状以 `.tmp/workflow-v4-api.md` 为准；`GET /job` 的 `definition` 带完整
+ * 形状以 ADR 0015 为准；`GET /job` 的 `definition` 带完整
  * positions[].taskTypes，客户端不需要再拉工作流兜底。
  *
  * @module @buka/dsh-plugin-workflows/engine/board
  */
 
 import { clipUtf8 } from '../attachments/index.ts'
-import { findTaskType } from '../definition/validate.ts'
+import { findChannel, findTaskType } from '../definition/validate.ts'
 import { TASK_STATUSES } from '../domain/status.ts'
 import type {
   AttachmentRecord,
@@ -66,6 +66,7 @@ export function taskSummary(
     position: task.position,
     type: task.type,
     typeLabel: taskTypeLabel(definition, task.type),
+    channel: task.channel,
     status: task.status,
     deps: [...task.deps],
     createdAt: task.createdAt,
@@ -146,6 +147,7 @@ export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
   const { job, task } = input
   const definition = job.definition
   const taskType = findTaskType(definition, task.type)
+  const channel = task.channel === null ? undefined : findChannel(definition, task.channel)
   const dependencyTasks = task.deps
     .map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId))
     .filter((candidate): candidate is TaskRecord => candidate !== undefined)
@@ -160,6 +162,8 @@ export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
     type: task.type,
     typeLabel: taskTypeLabel(definition, task.type),
     typeDescription: taskType?.description ?? '',
+    channel: task.channel,
+    channelLabel: channel?.label ?? '',
     status: task.status,
     payload: task.payload,
     deps: dependencyTasks.map((dependency) => taskSummary(dependency, definition)),
@@ -239,14 +243,14 @@ export function jobDefinition(
         ...(taskType.mode === undefined ? {} : { mode: taskType.mode }),
       })),
     })),
-    edges: definition.edges,
+    channels: definition.channels,
     start: { label: '开始' },
     end: { label: '结束' },
   }
 }
 
 /**
- * 工作流详情里的图（positions / edges / start / end）。
+ * 工作流详情里的图（positions / channels / start / end）。
  *
  * @param definition 定义
  * @returns 契约形状
@@ -262,11 +266,13 @@ export function workflowGraph(
       label: position.label,
       executor: position.executor,
     })),
-    edges: definition.edges.map((edge) => ({
-      from: edge.from,
-      to: edge.to,
-      types: edge.types ?? [],
-      back: edge.back === true,
+    channels: definition.channels.map((channel) => ({
+      id: channel.id,
+      label: channel.label,
+      from: channel.from,
+      to: channel.to,
+      types: channel.types ?? [],
+      back: channel.back === true,
     })),
     start: { label: '开始' },
     end: { label: '结束' },

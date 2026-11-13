@@ -1,5 +1,5 @@
 /**
- * 浏览器一半的 HTTP 路由（`.tmp/workflow-v4-api.md`）：
+ * 浏览器一半的 HTTP 路由（ADR 0015 的 v5 契约）：
  * 工作流 / 作业 / 任务 / 附件与动作。
  *
  * 所有路由沿用 web 组合的信任栅栏（`ctx.connection.requestRejection`），只接受

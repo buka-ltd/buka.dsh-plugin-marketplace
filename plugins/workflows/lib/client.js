@@ -340,12 +340,10 @@ window.__ModuleLoader__.load({
     	taskTypeUnset: "—",
     	schemaNoFields: "No fields.",
     	schemaFieldRequired: "required",
-    	edgeTitle: "Connection",
-    	edgeFrom: "From",
-    	edgeTo: "To",
-    	edgeBack: "Back edge",
-    	edgeAllowedTypes: "Allowed task types",
-    	edgeAllTypes: "All task types",
+    	channelTitle: "Channel",
+    	channelBack: "Back channel",
+    	channelAllowedTypes: "Allowed task types",
+    	channelAllTypes: "All task types",
     	startTaskTitle: "Start task",
     	startTaskShort: "Start",
     	endTaskTitle: "End task",
@@ -364,9 +362,9 @@ window.__ModuleLoader__.load({
     	graphWorker: "Worker position",
     	graphHuman: "Human position",
     	graphIdle: "Not started",
-    	graphEdgeForward: "Forward",
-    	graphEdgeBack: "Back edge",
-    	graphEdgeTaken: "Taken",
+    	graphChannelForward: "Forward channel",
+    	graphChannelBack: "Back channel",
+    	graphChannelTaken: "Taken",
     	newJob: "New job",
     	newJobTitle: "New job",
     	newJobHint: "Tell the workflow what needs to be done. The start task turns it into the structured input for the rest of the job.",
@@ -458,6 +456,7 @@ window.__ModuleLoader__.load({
     	taskDrawerTitle: "Task",
     	taskPosition: "Position",
     	taskType: "Type",
+    	taskChannel: "Channel",
     	taskStatus: "Status",
     	taskClaimant: "Claimed by",
     	taskCreatedAt: "Created",
@@ -566,7 +565,7 @@ window.__ModuleLoader__.load({
     	jobSeq: "作业 #{seq}",
     	jobErrorTitle: "错误",
     	definitionInfo: "定义信息",
-    	definitionHint: "点节点或连线查看详情。",
+    	definitionHint: "点节点或通道查看详情。",
     	definitionPositions: "岗位",
     	definitionStartContract: "开始契约",
     	definitionEndContract: "结束契约",
@@ -584,12 +583,10 @@ window.__ModuleLoader__.load({
     	taskTypeUnset: "—",
     	schemaNoFields: "没有字段。",
     	schemaFieldRequired: "必填",
-    	edgeTitle: "连线",
-    	edgeFrom: "从",
-    	edgeTo: "到",
-    	edgeBack: "回边",
-    	edgeAllowedTypes: "允许的任务类型",
-    	edgeAllTypes: "全部任务类型",
+    	channelTitle: "通道",
+    	channelBack: "回向通道",
+    	channelAllowedTypes: "允许的任务类型",
+    	channelAllTypes: "全部任务类型",
     	startTaskTitle: "开始任务",
     	startTaskShort: "开始",
     	endTaskTitle: "结束任务",
@@ -608,9 +605,9 @@ window.__ModuleLoader__.load({
     	graphWorker: "打工人岗位",
     	graphHuman: "人岗位",
     	graphIdle: "未开始",
-    	graphEdgeForward: "前向",
-    	graphEdgeBack: "回边",
-    	graphEdgeTaken: "已走过",
+    	graphChannelForward: "前向通道",
+    	graphChannelBack: "回向通道",
+    	graphChannelTaken: "已走过",
     	newJob: "新建作业",
     	newJobTitle: "新建作业",
     	newJobHint: "告诉工作流这次要做什么；开始任务会把它整理成后续任务使用的结构化输入。",
@@ -657,7 +654,7 @@ window.__ModuleLoader__.load({
     	retryDelivery: "重试交付",
     	deliveryRetryHint: "结束任务仍在等待：交付没有成功。",
     	deliveryRetryStarted: "已发起重试交付。",
-    	flowHint: "点节点查看这个岗位的任务；加重的连线表示已经走过。",
+    	flowHint: "点节点查看这个岗位的任务；加重的通道表示已经走过。",
     	flowTaskCount: "{n} 个任务",
     	flowBuiltinStart: "开始",
     	flowBuiltinEnd: "交付",
@@ -702,6 +699,7 @@ window.__ModuleLoader__.load({
     	taskDrawerTitle: "任务详情",
     	taskPosition: "岗位",
     	taskType: "类型",
+    	taskChannel: "通道",
     	taskStatus: "状态",
     	taskClaimant: "承办者",
     	taskCreatedAt: "创建",
@@ -847,8 +845,8 @@ window.__ModuleLoader__.load({
     /**
     * 浏览器一半的共享类型与常量。
     *
-    * 这里的形状全部是**客户端本地定义**：按 `.tmp/workflow-v4-api.md` 的 HTTP
-    * 契约声明，不 import 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
+    * 这里的形状全部是**客户端本地定义**：按 ADR 0015 的 v5 契约声明，不 import
+    * 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
     *
     * 契约字段一律按「可能缺失」处理（响应来自新版 / 旧版 Host 都可能），页面
     * 只做防御式读取，不做完整校验。
@@ -1715,7 +1713,7 @@ window.__ModuleLoader__.load({
     /**
     * 页面数据模型：把 Host 返回的定义快照 / 任务记录收口成看板与流程图直接消费的形状。
     *
-    * 服务端只给「岗位、边、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
+    * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
     */
     /** 取当前工作流详情里的定义快照；执行者补上打工人登记里的展示字段。 */
     function currentDefinition(state) {
@@ -1759,14 +1757,21 @@ window.__ModuleLoader__.load({
     	}
     	return out;
     }
-    /** 把定义里的边归一化。 */
-    function edgesOf(definition) {
-    	return asArray(definition?.edges).filter((edge) => typeof edge?.from === "string" && edge.from !== "" && typeof edge.to === "string" && edge.to !== "").map((edge) => ({
-    		from: edge.from,
-    		to: edge.to,
-    		types: asArray(edge.types).filter((type) => typeof type === "string"),
-    		back: edge.back === true
+    /** 把定义里的通道归一化。 */
+    function channelsOf(definition) {
+    	return asArray(definition?.channels).filter((channel) => typeof channel?.id === "string" && channel.id !== "" && typeof channel.from === "string" && channel.from !== "" && typeof channel.to === "string" && channel.to !== "").map((channel) => ({
+    		id: channel.id,
+    		label: typeof channel.label === "string" && channel.label !== "" ? channel.label : channel.id,
+    		from: channel.from,
+    		to: channel.to,
+    		types: asArray(channel.types).filter((type) => typeof type === "string"),
+    		back: channel.back === true
     	}));
+    }
+    /** 按 id 找通道；找不到时返回 null。 */
+    function channelOf(definition, channelId) {
+    	if (typeof channelId !== "string" || channelId === "") return null;
+    	return channelsOf(definition).find((channel) => channel.id === channelId) ?? null;
     }
     /** 岗位标签；开始 / 结束用内建文案。 */
     function positionLabel(definition, positionId, builtin) {
@@ -1947,13 +1952,13 @@ window.__ModuleLoader__.load({
     			taskTypes: position.taskTypes
     		};
     	});
-    	const jobEdges = Array.isArray(jobDefinition.edges) ? jobDefinition.edges : [];
+    	const jobChannels = Array.isArray(jobDefinition.channels) ? jobDefinition.channels : [];
     	const start = workflowDefinition.start ?? jobDefinition.start;
     	const end = workflowDefinition.end ?? jobDefinition.end;
     	return {
     		...workflowDefinition,
     		positions: merged,
-    		...jobEdges.length > 0 ? { edges: jobEdges } : workflowDefinition.edges !== void 0 ? { edges: workflowDefinition.edges } : {},
+    		...jobChannels.length > 0 ? { channels: jobChannels } : workflowDefinition.channels !== void 0 ? { channels: workflowDefinition.channels } : {},
     		...start !== void 0 ? { start } : {},
     		...end !== void 0 ? { end } : {}
     	};
@@ -2013,26 +2018,14 @@ window.__ModuleLoader__.load({
     	return progress;
     }
     /**
-    * 实时流程里哪些边已经被走过：任务依赖跨越了岗位。
+    * 实时流程里哪些通道已经被走过：任务记录自己走过的通道 id。
     *
     * @param tasks
-    * @returns `from->to` 的集合
+    * @returns 通道 id 的集合
     */
-    function takenEdges(tasks) {
-    	const byId = /* @__PURE__ */ new Map();
-    	for (const task of tasks) byId.set(task.id, task);
+    function takenChannels(tasks) {
     	const taken = /* @__PURE__ */ new Set();
-    	for (const task of tasks) {
-    		const to = typeof task.position === "string" ? task.position : "";
-    		if (to === "") continue;
-    		const deps = Array.isArray(task.deps) ? task.deps : [];
-    		for (const depId of deps) {
-    			const dep = byId.get(depId);
-    			const from = typeof dep?.position === "string" ? dep.position : "";
-    			if (from === "" || from === to) continue;
-    			taken.add(`${from}->${to}`);
-    		}
-    	}
+    	for (const task of tasks) if (typeof task.channel === "string" && task.channel !== "") taken.add(task.channel);
     	return taken;
     }
     /**
@@ -2140,9 +2133,9 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/components/definition-drawer.js
     /**
-    * 定义结构的右侧抽屉：全局信息、岗位、开始 / 结束节点与连线。
+    * 定义结构的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
     *
-    * 抽屉只回答一个问题：所选节点 / 连线在定义里是什么。身份放在头部，契约字段
+    * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，契约字段
     * 收成紧凑标签；预算、完整契约这类技术细节放进默认收起的折叠区。
     */
     /** 定义抽屉。 */
@@ -2161,7 +2154,7 @@ window.__ModuleLoader__.load({
     	};
     	const positions = positionsOf(definition);
     	const labels = taskTypeLabels(definition);
-    	const title = titleOf(page, selection, definition, builtin);
+    	const title = titleOf(page, selection, definition);
     	const position = selection.kind === "position" ? positions.find((item) => item.id === selection.id) : void 0;
     	const avatar = position !== void 0 && typeof position.executor.avatar === "string" ? renderAvatar(position.executor.avatar, 28, "buka-workflows-drawerAvatar") : null;
     	const body = [];
@@ -2181,10 +2174,13 @@ window.__ModuleLoader__.load({
     			expandLabel: t("expandText"),
     			collapseLabel: t("collapseText")
     		}));
-    		body.push(renderSection(t("definitionInitialTasks"), Array.isArray(definition.start?.next) && definition.start.next.length > 0 ? h("ul", { className: "buka-workflows-initialList" }, ...definition.start.next.map((initial, index) => h("li", {
-    			key: `${initial.position ?? ""}-${index}`,
-    			className: "buka-workflows-initialRow"
-    		}, h("span", { className: "buka-workflows-initialMain" }, h("strong", null, positionLabel(definition, initial.position, builtin)), h("span", { className: "buka-workflows-hint" }, labels.get(initial.type ?? "") ?? initial.type ?? "")), h("span", { className: "buka-workflows-hint" }, fill(t, "initialDeps", { n: initial.dependsOn?.length ?? 0 }))))) : h("p", { className: "buka-workflows-hint" }, t("definitionInitialEmpty"))));
+    		body.push(renderSection(t("definitionInitialTasks"), Array.isArray(definition.start?.next) && definition.start.next.length > 0 ? h("ul", { className: "buka-workflows-initialList" }, ...definition.start.next.map((initial, index) => {
+    			const channel = channelOf(definition, initial.channel);
+    			return h("li", {
+    				key: `${initial.channel ?? ""}-${index}`,
+    				className: "buka-workflows-initialRow"
+    			}, h("span", { className: "buka-workflows-initialMain" }, h("strong", null, channel === null ? initial.channel ?? "" : positionLabel(definition, channel.to, builtin)), h("span", { className: "buka-workflows-hint" }, [channel === null ? "" : `「${channel.label}」`, labels.get(initial.type ?? "") ?? initial.type ?? ""].filter((part) => part !== "").join(" · "))), h("span", { className: "buka-workflows-hint" }, fill(t, "initialDeps", { n: initial.dependsOn?.length ?? 0 })));
+    		})) : h("p", { className: "buka-workflows-hint" }, t("definitionInitialEmpty"))));
     		body.push(renderFold(t("definitionStartContract"), h("div", { className: "buka-workflows-contractStack" }, contractBlock(page, t("taskTypePayload"), t("startPayloadHint"), definition.start?.task?.payload), contractBlock(page, t("taskTypeOutput"), t("startOutputHint"), definition.start?.task?.output))), renderFold(t("definitionEndContract"), contractBlock(page, t("taskTypePayload"), t("endPayloadHint"), definition.end?.task?.payload)));
     	} else if (selection.kind === "position") {
     		if (position === void 0) body.push(h("p", { className: "buka-workflows-hint" }, t("notFound")));
@@ -2203,9 +2199,9 @@ window.__ModuleLoader__.load({
     		body.push(h("p", { className: "buka-workflows-drawerText" }, isStart ? t("startContractHint") : t("endContractHint")), renderSection(t("taskTypePayload"), h("div", { className: "buka-workflows-contractStack" }, h("p", { className: "buka-workflows-sectionHint" }, isStart ? t("startPayloadHint") : t("endPayloadHint")), renderContractFields(page, definition.start?.task?.payload))));
     		if (isStart) body.push(renderSection(t("taskTypeOutput"), h("div", { className: "buka-workflows-contractStack" }, h("p", { className: "buka-workflows-sectionHint" }, t("startOutputHint")), renderContractFields(page, definition.start?.task?.output))));
     	} else {
-    		const edge = edgesOf(definition)[selection.index];
-    		if (edge === void 0) body.push(h("p", { className: "buka-workflows-hint" }, t("notFound")));
-    		else body.push(renderSection(t("edgeAllowedTypes"), edge.types.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("edgeAllTypes")) : h("div", { className: "buka-workflows-tagRow" }, ...edge.types.map((type) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
+    		const channel = channelOf(definition, selection.id);
+    		if (channel === null) body.push(h("p", { className: "buka-workflows-hint" }, t("notFound")));
+    		else body.push(renderSection(t("channelAllowedTypes"), channel.types.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("channelAllTypes")) : h("div", { className: "buka-workflows-tagRow" }, ...channel.types.map((type) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
     			key: type,
     			tone: "neutral"
     		}, labels.get(type) ?? type)))));
@@ -2226,7 +2222,7 @@ window.__ModuleLoader__.load({
     		closeLabel: t("close")
     	}), h("div", { className: "buka-workflows-drawerBody" }, ...body));
     }
-    /** 头部第二行：执行者 / 版本 / 回边，没有可说的就留空。 */
+    /** 头部第二行：执行者 / 通道 id 与端点 / 回向标记，没有可说的就留空。 */
     function headerMeta(page, selection, position, definition) {
     	const { t } = page;
     	if (selection.kind === "position") {
@@ -2234,23 +2230,31 @@ window.__ModuleLoader__.load({
     		const text = renderExecutor(page, position.executor);
     		return text === t("taskTypeUnset") ? null : text;
     	}
-    	if (selection.kind === "edge") {
-    		const edge = edgesOf(definition)[selection.index];
-    		if (edge === void 0) return null;
-    		return edge.back ? t("edgeBack") : null;
+    	if (selection.kind === "channel") {
+    		const channel = channelOf(definition, selection.id);
+    		if (channel === null) return null;
+    		const builtin = {
+    			start: t("graphStart"),
+    			end: t("graphEnd")
+    		};
+    		const route = `${positionLabel(definition, channel.from, builtin)} → ${positionLabel(definition, channel.to, builtin)}`;
+    		return [
+    			channel.id,
+    			route,
+    			channel.back ? t("channelBack") : ""
+    		].filter((part) => part !== "").join(" · ");
     	}
     	return null;
     }
     /** 抽屉标题。 */
-    function titleOf(page, selection, definition, builtin) {
+    function titleOf(page, selection, definition) {
     	const { t } = page;
     	if (selection.kind === "info") return t("definitionInfo");
     	if (selection.kind === "start") return t("startTaskTitle");
     	if (selection.kind === "end") return t("endTaskTitle");
     	if (selection.kind === "position") return positionsOf(definition).find((item) => item.id === selection.id)?.label ?? selection.id;
-    	const edge = edgesOf(definition)[selection.index];
-    	if (edge === void 0) return t("edgeTitle");
-    	return `${positionLabel(definition, edge.from, builtin)} → ${positionLabel(definition, edge.to, builtin)}`;
+    	const channel = channelOf(definition, selection.id);
+    	return channel === null ? t("channelTitle") : channel.label;
     }
     /** 一个任务类型：标题 + 说明 + 输入 / 产出两行契约。 */
     function renderTaskType(page, type, labels) {
@@ -2418,17 +2422,19 @@ window.__ModuleLoader__.load({
     const GAP_X = 18;
     /** 层间垂直间距。 */
     const GAP_Y = 42;
-    /** 回边绕行的基础横向偏移。 */
+    /** 回向通道绕行的基础横向偏移。 */
     const BACK_OFFSET = 20;
-    /** 多条回边之间的横向间隔。 */
+    /** 多条回向通道之间的横向间隔。 */
     const BACK_STEP = 10;
-    /** 回边绕行额外留白（单侧）。 */
+    /** 同一对节点的多条前向通道之间的横向间隔。 */
+    const LANE_STEP = 16;
+    /** 回向通道绕行额外留白（单侧）。 */
     const BACK_EXTRA = 12;
     /**
-    * 计算分层的上下坐标与连线路径。
+    * 计算分层的上下坐标与通道路径。
     *
     * @param nodes 节点
-    * @param rawEdges 边
+    * @param rawEdges 通道
     * @returns 布局结果
     */
     function layoutGraph(nodes, rawEdges) {
@@ -2446,7 +2452,13 @@ window.__ModuleLoader__.load({
     	const rowWidth = Math.max(1, ...layerKeys.map((layer) => rowWidthOf(byLayer.get(layer) ?? [])));
     	const backCount = edges.filter((edge) => isBackEdge(edge, layers)).length;
     	const backPad = backCount === 0 ? 0 : BACK_OFFSET + Math.max(0, backCount - 1) * BACK_STEP + BACK_EXTRA;
-    	const width = 48 + rowWidth + backPad * 2;
+    	const pairCounts = /* @__PURE__ */ new Map();
+    	for (const edge of edges) {
+    		const pair = `${edge.from}->${edge.to}`;
+    		pairCounts.set(pair, (pairCounts.get(pair) ?? 0) + 1);
+    	}
+    	const lanePad = (Math.max(1, ...pairCounts.values()) - 1) * LANE_STEP;
+    	const width = 48 + rowWidth + backPad * 2 + lanePad * 2;
     	const height = 48 + layerKeys.length * NODE_HEIGHT + Math.max(0, layerKeys.length - 1) * GAP_Y;
     	const byId = /* @__PURE__ */ new Map();
     	const laidOut = [];
@@ -2471,6 +2483,7 @@ window.__ModuleLoader__.load({
     	});
     	const laidOutEdges = [];
     	const usedKeys = /* @__PURE__ */ new Map();
+    	const pairSeen = /* @__PURE__ */ new Map();
     	let backLane = 0;
     	for (const edge of edges) {
     		const from = byId.get(edge.from);
@@ -2481,17 +2494,21 @@ window.__ModuleLoader__.load({
     		const seen = usedKeys.get(baseKey) ?? 0;
     		usedKeys.set(baseKey, seen + 1);
     		const key = seen === 0 ? baseKey : `${baseKey}#${seen}`;
+    		const pair = pairCounts.get(baseKey) ?? 1;
+    		const lane = pairSeen.get(baseKey) ?? 0;
+    		pairSeen.set(baseKey, lane + 1);
     		const types = Array.isArray(edge.types) ? edge.types.filter((type) => typeof type === "string") : [];
-    		const geometry = back ? backEdgeGeometry(from, to, backLane, width) : forwardEdgeGeometry(from, to);
+    		const geometry = back ? backEdgeGeometry(from, to, backLane, width) : forwardEdgeGeometry(from, to, pair <= 1 ? 0 : (lane - (pair - 1) / 2) * LANE_STEP);
     		if (back) backLane += 1;
     		laidOutEdges.push({
     			key,
+    			id: edge.id,
+    			label: typeof edge.label === "string" ? edge.label : "",
     			from: edge.from,
     			to: edge.to,
     			kind: back ? "back" : "forward",
     			types,
     			state: edge.state === "taken" ? "taken" : "open",
-    			index: typeof edge.index === "number" ? edge.index : -1,
     			...geometry
     		});
     	}
@@ -2516,7 +2533,7 @@ window.__ModuleLoader__.load({
     	return width;
     }
     /**
-    * 是不是回边：显式标记，或指向同层 / 更上层。
+    * 是不是回向通道：显式标记，或指向同层 / 更上层。
     *
     * @param edge
     * @param layers
@@ -2527,7 +2544,7 @@ window.__ModuleLoader__.load({
     	return (layers.get(edge.to) ?? 0) <= (layers.get(edge.from) ?? 0);
     }
     /**
-    * 最长路径分层：开始节点固定第 0 层，结束节点固定最后一层；回边不参与分层。
+    * 最长路径分层：开始节点固定第 0 层，结束节点固定最后一层；回向通道不参与分层。
     *
     * @param nodes
     * @param edges
@@ -2562,13 +2579,15 @@ window.__ModuleLoader__.load({
     	return layers;
     }
     /**
-    * 向下的边：从下层节点的底边中点连到目标节点的顶边中点。
+    * 向下的通道：从下层节点的底边中点连到目标节点的顶边中点；同一对节点的
+    * 多条通道用 `offset` 错开车道。
     *
     * @param from
     * @param to
+    * @param offset 横向车道偏移
     * @returns
     */
-    function forwardEdgeGeometry(from, to) {
+    function forwardEdgeGeometry(from, to, offset = 0) {
     	const x1 = from.x;
     	const y1 = from.y + from.height / 2;
     	const x2 = to.x;
@@ -2579,11 +2598,11 @@ window.__ModuleLoader__.load({
     		y: y1
     	};
     	const p1 = {
-    		x: x1,
+    		x: x1 + offset,
     		y: y1 + control
     	};
     	const p2 = {
-    		x: x2,
+    		x: x2 + offset,
     		y: y2 - control
     	};
     	const p3 = {
@@ -2605,11 +2624,11 @@ window.__ModuleLoader__.load({
     	};
     }
     /**
-    * 回边：从节点右侧绕出去，再回到目标的右侧，避免穿过中间的节点。
+    * 回向通道：从节点右侧绕出去，再回到目标的右侧，避免穿过中间的节点。
     *
     * @param from
     * @param to
-    * @param lane 第几条回边，用来错开绕行线
+    * @param lane 第几条回向通道，用来错开绕行线
     * @param width 画布宽度
     * @returns
     */
@@ -2689,9 +2708,7 @@ window.__ModuleLoader__.load({
     	const showLegend = options.showLegend ?? true;
     	const fit = options.fit ?? true;
     	const selectedNodeId = options.selectedNodeId ?? null;
-    	const selectedEdgeKey = options.selectedEdgeKey ?? null;
-    	const nodeLabels = new Map(options.nodes.map((node) => [node.id, node.label]));
-    	const edgeName = (edge) => `${nodeLabels.get(edge.from) ?? edge.from} → ${nodeLabels.get(edge.to) ?? edge.to}`;
+    	const selectedChannelId = options.selectedChannelId ?? null;
     	const ref = react.default.useRef(null);
     	const [scale, setScale] = react.default.useState(1);
     	const [hoveredEdgeKey, setHoveredEdgeKey] = react.default.useState(null);
@@ -2736,7 +2753,7 @@ window.__ModuleLoader__.load({
     		height: layout.height,
     		viewBox: `0 0 ${layout.width} ${layout.height}`
     	}, ...layout.edges.map((edge) => {
-    		const selected = selectedEdgeKey !== null && edge.key.startsWith(selectedEdgeKey);
+    		const selected = selectedChannelId !== null && edge.id === selectedChannelId;
     		return h("g", {
     			key: edge.key,
     			className: `buka-workflows-edgeGroup is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}${selected ? " is-selected" : ""}`
@@ -2752,13 +2769,20 @@ window.__ModuleLoader__.load({
     			onMouseLeave: () => setHoveredEdgeKey((current) => current === edge.key ? null : current),
     			onFocus: () => setHoveredEdgeKey(edge.key),
     			onBlur: () => setHoveredEdgeKey((current) => current === edge.key ? null : current),
-    			"aria-label": edgeName(edge),
+    			"aria-label": edge.label === "" ? edge.id : edge.label,
     			...options.onEdgeClick === null || options.onEdgeClick === void 0 ? {} : {
     				onClick: () => options.onEdgeClick(edge),
     				role: "button",
     				tabIndex: 0
     			}
-    		}), h("g", {
+    		}), edge.labelAt === null || edge.label === "" ? null : h("text", {
+    			key: `${edge.key}-label`,
+    			className: `buka-workflows-edgeLabel is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}`,
+    			x: round(edge.labelAt.x),
+    			y: round(edge.labelAt.y),
+    			textAnchor: "middle",
+    			dominantBaseline: "middle"
+    		}, clipLabel(edge.label)), h("g", {
     			key: `${edge.key}-arrow`,
     			className: `buka-workflows-edgeArrow is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}`,
     			transform: `translate(${round(edge.arrow.x)} ${round(edge.arrow.y)}) rotate(${round(edge.arrow.angle)})`
@@ -2790,14 +2814,14 @@ window.__ModuleLoader__.load({
     			"aria-pressed": selected,
     			onClick: () => options.onNodeClick(node.id)
     		}, renderAvatar(node.avatar, 16, "buka-workflows-nodeAvatar"), h("span", { className: "buka-workflows-nodeLabel" }, node.label), corner) : h("span", { className: `buka-workflows-node ${tag}${stateName}` }, renderAvatar(node.avatar, 16, "buka-workflows-nodeAvatar"), h("span", { className: "buka-workflows-nodeLabel" }, node.label), corner));
-    	})), hoveredEdge === null || hoveredEdge.labelAt === null ? null : h("span", {
+    	})), hoveredEdge === null || hoveredEdge.labelAt === null || hoveredEdge.label === "" || !isClipped(hoveredEdge.label) ? null : h("span", {
     		key: "edge-tip",
     		className: "buka-workflows-edgeTip",
     		style: {
     			left: `${hoveredEdge.labelAt.x * scale}px`,
-    			top: `${hoveredEdge.labelAt.y * scale}px`
+    			top: `${(hoveredEdge.labelAt.y - 14) * scale}px`
     		}
-    	}, edgeName(hoveredEdge)))), options.caption === null || options.caption === void 0 ? null : h("p", { className: "buka-workflows-hint buka-workflows-graphCaption" }, options.caption), showLegend ? renderGraphLegend(page, mode) : null);
+    	}, hoveredEdge.label))), options.caption === null || options.caption === void 0 ? null : h("p", { className: "buka-workflows-hint buka-workflows-graphCaption" }, options.caption), showLegend ? renderGraphLegend(page, mode) : null);
     }
     /**
     * 画一张流程图。
@@ -2835,9 +2859,9 @@ window.__ModuleLoader__.load({
     		["idle", t("graphIdle")]
     	];
     	const edges = [
-    		["forward", t("graphEdgeForward")],
-    		["back", t("graphEdgeBack")],
-    		...mode === "live" ? [["taken", t("graphEdgeTaken")]] : []
+    		["forward", t("graphChannelForward")],
+    		["back", t("graphChannelBack")],
+    		...mode === "live" ? [["taken", t("graphChannelTaken")]] : []
     	];
     	return h("div", { className: "buka-workflows-legend" }, h("span", { className: "buka-workflows-legendGroup" }, ...types.map(([kind, label]) => h("span", {
     		key: kind,
@@ -2863,6 +2887,17 @@ window.__ModuleLoader__.load({
     function round(value) {
     	return Math.round(value * 100) / 100;
     }
+    /** 连线上的标签：过长时截断，悬停能看到全文。 */
+    const LABEL_MAX = 14;
+    /** 标签是否被截断（只有截断时才需要悬停提示）。 */
+    function isClipped(label) {
+    	return [...label].length > LABEL_MAX;
+    }
+    /** 截断后的画布标签。 */
+    function clipLabel(label, max = LABEL_MAX) {
+    	const chars = [...label];
+    	return chars.length <= max ? label : `${chars.slice(0, max - 1).join("")}…`;
+    }
     // .build/workflows/client/components/job-flow.js
     /**
     * 作业的实时流程：同一份任务数据按岗位聚合后画在定义图上。
@@ -2876,7 +2911,7 @@ window.__ModuleLoader__.load({
     	const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state));
     	const tasks = jobTasks(state);
     	const positions = positionsOf(definition);
-    	const done = takenEdges(tasks);
+    	const taken = takenChannels(tasks);
     	const tasksOf = (positionId) => tasks.filter((task) => task.position === positionId);
     	const metaOf = (list) => {
     		const progress = taskProgress(list);
@@ -2934,12 +2969,14 @@ window.__ModuleLoader__.load({
     				title: titleOf(t("boardEnd"), tasksOf("end"))
     			}
     		],
-    		edges: edgesOf(definition).map((edge) => ({
-    			from: edge.from,
-    			to: edge.to,
-    			types: edge.types,
-    			back: edge.back,
-    			state: done.has(`${edge.from}->${edge.to}`) ? "taken" : "open"
+    		edges: channelsOf(definition).map((channel) => ({
+    			id: channel.id,
+    			label: channel.label,
+    			from: channel.from,
+    			to: channel.to,
+    			types: channel.types,
+    			back: channel.back,
+    			state: taken.has(channel.id) ? "taken" : "open"
     		})),
     		mode: "live",
     		caption: t("flowHint"),
@@ -3296,10 +3333,14 @@ window.__ModuleLoader__.load({
     		closeLabel: t("close")
     	}), h("div", { className: "buka-workflows-drawerBody" }, ...body));
     }
-    /** 头部第二行：岗位 · 承办者。 */
+    /** 头部第二行：岗位 · 入站通道 · 承办者。 */
     function taskMeta(page, task) {
     	const { t } = page;
-    	return [task.positionLabel ?? task.position ?? "", claimantName(task.claimant, t) || t("taskUnclaimed")].filter((part) => part !== "").join(" · ");
+    	return [
+    		task.positionLabel ?? task.position ?? "",
+    		typeof task.channelLabel === "string" && task.channelLabel !== "" ? `${t("taskChannel")}: ${task.channelLabel}` : "",
+    		claimantName(task.claimant, t) || t("taskUnclaimed")
+    	].filter((part) => part !== "").join(" · ");
     }
     /** 任务岗位对应的打工人头像。 */
     function executorAvatar(page, task) {
@@ -3468,6 +3509,7 @@ window.__ModuleLoader__.load({
     	const { t } = page;
     	const rows = [];
     	if (typeof task.type === "string" && task.type !== "") rows.push([t("taskType"), h("code", { className: "buka-workflows-inlineCode" }, task.type)]);
+    	if (typeof task.channel === "string" && task.channel !== "") rows.push([t("taskChannel"), h("code", { className: "buka-workflows-inlineCode" }, task.channel)]);
     	if (isRecord(typeDefinition) && typeof typeDefinition.assistant === "string" && typeDefinition.assistant !== "") rows.push([t("taskTypeAssistant"), typeDefinition.assistant]);
     	rows.push([t("taskCreatedAt"), formatTime(task.createdAt)]);
     	if (task.startedAt !== null && task.startedAt !== void 0) rows.push([t("taskStartedAt"), formatTime(task.startedAt)]);
@@ -3492,7 +3534,7 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/components/workflow-definition.js
     /**
-    * 工作流页的「定义结构」Tab：可交互的分层图；点节点 / 连线在右侧抽屉里看细节。
+    * 工作流页的「定义结构」Tab：可交互的分层图；点节点 / 通道在右侧抽屉里看细节。
     */
     /** 定义结构视图。 */
     function renderWorkflowDefinition(page) {
@@ -3503,7 +3545,7 @@ window.__ModuleLoader__.load({
     	const definition = currentDefinition(state);
     	if (definition === null) return renderEmpty(t("definitionMissing"));
     	const positions = positionsOf(definition);
-    	const defined = edgesOf(definition);
+    	const defined = channelsOf(definition);
     	const nodes = [
     		{
     			id: "start",
@@ -3527,17 +3569,17 @@ window.__ModuleLoader__.load({
     			status: "idle"
     		}
     	];
-    	const edges = defined.map((edge, index) => ({
-    		from: edge.from,
-    		to: edge.to,
-    		types: edge.types,
-    		back: edge.back,
-    		index
+    	const edges = defined.map((channel) => ({
+    		id: channel.id,
+    		label: channel.label,
+    		from: channel.from,
+    		to: channel.to,
+    		types: channel.types,
+    		back: channel.back
     	}));
     	const selection = state.definitionSelection;
     	const selectedNodeId = selection !== null && selection.kind === "position" ? selection.id : selection !== null && (selection.kind === "start" || selection.kind === "end") ? selection.kind : null;
-    	const selectedEdge = selection !== null && selection.kind === "edge" ? defined[selection.index] : void 0;
-    	const selectedEdgeKey = selectedEdge === void 0 ? null : `${selectedEdge.from}->${selectedEdge.to}`;
+    	const selectedChannelId = selection !== null && selection.kind === "channel" ? selection.id : null;
     	return h("div", { className: "buka-workflows-definitionPane" }, h("div", { className: "buka-workflows-definitionToolbar" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "outline",
     		size: "sm",
@@ -3549,7 +3591,7 @@ window.__ModuleLoader__.load({
     		edges,
     		mode: "definition",
     		selectedNodeId,
-    		selectedEdgeKey,
+    		selectedChannelId,
     		onNodeClick: (id) => {
     			if (id === "start" || id === "end") actions.selectDefinition({ kind: id });
     			else actions.selectDefinition({
@@ -3558,9 +3600,9 @@ window.__ModuleLoader__.load({
     			});
     		},
     		onEdgeClick: (edge) => {
-    			if (edge.index >= 0) actions.selectDefinition({
-    				kind: "edge",
-    				index: edge.index
+    			actions.selectDefinition({
+    				kind: "channel",
+    				id: edge.id
     			});
     		}
     	}));
@@ -5230,6 +5272,9 @@ window.__ModuleLoader__.load({
     .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none}
     .buka-workflows-edgeArrow.is-back{fill:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-edgeArrow.is-taken{fill:var(--dsw-alias-brand-primary);opacity:1}
+    .buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none}
+    .buka-workflows-edgeLabel.is-back{fill:var(--dsw-alias-state-warn-primary)}
+    .buka-workflows-edgeLabel.is-taken{fill:var(--dsw-alias-brand-primary)}
     .buka-workflows-edgeTip{position:absolute;z-index:4;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 2px 10px color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:nowrap;pointer-events:none}
     .buka-workflows-graphCaption{text-align:center}
     .buka-workflows-nodeWrap{position:absolute;z-index:2}

@@ -1,10 +1,10 @@
 /**
- * 工作流 v4 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
+ * 工作流 v5 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
  *
  * 本模块是纯类型与常量，不 import 任何运行时依赖（除 `output.ts` 的类型），
  * 便于被校验、存储、引擎、路由与单测共同引用。
  *
- * 术语以根 `GLOSSARY.md` 为准：工作流 / 作业 / 任务 / 岗位 / 任务类型 / 边 /
+ * 术语以根 `GLOSSARY.md` 为准：工作流 / 作业 / 任务 / 岗位 / 任务类型 / 通道 /
  * 启动者 / 执行者 / 承办者 / 执行记录 / 看板。
  *
  * @module @buka/dsh-plugin-workflows/domain/types
@@ -120,19 +120,24 @@ export interface PositionDefinition {
   readonly taskTypes: readonly TaskTypeDefinition[]
 }
 
-/** 一条边：`from` 的执行者可以把任务派给 `to`。 */
-export interface EdgeDefinition {
+/** 一条通道：`from` 的执行者可以沿它把任务派给 `to`；`label` 给人读，引擎不读。 */
+export interface ChannelDefinition {
+  /** 工作流内唯一的小写点分标识，任务记录用它标注自己走过的通道。 */
+  readonly id: string
+  /** 展示名（人 / agent 读）；引擎不参与判定。 */
+  readonly label: string
   readonly from: string
   readonly to: string
   /** 目标岗位的任务类型白名单；省略表示目标岗位声明的所有类型。 */
   readonly types?: readonly string[] | undefined
-  /** 显式回边；环上的边必须标记。 */
+  /** 显式回向通道；环上的通道必须标记，同一对有序节点的标记必须一致。 */
   readonly back?: boolean | undefined
 }
 
 /** `start.next` 里的一条初始任务模板。 */
 export interface StartRouteDefinition {
-  readonly position: string
+  /** 从 `start` 出发的通道 id；目标岗位由通道推出。 */
+  readonly channel: string
   readonly type: string
   /** 模板对象：字符串里的 `{{start.output.<path>}}` 在执行开始时渲染。 */
   readonly payload: Readonly<Record<string, JsonValue>>
@@ -156,22 +161,22 @@ export interface EndDefinition {
   }
 }
 
-/** 预算；回边必须有预算兜底。 */
+/** 预算；回向通道必须有预算兜底。 */
 export interface BudgetDefinition {
   readonly maxTasks: number
   readonly maxDurationHours: number
 }
 
-/** 工作流 v4 定义。 */
+/** 工作流 v5 定义。 */
 export interface WorkflowDefinition {
-  readonly version: 4
+  readonly version: 5
   readonly name: string
   readonly description?: string | undefined
   readonly budgets: BudgetDefinition
   readonly start: StartDefinition
   readonly end: EndDefinition
   readonly positions: readonly PositionDefinition[]
-  readonly edges: readonly EdgeDefinition[]
+  readonly channels: readonly ChannelDefinition[]
 }
 
 /** 工作流定义的一个版本快照。 */
@@ -231,6 +236,8 @@ export interface TaskRecord {
   readonly position: string
   /** 任务类型 id；启动 / 结束任务分别是节点契约，值仍为 `start` / `end`。 */
   readonly type: string
+  /** 任务沿哪条通道派发而来；启动任务没有入站通道，为 null。 */
+  readonly channel: string | null
   readonly payload: JsonValue
   readonly deps: readonly string[]
   readonly status: TaskStatus

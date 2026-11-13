@@ -1,5 +1,5 @@
 /**
- * 工作流页的「定义结构」Tab：可交互的分层图；点节点 / 连线在右侧抽屉里看细节。
+ * 工作流页的「定义结构」Tab：可交互的分层图；点节点 / 通道在右侧抽屉里看细节。
  */
 
 import { Button, IconInfoOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -8,7 +8,7 @@ import type React from 'react'
 import { h } from '../element.ts'
 import type { GraphEdgeInput, GraphNodeInput } from '../graph/layout.ts'
 import { renderWorkflowGraph } from '../graph/render.ts'
-import { currentDefinition, edgesOf, positionsOf } from '../model.ts'
+import { channelsOf, currentDefinition, positionsOf } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { renderEmpty, renderExecutor, renderFailure, renderLoading } from './parts.ts'
 
@@ -23,7 +23,7 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
   const definition = currentDefinition(state)
   if (definition === null) return renderEmpty(t('definitionMissing'))
   const positions = positionsOf(definition)
-  const defined = edgesOf(definition)
+  const defined = channelsOf(definition)
 
   const nodes: GraphNodeInput[] = [
     {
@@ -50,12 +50,13 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
       status: 'idle',
     },
   ]
-  const edges: GraphEdgeInput[] = defined.map((edge, index) => ({
-    from: edge.from,
-    to: edge.to,
-    types: edge.types,
-    back: edge.back,
-    index,
+  const edges: GraphEdgeInput[] = defined.map((channel) => ({
+    id: channel.id,
+    label: channel.label,
+    from: channel.from,
+    to: channel.to,
+    types: channel.types,
+    back: channel.back,
   }))
   const selection = state.definitionSelection
   const selectedNodeId =
@@ -64,10 +65,7 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
       : selection !== null && (selection.kind === 'start' || selection.kind === 'end')
         ? selection.kind
         : null
-  const selectedEdge =
-    selection !== null && selection.kind === 'edge' ? defined[selection.index] : undefined
-  const selectedEdgeKey =
-    selectedEdge === undefined ? null : `${selectedEdge.from}->${selectedEdge.to}`
+  const selectedChannelId = selection !== null && selection.kind === 'channel' ? selection.id : null
 
   return h(
     'div',
@@ -93,13 +91,13 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
       edges,
       mode: 'definition',
       selectedNodeId,
-      selectedEdgeKey,
+      selectedChannelId,
       onNodeClick: (id) => {
         if (id === 'start' || id === 'end') actions.selectDefinition({ kind: id })
         else actions.selectDefinition({ kind: 'position', id })
       },
       onEdgeClick: (edge) => {
-        if (edge.index >= 0) actions.selectDefinition({ kind: 'edge', index: edge.index })
+        actions.selectDefinition({ kind: 'channel', id: edge.id })
       },
     }),
   )

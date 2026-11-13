@@ -24,12 +24,12 @@ export interface RenderGraphOptions {
   edges: GraphEdgeInput[]
   /** 点节点时打开对应面板；不传则不响应点击。 */
   onNodeClick?: ((id: string) => void) | null
-  /** 点边时打开对应面板。 */
+  /** 点通道时打开对应面板。 */
   onEdgeClick?: ((edge: GraphLayoutEdge) => void) | null
   /** 当前选中的节点 id。 */
   selectedNodeId?: string | null
-  /** 当前选中的边 key（`from->to`）。 */
-  selectedEdgeKey?: string | null
+  /** 当前选中的通道 id。 */
+  selectedChannelId?: string | null
   /** 图下方的说明。 */
   caption?: string | null
   /** 定义图显示节点类型与边类型数；实时图显示任务状态。 */
@@ -49,10 +49,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
   const showLegend = options.showLegend ?? true
   const fit = options.fit ?? true
   const selectedNodeId = options.selectedNodeId ?? null
-  const selectedEdgeKey = options.selectedEdgeKey ?? null
-  const nodeLabels = new Map(options.nodes.map((node) => [node.id, node.label]))
-  const edgeName = (edge: GraphLayoutEdge): string =>
-    `${nodeLabels.get(edge.from) ?? edge.from} → ${nodeLabels.get(edge.to) ?? edge.to}`
+  const selectedChannelId = options.selectedChannelId ?? null
 
   const ref = React.useRef<HTMLDivElement | null>(null)
   const [scale, setScale] = React.useState(1)
@@ -114,7 +111,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
               viewBox: `0 0 ${layout.width} ${layout.height}`,
             },
             ...layout.edges.map((edge) => {
-              const selected = selectedEdgeKey !== null && edge.key.startsWith(selectedEdgeKey)
+              const selected = selectedChannelId !== null && edge.id === selectedChannelId
               return h(
                 'g',
                 {
@@ -140,7 +137,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                   onFocus: () => setHoveredEdgeKey(edge.key),
                   onBlur: () =>
                     setHoveredEdgeKey((current) => (current === edge.key ? null : current)),
-                  'aria-label': edgeName(edge),
+                  'aria-label': edge.label === '' ? edge.id : edge.label,
                   ...(options.onEdgeClick === null || options.onEdgeClick === undefined
                     ? {}
                     : {
@@ -150,6 +147,22 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                         tabIndex: 0,
                       }),
                 }),
+                edge.labelAt === null || edge.label === ''
+                  ? null
+                  : h(
+                      'text',
+                      {
+                        key: `${edge.key}-label`,
+                        className: `buka-workflows-edgeLabel is-${edge.kind}${
+                          edge.state === 'taken' ? ' is-taken' : ''
+                        }`,
+                        x: round(edge.labelAt.x),
+                        y: round(edge.labelAt.y),
+                        textAnchor: 'middle',
+                        dominantBaseline: 'middle',
+                      },
+                      clipLabel(edge.label),
+                    ),
                 h(
                   'g',
                   {
@@ -227,7 +240,10 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
             )
           }),
         ),
-        hoveredEdge === null || hoveredEdge.labelAt === null
+        hoveredEdge === null ||
+          hoveredEdge.labelAt === null ||
+          hoveredEdge.label === '' ||
+          !isClipped(hoveredEdge.label)
           ? null
           : h(
               'span',
@@ -236,10 +252,10 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                 className: 'buka-workflows-edgeTip',
                 style: {
                   left: `${hoveredEdge.labelAt.x * scale}px`,
-                  top: `${hoveredEdge.labelAt.y * scale}px`,
+                  top: `${(hoveredEdge.labelAt.y - 14) * scale}px`,
                 },
               },
-              edgeName(hoveredEdge),
+              hoveredEdge.label,
             ),
       ),
     ),
@@ -290,9 +306,9 @@ export function renderGraphLegend(
     ['idle', t('graphIdle')],
   ]
   const edges: Array<[string, string]> = [
-    ['forward', t('graphEdgeForward')],
-    ['back', t('graphEdgeBack')],
-    ...(mode === 'live' ? ([['taken', t('graphEdgeTaken')]] as Array<[string, string]>) : []),
+    ['forward', t('graphChannelForward')],
+    ['back', t('graphChannelBack')],
+    ...(mode === 'live' ? ([['taken', t('graphChannelTaken')]] as Array<[string, string]>) : []),
   ]
   return h(
     'div',
@@ -350,4 +366,18 @@ export function renderGraphLegend(
 /** 数字保留两位小数，减少 DOM 字符串抖动。 */
 function round(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+/** 连线上的标签：过长时截断，悬停能看到全文。 */
+const LABEL_MAX = 14
+
+/** 标签是否被截断（只有截断时才需要悬停提示）。 */
+function isClipped(label: string): boolean {
+  return [...label].length > LABEL_MAX
+}
+
+/** 截断后的画布标签。 */
+function clipLabel(label: string, max = LABEL_MAX): string {
+  const chars = [...label]
+  return chars.length <= max ? label : `${chars.slice(0, max - 1).join('')}…`
 }

@@ -1,7 +1,7 @@
 /**
- * 定义结构的右侧抽屉：全局信息、岗位、开始 / 结束节点与连线。
+ * 定义结构的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
  *
- * 抽屉只回答一个问题：所选节点 / 连线在定义里是什么。身份放在头部，契约字段
+ * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，契约字段
  * 收成紧凑标签；预算、完整契约这类技术细节放进默认收起的折叠区。
  */
 
@@ -13,8 +13,8 @@ import { ClientModal, h } from '../element.ts'
 import { fill } from '../i18n.ts'
 import {
   allTaskTypes,
+  channelOf,
   currentDefinition,
-  edgesOf,
   positionLabel,
   positionsOf,
   taskTypeLabels,
@@ -44,7 +44,7 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
   const builtin = { start: t('graphStart'), end: t('graphEnd') }
   const positions = positionsOf(definition)
   const labels = taskTypeLabels(definition)
-  const title = titleOf(page, selection, definition, builtin)
+  const title = titleOf(page, selection, definition)
   const position =
     selection.kind === 'position' ? positions.find((item) => item.id === selection.id) : undefined
   const avatar =
@@ -82,21 +82,33 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
           ? h(
               'ul',
               { className: 'buka-workflows-initialList' },
-              ...definition.start.next.map((initial, index) =>
-                h(
+              ...definition.start.next.map((initial, index) => {
+                const channel = channelOf(definition, initial.channel)
+                return h(
                   'li',
                   {
-                    key: `${initial.position ?? ''}-${index}`,
+                    key: `${initial.channel ?? ''}-${index}`,
                     className: 'buka-workflows-initialRow',
                   },
                   h(
                     'span',
                     { className: 'buka-workflows-initialMain' },
-                    h('strong', null, positionLabel(definition, initial.position, builtin)),
+                    h(
+                      'strong',
+                      null,
+                      channel === null
+                        ? (initial.channel ?? '')
+                        : positionLabel(definition, channel.to, builtin),
+                    ),
                     h(
                       'span',
                       { className: 'buka-workflows-hint' },
-                      labels.get(initial.type ?? '') ?? initial.type ?? '',
+                      [
+                        channel === null ? '' : `「${channel.label}」`,
+                        labels.get(initial.type ?? '') ?? initial.type ?? '',
+                      ]
+                        .filter((part) => part !== '')
+                        .join(' · '),
                     ),
                   ),
                   h(
@@ -104,8 +116,8 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
                     { className: 'buka-workflows-hint' },
                     fill(t, 'initialDeps', { n: initial.dependsOn?.length ?? 0 }),
                   ),
-                ),
-              ),
+                )
+              }),
             )
           : h('p', { className: 'buka-workflows-hint' }, t('definitionInitialEmpty')),
       ),
@@ -204,19 +216,19 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
       )
     }
   } else {
-    const edge = edgesOf(definition)[selection.index]
-    if (edge === undefined) {
+    const channel = channelOf(definition, selection.id)
+    if (channel === null) {
       body.push(h('p', { className: 'buka-workflows-hint' }, t('notFound')))
     } else {
       body.push(
         renderSection(
-          t('edgeAllowedTypes'),
-          edge.types.length === 0
-            ? h('p', { className: 'buka-workflows-hint' }, t('edgeAllTypes'))
+          t('channelAllowedTypes'),
+          channel.types.length === 0
+            ? h('p', { className: 'buka-workflows-hint' }, t('channelAllTypes'))
             : h(
                 'div',
                 { className: 'buka-workflows-tagRow' },
-                ...edge.types.map((type) =>
+                ...channel.types.map((type) =>
                   h(Tag, { key: type, tone: 'neutral' }, labels.get(type) ?? type),
                 ),
               ),
@@ -247,7 +259,7 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
   )
 }
 
-/** 头部第二行：执行者 / 版本 / 回边，没有可说的就留空。 */
+/** 头部第二行：执行者 / 通道 id 与端点 / 回向标记，没有可说的就留空。 */
 function headerMeta(
   page: AppContext,
   selection: NonNullable<AppContext['state']['definitionSelection']>,
@@ -260,10 +272,18 @@ function headerMeta(
     const text = renderExecutor(page, position.executor)
     return text === t('taskTypeUnset') ? null : text
   }
-  if (selection.kind === 'edge') {
-    const edge = edgesOf(definition)[selection.index]
-    if (edge === undefined) return null
-    return edge.back ? t('edgeBack') : null
+  if (selection.kind === 'channel') {
+    const channel = channelOf(definition, selection.id)
+    if (channel === null) return null
+    const builtin = { start: t('graphStart'), end: t('graphEnd') }
+    const route = `${positionLabel(definition, channel.from, builtin)} → ${positionLabel(
+      definition,
+      channel.to,
+      builtin,
+    )}`
+    return [channel.id, route, channel.back ? t('channelBack') : '']
+      .filter((part) => part !== '')
+      .join(' · ')
   }
   return null
 }
@@ -273,7 +293,6 @@ function titleOf(
   page: AppContext,
   selection: NonNullable<AppContext['state']['definitionSelection']>,
   definition: WorkflowDefinition,
-  builtin: { start: string; end: string },
 ): string {
   const { t } = page
   if (selection.kind === 'info') return t('definitionInfo')
@@ -283,9 +302,8 @@ function titleOf(
     const position = positionsOf(definition).find((item) => item.id === selection.id)
     return position?.label ?? selection.id
   }
-  const edge = edgesOf(definition)[selection.index]
-  if (edge === undefined) return t('edgeTitle')
-  return `${positionLabel(definition, edge.from, builtin)} → ${positionLabel(definition, edge.to, builtin)}`
+  const channel = channelOf(definition, selection.id)
+  return channel === null ? t('channelTitle') : channel.label
 }
 
 /** 一个任务类型：标题 + 说明 + 输入 / 产出两行契约。 */

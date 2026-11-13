@@ -84,12 +84,16 @@ export function renderTaskDrawer(page: AppContext): React.ReactElement | null {
   )
 }
 
-/** 头部第二行：岗位 · 承办者。 */
+/** 头部第二行：岗位 · 入站通道 · 承办者。 */
 function taskMeta(page: AppContext, task: TaskDetail): string {
   const { t } = page
   const position = task.positionLabel ?? task.position ?? ''
+  const channel =
+    typeof task.channelLabel === 'string' && task.channelLabel !== ''
+      ? `${t('taskChannel')}: ${task.channelLabel}`
+      : ''
   const claimant = claimantName(task.claimant, t) || t('taskUnclaimed')
-  return [position, claimant].filter((part) => part !== '').join(' · ')
+  return [position, channel, claimant].filter((part) => part !== '').join(' · ')
 }
 
 /** 任务岗位对应的打工人头像。 */
@@ -499,6 +503,12 @@ function renderTaskDetails(
   const rows: Array<[string, React.ReactNode]> = []
   if (typeof task.type === 'string' && task.type !== '') {
     rows.push([t('taskType'), h('code', { className: 'buka-workflows-inlineCode' }, task.type)])
+  }
+  if (typeof task.channel === 'string' && task.channel !== '') {
+    rows.push([
+      t('taskChannel'),
+      h('code', { className: 'buka-workflows-inlineCode' }, task.channel),
+    ])
   }
   if (
     isRecord(typeDefinition) &&

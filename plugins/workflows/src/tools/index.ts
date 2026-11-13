@@ -1,5 +1,5 @@
 /**
- * 模型工具注册（`.tmp/workflow-v4-spec.md` §13.2）。
+ * 模型工具注册（ADR 0015）。
  *
  * 可见性：
  * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
@@ -52,9 +52,9 @@ function sessionIdOf(context: { agent?: { id?: unknown } }): string {
 }
 
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v5) JSON shape:
 {
-  "version": 4, "name": "...", "description": "...",
+  "version": 5, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
     "task": {
@@ -62,7 +62,7 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
       "output":  <JSON Schema object: the first structured input>
     },
     "next": [
-      { "position": "<position id>", "type": "<task type id>",
+      { "channel": "<channel id leaving start>", "type": "<task type id>",
         "payload": { ...templates... }, "dependsOn": ["$start"] }
     ]
   },
@@ -77,13 +77,14 @@ const DEFINITION_HELP = `Workflow definition (v4) JSON shape:
           "mode": "plan" | null }
       ] }
   ],
-  "edges": [
-    { "from": "start", "to": "dev" },
-    { "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
-    { "from": "deploy", "to": "end" }
+  "channels": [
+    { "id": "start.dev", "label": "受理", "from": "start", "to": "dev" },
+    { "id": "dev.qa", "label": "提测", "from": "dev", "to": "qa", "types": ["qa.verify"] },
+    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
+    { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back edge; a back edge must close a cycle. start.next entries must depend on "$start" and target a direct successor of start. Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Edges carry no prompt: instructions live in task payloads and task type contracts.`
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Multiple channels may connect the same ordered pair and their type whitelists may overlap; tasks are created by channel id, and the target position comes from the channel. Channels into "end" cannot whitelist types. Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". start.next entries must leave the start node via a channel and depend on "$start". Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Channels carry no prompt: instructions live in task payloads and task type contracts.`
 
 /**
  * 注册全部工作流工具。
@@ -105,12 +106,12 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
   register(
     defineTool({
       name: 'buka_workflow_save',
-      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v4 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v5 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
           type: 'json',
           required: true,
-          description: 'The complete workflow v4 definition object.',
+          description: 'The complete workflow v5 definition object.',
         },
         id: { type: 'string', description: 'Existing workflow id; omit to create a new workflow.' },
       },
@@ -361,12 +362,13 @@ function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
     name: 'buka_task_create',
     description:
-      'Create a task on the current job board (callable any number of times while executing a task). The engine validates the target position, task type, edge whitelist, payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.',
+      'Create a task on the current job board (callable any number of times while executing a task). The engine validates the channel (it must start at your position and allow the task type), payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.',
     parameters: {
-      position: {
+      channel: {
         type: 'string',
         required: true,
-        description: 'Target position id (or "end" for the end task).',
+        description:
+          'Channel id to dispatch along (listed in the prompt under "你可以派发的任务"). It must start at your position and allow the task type; the target position comes from the channel.',
       },
       type: {
         type: 'string',
@@ -403,7 +405,7 @@ function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
       const engine = await ready()
       const task = await engine.createTaskFromSession({
         sessionId,
-        position: args.position,
+        channel: args.channel,
         type: args.type,
         payload: (args.payload ?? {}) as JsonValue,
         deps: Array.isArray(args.deps) ? args.deps : [],
@@ -488,7 +490,7 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
         for (const task of tasks) {
           const record = task as Record<string, unknown>
           lines.push(
-            `- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] deps=${Array.isArray(record.deps) ? record.deps.join(',') : ''}`,
+            `- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] via=${record.channel === null || record.channel === undefined ? '-' : String(record.channel)} deps=${Array.isArray(record.deps) ? record.deps.join(',') : ''}`,
           )
         }
         return text(lines.join('\n'))

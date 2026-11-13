@@ -13,8 +13,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
-  edgeAllowsType,
-  findEdge,
+  channelAllowsType,
+  findChannel,
   findPosition,
   findTaskType,
   validateWorkflowDefinition,
@@ -52,10 +52,10 @@ function sampleWorkers() {
   )
 }
 
-/** spec §5.7 的研发交付定义（approve 补了一条到 deploy 的边，满足「每个岗位都能到达 end」）。 */
+/** 研发交付定义（v5 通道；approve 补了一条到 deploy 的通道，满足「每个岗位都能到达 end」）。 */
 function sampleDefinition() {
   return {
-    version: 4,
+    version: 5,
     name: '研发交付',
     description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
     budgets: { maxTasks: 200, maxDurationHours: 72 },
@@ -76,7 +76,7 @@ function sampleDefinition() {
       },
       next: [
         {
-          position: 'need',
+          channel: 'start.need',
           type: 'need.analyze',
           payload: { focus: '{{start.output.requirement}}' },
           dependsOn: ['$start'],
@@ -234,18 +234,55 @@ function sampleDefinition() {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'need' },
-      { from: 'need', to: 'dev' },
-      { from: 'need', to: 'qa', types: ['qa.prepare'] },
-      { from: 'dev', to: 'qa', types: ['qa.verify'] },
-      { from: 'qa', to: 'dev', types: ['dev.rework'], back: true },
-      { from: 'qa', to: 'approve', types: ['approve.release'] },
-      { from: 'qa', to: 'deploy', types: ['deploy.run'] },
-      { from: 'approve', to: 'deploy', types: ['deploy.run'] },
-      { from: 'deploy', to: 'end' },
+    channels: [
+      { id: 'start.need', label: '受理', from: 'start', to: 'need' },
+      { id: 'need.dev', label: '排期开发', from: 'need', to: 'dev' },
+      { id: 'need.qa.prepare', label: '测试准备', from: 'need', to: 'qa', types: ['qa.prepare'] },
+      { id: 'dev.qa.verify', label: '提测', from: 'dev', to: 'qa', types: ['qa.verify'] },
+      {
+        id: 'qa.dev.rework',
+        label: '返工',
+        from: 'qa',
+        to: 'dev',
+        types: ['dev.rework'],
+        back: true,
+      },
+      { id: 'qa.approve', label: '送审', from: 'qa', to: 'approve', types: ['approve.release'] },
+      { id: 'qa.deploy', label: '直达发布', from: 'qa', to: 'deploy', types: ['deploy.run'] },
+      {
+        id: 'approve.deploy',
+        label: '批准发布',
+        from: 'approve',
+        to: 'deploy',
+        types: ['deploy.run'],
+      },
+      { id: 'deploy.end', label: '交付', from: 'deploy', to: 'end' },
     ],
   }
+}
+
+/** 把 v5 参考定义降级成 v4 形状，用来测一次性迁移。 */
+function legacyV4Definition() {
+  const definition = clone(sampleDefinition())
+  const byId = new Map(definition.channels.map((channel) => [channel.id, channel]))
+  definition.version = 4
+  definition.start.next = definition.start.next.map((route) => {
+    const channel = byId.get(route.channel)
+    return {
+      position: channel.to,
+      type: route.type,
+      payload: route.payload,
+      dependsOn: route.dependsOn,
+    }
+  })
+  definition.edges = definition.channels.map((channel) => ({
+    from: channel.from,
+    to: channel.to,
+    ...(channel.types === undefined ? {} : { types: channel.types }),
+    ...(channel.back === true ? { back: true } : {}),
+  }))
+  delete definition.channels
+  return definition
 }
 
 // ---------------------------------------------------------------------------
@@ -432,29 +469,50 @@ test('domain: terminal helpers', () => {
 // 定义校验
 // ---------------------------------------------------------------------------
 
-test('definition: accepts the v4 研发交付 reference workflow', () => {
+test('definition: accepts the v5 研发交付 reference workflow', () => {
   const result = validateWorkflowDefinition(sampleDefinition(), { workers: sampleWorkers() })
   const definition = expectOk(result)
-  assert.equal(definition.version, 4)
+  assert.equal(definition.version, 5)
   assert.equal(definition.name, '研发交付')
   assert.equal(definition.positions.length, 5)
+  assert.equal(definition.channels.length, 9)
   assert.equal(definition.budgets.maxTasks, 200)
   assert.equal(definition.start.next.length, 1)
+  assert.equal(definition.start.next[0].channel, 'start.need')
   assert.deepEqual(definition.start.next[0].dependsOn, ['$start'])
   assert.equal(findPosition(definition, 'dev')?.executor.name, '软件工程师')
   assert.equal(findTaskType(definition, 'qa.verify')?.label, '验证')
-  assert.equal(findEdge(definition, 'qa', 'dev')?.back, true)
-  assert.equal(edgeAllowsType(findEdge(definition, 'qa', 'dev'), 'dev.rework'), true)
-  assert.equal(edgeAllowsType(findEdge(definition, 'qa', 'dev'), 'qa.verify'), false)
+  assert.equal(findChannel(definition, 'qa.dev.rework')?.back, true)
+  assert.equal(findChannel(definition, 'qa.dev.rework')?.label, '返工')
+  assert.equal(channelAllowsType(findChannel(definition, 'qa.dev.rework'), 'dev.rework'), true)
+  assert.equal(channelAllowsType(findChannel(definition, 'qa.dev.rework'), 'qa.verify'), false)
   const approve = findPosition(definition, 'approve')
   assert.equal(approve?.executor.kind, 'human')
   assert.equal(approve?.taskTypes[0].assistant, '沟通助理')
 })
 
+test('definition: allows parallel channels between the same pair and overlapping types', () => {
+  const result = validateWorkflowDefinition(
+    mutate((d) => {
+      d.channels.push({
+        id: 'dev.qa.urgent',
+        label: '加急提测',
+        from: 'dev',
+        to: 'qa',
+        types: ['qa.verify'],
+      })
+    }),
+    { workers: sampleWorkers() },
+  )
+  const definition = expectOk(result)
+  assert.equal(definition.channels.length, 10)
+  assert.equal(findChannel(definition, 'dev.qa.urgent')?.label, '加急提测')
+})
+
 test('definition: rejects structural and identity errors', () => {
   const workers = sampleWorkers()
   const cases = [
-    [mutate((d) => (d.version = 3)), /^version$/, /must be 4/],
+    [mutate((d) => (d.version = 4)), /^version$/, /must be 5/],
     [mutate((d) => (d.positions = [])), /^positions$/, /non-empty array/],
     [
       mutate((d) => d.positions.push(clone(d.positions[0]))),
@@ -529,44 +587,83 @@ test('definition: rejects structural and identity errors', () => {
   }
 })
 
-test('definition: rejects edge, cycle and reachability errors', () => {
+test('definition: rejects channel, cycle and reachability errors', () => {
   const workers = sampleWorkers()
   const cases = [
-    [mutate((d) => d.edges.push({ from: 'dev', to: 'nobody' })), /edges\[9\]\.to/, /unknown node/],
     [
-      mutate((d) => d.edges.push({ from: 'end', to: 'dev' })),
-      /edges\[9\]\.from/,
+      mutate((d) =>
+        d.channels.push({ id: 'dev.nobody', label: '未知', from: 'dev', to: 'nobody' }),
+      ),
+      /channels\[9\]\.to/,
+      /unknown node/,
+    ],
+    [
+      mutate((d) => d.channels.push({ id: 'end.dev', label: '反向', from: 'end', to: 'dev' })),
+      /channels\[9\]\.from/,
       /end node cannot dispatch/,
     ],
     [
-      mutate((d) => d.edges.push({ from: 'dev', to: 'start' })),
-      /edges\[9\]\.to/,
+      mutate((d) =>
+        d.channels.push({ id: 'dev.start', label: '回到开始', from: 'dev', to: 'start' }),
+      ),
+      /channels\[9\]\.to/,
       /start node cannot receive/,
     ],
-    [mutate((d) => d.edges.push({ from: 'qa', to: 'dev' })), /edges\[9\]/, /duplicate edge/],
     [
-      mutate((d) => d.edges.push({ from: 'approve', to: 'qa', types: ['nope.type'] })),
-      /edges\[9\]\.types\[0\]/,
+      mutate((d) => d.channels.push({ id: 'qa.dev.rework', label: '重复', from: 'dev', to: 'qa' })),
+      /channels\[9\]\.id/,
+      /duplicate channel id/,
+    ],
+    [
+      mutate((d) => d.channels.push({ id: 'Bad Id', label: '坏 id', from: 'dev', to: 'qa' })),
+      /channels\[9\]\.id/,
+      /lowercase identifier/,
+    ],
+    [
+      mutate((d) => d.channels.push({ id: 'dev.qa.blank', label: ' ', from: 'dev', to: 'qa' })),
+      /channels\[9\]\.label/,
+      /non-empty display label/,
+    ],
+    [
+      mutate((d) =>
+        d.channels.push({
+          id: 'approve.qa',
+          label: '退回',
+          from: 'approve',
+          to: 'qa',
+          types: ['nope.type'],
+        }),
+      ),
+      /channels\[9\]\.types\[0\]/,
       /not a task type of position "qa"/,
     ],
     [
-      mutate((d) => d.edges.push({ from: 'qa', to: 'end', types: ['x'] })),
-      /edges\[9\]\.types/,
+      mutate((d) =>
+        d.channels.push({ id: 'qa.end.extra', label: '交付', from: 'qa', to: 'end', types: ['x'] }),
+      ),
+      /channels\[9\]\.types/,
       /cannot whitelist types/,
     ],
     [
       mutate((d) => {
-        d.edges.find((edge) => edge.from === 'qa' && edge.to === 'dev').back = undefined
+        delete d.channels[4].back
       }),
-      /edges\[3\]\.back/,
-      /no explicit back edge/,
+      /channels\[3\]\.back/,
+      /no explicit back channel/,
     ],
     [
       mutate((d) => {
-        d.edges.find((edge) => edge.from === 'need' && edge.to === 'dev').back = true
+        d.channels[1].back = true
       }),
-      /edges\[1\]\.back/,
+      /channels\[1\]\.back/,
       /does not close a cycle/,
+    ],
+    [
+      mutate((d) => {
+        d.channels.push({ id: 'qa.dev.rework.2', label: '返工二', from: 'qa', to: 'dev' })
+      }),
+      /channels\[9\]\.back/,
+      /must agree on "back"/,
     ],
     [
       mutate((d) => {
@@ -576,24 +673,24 @@ test('definition: rejects edge, cycle and reachability errors', () => {
           executor: { kind: 'worker', name: '产品经理' },
           taskTypes: [{ id: 'orphan.task', label: '孤儿任务' }],
         })
-        d.edges.push({ from: 'orphan', to: 'end' })
+        d.channels.push({ id: 'orphan.end', label: '孤儿交付', from: 'orphan', to: 'end' })
       }),
       /positions\.orphan/,
       /unreachable from the built-in start/,
     ],
     [
       mutate((d) => {
-        d.edges = d.edges.filter((edge) => edge.from !== 'deploy')
+        d.channels = d.channels.filter((channel) => channel.from !== 'deploy')
       }),
       /positions\.deploy/,
       /cannot reach the built-in end node/,
     ],
     [
       mutate((d) => {
-        d.edges = d.edges.filter((edge) => edge.to !== 'end')
+        d.channels = d.channels.filter((channel) => channel.to !== 'end')
       }),
-      /^edges$/,
-      /at least one position must have an edge into the built-in end node/,
+      /^channels$/,
+      /at least one position must have a channel into the built-in end node/,
     ],
   ]
   for (const [definition, pathPattern, messagePattern] of cases) {
@@ -615,13 +712,22 @@ test('definition: rejects start.next dependency and template errors', () => {
       /can only depend on "\$start"/,
     ],
     [
+      mutate((d) => (d.start.next[0].channel = 'nope')),
+      /start\.next\[0\]\.channel/,
+      /unknown channel/,
+    ],
+    [
+      mutate((d) => (d.start.next[0].channel = 'need.dev')),
+      /start\.next\[0\]\.channel/,
+      /must leave the start node/,
+    ],
+    [
       mutate((d) => {
-        d.start.next[0].position = 'dev'
-        d.start.next[0].type = 'dev.implement'
-        d.start.next[0].payload = { requirement: '{{start.output.requirement}}' }
+        d.channels.push({ id: 'start.end', label: '直接结束', from: 'start', to: 'end' })
+        d.start.next[0].channel = 'start.end'
       }),
-      /start\.next\[0\]\.position/,
-      /direct successor/,
+      /start\.next\[0\]\.channel/,
+      /does not lead to a position/,
     ],
     [
       mutate((d) => (d.start.next[0].payload = { focus: '{{task.abc.output.focus}}' })),
@@ -671,7 +777,7 @@ test('definition: rejects budget and end contract errors', () => {
 
 test('definition: workers are valid executors', () => {
   const definition = {
-    version: 4,
+    version: 5,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
     start: {
@@ -681,7 +787,7 @@ test('definition: workers are valid executors', () => {
       },
       next: [
         {
-          position: 'wait',
+          channel: 'start.wait',
           type: 'wait.until',
           payload: { until: '{{start.output.request}}' },
           dependsOn: ['$start'],
@@ -708,9 +814,9 @@ test('definition: workers are valid executors', () => {
         ],
       },
     ],
-    edges: [
-      { from: 'start', to: 'wait' },
-      { from: 'wait', to: 'end' },
+    channels: [
+      { id: 'start.wait', label: '开始等待', from: 'start', to: 'wait' },
+      { id: 'wait.end', label: '等待结束', from: 'wait', to: 'end' },
     ],
   }
   expectOk(validateWorkflowDefinition(definition, { workers: sampleWorkers() }))
@@ -998,6 +1104,101 @@ test('store: init normalizes legacy robot executor and claimant kinds', async ()
       domain.table('workflows').get('wf-1').versions['1'].definition.positions[0].executor.kind,
       'worker',
     )
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('store: init upgrades v4 definitions and backfills task channels', async () => {
+  const dataDir = await makeDataDir()
+  try {
+    const domain = new FakeDomain()
+    const definition = legacyV4Definition()
+    await domain.table('workflows').put('wf-legacy', {
+      id: 'wf-legacy',
+      name: '研发交付',
+      description: '',
+      status: 'active',
+      latestVersion: 1,
+      versions: { 1: { version: 1, definition, createdAt: 't' } },
+      jobSeq: 1,
+      createdAt: 't',
+      updatedAt: 't',
+    })
+    await domain.table('jobs').put('job-legacy', {
+      id: 'job-legacy',
+      seq: 1,
+      workflowId: 'wf-legacy',
+      workflowVersion: 1,
+      workflowName: '研发交付',
+      workflowDescription: '',
+      definition,
+      status: 'running',
+      starter: { kind: 'human' },
+      input: { raw: 'x' },
+      inputSummary: 'x',
+      error: null,
+      createdAt: 't',
+      updatedAt: 't',
+      finishedAt: null,
+    })
+    const baseTask = {
+      jobId: 'job-legacy',
+      payload: {},
+      deps: [],
+      status: 'completed',
+      attemptIds: [],
+      result: null,
+      error: null,
+      assistantBlocked: false,
+      createdAt: 't',
+      startedAt: 't',
+      finishedAt: 't',
+      updatedAt: 't',
+      assignee: { kind: 'human' },
+      claimant: null,
+    }
+    await domain.table('tasks').put(START_TASK_ID, {
+      ...baseTask,
+      id: START_TASK_ID,
+      position: 'start',
+      type: 'start',
+      createdBy: null,
+    })
+    await domain.table('tasks').put('task-need', {
+      ...baseTask,
+      id: 'task-need',
+      position: 'need',
+      type: 'need.analyze',
+      createdBy: { taskId: START_TASK_ID, position: 'start' },
+    })
+    await domain.table('tasks').put('task-dev', {
+      ...baseTask,
+      id: 'task-dev',
+      position: 'dev',
+      type: 'dev.implement',
+      createdBy: { taskId: 'task-need', position: 'need' },
+    })
+
+    await new WorkflowStore({ domain, dataDir }).init()
+
+    const upgraded = domain.table('workflows').get('wf-legacy').versions['1'].definition
+    assert.equal(upgraded.version, 5)
+    assert.equal(upgraded.channels.length, 9)
+    assert.equal(upgraded.start.next[0].channel, 'start.need')
+    assert.equal(upgraded.channels[0].id, 'start.need')
+    assert.equal(upgraded.channels[0].label, 'start → 需求')
+    assert.equal(upgraded.channels.find((channel) => channel.back === true).id, 'qa.dev')
+    assert.equal(domain.table('jobs').get('job-legacy').definition.version, 5)
+
+    const startTask = domain.table('tasks').get(START_TASK_ID)
+    assert.equal(startTask.channel, null)
+    assert.equal(domain.table('tasks').get('task-need').channel, 'start.need')
+    assert.equal(domain.table('tasks').get('task-dev').channel, 'need.dev')
+
+    // 幂等：再 init 一次不改写已经升级的记录。
+    await new WorkflowStore({ domain, dataDir }).init()
+    assert.equal(domain.table('tasks').get('task-dev').channel, 'need.dev')
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true })
   }

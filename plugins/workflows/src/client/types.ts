@@ -1,8 +1,8 @@
 /**
  * 浏览器一半的共享类型与常量。
  *
- * 这里的形状全部是**客户端本地定义**：按 `.tmp/workflow-v4-api.md` 的 HTTP
- * 契约声明，不 import 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
+ * 这里的形状全部是**客户端本地定义**：按 ADR 0015 的 v5 契约声明，不 import
+ * 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
  *
  * 契约字段一律按「可能缺失」处理（响应来自新版 / 旧版 Host 都可能），页面
  * 只做防御式读取，不做完整校验。
@@ -119,8 +119,10 @@ export interface PositionDefinition {
   taskTypes?: TaskTypeDefinition[]
 }
 
-/** 边定义。`from` / `to` 是岗位 id 或内建的 `start` / `end`。 */
-export interface EdgeDefinition {
+/** 通道定义。`from` / `to` 是岗位 id 或内建的 `start` / `end`。 */
+export interface ChannelDefinition {
+  id?: string
+  label?: string
   from?: string
   to?: string
   types?: string[]
@@ -134,7 +136,7 @@ export interface StartDefinition {
     output?: JsonSchema
   }
   next?: Array<{
-    position?: string
+    channel?: string
     type?: string
     payload?: Record<string, unknown>
     dependsOn?: string[]
@@ -157,7 +159,7 @@ export interface WorkflowDefinition {
   start?: StartDefinition
   end?: EndDefinition
   positions?: PositionDefinition[]
-  edges?: EdgeDefinition[]
+  channels?: ChannelDefinition[]
 }
 
 /** 工作流列表里的一条。 */
@@ -201,6 +203,7 @@ export interface TaskSummary {
   position?: string
   type?: string
   typeLabel?: string
+  channel?: string | null
   status?: string
   deps?: string[]
   createdAt?: string
@@ -253,6 +256,8 @@ export interface TaskDetail {
   type?: string
   typeLabel?: string
   typeDescription?: string
+  channel?: string | null
+  channelLabel?: string
   status?: string
   payload?: Record<string, unknown>
   deps?: TaskSummary[]
@@ -277,7 +282,7 @@ export interface WorkflowDetail {
   }
   graph?: {
     positions?: Array<{ id?: string; label?: string; executor?: Executor }>
-    edges?: EdgeDefinition[]
+    channels?: ChannelDefinition[]
     start?: { label?: string }
     end?: { label?: string }
   }
@@ -288,7 +293,7 @@ export interface WorkflowDetail {
 export interface JobDefinition {
   name?: string
   positions?: Array<{ id?: string; label?: string; executor?: Executor }>
-  edges?: EdgeDefinition[]
+  channels?: ChannelDefinition[]
   start?: { label?: string }
   end?: { label?: string }
 }
@@ -325,7 +330,7 @@ export type JobFilter = 'all' | 'running' | 'completed' | 'problem'
 /** 定义结构画布上的选中项：节点、边或全局信息。 */
 export type DefinitionSelection =
   | { kind: 'position'; id: string }
-  | { kind: 'edge'; index: number }
+  | { kind: 'channel'; id: string }
   | { kind: 'start' }
   | { kind: 'end' }
   | { kind: 'info' }

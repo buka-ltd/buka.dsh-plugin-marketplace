@@ -18,8 +18,9 @@ export {
   type TemplateTaskValue,
 } from './payload.ts'
 export {
-  edgeAllowsType,
-  findEdge,
+  channelAllowsType,
+  channelsFrom,
+  findChannel,
   findPosition,
   findTaskType,
   type ValidateDefinitionOptions,

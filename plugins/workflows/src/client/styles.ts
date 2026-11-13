@@ -103,6 +103,9 @@ export const CSS = `
 .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none}
 .buka-workflows-edgeArrow.is-back{fill:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-edgeArrow.is-taken{fill:var(--dsw-alias-brand-primary);opacity:1}
+.buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none}
+.buka-workflows-edgeLabel.is-back{fill:var(--dsw-alias-state-warn-primary)}
+.buka-workflows-edgeLabel.is-taken{fill:var(--dsw-alias-brand-primary)}
 .buka-workflows-edgeTip{position:absolute;z-index:4;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 2px 10px color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:nowrap;pointer-events:none}
 .buka-workflows-graphCaption{text-align:center}
 .buka-workflows-nodeWrap{position:absolute;z-index:2}

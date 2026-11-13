@@ -1,10 +1,10 @@
 /**
- * 工作流 v4 定义校验（`.tmp/workflow-v4-spec.md` §5.8）。
+ * 工作流 v5 定义校验（ADR 0015）。
  *
  * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
  * 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
  *
- * 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回边、模板引用）。
+ * 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回向通道、模板引用）。
  * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
  *
  * @module @buka/dsh-plugin-workflows/definition/validate
@@ -12,8 +12,8 @@
 
 import type {
   BudgetDefinition,
+  ChannelDefinition,
   DefinitionIssue,
-  EdgeDefinition,
   EndDefinition,
   ExecutorSpec,
   JsonValue,
@@ -42,6 +42,9 @@ export type ValidateDefinitionResult =
 /** 岗位 id 与任务类型 id 的形状。 */
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 
+/** 通道 id 的形状：小写点分，首尾是字母或数字，便于在对话与报错里引用。 */
+const CHANNEL_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u
+
 /** 内建节点 id。 */
 const START_ID = 'start'
 const END_ID = 'end'
@@ -60,7 +63,7 @@ class Issues {
 }
 
 /**
- * 校验一份工作流 v4 定义。
+ * 校验一份工作流 v5 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
  * @param options 打工人目录
@@ -76,7 +79,7 @@ export function validateWorkflowDefinition(
     return { ok: false, issues: issues.list }
   }
 
-  if (raw.version !== 4) issues.add('version', 'must be 4')
+  if (raw.version !== 5) issues.add('version', 'must be 5')
   const name = readName(raw, 'name', '', issues)
   const description = readOptionalString(raw, 'description', 'description', issues) ?? ''
   const budgets = readBudgets(raw.budgets, issues)
@@ -103,14 +106,14 @@ export function validateWorkflowDefinition(
     }
   }
 
-  const edges = readEdges(raw.edges, positionById, typeById, issues)
-  const start = readStart(raw.start, positionById, typeById, issues)
+  const channels = readChannels(raw.channels, positionById, typeById, issues)
+  const channelById = new Map(channels.map((channel) => [channel.id, channel]))
+  const start = readStart(raw.start, positionById, typeById, channelById, issues)
   const end = readEnd(raw.end, issues)
 
-  checkEdges(edges, positions, issues)
-  checkReachability(edges, positions, issues)
-  checkStartNext(start, positionById, typeById, edges, issues)
-  checkEnd(edges, positions, issues)
+  checkChannels(channels, positions, issues)
+  checkReachability(channels, positions, issues)
+  checkEnd(channels, positions, issues)
 
   if (issues.failed) return { ok: false, issues: issues.list }
   // name / budgets / start / end 缺失时前面已经记录错误；这里只做类型收窄。
@@ -121,14 +124,14 @@ export function validateWorkflowDefinition(
   return {
     ok: true,
     definition: {
-      version: 4,
+      version: 5,
       name,
       ...(description === '' ? {} : { description }),
       budgets,
       start,
       end,
       positions,
-      edges,
+      channels,
     },
   }
 }
@@ -473,23 +476,40 @@ function readMode(
   return 'plan'
 }
 
-/** 解析边列表。 */
-function readEdges(
+/** 解析通道列表。 */
+function readChannels(
   raw: unknown,
   positionById: ReadonlyMap<string, PositionDefinition>,
   typeById: ReadonlyMap<string, TaskTypeDefinition>,
   issues: Issues,
-): EdgeDefinition[] {
+): ChannelDefinition[] {
   if (!Array.isArray(raw)) {
-    issues.add('edges', 'must be an array')
+    issues.add('channels', 'must be an array')
     return []
   }
-  const edges: EdgeDefinition[] = []
+  const channels: ChannelDefinition[] = []
   const seen = new Set<string>()
   for (const [index, entry] of raw.entries()) {
-    const path = `edges[${index}]`
+    const path = `channels[${index}]`
     if (!isPlainObject(entry)) {
       issues.add(path, 'must be an object')
+      continue
+    }
+    const id = typeof entry.id === 'string' ? entry.id.trim() : ''
+    if (id === '' || !CHANNEL_ID_PATTERN.test(id)) {
+      issues.add(
+        `${path}.id`,
+        'must be a lowercase identifier (letters, digits, dots, hyphens or underscores), e.g. "qa.dev.rework"',
+      )
+      continue
+    }
+    if (seen.has(id)) {
+      issues.add(`${path}.id`, `duplicate channel id "${id}"`)
+      continue
+    }
+    const label = typeof entry.label === 'string' ? entry.label.trim() : ''
+    if (label === '') {
+      issues.add(`${path}.label`, 'must be a non-empty display label')
       continue
     }
     const from = typeof entry.from === 'string' ? entry.from.trim() : ''
@@ -511,27 +531,24 @@ function readEdges(
       continue
     }
     if (from === to) {
-      issues.add(path, 'an edge must connect two different nodes')
+      issues.add(path, 'a channel must connect two different nodes')
       continue
     }
-    const key = `${from}->${to}`
-    if (seen.has(key)) {
-      issues.add(path, `duplicate edge "${key}"`)
-      continue
-    }
-    seen.add(key)
-    const types = readEdgeTypes(entry.types, `${path}.types`, to, positionById, typeById, issues)
+    seen.add(id)
+    const types = readChannelTypes(entry.types, `${path}.types`, to, positionById, typeById, issues)
     if (entry.back !== undefined && typeof entry.back !== 'boolean') {
       issues.add(`${path}.back`, 'must be true or false')
     }
-    edges.push({
+    channels.push({
+      id,
+      label,
       from,
       to,
       ...(types === undefined ? {} : { types }),
       ...(entry.back === true ? { back: true } : {}),
     })
   }
-  return edges
+  return channels
 }
 
 /** 判断节点是否存在（岗位或内建 start / end）。 */
@@ -539,8 +556,8 @@ function isKnownNode(id: string, positionById: ReadonlyMap<string, PositionDefin
   return id === START_ID || id === END_ID || positionById.has(id)
 }
 
-/** 解析边上的任务类型白名单。 */
-function readEdgeTypes(
+/** 解析通道上的任务类型白名单。 */
+function readChannelTypes(
   raw: unknown,
   path: string,
   to: string,
@@ -552,7 +569,7 @@ function readEdgeTypes(
   if (to === END_ID) {
     issues.add(
       path,
-      'the built-in end node has a single contract; an edge into it cannot whitelist types',
+      'the built-in end node has a single contract; a channel into it cannot whitelist types',
     )
     return undefined
   }
@@ -584,6 +601,7 @@ function readStart(
   raw: unknown,
   positionById: ReadonlyMap<string, PositionDefinition>,
   typeById: ReadonlyMap<string, TaskTypeDefinition>,
+  channelById: ReadonlyMap<string, ChannelDefinition>,
   issues: Issues,
 ): StartDefinition | null {
   if (!isPlainObject(raw)) {
@@ -601,7 +619,15 @@ function readStart(
     issues.add('start.task.output', 'is required: it is the structured input later tasks consume')
     return null
   }
-  const routes = readStartRoutes(raw.next, 'start.next', positionById, typeById, output, issues)
+  const routes = readStartRoutes(
+    raw.next,
+    'start.next',
+    positionById,
+    typeById,
+    channelById,
+    output,
+    issues,
+  )
   return { task: { payload, output }, next: routes }
 }
 
@@ -611,6 +637,7 @@ function readStartRoutes(
   path: string,
   positionById: ReadonlyMap<string, PositionDefinition>,
   typeById: ReadonlyMap<string, TaskTypeDefinition>,
+  channelById: ReadonlyMap<string, ChannelDefinition>,
   startOutput: OutputSchema,
   issues: Issues,
 ): StartRouteDefinition[] {
@@ -625,10 +652,25 @@ function readStartRoutes(
       issues.add(at, 'must be an object')
       continue
     }
-    const position = typeof entry.position === 'string' ? entry.position.trim() : ''
-    const target = positionById.get(position)
+    const channelId = typeof entry.channel === 'string' ? entry.channel.trim() : ''
+    const channel = channelById.get(channelId)
+    if (channel === undefined) {
+      issues.add(`${at}.channel`, `unknown channel "${String(entry.channel)}"`)
+      continue
+    }
+    if (channel.from !== START_ID) {
+      issues.add(
+        `${at}.channel`,
+        `initial tasks must leave the start node; channel "${channelId}" starts at "${channel.from}"`,
+      )
+      continue
+    }
+    const target = positionById.get(channel.to)
     if (target === undefined) {
-      issues.add(`${at}.position`, `unknown position "${String(entry.position)}"`)
+      issues.add(
+        `${at}.channel`,
+        `channel "${channelId}" does not lead to a position; initial tasks cannot target "${channel.to}"`,
+      )
       continue
     }
     const type = typeof entry.type === 'string' ? entry.type.trim() : ''
@@ -636,8 +678,12 @@ function readStartRoutes(
     if (taskType === undefined || !target.taskTypes.some((candidate) => candidate.id === type)) {
       issues.add(
         `${at}.type`,
-        `"${String(entry.type)}" is not a task type of position "${position}"`,
+        `"${String(entry.type)}" is not a task type of position "${target.id}"`,
       )
+      continue
+    }
+    if (!channelAllowsType(channel, type)) {
+      issues.add(`${at}.type`, `channel "${channelId}" does not allow task type "${type}"`)
       continue
     }
     if (!isPlainObject(entry.payload)) {
@@ -647,7 +693,7 @@ function readStartRoutes(
     const dependsOn = readStartDependsOn(entry.dependsOn, `${at}.dependsOn`, issues)
     validateRoutePayload(entry.payload, `${at}.payload`, taskType, startOutput, issues)
     routes.push({
-      position,
+      channel: channelId,
       type,
       payload: entry.payload as Record<string, JsonValue>,
       ...(dependsOn === undefined ? {} : { dependsOn }),
@@ -818,23 +864,25 @@ function readEnd(raw: unknown, issues: Issues): EndDefinition | null {
 }
 
 /**
- * 边与节点的结构检查：回边闭合、环上至少一条回边、start/end 关系。
+ * 通道与节点的结构检查：回向通道闭合、环上至少一条回向通道、同一对节点的
+ * `back` 一致。
  *
- * 规则按 spec：环上的边必须有显式标记，回边必须真的闭合一个环。一个环只需要
- * 一条 `back: true`（例：`qa -> dev` 标 back，`dev -> qa` 是环里向前的边，
- * 不必再标），所以按强连通分量检查：每个多节点分量至少有一条内部回边。
+ * 规则按 ADR 0015：环上的通道必须有显式标记，回向通道必须真的闭合一个环。
+ * 一个环只需要一条 `back: true`（例：`qa -> dev` 标 back，`dev -> qa` 是环里
+ * 向前的通道，不必再标），所以按强连通分量检查：每个多节点分量至少有一条
+ * 内部回向通道。同一对有序节点可以有多条通道，但 `back` 必须一致。
  */
-function checkEdges(
-  edges: readonly EdgeDefinition[],
+function checkChannels(
+  channels: readonly ChannelDefinition[],
   positions: readonly PositionDefinition[],
   issues: Issues,
 ): void {
   const nodes = new Set<string>([START_ID, END_ID, ...positions.map((position) => position.id)])
   const adjacency = new Map<string, Set<string>>()
   for (const node of nodes) adjacency.set(node, new Set())
-  for (const edge of edges) {
-    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue
-    adjacency.get(edge.from)?.add(edge.to)
+  for (const channel of channels) {
+    if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue
+    adjacency.get(channel.from)?.add(channel.to)
   }
   const reach = (from: string): Set<string> => {
     const seen = new Set<string>()
@@ -852,18 +900,18 @@ function checkEdges(
   const reachability = new Map<string, Set<string>>()
   for (const node of nodes) reachability.set(node, reach(node))
 
-  // 回边必须闭合：to 能回到 from 才算回边。
-  for (const [index, edge] of edges.entries()) {
-    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue
-    if (edge.back !== true) continue
-    if (reachability.get(edge.to)?.has(edge.from) === true) continue
+  // 回向通道必须闭合：to 能回到 from 才算回向。
+  for (const [index, channel] of channels.entries()) {
+    if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue
+    if (channel.back !== true) continue
+    if (reachability.get(channel.to)?.has(channel.from) === true) continue
     issues.add(
-      `edges[${index}].back`,
-      `edge "${edge.from} -> ${edge.to}" does not close a cycle and cannot be marked back`,
+      `channels[${index}].back`,
+      `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not close a cycle and cannot be marked back`,
     )
   }
 
-  // 每个强连通分量（多节点）至少有一条内部回边。
+  // 每个强连通分量（多节点）至少有一条内部回向通道。
   const grouped = new Set<string>()
   for (const node of nodes) {
     if (grouped.has(node)) continue
@@ -876,22 +924,46 @@ function checkEdges(
     }
     if (members.size < 2) continue
     for (const member of members) grouped.add(member)
-    const internal = edges.flatMap((edge, index) =>
-      edge.back === true && members.has(edge.from) && members.has(edge.to) ? [index] : [],
+    const internal = channels.flatMap((channel, index) =>
+      channel.back === true && members.has(channel.from) && members.has(channel.to) ? [index] : [],
     )
     if (internal.length > 0) continue
-    const first = edges.findIndex((edge) => members.has(edge.from) && members.has(edge.to))
+    const first = channels.findIndex(
+      (channel) => members.has(channel.from) && members.has(channel.to),
+    )
     const cycle = [...members].join(' -> ')
     issues.add(
-      `edges[${Math.max(first, 0)}].back`,
-      `cycle "${cycle}" has no explicit back edge: mark the edge that closes it with "back": true`,
+      `channels[${Math.max(first, 0)}].back`,
+      `cycle "${cycle}" has no explicit back channel: mark the channel that closes it with "back": true`,
     )
+  }
+
+  // 同一对有序节点的 back 必须一致：一条向前一条回向会自相矛盾。
+  const pairs = new Map<string, Array<{ index: number; back: boolean; from: string; to: string }>>()
+  for (const [index, channel] of channels.entries()) {
+    if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue
+    const key = `${channel.from}\u0000${channel.to}`
+    const group = pairs.get(key)
+    const item = { index, back: channel.back === true, from: channel.from, to: channel.to }
+    if (group === undefined) pairs.set(key, [item])
+    else group.push(item)
+  }
+  for (const group of pairs.values()) {
+    const first = group[0]
+    if (first === undefined || group.length < 2) continue
+    for (const item of group.slice(1)) {
+      if (item.back === first.back) continue
+      issues.add(
+        `channels[${item.index}].back`,
+        `channels between "${item.from}" and "${item.to}" must agree on "back"`,
+      )
+    }
   }
 }
 
 /** 可达性：每个岗位都能从 start 到达，也能到达 end。 */
 function checkReachability(
-  edges: readonly EdgeDefinition[],
+  channels: readonly ChannelDefinition[],
   positions: readonly PositionDefinition[],
   issues: Issues,
 ): void {
@@ -902,10 +974,10 @@ function checkReachability(
     forward.set(node, new Set())
     reverse.set(node, new Set())
   }
-  for (const edge of edges) {
-    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue
-    forward.get(edge.from)?.add(edge.to)
-    reverse.get(edge.to)?.add(edge.from)
+  for (const channel of channels) {
+    if (!nodes.has(channel.from) || !nodes.has(channel.to)) continue
+    forward.get(channel.from)?.add(channel.to)
+    reverse.get(channel.to)?.add(channel.from)
   }
   const fromStart = walkFrom(START_ID, forward)
   const toEnd = walkFrom(END_ID, reverse)
@@ -913,13 +985,13 @@ function checkReachability(
     if (!fromStart.has(position.id)) {
       issues.add(
         `positions.${position.id}`,
-        'is unreachable from the built-in start node: add an edge path from start',
+        'is unreachable from the built-in start node: add a channel path from start',
       )
     }
     if (!toEnd.has(position.id)) {
       issues.add(
         `positions.${position.id}`,
-        'cannot reach the built-in end node: add an edge path to end',
+        'cannot reach the built-in end node: add a channel path to end',
       )
     }
   }
@@ -940,88 +1012,68 @@ function walkFrom(from: string, adjacency: ReadonlyMap<string, Set<string>>): Se
   return seen
 }
 
-/** `start.next` 的跨节点检查：直接后继、边白名单、模板只引用 start.output。 */
-function checkStartNext(
-  start: StartDefinition | null,
-  positionById: ReadonlyMap<string, PositionDefinition>,
-  typeById: ReadonlyMap<string, TaskTypeDefinition>,
-  edges: readonly EdgeDefinition[],
-  issues: Issues,
-): void {
-  if (start === null) return
-  for (const [index, route] of start.next.entries()) {
-    if (positionById.get(route.position) === undefined) continue
-    if (typeById.get(route.type) === undefined) continue
-    const edge = edges.find(
-      (candidate) => candidate.from === START_ID && candidate.to === route.position,
-    )
-    if (edge === undefined) {
-      issues.add(
-        `start.next[${index}].position`,
-        `initial tasks must target a direct successor of the start node: no "start -> ${route.position}" edge`,
-      )
-      continue
-    }
-    if (edge.types !== undefined && !edge.types.includes(route.type)) {
-      issues.add(
-        `start.next[${index}].type`,
-        `edge "start -> ${route.position}" does not allow task type "${route.type}"`,
-      )
-    }
-  }
-}
-
-/** 结束节点检查：至少一条入边；能派发结束任务的岗位必须与 end 有边。 */
+/** 结束节点检查：至少一条入向通道；能派发结束任务的岗位必须与 end 有通道。 */
 function checkEnd(
-  edges: readonly EdgeDefinition[],
+  channels: readonly ChannelDefinition[],
   positions: readonly PositionDefinition[],
   issues: Issues,
 ): void {
-  const intoEnd = edges.filter((edge) => edge.to === END_ID)
+  const intoEnd = channels.flatMap((channel, index) =>
+    channel.to === END_ID ? [{ channel, index }] : [],
+  )
   if (intoEnd.length === 0) {
-    issues.add('edges', 'at least one position must have an edge into the built-in end node')
+    issues.add('channels', 'at least one position must have a channel into the built-in end node')
   }
-  for (const [index, edge] of intoEnd.entries()) {
-    if (edge.from === START_ID) {
+  for (const { channel, index } of intoEnd) {
+    if (channel.from === START_ID) {
       issues.add(
-        `edges.end[${index}]`,
+        `channels[${index}].from`,
         'the start node cannot dispatch the end task; only positions can',
       )
       continue
     }
-    if (positions.every((position) => position.id !== edge.from)) {
-      issues.add(`edges.end[${index}].from`, `unknown position "${edge.from}"`)
+    if (positions.every((position) => position.id !== channel.from)) {
+      issues.add(`channels[${index}].from`, `unknown position "${channel.from}"`)
     }
   }
 }
 
 /**
- * 判断一个任务类型是否允许某个派发（边白名单）。
+ * 判断一个任务类型是否允许某个派发（通道白名单）。
  *
  * 引擎创建任务时复用这里的规则。
  *
- * @param edge 边
+ * @param channel 通道
  * @param type 任务类型 id
  * @returns 允许时为 true
  */
-export function edgeAllowsType(edge: EdgeDefinition, type: string): boolean {
-  return edge.types === undefined || edge.types.includes(type)
+export function channelAllowsType(channel: ChannelDefinition, type: string): boolean {
+  return channel.types === undefined || channel.types.includes(type)
 }
 
 /**
- * 在定义里找一条从 `from` 到 `to` 的边。
+ * 按 id 取一条通道。
  *
  * @param definition 定义
- * @param from 创建者岗位
- * @param to 目标岗位
- * @returns 边；不存在时是 undefined
+ * @param channelId 通道 id
+ * @returns 通道；不存在时是 undefined
  */
-export function findEdge(
+export function findChannel(
   definition: WorkflowDefinition,
-  from: string,
-  to: string,
-): EdgeDefinition | undefined {
-  return definition.edges.find((edge) => edge.from === from && edge.to === to)
+  channelId: string,
+): ChannelDefinition | undefined {
+  return definition.channels.find((channel) => channel.id === channelId)
+}
+
+/**
+ * 从某个节点出发的全部通道。
+ *
+ * @param definition 定义
+ * @param from 起点节点 id
+ * @returns 通道列表
+ */
+export function channelsFrom(definition: WorkflowDefinition, from: string): ChannelDefinition[] {
+  return definition.channels.filter((channel) => channel.from === from)
 }
 
 /**

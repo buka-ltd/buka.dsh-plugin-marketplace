@@ -11,6 +11,7 @@
  * @module @buka/dsh-plugin-workflows/store
  */
 
+import { upgradeV4Definition, upgradeV4TaskChannel } from '../definition/upgrade.ts'
 import { newWorkflowId, nowIso } from '../domain/ids.ts'
 import type {
   AttachmentRecord,
@@ -198,6 +199,66 @@ export class WorkflowStore {
     }
   }
 
+  /**
+   * v4 → v5 一次性迁移：把工作流（全部版本）与作业快照升级成通道定义，
+   * 并按 v4 的唯一派发关系给任务回填 `channel`。
+   *
+   * 幂等：已升级的定义返回 null，已带 `channel` 的任务跳过。某条记录升级失败
+   * 时只记日志、保留原样，避免一次坏数据让整个插件起不来。
+   */
+  private async upgradeDefinitionsToV5(): Promise<void> {
+    let workflows = 0
+    for (const [id, record] of this.domain.table('workflows').entries()) {
+      let changed = false
+      const versions: Record<string, WorkflowVersionRecord> = {}
+      for (const [version, snapshot] of Object.entries(record.versions)) {
+        const upgraded = upgradeV4Definition(snapshot.definition)
+        if (upgraded === null) {
+          versions[version] = snapshot
+          continue
+        }
+        changed = true
+        versions[version] = { ...snapshot, definition: upgraded }
+      }
+      if (!changed) continue
+      await this.domain.table('workflows').update(id, (current) => ({ ...current, versions }))
+      workflows += 1
+    }
+    if (workflows > 0) {
+      this.logger?.info?.(`buka-workflows: upgraded ${workflows} workflow(s) to definition v5`)
+    }
+
+    let jobs = 0
+    const definitions = new Map<string, WorkflowDefinition>()
+    for (const [id, record] of this.domain.table('jobs').entries()) {
+      const upgraded = upgradeV4Definition(record.definition)
+      if (upgraded === null) {
+        definitions.set(id, record.definition)
+        continue
+      }
+      definitions.set(id, upgraded)
+      await this.domain
+        .table('jobs')
+        .update(id, (current) => ({ ...current, definition: upgraded }))
+      jobs += 1
+    }
+    if (jobs > 0) {
+      this.logger?.info?.(`buka-workflows: upgraded ${jobs} job snapshot(s) to definition v5`)
+    }
+
+    let tasks = 0
+    for (const [id, record] of this.domain.table('tasks').entries()) {
+      if (Object.hasOwn(record, 'channel')) continue
+      const definition = definitions.get(record.jobId)
+      const channel = definition === undefined ? null : upgradeV4TaskChannel(definition, record)
+      await this.domain.table('tasks').update(id, (current) => ({ ...current, channel }))
+      tasks += 1
+    }
+    if (tasks > 0) {
+      this.logger?.info?.(`buka-workflows: backfilled channel on ${tasks} legacy task(s)`)
+    }
+  }
+
   /** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
   async init(): Promise<void> {
     for (const [key, record] of this.domain.table('workflows').entries()) {
@@ -219,6 +280,7 @@ export class WorkflowStore {
       }
     }
     await this.normalizeLegacyWorkerKinds()
+    await this.upgradeDefinitionsToV5()
     // 旧版本把新建工作流保存为 draft，要求人工激活；现在新建即启用。
     // 这里把遗留草稿一次性归一为启用，且只做一次幂等更新。
     let promoted = 0
