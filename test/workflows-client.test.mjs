@@ -16,6 +16,8 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
+import { toV7 } from './workflows-fixture-v7.mjs'
+
 const CLIENT_DIR = path.resolve('plugins/workflows/src/client')
 
 /** 测试与桩模块共享的状态：注入的 useState 值、setState 记录与样式文本。 */
@@ -218,6 +220,16 @@ function textOf(node) {
   return texts.join(' ')
 }
 
+/** 找出定义 / 任务抽屉的根元素，断言只看抽屉里的内容。 */
+function drawerOf(tree) {
+  return findBy(
+    tree,
+    (node) =>
+      typeof node.props?.className === 'string' &&
+      node.props.className.split(/\s+/).includes('buka-workflows-drawer'),
+  )
+}
+
 /** 按文本找可点击按钮并点它。 */
 function clickButton(tree, label) {
   const node = findBy(
@@ -242,8 +254,8 @@ function render(client, patch) {
 }
 
 /** 工作流定义。 */
-const DEFINITION = {
-  version: 4,
+const DEFINITION = toV7({
+  version: 6,
   name: '研发交付',
   description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
   budgets: { maxTasks: 200, maxDurationHours: 72 },
@@ -281,13 +293,13 @@ const DEFINITION = {
     {
       id: 'dev',
       label: '研发',
-      description: '负责实现与返工',
+      prompt: '负责实现与返工',
       executor: { kind: 'worker', name: '软件工程师' },
       taskTypes: [
         {
           id: 'dev.implement',
           label: '开发',
-          description: '实现功能',
+          prompt: '实现功能',
           payload: { type: 'object', properties: { requirement: { type: 'string' } } },
           output: { type: 'object', properties: { summary: { type: 'string' } } },
         },
@@ -348,7 +360,22 @@ const DEFINITION = {
     { id: 'qa.approve', label: '送审', from: 'qa', to: 'approve' },
     { id: 'approve.end', label: '交付', from: 'approve', to: 'end' },
   ],
-}
+})
+DEFINITION.positions[2].taskTypes[0].actions = [
+  {
+    id: 'approve',
+    label: '批准',
+    input: {
+      type: 'object',
+      properties: {
+        approved: { type: 'string', enum: ['yes', 'no'] },
+        note: { type: 'string' },
+      },
+      required: ['approved'],
+    },
+    creates: [{ channel: 'approve.end', content: { summary: '批准发布' } }],
+  },
+]
 
 /** 工作流详情响应。 */
 const WORKFLOW_DETAIL = {
@@ -401,10 +428,8 @@ const JOB_DETAIL = {
     workflowName: '研发交付',
     workflowVersion: 3,
     starter: { kind: 'human' },
-    input: {
-      raw: { request: '实现登录页' },
-      structured: { requirement: '实现登录页', acceptance: '可以登录' },
-    },
+    input: { requirement: '实现登录页', acceptance: '可以登录' },
+    delivery: { kind: 'starter' },
     createdAt: '2026-11-12T10:00:00.000Z',
     updatedAt: '2026-11-12T10:05:00.000Z',
     error: null,
@@ -489,7 +514,7 @@ const FINAL_TASK = {
     typeLabel: '结束',
     channel: 'approve.end',
     status: 'ready',
-    payload: { summary: '最终交付说明' },
+    content: { summary: '最终交付说明' },
     deps: [],
     attempts: [],
     result: null,
@@ -506,11 +531,10 @@ const TASK_DETAIL = {
     positionLabel: '研发',
     type: 'dev.implement',
     typeLabel: '开发',
-    typeDescription: '实现功能',
     channel: 'start.dev',
     channelLabel: '开始研发',
     status: 'running',
-    payload: { requirement: '实现登录页' },
+    content: { requirement: '实现登录页' },
     deps: [
       {
         id: 'task-0',
@@ -537,7 +561,6 @@ const TASK_DETAIL = {
     ],
     result: {
       text: '登录页已实现',
-      output: { summary: '登录页已实现' },
       attachments: [
         {
           id: 'att-file-1',
@@ -561,9 +584,8 @@ const HUMAN_TASK_DETAIL = {
     positionLabel: '发布审批',
     type: 'approve.release',
     typeLabel: '批准发布',
-    typeDescription: '批准或驳回发布',
     status: 'running',
-    payload: { summary: '发布说明' },
+    content: { summary: '发布说明' },
     deps: [],
     createdAt: '2026-11-12T10:02:00.000Z',
     startedAt: '2026-11-12T10:02:05.000Z',
@@ -634,13 +656,15 @@ test('工作流页：作业 Tab 默认，筛选、卡片与进入作业', async 
   assert.equal(harness.updates[0].route.view, 'overview')
 })
 
-test('定义结构：画通道、点节点打开抽屉、点通道记录选中', async () => {
+test('结构图：画通道、点节点打开抽屉、点通道记录选中', async () => {
   const client = await loadClient()
-  const { tree, texts, paths } = render(client, {
+  const { tree, texts, paths, classes } = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
   })
   assert.equal(paths.length, DEFINITION.channels.length, 'every defined channel should be drawn')
+  assert.ok(classes.includes('is-graph'), 'the structure view fills the body height')
+  assert.ok(classes.includes('buka-workflows-graphFooter'), 'the legend sits in the pinned footer')
   const firstEdge = paths[0].match(/-?\d+(?:\.\d+)?/gu)?.map(Number) ?? []
   assert.ok(firstEdge[1] < firstEdge.at(-1), 'channels flow from top to bottom')
   assert.equal(firstEdge[0], firstEdge.at(-2), 'a straight channel keeps one column')
@@ -682,7 +706,7 @@ test('定义结构：画通道、点节点打开抽屉、点通道记录选中',
   })
 })
 
-test('定义结构：同一对节点的并行通道分别画线并显示标签', async () => {
+test('结构图：同一对节点的并行通道分别画线并显示标签', async () => {
   const client = await loadClient()
   const extra = {
     id: 'dev.qa.urgent',
@@ -716,7 +740,7 @@ test('定义结构：同一对节点的并行通道分别画线并显示标签',
   assert.match(text, /加急提测/u)
 })
 
-test('定义结构：节点头像来自打工人登记，而不是定义快照', async () => {
+test('结构图：节点头像来自打工人登记，而不是定义快照', async () => {
   const client = await loadClient()
   const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
     position.id === 'dev'
@@ -741,7 +765,7 @@ test('定义结构：节点头像来自打工人登记，而不是定义快照',
 
 test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
   const client = await loadClient()
-  const { texts } = render(client, {
+  const { tree, texts, classes } = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     definitionSelection: { kind: 'position', id: 'dev' },
@@ -752,8 +776,39 @@ test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
   assert.match(text, /开发/u)
   assert.match(text, /实现功能/u)
   assert.match(text, /requirement/u, 'schema fields are listed')
+  assert.ok(classes.includes('buka-workflows-typeCard'), 'task types render as cards')
+  assert.match(text, /可处理的任务类型/u, 'the heading names the position’s task types explicitly')
+  const drawer = drawerOf(tree)
+  assert.ok(drawer !== null, 'the definition drawer renders')
+  assert.doesNotMatch(
+    textOf(drawer),
+    /通道/u,
+    'channels are inspected on the edge, not on the node',
+  )
   assert.doesNotMatch(text, /执行者:/u, 'the executor is no longer a loose key-value row')
   assert.doesNotMatch(text, /原始 schema/u, 'no raw schema dump')
+})
+
+test('定义抽屉：通道显示发送方、接收方与允许的任务类型', async () => {
+  const client = await loadClient()
+  const { tree } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    definitionSelection: { kind: 'channel', id: 'qa.dev.rework' },
+  })
+  const drawer = drawerOf(tree)
+  assert.ok(drawer !== null, 'the channel drawer renders')
+  const text = textOf(drawer)
+  assert.match(text, /返工/u, 'the channel label is the drawer title')
+  assert.match(text, /qa\.dev\.rework/u, 'the channel id sits in the drawer header')
+  assert.match(text, /回向通道/u, 'a back channel is marked')
+  assert.match(text, /发送方/u)
+  assert.match(text, /接收方/u)
+  assert.match(text, /测试/u, 'the sender is the source position')
+  assert.match(text, /研发/u, 'the receiver is the target position')
+  assert.match(text, /打工人 · 质量保障工程师/u, 'the sender executor is shown')
+  assert.match(text, /允许的任务类型/u)
+  assert.match(text, /开发/u, 'the allowed task type is listed')
 })
 
 test('作业概览：需求、结构化输入、最终交付物与启动信息', async () => {
@@ -765,9 +820,7 @@ test('作业概览：需求、结构化输入、最终交付物与启动信息',
     finalTask: { status: 'ready', data: FINAL_TASK.task, error: null },
   })
   const text = texts.join(' ')
-  assert.match(text, /这次要做什么/u)
   assert.match(text, /实现登录页/u)
-  assert.match(text, /结构化输入/u)
   assert.match(text, /需求说明/u)
   assert.match(text, /最终交付物/u)
   assert.match(text, /最终交付说明/u)
@@ -790,6 +843,8 @@ test('实时流程：节点聚合、待认领徽标、已走过的通道与点�
   assert.match(text, /1\/1/u, 'dev node shows one of one done')
   assert.ok(classes.includes('buka-workflows-nodeCorner'), 'live nodes show a task corner badge')
   assert.ok(classes.includes('is-taken'), 'traversed channels should be marked')
+  assert.ok(classes.includes('is-graph'), 'the live flow fills the body height')
+  assert.ok(classes.includes('buka-workflows-graphFooter'), 'the legend sits in the pinned footer')
   assert.match(text, /点节点查看/u)
 
   clickButton(tree, '研发')
@@ -797,7 +852,7 @@ test('实时流程：节点聚合、待认领徽标、已走过的通道与点�
   assert.equal(harness.updates[0].taskId, 'task-1', 'a single task opens its drawer directly')
 })
 
-test('看板：五列、岗位行（开始 / 结束合并为启动者）、卡片打开任务抽屉', async () => {
+test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡片打开任务抽屉', async () => {
   const client = await loadClient()
   const { tree, texts } = render(client, {
     route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
@@ -822,7 +877,7 @@ test('看板：五列、岗位行（开始 / 结束合并为启动者）、卡�
   })
   assert.deepEqual(
     titles,
-    ['启动者', '研发', '测试', '发布审批'],
+    ['发起人', '研发', '测试', '发布审批'],
     'start / end share one starter row',
   )
 
@@ -831,7 +886,7 @@ test('看板：五列、岗位行（开始 / 结束合并为启动者）、卡�
     (node) =>
       typeof node.props?.className === 'string' &&
       node.props.className.split(/\s+/).includes('buka-workflows-boardRow') &&
-      textOf(node).includes('启动者'),
+      textOf(node).includes('发起人'),
   )
   assert.ok(starterRow !== null, 'the starter row should exist')
   assert.match(textOf(starterRow), /人（页面启动）/u, 'the row names the starter')
@@ -888,7 +943,7 @@ test('节点任务抽屉：岗位身份、任务数与任务卡', async () => {
   assert.equal(harness.updates[0].taskId, 'task-2', 'the first task card opens its drawer')
 })
 
-test('只读值：没有 payload 契约时按字段逐行展示，不铺原始 JSON', async () => {
+test('只读值：没有任务内容契约时按字段逐行展示，不铺原始 JSON', async () => {
   const client = await loadClient()
   const definition = {
     ...DEFINITION,
@@ -896,7 +951,7 @@ test('只读值：没有 payload 契约时按字段逐行展示，不铺原始 J
       position.id === 'dev'
         ? {
             ...position,
-            taskTypes: position.taskTypes.map((type) => ({ ...type, payload: undefined })),
+            taskTypes: position.taskTypes.map((type) => ({ ...type, content: undefined })),
           }
         : position,
     ),
@@ -918,7 +973,7 @@ test('只读值：没有 payload 契约时按字段逐行展示，不铺原始 J
   assert.doesNotMatch(text, /"requirement"/u, 'no raw JSON dump')
 })
 
-test('人任务：按 output schema 渲染表单，提交走 task/action complete', async () => {
+test('人任务：选动作、按动作表单填写，提交走 task/action complete', async () => {
   const client = await loadClient()
   const requests = []
   const originalFetch = globalThis.fetch
@@ -936,10 +991,16 @@ test('人任务：按 output schema 渲染表单，提交走 task/action complet
       job: { status: 'ready', data: JOB_DETAIL, error: null },
       taskId: 'task-3',
       task: { status: 'ready', data: HUMAN_TASK_DETAIL.task, error: null },
-      taskForm: { values: { approved: 'yes' }, text: '同意发布', error: null, submitting: false },
+      taskForm: {
+        action: 'approve',
+        values: { approved: 'yes' },
+        text: '同意发布',
+        error: null,
+        submitting: false,
+      },
     })
     const text = texts.join(' ')
-    assert.match(text, /填写结果/u)
+    assert.match(text, /接下来做什么/u)
 
     const approved = findBy(
       tree,
@@ -948,7 +1009,7 @@ test('人任务：按 output schema 渲染表单，提交走 task/action complet
     assert.ok(approved !== null, 'approved enum field should render')
     assert.equal(approved.props.value, 'yes')
 
-    clickButton(tree, '提交结果')
+    clickButton(tree, '执行这个动作')
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(requests.length, 1, 'complete should POST exactly once')
     assert.equal(requests[0].url, '/buka-workflows/task/action')
@@ -956,7 +1017,8 @@ test('人任务：按 output schema 渲染表单，提交走 task/action complet
     assert.equal(body.jobId, 'job-1')
     assert.equal(body.taskId, 'task-3')
     assert.equal(body.action, 'complete')
-    assert.deepEqual(body.output, { approved: 'yes' })
+    assert.equal(body.selectedAction, 'approve')
+    assert.deepEqual(body.input, { approved: 'yes' })
     assert.equal(body.text, '同意发布')
   } finally {
     globalThis.fetch = originalFetch
@@ -968,15 +1030,13 @@ test('新建作业：需求在前、结构化输入按契约渲染', async () =>
   const { tree } = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
-    newJob: { open: true, raw: {}, structured: {}, error: null, submitting: false },
+    newJob: { open: true, content: {}, delivery: 'starter', error: null, submitting: false },
   })
-  const raw = findBy(tree, (node) => node.props?.id === 'buka-workflows-newjob-raw-request')
-  const structured = findBy(
+  const requirement = findBy(
     tree,
-    (node) => node.props?.id === 'buka-workflows-newjob-structured-requirement',
+    (node) => node.props?.id === 'buka-workflows-newjob-content-requirement',
   )
-  assert.ok(raw !== null, 'raw input field should render from start.task.payload')
-  assert.ok(structured !== null, 'structured field should render from start.task.output')
+  assert.ok(requirement !== null, 'the start content schema renders the job input form')
   const submit = findBy(
     tree,
     (node) => typeof node.props?.onClick === 'function' && textOf(node).includes('启动作业'),

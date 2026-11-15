@@ -1,5 +1,5 @@
 /**
- * 作业看板：行 = 启动者（开始 / 结束任务合并）+ 岗位，
+ * 作业看板：行 = 发起人（开始 / 结束任务合并）+ 岗位，
  * 列 = 排队 / 待认领 / 进行中 / 已完成 / 异常。
  *
  * 宽屏是网格；窄屏退化成按状态分组的纵向列表。
@@ -130,7 +130,7 @@ function renderBoardRow(page: AppContext, row: BoardRow): React.ReactElement {
 /** 窄屏：按状态分组的纵向列表。 */
 function renderCompactBoard(page: AppContext, rows: BoardRow[]): React.ReactElement {
   const { t } = page
-  // 卡片按任务自己的 position 找行名；启动者行同时覆盖 start 与 end。
+  // 卡片按任务自己的 position 找行名；发起人行同时覆盖 start 与 end。
   const labels = new Map<string, string>()
   for (const row of rows) {
     labels.set(row.id, row.label)

@@ -1,7 +1,7 @@
 /**
  * 机器人驱动：v1 只有内建 `clock`。
  *
- * `clock` 任务在 payload 里带 `until`（ISO 时间）；到点完成，不建会话、不占
+ * `clock` 任务在任务内容里带 `until`（ISO 时间）；到点完成，不建会话、不占
  * 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
  *
  * @module @buka/dsh-plugin-workflows/program/clock
@@ -14,20 +14,21 @@ export const CLOCK_PROGRAM_ID = 'clock'
 
 /** 一个 program 驱动的执行结果。 */
 export interface ProgramRunResult {
-  readonly output: JsonValue
+  /** 一段总结文本，写进任务结果。 */
+  readonly text: string
 }
 
 /** program 驱动接口；未来可注册更多。 */
 export interface ProgramDriver {
   readonly id: string
   /**
-   * 执行一个 program 任务；返回结构化产出。
+   * 执行一个 program 任务。
    *
-   * @param input payload 与取消信号
-   * @returns 结构化产出
+   * @param input 任务内容与取消信号
+   * @returns 结果文本
    */
   run(input: {
-    readonly payload: JsonValue
+    readonly content: JsonValue
     readonly signal: AbortSignal
   }): Promise<ProgramRunResult>
 }
@@ -36,14 +37,14 @@ export interface ProgramDriver {
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
 /**
- * 解析 payload 里的 `until`。
+ * 解析任务内容里的 `until`。
  *
- * @param payload 任务 payload
+ * @param content 任务内容
  * @returns 时间戳（毫秒）；不合法时是 null
  */
-export function clockUntil(payload: JsonValue): number | null {
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null
-  const raw = (payload as Record<string, JsonValue>).until
+export function clockUntil(content: JsonValue): number | null {
+  if (content === null || typeof content !== 'object' || Array.isArray(content)) return null
+  const raw = (content as Record<string, JsonValue>).until
   if (typeof raw !== 'string' || raw.trim() === '') return null
   const parsed = Date.parse(raw)
   return Number.isNaN(parsed) ? null : parsed
@@ -81,17 +82,17 @@ function sleep(delayMs: number, signal: AbortSignal): Promise<void> {
 /** 内建 clock 驱动。 */
 export const clockDriver: ProgramDriver = {
   id: CLOCK_PROGRAM_ID,
-  async run({ payload, signal }) {
-    const until = clockUntil(payload)
+  async run({ content, signal }) {
+    const until = clockUntil(content)
     if (until === null) {
-      throw new Error('clock task payload must contain an ISO timestamp "until"')
+      throw new Error('clock task content must contain an ISO timestamp "until"')
     }
     // 分段等待，避免超过 setTimeout 上限；重启恢复时同样按 until 判断。
     while (Date.now() < until) {
       if (signal.aborted) throw new Error('clock task was cancelled')
       await sleep(until - Date.now(), signal)
     }
-    return { output: { completedAt: new Date().toISOString() } }
+    return { text: `clock 到点：${new Date().toISOString()}` }
   },
 }
 

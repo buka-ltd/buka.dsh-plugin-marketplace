@@ -47,6 +47,8 @@ export function renderWorkflowList(page: AppContext): React.ReactElement {
 function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.ReactElement {
   const { t, actions } = page
   const retired = workflow.status === 'retired'
+  const outdated =
+    typeof workflow.definitionVersion === 'number' && workflow.definitionVersion !== 7
   return h(
     'li',
     { key: workflow.id },
@@ -72,6 +74,7 @@ function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.
             ? h(Tag, { tone: 'neutral' }, `v${workflow.version}`)
             : null,
         ),
+        outdated ? h(Tag, { tone: 'warn' }, t('workflowOutdated')) : null,
         retired ? h(Tag, { tone: 'neutral' }, t('workflowRetired')) : null,
       ),
       typeof workflow.description === 'string' && workflow.description !== ''

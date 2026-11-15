@@ -2,7 +2,7 @@
  * 页面通用小部件：状态标签、加载 / 失败 / 空态、键值行、只读 schema 与二次确认按钮。
  */
 
-import { Button, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, SegmentedTabs, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import React from 'react'
 
 import { h } from '../element.ts'
@@ -92,7 +92,7 @@ export function renderStatusTag(
   return h(Tag, { tone: statusTone(status) }, label)
 }
 
-/** 承办者 / 启动者种类标签。 */
+/** 承办者 / 发起人种类标签。 */
 export function renderActorTag(t: Translate, kind: unknown): React.ReactElement | null {
   if (typeof kind !== 'string' || kind === '') return null
   return h(Tag, { tone: 'neutral' }, t(actorKindKey(kind)))
@@ -207,6 +207,39 @@ export function renderFold(title: string, children: React.ReactNode): React.Reac
     { className: 'buka-workflows-fold' },
     h('summary', { className: 'buka-workflows-foldSummary' }, title),
     h('div', { className: 'buka-workflows-foldBody' }, children),
+  )
+}
+
+/** 抽屉里的分区页签：内容随页签切换；只有一个分区时不画页签。 */
+export function DrawerTabs(props: {
+  label: string
+  tabs: Array<{ id: string; label: string; content: React.ReactNode }>
+}): React.ReactElement {
+  const [active, setActive] = React.useState(props.tabs[0]?.id ?? '')
+  const current = props.tabs.find((tab) => tab.id === active) ?? props.tabs[0]
+  return h(
+    'div',
+    { className: 'buka-workflows-drawerTabbed' },
+    props.tabs.length < 2
+      ? null
+      : h(
+          'div',
+          { className: 'buka-workflows-drawerTabBar' },
+          h(SegmentedTabs, {
+            size: 'sm',
+            className: 'buka-workflows-tabList',
+            label: props.label,
+            value: current?.id ?? '',
+            items: props.tabs.map((tab) => ({
+              value: tab.id,
+              label: tab.label,
+              id: `buka-workflows-drawer-tab-${tab.id}`,
+              panelId: `buka-workflows-drawer-panel-${tab.id}`,
+            })),
+            onChange: (value: string) => setActive(value),
+          }),
+        ),
+    h('div', { className: 'buka-workflows-drawerTabPanel' }, current?.content ?? null),
   )
 }
 

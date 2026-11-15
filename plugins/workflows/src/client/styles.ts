@@ -24,6 +24,8 @@ export const CSS = `
 .buka-workflows-tabs{display:flex;align-items:center;gap:8px;padding:14px 0 0;min-width:0;overflow-x:auto;overscroll-behavior-x:contain}
 .buka-workflows-tabList{width:fit-content;max-width:100%}
 .buka-workflows-body{box-sizing:border-box;width:100%;max-width:960px;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;display:flex;flex-direction:column;padding:28px 0 48px;scrollbar-gutter:stable}
+.buka-workflows-body.is-graph{overflow:hidden;padding-bottom:0}
+.buka-workflows-body.is-graph .buka-workflows-detail,.buka-workflows-body.is-graph .buka-workflows-definitionPane,.buka-workflows-body.is-graph .buka-workflows-graphPane{flex:1 1 auto;min-height:0}
 .buka-workflows-more{position:relative;display:inline-flex}
 .buka-workflows-moreSummary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;height:32px;padding:0 12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;background:0 0}
 .buka-workflows-moreSummary::-webkit-details-marker{display:none}
@@ -88,11 +90,13 @@ export const CSS = `
 .buka-workflows-detailsSummary{cursor:pointer;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;width:fit-content;border-radius:var(--dsw-radius-sm)}
 .buka-workflows-detailsSummary:hover{color:var(--dsw-alias-label-secondary)}
 .buka-workflows-details[open] .buka-workflows-detailsSummary{margin-bottom:4px}
-.buka-workflows-definitionPane{display:flex;flex-direction:column;gap:12px;min-width:0}
+.buka-workflows-definitionPane{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
 .buka-workflows-definitionToolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.buka-workflows-graphPane{display:flex;flex-direction:column;gap:10px;min-width:0}
-.buka-workflows-graphViewport{width:100%;overflow:hidden;overscroll-behavior:contain}
-.buka-workflows-graphScaleBox{position:relative;flex:none;margin:0 auto}
+.buka-workflows-graphPane{display:flex;flex-direction:column;min-width:0;min-height:0}
+.buka-workflows-graphViewport{display:flex;align-items:flex-start;justify-content:center;width:100%;flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
+.buka-workflows-graphScaleBox{position:relative;flex:none;margin:auto}
+.buka-workflows-graphFooter{flex:none;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 24px;padding:10px 0 12px;border-top:0.5px solid var(--dsw-alias-border-l1)}
+.buka-workflows-graphHint{margin:0;flex:1 1 240px;min-width:0}
 .buka-workflows-graphCanvas{position:absolute;left:0;top:0;flex:none}
 .buka-workflows-graphSvg{position:absolute;left:0;top:0;z-index:1;pointer-events:none;overflow:visible}
 .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.7}
@@ -107,7 +111,6 @@ export const CSS = `
 .buka-workflows-edgeLabel.is-back{fill:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-edgeLabel.is-taken{fill:var(--dsw-alias-brand-primary)}
 .buka-workflows-edgeTip{position:absolute;z-index:4;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 2px 10px color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:nowrap;pointer-events:none}
-.buka-workflows-graphCaption{text-align:center}
 .buka-workflows-nodeWrap{position:absolute;z-index:2}
 .buka-workflows-node{position:relative;display:flex;align-items:center;gap:6px;width:100%;height:100%;box-sizing:border-box;margin:0;padding:0 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;overflow:visible}
 button.buka-workflows-node{cursor:pointer}
@@ -132,7 +135,7 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-nodeCorner.is-failed{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 16%,var(--dsw-alias-bg-base));color:var(--dsw-alias-state-error-primary)}
 .buka-workflows-nodeLabel{font-size:12.5px;font-weight:600;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto}
 
-.buka-workflows-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:6px 18px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;width:100%}
+.buka-workflows-legend{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px 18px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;min-width:0}
 .buka-workflows-legendGroup{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .buka-workflows-legendItem{display:inline-flex;align-items:center;gap:5px}
 .buka-workflows-legendNode{box-sizing:border-box;width:20px;height:10px;border-radius:4px;border:1px solid var(--dsw-alias-border-l2)}
@@ -213,6 +216,8 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-attemptMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;overflow-wrap:anywhere}
 .buka-workflows-sessionRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .buka-workflows-result{display:flex;flex-direction:column;gap:12px}
+.buka-workflows-actionRow{display:flex;flex-wrap:wrap;gap:6px}
+.buka-workflows-select{width:100%;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-l0);color:var(--dsw-alias-label-primary);font-size:13px}
 .buka-workflows-taskForm{display:flex;flex-direction:column;gap:10px}
 .buka-workflows-contractBody{display:flex;flex-direction:column;gap:8px;min-width:0}
 .buka-workflows-tagRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -224,10 +229,8 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-clampedText.is-clamped{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;white-space:normal}
 .buka-workflows-drawerText{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;overflow-wrap:anywhere}
 .buka-workflows-required{color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:16px}
-.buka-workflows-typeList{display:flex;flex-direction:column;min-width:0}
-.buka-workflows-typeRow{display:flex;flex-direction:column;gap:5px;padding:12px 0;border-top:0.5px solid var(--dsw-alias-border-l1);min-width:0}
-.buka-workflows-typeRow:first-child{border-top:0;padding-top:0}
-.buka-workflows-typeRow:last-child{padding-bottom:0}
+.buka-workflows-typeList{display:flex;flex-direction:column;gap:10px;min-width:0}
+.buka-workflows-typeCard{display:flex;flex-direction:column;gap:6px;padding:12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);min-width:0}
 .buka-workflows-typeRowHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .buka-workflows-typeName{font-size:13px;font-weight:600;line-height:20px;overflow-wrap:anywhere}
 .buka-workflows-typeTags{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto}
@@ -262,8 +265,10 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-dialogSection{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
 .buka-workflows-dialogSectionTitle{margin:0;font-size:13px;font-weight:600;line-height:20px}
 .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
-.buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(560px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
-.buka-workflows-inspector.buka-workflows-inspector{width:min(460px,100vw)}
+.buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(720px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
+.buka-workflows-inspector.buka-workflows-inspector{width:min(640px,100vw)}
+.buka-workflows-inspector .buka-workflows-drawerHead{padding:16px 20px}
+.buka-workflows-inspector .buka-workflows-drawerBody{padding:18px 20px 28px}
 .buka-workflows-nodeTasks.buka-workflows-nodeTasks{width:min(480px,100vw)}
 @keyframes buka-workflows-drawer-in{from{transform:translateX(16px);opacity:0}to{transform:translateX(0);opacity:1}}
 @media (prefers-reduced-motion:reduce){.buka-workflows-drawer.buka-workflows-drawer{animation:none}}
@@ -284,6 +289,10 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-drawerBody .buka-workflows-sectionTitle{font-size:13px;line-height:20px}
 .buka-workflows-drawerBody .buka-workflows-valueKey{min-width:88px}
 .buka-workflows-drawerBody .buka-workflows-kvKey{min-width:80px}
+.buka-workflows-drawerTabbed{display:flex;flex-direction:column;gap:14px;min-width:0}
+.buka-workflows-drawerTabBar{display:flex;align-items:center;min-width:0;overflow-x:auto;overscroll-behavior-x:contain}
+.buka-workflows-drawerTabPanel{display:flex;flex-direction:column;gap:16px;min-width:0}
+.buka-workflows-drawerStack{display:flex;flex-direction:column;gap:16px;min-width:0}
 .buka-workflows-sectionHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:11px;line-height:17px;overflow-wrap:anywhere}
 .buka-workflows-fold{border-top:0.5px solid var(--dsw-alias-border-l1);padding-top:10px;min-width:0}
 .buka-workflows-foldSummary{cursor:pointer;width:fit-content;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600;line-height:20px;border-radius:var(--dsw-radius-sm)}
@@ -296,6 +305,9 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-title{font-size:18px;line-height:26px}
 .buka-workflows-titleSub{flex:1 1 100%}
 .buka-workflows-body{padding:20px 0 36px}
+.buka-workflows-body.is-graph{padding-bottom:0}
+.buka-workflows-graphFooter{gap:6px;padding-bottom:8px}
+.buka-workflows-legend{justify-content:flex-start;width:100%}
 .buka-workflows-sectionTitle{font-size:14px}
 .buka-workflows-overviewCard{padding:10px 12px}
 .buka-workflows-valueRow{flex-direction:column;gap:2px}

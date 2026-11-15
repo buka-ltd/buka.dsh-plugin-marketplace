@@ -27,7 +27,7 @@ import type {
 /**
  * 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的
  * `init`）；version 2 把执行者 / 承办者的 `kind: "robot"` 改成 `worker`、
- * driver `program` 改成 `robot`，version 3 把定义升到 v5 并给任务补
+ * driver `program` 改成 `robot`，version 3 把定义升到 v5 / v6 并给任务补
  * `channel`；旧版本记录仍可读取，打开后由 `init` 归一 / 升级。
  */
 export const WORKFLOW_DOMAIN_VERSION = 3
@@ -76,16 +76,16 @@ const claimantSchema = z
   })
   .passthrough()
 
-/** 启动者。 */
+/** 发起人。 */
 const starterSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human') }).passthrough(),
   z.object({ kind: z.literal('session'), sessionId: z.string() }).passthrough(),
 ])
 
-/** 任务结果。 */
+/** 任务结果；v6 及更早的记录带 output，打开后按旧版本作业处理。 */
 const taskResultSchema = z
   .object({
-    output: z.unknown().nullable(),
+    output: z.unknown().nullable().optional(),
     text: z.string(),
     textBytes: z.number().int().nonnegative(),
     textFile: z.string().nullable(),
@@ -129,7 +129,10 @@ const jobRecordSchema = z
     definition: looseObject,
     status: jobStatusSchema,
     starter: starterSchema,
-    input: z.object({ raw: z.unknown(), structured: z.unknown().optional() }).passthrough(),
+    // v7：input 是发起人填的任务内容；v6 及更早是 { raw, structured }。
+    input: z.unknown(),
+    // v7 新增；旧记录没有，按旧版本作业处理。
+    delivery: z.unknown().optional(),
     inputSummary: z.string(),
     error: z.string().nullable(),
     createdAt: z.string(),
@@ -145,9 +148,11 @@ const taskRecordSchema = z
     jobId: z.string().min(1),
     position: z.string().min(1),
     type: z.string().min(1),
-    // v5 新增；v4 记录没有这个字段，由 store.init() 回填。
+    // v5 新增；v4 记录没有这个字段。
     channel: z.string().nullable().optional(),
-    payload: z.unknown(),
+    // v7：任务内容。v6 及更早的记录只有 payload，打开后按旧版本作业处理。
+    content: z.unknown().optional(),
+    payload: z.unknown().optional(),
     deps: z.array(z.string()),
     status: taskStatusSchema,
     createdBy: z.object({ taskId: z.string(), position: z.string() }).passthrough().nullable(),

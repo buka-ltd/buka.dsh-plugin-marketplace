@@ -1,5 +1,5 @@
 /**
- * 工作流页的「定义结构」Tab：可交互的分层图；点节点 / 通道在右侧抽屉里看细节。
+ * 工作流页的「结构图」Tab：可交互的分层图；点节点 / 通道在右侧抽屉里看细节。
  */
 
 import { Button, IconInfoOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -12,7 +12,7 @@ import { channelsOf, currentDefinition, positionsOf } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { renderEmpty, renderExecutor, renderFailure, renderLoading } from './parts.ts'
 
-/** 定义结构视图。 */
+/** 结构图视图。 */
 export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
   const { t, state, actions } = page
   const loaded = state.workflow
@@ -84,12 +84,12 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
         },
         t('definitionInfo'),
       ),
-      h('span', { className: 'buka-workflows-hint' }, t('definitionHint')),
     ),
     renderWorkflowGraph(page, {
       nodes,
       edges,
       mode: 'definition',
+      caption: t('definitionHint'),
       selectedNodeId,
       selectedChannelId,
       onNodeClick: (id) => {

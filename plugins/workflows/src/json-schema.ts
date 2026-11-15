@@ -1,21 +1,21 @@
 /**
- * 受限 JSON Schema 子集：定义校验、运行期结果校验与模板路径检查。
+ * 受限 JSON Schema 子集：任务内容、动作表单与作业输入共用的声明格式。
  *
- * 工作流 v5 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
- * 执行者必须交回的结构化结果；开始 / 结束节点也各自声明任务契约。本模块
+ * 工作流 v7 里任务类型用 `content` 声明创建者必须提供的任务内容，人任务类型
+ * 的动作用 `input` 声明表单，开始 / 结束节点也各自声明任务内容格式。本模块
  * 只处理声明与值之间的纯逻辑（不读盘、不依赖 DSH）：
  *
- * - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
+ * - `parseJsonSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
  *   由编排 agent 生成，所以这里只放行一组可移植关键字，避免把任意 schema
  *   直接当成工具参数；
- * - `schemaProblems`：运行期按声明的 schema 校验 payload / output；
- * - `resolveOutputPath`：定义校验时检查 `{{start.output.<path>}}` 这类模板
- *   引用的路径是否真的在目标 schema 里；
- * - `schemaJson`：给 prompt 用的 schema 序列化。
+ * - `schemaProblems`：运行期按声明的 schema 校验任务内容与动作表单；
+ * - `resolveSchemaPath`：定义校验时检查 `{{content.<path>}}` 这类模板引用
+ *   的路径是否真的在目标 schema 里；
+ * - `schemaJson`：给提示词用的 schema 序列化。
  *
  * 本模块不修改调用方传入的对象。
  *
- * @module @buka/dsh-plugin-workflows/output
+ * @module @buka/dsh-plugin-workflows/json-schema
  */
 
 /** 单份 schema 序列化后的字节上限。 */
@@ -49,20 +49,20 @@ const ALLOWED_KEYWORDS = new Set([
 /** `description` 的最大字符数。 */
 const MAX_DESCRIPTION_LENGTH = 1000
 
-/** 运行期校验的递归深度上限（定义已经过 parseOutputSchema，正常不会触发）。 */
+/** 运行期校验的递归深度上限（定义已经过 parseJsonSchema，正常不会触发）。 */
 const MAX_CHECK_DEPTH = 32
 
 /** 校验通过后保留的 JSON Schema 子集；只含 ALLOWED_KEYWORDS。 */
-export interface OutputSchema {
+export interface JsonSchema {
   description?: string
   type?: string
   enum?: unknown[]
   const?: unknown
-  oneOf?: OutputSchema[]
-  properties?: Record<string, OutputSchema>
+  oneOf?: JsonSchema[]
+  properties?: Record<string, JsonSchema>
   required?: string[]
   additionalProperties?: boolean
-  items?: OutputSchema
+  items?: JsonSchema
 }
 
 /** 定义校验时记录错误的回调。 */
@@ -93,25 +93,36 @@ function isPrimitive(value: unknown): boolean {
   )
 }
 
+/** 顶层类型约束：表单 / 作业输入要求对象，任务内容允许字符串等其它值。 */
+export interface ParseSchemaOptions {
+  readonly root?: 'object' | 'value' | undefined
+}
+
 /**
- * 校验并规范化一份 payload / output schema。
+ * 校验并规范化一份 schema。
  *
- * 顶层必须是 `type: "object"`：任务的 payload 与结构化结果都是 JSON 对象，
- * 页面表单与 `buka_task_complete` 都按对象读写。返回只包含合法关键字的新对象；
+ * 顶层默认必须是 `type: "object"`；任务内容允许其它类型，所以任务类型与结束
+ * 节点的 `content` 用 `root: "value"` 解析。返回只包含合法关键字的新对象；
  * 无法构成 schema 时返回 null（错误已记录）。
  *
  * @param raw 声明的 schema
  * @param path 出错时使用的路径前缀
  * @param fail 记录错误的回调
+ * @param options 顶层类型约束
  * @returns 规范化后的 schema；不合法时是 `null`
  */
-export function parseOutputSchema(raw: unknown, path: string, fail: FailFn): OutputSchema | null {
+export function parseJsonSchema(
+  raw: unknown,
+  path: string,
+  fail: FailFn,
+  options: ParseSchemaOptions = {},
+): JsonSchema | null {
   if (!isPlainObject(raw)) {
     fail(path, 'must be a JSON Schema object')
     return null
   }
-  if (raw.type !== 'object') {
-    fail(`${path}.type`, 'must be "object": task payload and results are JSON objects')
+  if ((options.root ?? 'object') === 'object' && raw.type !== 'object') {
+    fail(`${path}.type`, 'must be "object": forms and job input are JSON objects')
     return null
   }
   const state = { properties: 0 }
@@ -141,7 +152,7 @@ function walkSchema(
   depth: number,
   state: { properties: number },
   fail: FailFn,
-): OutputSchema | null {
+): JsonSchema | null {
   if (!isPlainObject(raw)) {
     fail(path, 'must be a JSON Schema object')
     return null
@@ -162,7 +173,7 @@ function walkSchema(
   }
   if (invalid) return null
 
-  const schema: OutputSchema = {}
+  const schema: JsonSchema = {}
   if (raw.description !== undefined) {
     if (typeof raw.description !== 'string') {
       fail(`${path}.description`, 'must be a string')
@@ -187,7 +198,7 @@ function walkSchema(
       fail(`${path}.oneOf`, 'must be a non-empty array of schemas')
       return null
     }
-    const branches: OutputSchema[] = []
+    const branches: JsonSchema[] = []
     for (const [index, branch] of raw.oneOf.entries()) {
       const parsed = walkSchema(branch, `${path}.oneOf[${index}]`, depth + 1, state, fail)
       if (parsed === null) return null
@@ -235,7 +246,7 @@ function walkSchema(
   }
 
   if (type === 'object') {
-    const properties: Record<string, OutputSchema> = {}
+    const properties: Record<string, JsonSchema> = {}
     const names: string[] = []
     if (raw.properties !== undefined) {
       if (!isPlainObject(raw.properties)) {
@@ -342,17 +353,14 @@ function walkSchema(
  * @param segments 路径段（不含 `start.output` 前缀）
  * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
  */
-export function resolveOutputPath(
-  schema: OutputSchema,
-  segments: readonly string[],
-): string | null {
-  let current: OutputSchema = schema
+export function resolveSchemaPath(schema: JsonSchema, segments: readonly string[]): string | null {
+  let current: JsonSchema = schema
   const walked: string[] = []
   for (const segment of segments) {
     if (!isPlainObject(current)) return 'points into a value that is not an object'
     if (Array.isArray(current.oneOf)) {
       for (const branch of current.oneOf) {
-        const reason = resolveOutputPath(branch, segments.slice(walked.length))
+        const reason = resolveSchemaPath(branch, segments.slice(walked.length))
         if (reason !== null) return 'is not declared in every oneOf variant'
       }
       return null
@@ -361,14 +369,14 @@ export function resolveOutputPath(
       if (!/^\d+$/u.test(segment)) return 'uses a non-numeric segment on an array'
       if (!isPlainObject(current.items))
         return 'descends into an array that does not declare "items"'
-      current = current.items as OutputSchema
+      current = current.items as JsonSchema
       walked.push(segment)
       continue
     }
     if (current.type !== 'object') return 'points into a value that is not an object'
     const properties = isPlainObject(current.properties) ? current.properties : {}
     if (!Object.hasOwn(properties, segment)) return 'is not declared'
-    current = properties[segment] as OutputSchema
+    current = properties[segment] as JsonSchema
     walked.push(segment)
   }
   return null
@@ -381,7 +389,7 @@ export function resolveOutputPath(
  * @param data 待校验的值
  * @returns 可读问题列表；空数组表示通过
  */
-export function schemaProblems(schema: OutputSchema, data: unknown): string[] {
+export function schemaProblems(schema: JsonSchema, data: unknown): string[] {
   const problems: string[] = []
   checkValue(schema, data, '', problems, 0)
   return problems
@@ -398,7 +406,7 @@ export function schemaProblems(schema: OutputSchema, data: unknown): string[] {
  * @returns 无返回值
  */
 function checkValue(
-  schema: OutputSchema,
+  schema: JsonSchema,
   value: unknown,
   path: string,
   problems: string[],
@@ -459,7 +467,7 @@ function checkValue(
       }
       if (isPlainObject(schema.items)) {
         value.forEach((item, index) => {
-          checkValue(schema.items as OutputSchema, item, `${path}[${index}]`, problems, depth + 1)
+          checkValue(schema.items as JsonSchema, item, `${path}[${index}]`, problems, depth + 1)
         })
       }
       return
@@ -519,6 +527,6 @@ function actualType(value: unknown): string {
  * @param schema 声明的 schema
  * @returns 格式化后的 JSON
  */
-export function schemaJson(schema: OutputSchema): string {
+export function schemaJson(schema: JsonSchema): string {
   return JSON.stringify(schema, null, 2)
 }

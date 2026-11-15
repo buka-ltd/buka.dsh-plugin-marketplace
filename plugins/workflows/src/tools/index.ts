@@ -3,9 +3,9 @@
  *
  * 可见性：
  * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
- * - 启动 / 状态 / 取消工具对普通会话可见（启动者 = 当前会话）；
+ * - 启动 / 状态 / 取消工具对普通会话可见（发起人 = 当前会话）；
  * - 执行工具（建任务 / 提交结果 / 看板 / 任务 / 附件）只对引擎创建的任务会话、
- *   助理会话与启动者会话可见，并在 `execute` 里按会话再校验一次。
+ *   助理会话与发起人会话可见，并在 `execute` 里按会话再校验一次。
  *
  * @module @buka/dsh-plugin-workflows/tools
  */
@@ -14,7 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolActivationContext, ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import type { JsonValue } from '../domain/types.ts'
+import type { DeliveryRule, JsonValue } from '../domain/types.ts'
 import type { WorkflowEngine } from '../engine/engine.ts'
 import type { ResolvedOptions } from '../options.ts'
 
@@ -25,9 +25,9 @@ export interface WorkflowToolDeps {
   readonly options: ResolvedOptions
   /** 编排 preset 根会话的可见性条件。 */
   readonly orchestratorVisible: (context: ToolActivationContext) => boolean
-  /** 执行会话（任务 / 助理 / 启动者）的可见性条件。 */
+  /** 执行会话（任务 / 助理 / 发起人）的可见性条件。 */
   readonly executionVisible: (context: ToolActivationContext) => boolean | Promise<boolean>
-  /** 启动者 / 执行会话的可见性条件（状态 / 取消）。 */
+  /** 发起人 / 执行会话的可见性条件（状态 / 取消）。 */
   readonly starterVisible: (context: ToolActivationContext) => boolean | Promise<boolean>
   /** 调用时再校验一次编排 preset（防止绕过可见性直接调用）。 */
   readonly assertOrchestrator: (agent: { id?: unknown } | null | undefined) => void
@@ -36,9 +36,42 @@ export interface WorkflowToolDeps {
 /** 工具输出 schema 里 `type: "json"` 对应的值类型；运行时就是 JSON。 */
 type ToolJson = NonNullable<ToolResult['meta']>
 
-/** 把已知 JSON 兼容的运行时对象标成工具输出的 json 类型。 */
+/**
+ * 把已知 JSON 兼容的运行时对象标成工具输出的 json 类型。
+ *
+ * @param value 运行时的 JSON 对象
+ * @returns 工具输出可接受的 json 值
+ */
 function toolJson(value: unknown): ToolJson {
   return value as ToolJson
+}
+
+/** 模型可读的任务投影：不带岗位 / 通道等编排信息。 */
+function taskForModel(task: Record<string, unknown>, withContent = false): Record<string, unknown> {
+  const result = task.result as Record<string, unknown> | null | undefined
+  return {
+    id: task.id,
+    type: task.typeLabel ?? task.type,
+    status: task.status,
+    deps: task.deps,
+    ...(withContent ? { content: task.content } : {}),
+    ...(result === null || result === undefined
+      ? {}
+      : {
+          text: result.text,
+          ...(result.action === undefined ? {} : { action: result.action }),
+          ...(result.input === undefined ? {} : { input: result.input }),
+          attachments: Array.isArray(result.attachments)
+            ? (result.attachments as Record<string, unknown>[]).map((attachment) => ({
+                id: attachment.id,
+                name: attachment.name,
+                bytes: attachment.bytes,
+                mime: attachment.mime,
+                description: attachment.description,
+              }))
+            : [],
+        }),
+  }
 }
 
 /** 一段模型可读文本。 */
@@ -52,39 +85,42 @@ function sessionIdOf(context: { agent?: { id?: unknown } }): string {
 }
 
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v5) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
 {
-  "version": 5, "name": "...", "description": "...",
+  "version": 7, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
-    "task": {
-      "payload": <JSON Schema object: the raw input form>,
-      "output":  <JSON Schema object: the first structured input>
-    },
+    "content": <JSON Schema object: what the starter fills in>,
     "next": [
       { "channel": "<channel id leaving start>", "type": "<task type id>",
-        "payload": { ...templates... }, "dependsOn": ["$start"] }
+        "content": { ...templates over {{content.<path}}...} }
     ]
   },
-  "end": { "task": { "payload": <JSON Schema object: the final deliverable> } },
+  "end": { "content": <JSON Schema object: the final report> },
   "positions": [
-    { "id": "dev", "label": "研发", "description": "...",
+    { "id": "dev", "label": "研发", "note": "<optional note for whoever maintains this flow>",
       "executor": { "kind": "worker", "name": "<registered worker>" } | { "kind": "human" },
       "taskTypes": [
-        { "id": "dev.implement", "label": "开发", "description": "...",
-          "payload": <JSON Schema object>, "output": <JSON Schema object>,
-          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant worker>" | null,
-          "mode": "plan" | null }
+        { "id": "dev.implement", "label": "开发",
+          "definition": "<what this kind of task is and what to do; preset facts live here>",
+          "content": <JSON Schema object: the task content the creator must supply>,
+          "assistant": "<assistant worker>" | null, "mode": "plan" | null,
+          "actions": [   // human positions only
+            { "id": "pass", "label": "通过",
+              "input": <JSON Schema object: the form the human fills, optional>,
+              "creates": [ { "channel": "<channel id from this position>", "type": "<task type id>",
+                             "content": { "field": "{{input.reason}}" } } ] }
+          ] }
       ] }
   ],
   "channels": [
     { "id": "start.dev", "label": "受理", "from": "start", "to": "dev" },
     { "id": "dev.qa", "label": "提测", "from": "dev", "to": "qa", "types": ["qa.verify"] },
-    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
+    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.fix"], "back": true },
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Multiple channels may connect the same ordered pair and their type whitelists may overlap; tasks are created by channel id, and the target position comes from the channel. Channels into "end" cannot whitelist types. Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". start.next entries must leave the start node via a channel and depend on "$start". Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Channels carry no prompt: instructions live in task payloads and task type contracts.`
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`
 
 /**
  * 注册全部工作流工具。
@@ -106,12 +142,12 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
   register(
     defineTool({
       name: 'buka_workflow_save',
-      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v5 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v7 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
           type: 'json',
           required: true,
-          description: 'The complete workflow v5 definition object.',
+          description: 'The complete workflow v6 definition object.',
         },
         id: { type: 'string', description: 'Existing workflow id; omit to create a new workflow.' },
       },
@@ -229,10 +265,18 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
     defineTool({
       name: 'buka_job_start',
       description:
-        'Start a workflow job from this session. The starter is this session: the start task comes back as a new message in this conversation, asking you to convert the raw request into the first structured input and submit it with buka_task_complete. Use /job instead when the host supports commands.',
+        'Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema; on mismatch the error lists the missing fields). The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.',
       parameters: {
         workflowId: { type: 'string', required: true, description: 'Workflow id to start.' },
-        request: { type: 'string', required: true, description: 'The raw request / input text.' },
+        content: {
+          type: 'json',
+          description: 'Workflow input matching the start.content schema; omit for no input.',
+        },
+        delivery: {
+          type: 'json',
+          description:
+            'How the end task comes back: {"kind":"starter"} (default) or {"kind":"assistant","name":"<assistant worker>"}.',
+        },
       },
       output: {
         schema: {
@@ -253,14 +297,15 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
         const engine = await ready()
         const job = await engine.createJobFromSession({
           workflowId: args.workflowId,
-          rawInput: { request: args.request },
+          content: (args.content ?? {}) as JsonValue,
           sessionId,
+          delivery: args.delivery as DeliveryRule | undefined,
         })
         return {
           jobId: job.id,
           seq: job.seq,
           workflowName: job.workflowName,
-          message: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话；按它给的结构化输入契约调用 buka_task_complete 提交后，作业进入看板调度。`,
+          message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`,
         }
       },
     }),
@@ -268,6 +313,8 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(defineJobStatusTool(ready), starterVisible)
   register(defineJobCancelTool(ready), starterVisible)
+  register(defineTaskTargetsTool(ready), executionVisible)
+  register(defineTaskActionsTool(ready), executionVisible)
   register(defineTaskCreateTool(ready), executionVisible)
   register(defineTaskCompleteTool(ready), executionVisible)
   register(defineBoardTool(ready), executionVisible)
@@ -357,34 +404,75 @@ function defineJobCancelTool(ready: () => Promise<WorkflowEngine>) {
   })
 }
 
+/** 可创建目标工具。 */
+function defineTaskTargetsTool(ready: () => Promise<WorkflowEngine>) {
+  return defineTool({
+    name: 'buka_task_targets',
+    description:
+      'List the tasks this task can create next in the current job. Each target carries the content schema it expects. Call this before buka_task_create.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { targets: { type: 'json', required: true } },
+      },
+      render: (_args, value) => text(JSON.stringify(value.targets, null, 2)),
+    },
+    async execute(_args, exec) {
+      const sessionId = sessionIdOf(exec)
+      if (sessionId === '') throw new Error('buka_task_targets must be called from a task session')
+      const engine = await ready()
+      return { targets: toolJson(engine.creatableTargetsForSession(sessionId)) }
+    },
+  })
+}
+
+/** 人任务动作工具。 */
+function defineTaskActionsTool(ready: () => Promise<WorkflowEngine>) {
+  return defineTool({
+    name: 'buka_task_actions',
+    description:
+      'List the actions the human task this session is handling can take: each action carries a label and, when it needs input, a form schema. Pick one, fill the form, then call buka_task_complete with `action` (and `input`).',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { actions: { type: 'json', required: true } },
+      },
+      render: (_args, value) => text(JSON.stringify(value.actions, null, 2)),
+    },
+    async execute(_args, exec) {
+      const sessionId = sessionIdOf(exec)
+      if (sessionId === '') throw new Error('buka_task_actions must be called from a task session')
+      const engine = await ready()
+      return { actions: toolJson(engine.taskActionsForSession(sessionId)) }
+    },
+  })
+}
+
 /** 派生任务工具。 */
 function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
     name: 'buka_task_create',
     description:
-      'Create a task on the current job board (callable any number of times while executing a task). The engine validates the channel (it must start at your position and allow the task type), payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.',
+      'Create a task in the current job (callable any number of times while executing a task). Call buka_task_targets first to see the available targets and their content schema. Dependencies default to the current task when omitted. The engine validates the content, dependencies (must exist in this job, no cycles) and the workflow budget.',
     parameters: {
-      channel: {
+      target: {
         type: 'string',
         required: true,
-        description:
-          'Channel id to dispatch along (listed in the prompt under "你可以派发的任务"). It must start at your position and allow the task type; the target position comes from the channel.',
+        description: 'Target id from buka_task_targets ("end" for the final delivery task).',
       },
-      type: {
-        type: 'string',
-        required: true,
-        description: 'Task type id declared by the target position ("end" for the end task).',
-      },
-      payload: {
+      content: {
         type: 'json',
         required: true,
-        description:
-          'Task payload matching the task type payload schema; templates are rendered when the task starts.',
+        description: 'Task content matching the target content schema.',
       },
       deps: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Task ids in this job that must complete first.',
+        description: 'Task ids in this job that must complete first; omit to depend on this task.',
       },
     },
     output: {
@@ -402,12 +490,15 @@ function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
       if (sessionId === '') throw new Error('buka_task_create must be called from a task session')
+      const target = typeof args.target === 'string' ? args.target.trim() : ''
+      if (target === '') {
+        throw new Error('buka_task_create requires a target from buka_task_targets')
+      }
       const engine = await ready()
-      const task = await engine.createTaskFromSession({
+      const task = await engine.createTaskFromTarget({
         sessionId,
-        channel: args.channel,
-        type: args.type,
-        payload: (args.payload ?? {}) as JsonValue,
+        target,
+        content: (args.content ?? {}) as JsonValue,
         deps: Array.isArray(args.deps) ? args.deps : [],
       })
       return { taskId: task.id, status: task.status }
@@ -420,14 +511,21 @@ function defineTaskCompleteTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
     name: 'buka_task_complete',
     description:
-      'Submit the structured result of the task this session is executing. The engine validates `output` against the task type output schema (invalid output is returned as an error so you can correct it in the same turn), copies any attachments into the job attachment library, and advances the workflow.',
+      'Submit the result of the task this session is executing: a summary `text` plus optional attachments. There is no structured result schema. Assistants of a human task also pass `action` (from buka_task_actions) and the action `input`.',
     parameters: {
-      output: {
-        type: 'json',
+      text: {
+        type: 'string',
         required: true,
-        description: 'Structured result matching the task type output schema.',
+        description: 'Human-readable summary of the result.',
       },
-      text: { type: 'string', description: 'Optional human-readable summary.' },
+      action: {
+        type: 'string',
+        description: 'Human tasks only: the action id from buka_task_actions.',
+      },
+      input: {
+        type: 'json',
+        description: 'Human tasks only: the form values for the chosen action.',
+      },
       attachments: {
         type: 'array',
         items: { type: 'json' },
@@ -456,8 +554,9 @@ function defineTaskCompleteTool(ready: () => Promise<WorkflowEngine>) {
       const engine = await ready()
       const result = await engine.completeTaskFromSession({
         sessionId,
-        output: (args.output ?? {}) as JsonValue,
         text: typeof args.text === 'string' ? args.text : '',
+        action: typeof args.action === 'string' ? args.action : undefined,
+        input: args.input as JsonValue | undefined,
         attachments: args.attachments,
       })
       return { taskId: result.task.id, status: result.task.status, jobStatus: result.job.status }
@@ -470,7 +569,7 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
     name: 'buka_job_board',
     description:
-      'Read the read-only board of the job this session is executing: every task with status, dependencies, claimant and result summary. Useful to gather task ids when creating tasks across branches.',
+      'Read the tasks of the job this session is executing: id, type, status, dependencies, result text and attachments. Useful to gather task ids when creating follow-up tasks.',
     parameters: {},
     output: {
       schema: {
@@ -484,13 +583,11 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
       render: (_args, value) => {
         const job = value.job as Record<string, unknown>
         const tasks = Array.isArray(value.tasks) ? value.tasks : []
-        const lines = [
-          `作业 #${String(job.seq)}「${String(job.workflowName)}」状态 ${String(job.status)}`,
-        ]
+        const lines = [`作业 #${String(job.seq)} 状态 ${String(job.status)}`]
         for (const task of tasks) {
           const record = task as Record<string, unknown>
           lines.push(
-            `- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] via=${record.channel === null || record.channel === undefined ? '-' : String(record.channel)} deps=${Array.isArray(record.deps) ? record.deps.join(',') : ''}`,
+            `- ${String(record.id)} ${String(record.type)} [${String(record.status)}] deps=${Array.isArray(record.deps) ? record.deps.join(',') : ''}`,
           )
         }
         return text(lines.join('\n'))
@@ -503,7 +600,12 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
       if (reference === null) throw new Error('this session is not executing a workflow task')
       const detail = await engine.jobDetail(reference.jobId)
       if (detail === null) throw new Error('job not found')
-      return { job: toolJson(detail.job), tasks: toolJson(detail.tasks) }
+      const job = detail.job as Record<string, unknown>
+      const tasks = Array.isArray(detail.tasks) ? (detail.tasks as Record<string, unknown>[]) : []
+      return {
+        job: toolJson({ seq: job.seq, status: job.status }),
+        tasks: toolJson(tasks.map((task) => taskForModel(task))),
+      }
     },
   })
 }
@@ -513,7 +615,7 @@ function defineTaskGetTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
     name: 'buka_task_get',
     description:
-      'Read one task of the job this session is executing: payload, dependencies, attempts, result and attachments.',
+      'Read one task of the job this session is executing: content, dependencies, result and attachments.',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task id on the current job board.' },
     },
@@ -532,7 +634,7 @@ function defineTaskGetTool(ready: () => Promise<WorkflowEngine>) {
       if (reference === null) throw new Error('this session is not executing a workflow task')
       const detail = engine.taskDetail(reference.jobId, args.taskId)
       if (detail === null) throw new Error(`task not found: ${args.taskId}`)
-      return { task: toolJson(detail) }
+      return { task: toolJson(taskForModel(detail, true)) }
     },
   })
 }

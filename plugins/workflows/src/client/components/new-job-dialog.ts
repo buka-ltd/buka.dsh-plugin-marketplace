@@ -1,8 +1,8 @@
 /**
- * 新建作业对话框：先填需求（原始输入），再填启动任务的结构化输入。
+ * 新建作业对话框：填发起人的任务内容，并选择结束任务怎么交回。
  *
- * 结构化输入会按开始任务的 output schema 被 Host 校验，所以不能省略；这里把它
- * 解释成「启动任务整理出的字段」，而不是一个技术概念。
+ * 任务内容按开始节点的 `content` schema 校验；交回方式只有两档——交回发起人，
+ * 或交给一个助理代收。
  */
 
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -13,96 +13,75 @@ import { currentDefinition } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { renderJsonFallback, renderSchemaFields, schemaFields } from '../schema.ts'
 import type { JsonSchema } from '../types.ts'
-import { isRecord } from '../types.ts'
+import { asArray, isRecord } from '../types.ts'
 
 /** 新建作业对话框。 */
 export function renderNewJobDialog(page: AppContext): React.ReactElement {
   const { t, state, actions } = page
   const dialog = state.newJob
   const definition = currentDefinition(state)
-  const start = definition?.start?.task
-  const rawSchema: JsonSchema | null = isRecord(start?.payload)
-    ? (start.payload as JsonSchema)
+  const contentSchema: JsonSchema | null = isRecord(definition?.start?.content)
+    ? (definition.start.content as JsonSchema)
     : null
-  const structuredSchema: JsonSchema | null = isRecord(start?.output)
-    ? (start.output as JsonSchema)
-    : null
-  const rawHasFields = schemaFields(rawSchema).length > 0
-  const structuredHasFields = schemaFields(structuredSchema).length > 0
+  const hasFields = schemaFields(contentSchema).length > 0
+  const assistants = asArray<{ name?: string; description?: string }>(
+    state.workflow.data?.assistants,
+  ).filter((assistant) => typeof assistant.name === 'string' && assistant.name !== '')
 
-  const rawSection = h(
+  const contentSection = h(
     'section',
-    { key: 'raw', className: 'buka-workflows-dialogSection' },
-    h('h3', { className: 'buka-workflows-dialogSectionTitle' }, t('newJobRawTitle')),
-    h('p', { className: 'buka-workflows-fieldHint' }, t('newJobRawHint')),
-    ...(rawHasFields
+    { key: 'content', className: 'buka-workflows-dialogSection' },
+    h('h3', { className: 'buka-workflows-dialogSectionTitle' }, t('newJobContentTitle')),
+    h('p', { className: 'buka-workflows-fieldHint' }, t('newJobContentHint')),
+    ...(hasFields
       ? renderSchemaFields(page, {
-          schema: rawSchema,
-          values: dialog.raw,
-          onChange: actions.setNewJobRaw,
-          idPrefix: 'buka-workflows-newjob-raw',
+          schema: contentSchema,
+          values: dialog.content,
+          onChange: actions.setNewJobContent,
+          idPrefix: 'buka-workflows-newjob-content',
         })
       : [
-          h(
-            'div',
-            { key: 'raw-fallback', className: 'buka-workflows-field' },
-            h(
-              'label',
-              {
-                className: 'buka-workflows-fieldLabel',
-                htmlFor: 'buka-workflows-newjob-raw-request',
-              },
-              t('newJobRawFallback'),
-              h('span', { className: 'buka-workflows-required' }, ` · ${t('schemaFieldRequired')}`),
-            ),
-            h('textarea', {
-              id: 'buka-workflows-newjob-raw-request',
-              className: 'buka-workflows-textarea',
-              rows: 4,
-              value: dialog.raw.request ?? '',
-              placeholder: t('newJobRawPlaceholder'),
-              onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) =>
-                actions.setNewJobRaw('request', event.target.value),
-            }),
+          renderJsonFallback(
+            page,
+            dialog.content.__json ?? '',
+            (next) => actions.setNewJobContent('__json', next),
+            'buka-workflows-newjob-content-json',
           ),
         ]),
   )
 
-  const structuredSection = h(
+  const deliverySection = h(
     'section',
-    { key: 'structured', className: 'buka-workflows-dialogSection' },
-    h('h3', { className: 'buka-workflows-dialogSectionTitle' }, t('newJobStructuredTitle')),
-    h('p', { className: 'buka-workflows-fieldHint' }, t('newJobStructuredHint')),
-    ...(structuredHasFields
-      ? renderSchemaFields(page, {
-          schema: structuredSchema,
-          values: dialog.structured,
-          onChange: actions.setNewJobStructured,
-          idPrefix: 'buka-workflows-newjob-structured',
-        })
-      : [
+    { key: 'delivery', className: 'buka-workflows-dialogSection' },
+    h('h3', { className: 'buka-workflows-dialogSectionTitle' }, t('newJobDeliveryTitle')),
+    h('p', { className: 'buka-workflows-fieldHint' }, t('newJobDeliveryHint')),
+    h(
+      'div',
+      { className: 'buka-workflows-field' },
+      h(
+        'select',
+        {
+          className: 'buka-workflows-select',
+          value: dialog.delivery,
+          onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+            actions.setNewJobDelivery(event.target.value),
+        },
+        h('option', { value: 'starter' }, t('newJobDeliveryStarter')),
+        ...assistants.map((assistant) =>
           h(
-            'details',
-            { key: 'structured-json', className: 'buka-workflows-details' },
-            h(
-              'summary',
-              { className: 'buka-workflows-detailsSummary' },
-              t('newJobStructuredAdvanced'),
-            ),
-            renderJsonFallback(
-              page,
-              dialog.structured.__json ?? '',
-              (next) => actions.setNewJobStructured('__json', next),
-              'buka-workflows-newjob-structured-json',
-            ),
+            'option',
+            { key: assistant.name, value: `assistant:${assistant.name}` },
+            `${t('newJobDeliveryAssistant')} · ${assistant.name}`,
           ),
-        ]),
+        ),
+      ),
+    ),
   )
 
   const body: React.ReactNode[] = [
     h('p', { key: 'hint', className: 'buka-workflows-hint' }, t('newJobHint')),
-    rawSection,
-    structuredSection,
+    contentSection,
+    deliverySection,
     dialog.error === null
       ? null
       : h(

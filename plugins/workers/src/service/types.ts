@@ -26,7 +26,7 @@ export interface AgentOptions {
 /** 两个入口共用的会话请求字段；必填字段由入口在运行时校验。 */
 export interface WorkerSessionRequestBase {
   worker?: string
-  /** 调用方 / 启动者所在的 agent；只用于挂 preset（`agentPreset` 缺失时）。 */
+  /** 调用方 / 发起人所在的 agent；只用于挂 preset（`agentPreset` 缺失时）。 */
   agent?: { id: string; ctx?: Context }
   agentPreset?: string
   title?: string

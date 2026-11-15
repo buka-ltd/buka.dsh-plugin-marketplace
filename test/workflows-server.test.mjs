@@ -2,7 +2,7 @@
  * workflows 宿主侧单测：作业创建、调度、任务创建校验、助理、结束投递、结算、
  * 重试 / 取消、重启恢复、clock、附件与可见性、路由桩。
  *
- * 用内存版 storageDomain + 假的 workers / 启动者投递，直接驱动真实引擎；
+ * 用内存版 storageDomain + 假的 workers / 发起人投递，直接驱动真实引擎；
  * 不依赖 DSH 宿主。运行：
  *
  *   node --test test/workflows-server.test.mjs
@@ -19,6 +19,7 @@ import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
+import { toV7 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // 内存版 storageDomain
@@ -91,7 +92,7 @@ class FakeDomain {
 }
 
 // ---------------------------------------------------------------------------
-// 测试夹具：打工人、会话句柄、启动者投递、工作流定义
+// 测试夹具：打工人、会话句柄、发起人投递、工作流定义
 // ---------------------------------------------------------------------------
 
 /** 测试里的打工人登记表。 */
@@ -164,7 +165,7 @@ function makeWorkers(entries = WORKER_ENTRIES) {
   }
 }
 
-/** 假的启动者会话投递。 */
+/** 假的发起人会话投递。 */
 function makeDelivery() {
   return {
     messages: [],
@@ -203,8 +204,8 @@ async function waitFor(check, timeoutMs = 1500) {
 
 /** 简单定义：start → dev(agent) → end。 */
 function simpleDevDefinition() {
-  return {
-    version: 5,
+  return toV7({
+    version: 6,
     name: '简单研发',
     budgets: { maxTasks: 20, maxDurationHours: 24 },
     start: {
@@ -247,6 +248,7 @@ function simpleDevDefinition() {
           {
             id: 'dev.implement',
             label: '开发',
+            prompt: '实现需求，完成后创建交付任务。',
             payload: {
               type: 'object',
               properties: { requirement: { type: 'string' } },
@@ -265,13 +267,13 @@ function simpleDevDefinition() {
       { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
       { id: 'dev.end', label: '直接交付', from: 'dev', to: 'end' },
     ],
-  }
+  })
 }
 
 /** 研发 + 测试：dev → qa（验证）→ dev（返工，回边）→ end。 */
 function reviewDefinition() {
-  return {
-    version: 5,
+  return toV7({
+    version: 6,
     name: '研发与验证',
     budgets: { maxTasks: 40, maxDurationHours: 24 },
     start: {
@@ -314,6 +316,7 @@ function reviewDefinition() {
           {
             id: 'dev.implement',
             label: '开发',
+            prompt: '实现需求，完成后创建交付任务。',
             payload: {
               type: 'object',
               properties: { requirement: { type: 'string' } },
@@ -377,13 +380,13 @@ function reviewDefinition() {
       },
       { id: 'qa.end', label: '验证通过交付', from: 'qa', to: 'end' },
     ],
-  }
+  })
 }
 
 /** 人岗位 + 助理：start → approve(human) → end。 */
 function assistantDefinition() {
-  return {
-    version: 5,
+  const definition = toV7({
+    version: 6,
     name: '发布审批',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -440,13 +443,31 @@ function assistantDefinition() {
       { id: 'start.approve', label: '送审', from: 'start', to: 'approve' },
       { id: 'approve.end', label: '交付', from: 'approve', to: 'end' },
     ],
-  }
+  })
+  definition.positions[0].taskTypes[0].actions = [
+    {
+      id: 'approve',
+      label: '批准',
+      creates: [{ channel: 'approve.end', content: { summary: '批准并发布' } }],
+    },
+    {
+      id: 'reject',
+      label: '打回',
+      input: {
+        type: 'object',
+        properties: { note: { type: 'string' } },
+        required: ['note'],
+      },
+      creates: [{ channel: 'approve.end', content: { summary: '{{input.note}}' } }],
+    },
+  ]
+  return definition
 }
 
 /** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
-  return {
-    version: 5,
+  return toV7({
+    version: 6,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -503,7 +524,7 @@ function clockDefinition() {
       { id: 'start.wait', label: '开始等待', from: 'start', to: 'wait' },
       { id: 'wait.end', label: '等待结束', from: 'wait', to: 'end' },
     ],
-  }
+  })
 }
 
 /** 预算装不下的定义：maxTasks=1 但 start.next 有两条初始任务。 */
@@ -514,14 +535,12 @@ function overBudgetDefinition() {
     {
       channel: 'start.dev',
       type: 'dev.implement',
-      payload: { requirement: 'a' },
-      dependsOn: ['$start'],
+      content: { requirement: 'a' },
     },
     {
       channel: 'start.dev',
       type: 'dev.implement',
-      payload: { requirement: 'b' },
-      dependsOn: ['$start'],
+      content: { requirement: 'b' },
     },
   ]
   return definition
@@ -579,12 +598,10 @@ test('engine: the start task id can be used as a storageDomain record key', asyn
   const env = await setup(simpleDevDefinition())
   try {
     // storageDomain 的 json 后端按记录 id 分文件，只接受 [a-zA-Z0-9_-]。
-    // 旧实现用 `$start` 当记录 id，真实宿主上创建作业会直接失败。
     assert.match(START_TASK_ID, /^[a-zA-Z0-9_-]+$/u)
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: '做一个登录页' },
-      structuredInput: { requirement: '登录页需求' },
+      content: { requirement: '登录页需求' },
     })
     const tasks = jobTasks(env.store, job.id)
     const start = tasks.find((task) => task.position === 'start')
@@ -596,36 +613,104 @@ test('engine: the start task id can be used as a storageDomain record key', asyn
   }
 })
 
+test('engine: the end task can be handed to an assistant acting as a secretary', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const job = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: '发布需求' },
+      sessionId: 'starter-session',
+      delivery: { kind: 'assistant', name: '沟通助理' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const devSession = env.workers.dispatched[0].sessionId
+    const dev = taskAt(env.store, job.id, 'dev')
+    await env.engine.createTaskFromTarget({
+      sessionId: devSession,
+      target: 'end',
+      content: { summary: '最终报告' },
+      deps: [dev.id],
+    })
+    await env.engine.completeTaskFromSession({ sessionId: devSession, text: '', attachments: [] })
+    await waitFor(() => env.workers.dispatched.length === 2)
+    const secretary = env.workers.dispatched[1]
+    assert.equal(secretary.request.worker, '沟通助理')
+    const end = taskAt(env.store, job.id, 'end')
+    assert.equal(end.status, 'running')
+    assert.equal(end.claimant.kind, 'worker')
+    assert.match(secretary.request.prompt, /最终报告/u)
+
+    await env.engine.completeTaskFromSession({
+      sessionId: secretary.sessionId,
+      text: '已代收',
+      attachments: [],
+    })
+    await waitFor(() => env.store.getJob(job.id).status === 'completed')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: the delivery assistant must exist and be marked as an assistant', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    await assert.rejects(
+      () =>
+        env.engine.createJobFromSession({
+          workflowId: env.workflowId,
+          content: { requirement: 'x' },
+          sessionId: 'starter-session',
+          delivery: { kind: 'assistant', name: '不存在' },
+        }),
+      /unknown assistant/u,
+    )
+    await assert.rejects(
+      () =>
+        env.engine.createJobFromSession({
+          workflowId: env.workflowId,
+          content: { requirement: 'x' },
+          sessionId: 'starter-session',
+          delivery: { kind: 'assistant', name: '软件工程师' },
+        }),
+      /not marked as an assistant/u,
+    )
+    assert.equal(env.store.allJobs().length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('engine: a human-started job completes the start task and dispatches the first task', async () => {
   const env = await setup(simpleDevDefinition())
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: '做一个登录页' },
-      structuredInput: { requirement: '登录页需求' },
+      content: { requirement: '登录页需求' },
     })
     assert.equal(job.status, 'running')
     assert.equal(job.seq, 1)
     const start = taskAt(env.store, job.id, 'start')
     assert.equal(start.status, 'completed')
     assert.equal(start.channel, null, 'the start task has no inbound channel')
-    assert.deepEqual(start.result.output, { requirement: '登录页需求' })
+    assert.deepEqual(start.content, { requirement: '登录页需求' })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
     assert.equal(dev.status, 'running')
     assert.equal(dev.channel, 'start.dev')
+    assert.deepEqual(dev.content, { requirement: '登录页需求' })
     const dispatch = env.workers.dispatched[0]
     assert.equal(dispatch.request.worker, '软件工程师')
+    assert.match(dispatch.request.prompt, /## 工作流规则/u)
+    assert.match(dispatch.request.prompt, /## 任务类型的定义/u)
+    assert.match(dispatch.request.prompt, /实现需求，完成后创建交付任务。/u)
+    assert.match(dispatch.request.prompt, /## 任务内容/u)
     assert.match(dispatch.request.prompt, /登录页需求/u)
-    assert.match(dispatch.request.prompt, /buka_task_complete/u)
-    assert.match(dispatch.request.prompt, /你由通道「开始研发」/u)
-    assert.match(dispatch.request.prompt, /channel: dev\.end/u)
+    assert.doesNotMatch(dispatch.request.prompt, /结果结构|通道|岗位|作业 #/u)
     assert.equal(env.engine.taskForSession(dispatch.sessionId)?.taskId, dev.id)
 
     await env.engine.completeTaskFromSession({
       sessionId: dispatch.sessionId,
-      output: { summary: '页面已完成' },
-      text: '完成',
+      text: '页面已完成',
       attachments: [],
     })
     assert.equal(env.store.getTask(dev.id).status, 'completed')
@@ -637,13 +722,13 @@ test('engine: a human-started job completes the start task and dispatches the fi
   }
 })
 
-test('engine: end task delivery completes the job', async () => {
+test('engine: the end report is delivered to the starter session and waits for confirmation', async () => {
   const env = await setup(simpleDevDefinition())
   try {
-    const job = await env.engine.createJobFromHuman({
+    const job = await env.engine.createJobFromSession({
       workflowId: env.workflowId,
-      rawInput: { request: '发布 v1' },
-      structuredInput: { requirement: '发布需求' },
+      content: { requirement: '发布需求' },
+      sessionId: 'starter-session',
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
@@ -652,59 +737,51 @@ test('engine: end task delivery completes the job', async () => {
       sessionId,
       channel: 'dev.end',
       type: 'end',
-      payload: { summary: '最终交付物' },
+      content: { summary: '最终交付物' },
       deps: [dev.id],
     })
     assert.equal(taskAt(env.store, job.id, 'end').status, 'pending')
     await env.engine.completeTaskFromSession({
       sessionId,
-      output: { summary: 'ok' },
       text: '',
       attachments: [],
     })
-    await waitFor(() => taskAt(env.store, job.id, 'end').status === 'completed')
+    await waitFor(() => env.delivery.messages.length === 1)
+    const message = env.delivery.messages[0]
+    assert.equal(message.sessionId, 'starter-session')
+    assert.match(message.text, /最终交付物/u)
+    assert.match(message.text, /buka_task_complete/u)
+    const endTask = taskAt(env.store, job.id, 'end')
+    assert.equal(endTask.status, 'running', 'delivered, waiting for the starter to confirm')
+    assert.equal(env.store.getJob(job.id).status, 'running')
+
+    await env.engine.completeTaskFromSession({
+      sessionId: 'starter-session',
+      text: '已收到',
+      attachments: [],
+    })
     await waitFor(() => env.store.getJob(job.id).status === 'completed')
+    assert.equal(taskAt(env.store, job.id, 'end').status, 'completed')
     assert.equal((await env.engine.jobDetail(job.id)).canRetryDelivery, false)
   } finally {
     await env.cleanup()
   }
 })
 
-test('engine: a session-started job runs the start task in the starter session', async () => {
+test('engine: a session-started job creates its first tasks immediately', async () => {
   const env = await setup(simpleDevDefinition())
   try {
     const job = await env.engine.createJobFromSession({
       workflowId: env.workflowId,
-      rawInput: { request: '做一个注册页' },
+      content: { requirement: '注册页需求' },
       sessionId: 'starter-session',
     })
-    await waitFor(() => env.delivery.messages.length === 1)
-    const message = env.delivery.messages[0]
-    assert.equal(message.sessionId, 'starter-session')
-    assert.match(message.text, /启动任务/u)
-    assert.equal(taskAt(env.store, job.id, 'start').status, 'running')
-
-    await assert.rejects(
-      () =>
-        env.engine.completeTaskFromSession({
-          sessionId: 'starter-session',
-          output: {},
-          text: '',
-          attachments: [],
-        }),
-      /output does not match/u,
-    )
-    await env.engine.completeTaskFromSession({
-      sessionId: 'starter-session',
-      output: { requirement: '注册页需求' },
-      text: '',
-      attachments: [],
-    })
+    const start = taskAt(env.store, job.id, 'start')
+    assert.equal(start.status, 'completed')
+    assert.deepEqual(env.store.getJob(job.id).input, { requirement: '注册页需求' })
     await waitFor(() => env.workers.dispatched.length === 1)
-    const stored = env.store.getJob(job.id)
-    assert.deepEqual(stored.input.structured, { requirement: '注册页需求' })
-    assert.equal(taskAt(env.store, job.id, 'start').status, 'completed')
     assert.match(env.workers.dispatched[0].request.prompt, /注册页需求/u)
+    assert.equal(env.delivery.messages.length, 0, 'nothing is pushed to the starter at job start')
   } finally {
     await env.cleanup()
   }
@@ -714,13 +791,12 @@ test('engine: a session-started job runs the start task in the starter session',
 // 任务创建校验
 // ---------------------------------------------------------------------------
 
-test('engine: task creation enforces channels, types, payloads, dependencies, requires and budget', async () => {
+test('engine: task creation enforces channels, types, content, dependencies and budget', async () => {
   const env = await setup(reviewDefinition())
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: '实现登录' },
-      structuredInput: { requirement: '登录' },
+      content: { requirement: '登录' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
@@ -730,7 +806,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
       sessionId,
       channel: 'dev.qa',
       type: 'qa.verify',
-      payload: { focus: '登录流程' },
+      content: { focus: '登录流程' },
       deps: [dev.id],
     })
     assert.equal(qa.status, 'pending')
@@ -743,7 +819,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'nobody',
           type: 'qa.verify',
-          payload: {},
+          content: {},
           deps: [],
         }),
       /unknown channel/u,
@@ -754,7 +830,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'qa.dev.rework',
           type: 'dev.rework',
-          payload: { summary: 'x' },
+          content: { summary: 'x' },
           deps: [dev.id],
         }),
       /starts at "qa"/u,
@@ -765,7 +841,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'dev.end',
           type: 'qa.verify',
-          payload: {},
+          content: {},
           deps: [],
         }),
       /built-in end contract/u,
@@ -776,7 +852,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'dev.qa',
           type: 'dev.rework',
-          payload: { summary: 'x' },
+          content: { summary: 'x' },
           deps: [dev.id],
         }),
       /not a task type of position "qa"/u,
@@ -787,7 +863,7 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'dev.qa',
           type: 'qa.verify',
-          payload: {},
+          content: {},
           deps: [dev.id],
         }),
       /does not match task type/u,
@@ -798,30 +874,8 @@ test('engine: task creation enforces channels, types, payloads, dependencies, re
           sessionId,
           channel: 'dev.qa',
           type: 'qa.verify',
-          payload: { focus: 'x' },
+          content: { focus: 'x' },
           deps: ['task-does-not-exist'],
-        }),
-      /does not exist in this job/u,
-    )
-    await assert.rejects(
-      () =>
-        env.engine.createTaskFromSession({
-          sessionId,
-          channel: 'dev.qa',
-          type: 'qa.verify',
-          payload: { focus: 'x' },
-          deps: [],
-        }),
-      /requires a dependency of type/u,
-    )
-    await assert.rejects(
-      () =>
-        env.engine.createTaskFromSession({
-          sessionId,
-          channel: 'dev.qa',
-          type: 'qa.verify',
-          payload: { focus: '{{task.missing.output.x}}' },
-          deps: [dev.id],
         }),
       /does not exist in this job/u,
     )
@@ -849,8 +903,7 @@ test('engine: a channel type whitelist rejects a declared task type', async () =
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: 'x' },
-      structuredInput: { requirement: 'x' },
+      content: { requirement: 'x' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
@@ -859,15 +912,10 @@ test('engine: a channel type whitelist rejects a declared task type', async () =
       sessionId: devSession,
       channel: 'dev.qa',
       type: 'qa.verify',
-      payload: { focus: 'x' },
+      content: { focus: 'x' },
       deps: [dev.id],
     })
-    await env.engine.completeTaskFromSession({
-      sessionId: devSession,
-      output: { summary: 'ok' },
-      text: '',
-      attachments: [],
-    })
+    await env.engine.completeTaskFromSession({ sessionId: devSession, text: '', attachments: [] })
     await waitFor(() => env.workers.dispatched.length === 2)
     const qaSession = env.workers.dispatched[1].sessionId
     assert.equal(env.store.getTask(qa.id).status, 'running')
@@ -877,7 +925,7 @@ test('engine: a channel type whitelist rejects a declared task type', async () =
           sessionId: qaSession,
           channel: 'qa.dev.rework',
           type: 'dev.implement',
-          payload: { requirement: 'again' },
+          content: { requirement: 'again' },
           deps: [dev.id],
         }),
       /does not allow task type "dev.implement"/u,
@@ -900,24 +948,100 @@ test('engine: parallel channels with overlapping types are chosen explicitly', a
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: 'x' },
-      structuredInput: { requirement: 'x' },
+      content: { requirement: 'x' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
     const sessionId = env.workers.dispatched[0].sessionId
     const prompt = env.workers.dispatched[0].request.prompt
-    assert.match(prompt, /「提测」/u)
-    assert.match(prompt, /「加急提测」/u)
+    assert.doesNotMatch(prompt, /提测/u, 'channels are not listed in the execution prompt')
     const qa = await env.engine.createTaskFromSession({
       sessionId,
       channel: 'dev.qa.urgent',
       type: 'qa.verify',
-      payload: { focus: 'x' },
+      content: { focus: 'x' },
       deps: [dev.id],
     })
     assert.equal(qa.channel, 'dev.qa.urgent')
     assert.equal(qa.position, 'qa')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: execution prompt is exactly the three model-facing sections', async () => {
+  const definition = reviewDefinition()
+  definition.positions[0].taskTypes[0].definition = '任务类型的定义：先读依赖结果，再实现。'
+  const env = await setup(definition)
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const prompt = env.workers.dispatched[0].request.prompt
+    const headings = ['## 工作流规则', '## 任务类型的定义', '## 任务内容']
+    let cursor = -1
+    for (const heading of headings) {
+      const index = prompt.indexOf(heading)
+      assert.ok(index > cursor, `${heading} should appear in this order`)
+      cursor = index
+    }
+    assert.match(prompt, /任务类型的定义：先读依赖结果，再实现。/u)
+    assert.match(prompt, /"requirement": "登录页需求"/u, 'the rendered content is the last section')
+    assert.doesNotMatch(prompt, /岗位|通道|作业 #/u, 'no authoring vocabulary')
+    assert.doesNotMatch(prompt, /研发|测试|软件工程师|开始研发|提测/u, 'no labels or channel names')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: creatable targets hide channels and create tasks by target', async () => {
+  const env = await setup(reviewDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    const sessionId = env.workers.dispatched[0].sessionId
+
+    const targets = env.engine.creatableTargetsForSession(sessionId)
+    assert.deepEqual(
+      targets.map((target) => target.target),
+      ['qa.verify', 'end'],
+    )
+    assert.ok(targets[0].content?.properties !== undefined, 'targets carry the content schema')
+    assert.doesNotMatch(JSON.stringify(targets), /dev\.qa|qa\.end|position/u)
+
+    const qa = await env.engine.createTaskFromTarget({
+      sessionId,
+      target: 'qa.verify',
+      content: { focus: '检查' },
+      deps: [dev.id],
+    })
+    assert.equal(qa.position, 'qa')
+    assert.equal(qa.channel, 'dev.qa')
+
+    const end = await env.engine.createTaskFromTarget({
+      sessionId,
+      target: 'end',
+      content: { summary: 'x' },
+      deps: [],
+    })
+    assert.deepEqual(end.deps, [dev.id], 'omitted deps default to the creating task')
+
+    await assert.rejects(
+      () =>
+        env.engine.createTaskFromTarget({
+          sessionId,
+          target: 'dev.rework',
+          content: {},
+          deps: [dev.id],
+        }),
+      /cannot be created from this task/u,
+    )
   } finally {
     await env.cleanup()
   }
@@ -930,8 +1054,7 @@ test('engine: exceeding maxTasks fails job creation', async () => {
       () =>
         env.engine.createJobFromHuman({
           workflowId: env.workflowId,
-          rawInput: { request: 'x' },
-          structuredInput: { requirement: 'x' },
+          content: { requirement: 'x' },
         }),
       /budget maxTasks/u,
     )
@@ -943,17 +1066,35 @@ test('engine: exceeding maxTasks fails job creation', async () => {
   }
 })
 
+test('engine: a task type may accept a string as its task content', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].content = { type: 'string' }
+  definition.start.next = [{ channel: 'start.dev', type: 'dev.implement', content: '做登录页' }]
+  const env = await setup(definition)
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    assert.equal(dev.content, '做登录页')
+    assert.match(env.workers.dispatched[0].request.prompt, /做登录页/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 人任务与助理
 // ---------------------------------------------------------------------------
 
-test('engine: a named assistant takes a human task and can complete the job', async () => {
+test('engine: a named assistant takes a human task and completes it with an action', async () => {
   const env = await setup(assistantDefinition())
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: '发布' },
-      structuredInput: {},
+      content: {},
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dispatch = env.workers.dispatched[0]
@@ -961,22 +1102,34 @@ test('engine: a named assistant takes a human task and can complete the job', as
     const approve = taskAt(env.store, job.id, 'approve')
     assert.equal(approve.status, 'running')
     assert.equal(approve.claimant.kind, 'assistant')
+    assert.match(dispatch.request.prompt, /buka_task_actions/u)
 
-    await env.engine.createTaskFromSession({
-      sessionId: dispatch.sessionId,
-      channel: 'approve.end',
-      type: 'end',
-      payload: { summary: '批准并发布' },
-      deps: [approve.id],
-    })
+    const actions = env.engine.taskActionsForSession(dispatch.sessionId)
+    assert.deepEqual(
+      actions.map((action) => action.id),
+      ['approve', 'reject'],
+    )
+
     await env.engine.completeTaskFromSession({
       sessionId: dispatch.sessionId,
-      output: { approved: 'yes' },
+      action: 'approve',
       text: '用户批准',
       attachments: [],
     })
-    await waitFor(() => taskAt(env.store, job.id, 'end').status === 'completed')
-    assert.equal(env.store.getJob(job.id).status, 'completed')
+    const end = taskAt(env.store, job.id, 'end')
+    assert.equal(end.status, 'ready')
+    assert.match(end.content.summary, /批准/u)
+    const approveTask = taskAt(env.store, job.id, 'approve')
+    assert.deepEqual(approveTask.result.action, { id: 'approve', label: '批准' })
+
+    // 人发起的作业：结束任务落在发起人自己的看板上，确认后才结束作业。
+    await env.engine.completeTaskAsHuman({
+      jobId: job.id,
+      taskId: end.id,
+      text: '已收到',
+      attachments: [],
+    })
+    await waitFor(() => env.store.getJob(job.id).status === 'completed')
   } finally {
     await env.cleanup()
   }
@@ -985,11 +1138,7 @@ test('engine: a named assistant takes a human task and can complete the job', as
 test('engine: a failed assistant returns the human task to 待认领 and a human can finish it', async () => {
   const env = await setup(assistantDefinition())
   try {
-    const job = await env.engine.createJobFromHuman({
-      workflowId: env.workflowId,
-      rawInput: { request: '发布' },
-      structuredInput: {},
-    })
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
     await waitFor(() => env.workers.dispatched.length === 1)
     env.workers.dispatched[0].handle.endTurn()
     await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
@@ -1005,11 +1154,57 @@ test('engine: a failed assistant returns the human task to 待认领 and a human
     const completed = await env.engine.completeTaskAsHuman({
       jobId: job.id,
       taskId: approve.id,
-      output: { approved: 'no' },
+      action: 'reject',
+      input: { note: '不通过' },
       text: '人自己处理',
       attachments: [],
     })
     assert.equal(completed.status, 'completed')
+    assert.deepEqual(completed.result.input, { note: '不通过' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a human action creates the declared task only after validation', async () => {
+  const env = await setup(assistantDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
+    await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
+    const approve = taskAt(env.store, job.id, 'approve')
+
+    await assert.rejects(
+      () =>
+        env.engine.completeTaskAsHuman({
+          jobId: job.id,
+          taskId: approve.id,
+          action: 'reject',
+          input: {},
+          text: '',
+          attachments: [],
+        }),
+      /does not match the action contract/u,
+    )
+    assert.equal(taskAt(env.store, job.id, 'approve').status, 'ready')
+    assert.equal(
+      jobTasks(env.store, job.id).filter((task) => task.position === 'end').length,
+      0,
+      'nothing is created when the form is invalid',
+    )
+
+    await env.engine.completeTaskAsHuman({
+      jobId: job.id,
+      taskId: approve.id,
+      action: 'reject',
+      input: { note: '回去改' },
+      text: '',
+      attachments: [],
+    })
+    const end = taskAt(env.store, job.id, 'end')
+    assert.equal(end.status, 'ready')
+    assert.equal(end.content.summary, '回去改')
   } finally {
     await env.cleanup()
   }
@@ -1024,8 +1219,7 @@ test('engine: a task session that ends without completing fails the task, and re
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: 'x' },
-      structuredInput: { requirement: 'x' },
+      content: { requirement: 'x' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
@@ -1078,8 +1272,7 @@ test('engine: restart resumes the same agent session for a running task', async 
     await first.setWorkflowActive(workflow.id, true)
     const job = await first.createJobFromHuman({
       workflowId: workflow.id,
-      rawInput: { request: 'x' },
-      structuredInput: { requirement: 'x' },
+      content: { requirement: 'x' },
     })
     await waitFor(() => workers.dispatched.length === 1)
     const dev = taskAt(store, job.id, 'dev')
@@ -1097,12 +1290,7 @@ test('engine: restart resumes the same agent session for a running task', async 
     await second.start()
     await waitFor(() => store.getTask(dev.id).status === 'running')
     assert.equal(second.taskForSession(sessionId)?.taskId, dev.id)
-    await second.completeTaskFromSession({
-      sessionId,
-      output: { summary: '恢复后完成' },
-      text: '',
-      attachments: [],
-    })
+    await second.completeTaskFromSession({ sessionId, text: '恢复后完成', attachments: [] })
     assert.equal(store.getTask(dev.id).status, 'completed')
     second.dispose()
   } finally {
@@ -1119,14 +1307,13 @@ test('engine: clock program tasks complete without a session', async () => {
   try {
     const job = await env.engine.createJobFromHuman({
       workflowId: env.workflowId,
-      rawInput: { request: '到点提醒' },
-      structuredInput: { until: new Date(Date.now() - 1000).toISOString() },
+      content: { until: new Date(Date.now() - 1000).toISOString() },
     })
     assert.equal(env.workers.dispatched.length, 0)
     const wait = taskAt(env.store, job.id, 'wait')
     await waitFor(() => env.store.getTask(wait.id).status === 'completed')
     const stored = env.store.getTask(wait.id)
-    assert.equal(typeof stored.result.output.completedAt, 'string')
+    assert.match(stored.result.text, /clock 到点/u)
     assert.equal(stored.claimant.kind, 'worker')
   } finally {
     await env.cleanup()
@@ -1215,8 +1402,7 @@ test('attachments: a task result attaches files and downstream tasks can read th
       await engine.setWorkflowActive(workflow.id, true)
       const job = await engine.createJobFromHuman({
         workflowId: workflow.id,
-        rawInput: { request: 'x' },
-        structuredInput: { requirement: 'x' },
+        content: { requirement: 'x' },
       })
       await waitFor(() => workers.dispatched.length === 1)
       const dev = taskAt(store, job.id, 'dev')
@@ -1225,12 +1411,11 @@ test('attachments: a task result attaches files and downstream tasks can read th
         sessionId: devSession,
         channel: 'dev.qa',
         type: 'qa.verify',
-        payload: { focus: 'x' },
+        content: { focus: 'x' },
         deps: [dev.id],
       })
       await engine.completeTaskFromSession({
         sessionId: devSession,
-        output: { summary: '完成' },
         text: '',
         attachments: [{ path: 'artifacts/report.txt', name: 'report.txt', description: '报告' }],
       })

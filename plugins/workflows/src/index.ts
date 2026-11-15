@@ -119,7 +119,7 @@ export function apply(ctx: Context, config: WorkflowsConfig): void {
     return current.taskForSession(sessionId) !== null
   }
 
-  /** 启动者 / 执行会话可见性：作业状态与取消。 */
+  /** 发起人 / 执行会话可见性：作业状态与取消。 */
   const starterVisible = async (context: { agent?: { id?: unknown } }): Promise<boolean> => {
     const sessionId = typeof context.agent?.id === 'string' ? context.agent.id : ''
     if (sessionId === '') return false

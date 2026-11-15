@@ -5,6 +5,7 @@
  */
 
 import type {
+  ActionDefinition,
   AttachmentMeta,
   ChannelDefinition,
   Claimant,
@@ -28,7 +29,7 @@ import { asArray, isRecord } from './types.ts'
 export interface PositionView {
   id: string
   label: string
-  description: string
+  note: string
   executor: Executor
   taskTypes: TaskTypeDefinition[]
 }
@@ -44,9 +45,9 @@ export interface ChannelView {
 }
 
 /**
- * 看板的一行：启动者（开始 / 结束任务合并）或岗位。
+ * 看板的一行：发起人（开始 / 结束任务合并）或岗位。
  *
- * 开始与结束任务的执行者是同一个启动者，合成一行才不会把同一个人画两次。
+ * 开始与结束任务的执行者是同一个发起人，合成一行才不会把同一个人画两次。
  */
 export interface BoardRow {
   id: string
@@ -99,7 +100,7 @@ export function positionsOf(definition: WorkflowDefinition | null): PositionView
     out.push({
       id,
       label: typeof position.label === 'string' && position.label !== '' ? position.label : id,
-      description: typeof position.description === 'string' ? position.description : '',
+      note: typeof position.note === 'string' ? position.note : '',
       executor: isRecord(position.executor) ? position.executor : {},
       taskTypes: asArray<TaskTypeDefinition>(position.taskTypes),
     })
@@ -222,26 +223,31 @@ export function isHumanPosition(
   return position !== undefined && position.executor.kind === 'human'
 }
 
-/** 任务类型 → 该岗位的输出 schema。 */
-export function outputSchemaFor(
+/** 任务类型 → 任务内容 schema。 */
+export function contentSchemaFor(
   jobDefinition: WorkflowDefinition | null,
   workflowDefinition: WorkflowDefinition | null,
   task: { position?: string; type?: string } | null,
 ): JsonSchema | null {
   if (task === null) return null
   const type = findTaskType(jobDefinition, workflowDefinition, task.position, task.type)
-  return isRecord(type?.output) ? (type.output as JsonSchema) : null
+  return isRecord(type?.content) ? (type.content as JsonSchema) : null
 }
 
-/** 任务类型 → 该岗位的 payload schema。 */
-export function payloadSchemaFor(
-  jobDefinition: WorkflowDefinition | null,
-  workflowDefinition: WorkflowDefinition | null,
-  task: { position?: string; type?: string } | null,
-): JsonSchema | null {
-  if (task === null) return null
-  const type = findTaskType(jobDefinition, workflowDefinition, task.position, task.type)
-  return isRecord(type?.payload) ? (type.payload as JsonSchema) : null
+/**
+ * 人任务类型里的一个动作。
+ *
+ * @param type 任务类型定义
+ * @param actionId 动作 id
+ * @returns 动作；不存在时 null
+ */
+export function actionOf(
+  type: TaskTypeDefinition | null,
+  actionId: string | null,
+): ActionDefinition | null {
+  if (type === null || actionId === null) return null
+  const actions = Array.isArray(type.actions) ? type.actions : []
+  return actions.find((action) => action.id === actionId) ?? null
 }
 
 /** 当前作业里的任务；没有详情时给空数组。 */
@@ -255,17 +261,17 @@ export function jobRecord(state: PageState): JobDetail['job'] | null {
   return state.job.data?.job ?? null
 }
 
-/** 当前作业的启动者（开始 / 结束任务的执行者）；没有作业时为 null。 */
+/** 当前作业的发起人（开始 / 结束任务的执行者）；没有作业时为 null。 */
 export function currentStarter(state: PageState): Starter | null {
   return state.job.data?.job?.starter ?? null
 }
 
 /**
- * 启动者的展示文本：人（页面启动）或会话。
+ * 发起人的展示文本：人（页面启动）或会话。
  *
  * @param starter
  * @param t
- * @returns 未知启动者时返回空串
+ * @returns 未知发起人时返回空串
  */
 export function starterText(starter: Starter | null | undefined, t: Translate): string {
   if (!isRecord(starter)) return ''
@@ -301,9 +307,9 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 }
 
 /**
- * 看板行：启动者（开始 + 结束任务）+ 岗位（定义顺序）。
+ * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
  *
- * 内建开始 / 结束任务的执行者是同一个启动者，因此合并成一行；岗位行只放
+ * 内建开始 / 结束任务的执行者是同一个发起人，因此合并成一行；岗位行只放
  * 定义里仍存在的岗位，契约外任务由调用方补行。
  *
  * @param definition
@@ -465,13 +471,8 @@ export function resultSummary(task: TaskDetail | null): string {
   if (!isRecord(summary)) return ''
   const text = typeof summary.text === 'string' ? summary.text : ''
   if (text !== '') return text
-  const output = summary.output
-  if (output === undefined || output === null) return ''
-  try {
-    return JSON.stringify(output)
-  } catch {
-    return ''
-  }
+  const action = isRecord(summary.action) ? summary.action : null
+  return typeof action?.label === 'string' ? action.label : ''
 }
 
 /**
@@ -493,7 +494,7 @@ export function mergedDefinition(
     return {
       id: position.id,
       label: fromJob?.label ?? position.label,
-      description: position.description,
+      note: position.note,
       executor:
         fromJob !== undefined && Object.keys(fromJob.executor).length > 0
           ? fromJob.executor

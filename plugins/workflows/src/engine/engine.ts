@@ -22,7 +22,7 @@ import {
   searchAttachments,
   visibleTaskIds,
 } from '../attachments/index.ts'
-import { validateWorkflowDefinition } from '../definition/validate.ts'
+import { contentIssues, findTaskType, validateWorkflowDefinition } from '../definition/validate.ts'
 import { newAttemptId, newJobId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import {
   assertJobTransition,
@@ -35,17 +35,19 @@ import type {
   AttachmentRecord,
   AttemptRecord,
   Claimant,
+  DeliveryRule,
   JobRecord,
   JsonValue,
   Starter,
   TaskRecord,
+  TaskResult,
   TaskStatus,
   WorkerInfo,
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
+import { type JsonSchema, schemaProblems } from '../json-schema.ts'
 import type { ResolvedOptions } from '../options.ts'
-import { schemaProblems } from '../output.ts'
 import { programDriver } from '../program/clock.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 import {
@@ -61,13 +63,15 @@ import {
   buildAssistantPrompt,
   buildEndDeliveryText,
   buildExecutionPrompt,
-  buildStartTaskPrompt,
-  positionOf,
-  renderTaskPayload,
   taskTypeLabel,
 } from './prompt.ts'
 import { handleSessionId, handleStartSeq, poll, readHandleResult } from './session.ts'
-import { buildCreatedTask, buildInitialTasks } from './tasks.ts'
+import {
+  buildCreatedTask,
+  buildInitialTasks,
+  renderCreation,
+  resolveTargetTaskType,
+} from './tasks.ts'
 import type { EngineDeps, TurnSnapshot, WorkerHandleLike, WorkersServiceLike } from './types.ts'
 import { describeError, WorkflowError } from './types.ts'
 
@@ -82,7 +86,7 @@ interface ActiveExecution {
   readonly jobId: string
   readonly taskId: string
   readonly attemptId: string
-  readonly kind: 'agent' | 'assistant' | 'program' | 'start'
+  readonly kind: 'agent' | 'assistant' | 'program'
   sessionId: string | null
   handle: WorkerHandleLike | null
   stopPoll: (() => void) | null
@@ -109,18 +113,11 @@ type Launch =
       readonly programId: string
     }
   | {
-      readonly kind: 'start'
-      readonly jobId: string
-      readonly taskId: string
-      readonly attemptId: string
-      readonly sessionId: string
-      readonly prompt: string
-    }
-  | {
       readonly kind: 'delivery'
       readonly jobId: string
       readonly taskId: string
       readonly attemptId: string
+      readonly sessionId: string
     }
 
 /** 引擎构造参数。 */
@@ -320,6 +317,8 @@ export class WorkflowEngine {
         name: workflow.name,
         description: workflow.description,
         version: workflow.latestVersion,
+        definitionVersion: this.store.readWorkflowVersion(workflow.id)?.versionRecord.definition
+          .version,
         status: workflow.status,
         jobCount: this.store.countJobs(workflow.id),
         updatedAt: workflow.updatedAt,
@@ -357,6 +356,13 @@ export class WorkflowEngine {
         definition: found.versionRecord.definition,
       },
       graph: workflowGraph(found.versionRecord.definition, workers),
+      assistants: [...workers.values()]
+        .filter((worker) => worker.assistant && worker.driver === 'agent')
+        .map((worker) => ({
+          name: worker.name,
+          ...(worker.description === undefined ? {} : { description: worker.description }),
+          ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
+        })),
       jobs,
     }
   }
@@ -380,32 +386,70 @@ export class WorkflowEngine {
   // ---------------------------------------------------------------------
 
   /**
-   * 页面人启动作业：原始输入与结构化输入一起提交，启动任务即刻完成。
+   * 页面人启动作业：发起人填的任务内容就是启动任务的内容，启动任务即刻完成。
    *
-   * @param input 工作流、原始输入与结构化输入
+   * @param input 工作流、任务内容与交回方式
    * @returns 新作业
    */
   async createJobFromHuman(input: {
     readonly workflowId: string
-    readonly rawInput: JsonValue
-    readonly structuredInput: JsonValue
+    readonly content: JsonValue
+    readonly delivery?: DeliveryRule | undefined
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
     const workers = await this.workers()
-    const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput)
-    if (inputProblems.length > 0) {
-      throw new WorkflowError('invalid-input', `raw input: ${inputProblems.join('; ')}`)
-    }
-    const structuredProblems = schemaProblems(definition.start.task.output, input.structuredInput)
-    if (structuredProblems.length > 0) {
-      throw new WorkflowError('invalid-input', `structured input: ${structuredProblems.join('; ')}`)
-    }
-    const job = await this.insertJob({
+    return await this.startJob({
       workflow,
       definition,
+      workers,
       starter: { kind: 'human' },
-      rawInput: input.rawInput,
-      structuredInput: input.structuredInput,
+      content: input.content,
+      delivery: this.resolveDelivery(definition, input.delivery, { kind: 'human' }, workers),
+    })
+  }
+
+  /**
+   * 会话启动作业：发起人会话给出任务内容，启动任务即刻完成。
+   *
+   * @param input 工作流、任务内容、发起人会话与交回方式
+   * @returns 新作业
+   */
+  async createJobFromSession(input: {
+    readonly workflowId: string
+    readonly content: JsonValue
+    readonly sessionId: string
+    readonly delivery?: DeliveryRule | undefined
+  }): Promise<JobRecord> {
+    const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
+    const workers = await this.workers()
+    const starter: Starter = { kind: 'session', sessionId: input.sessionId }
+    return await this.startJob({
+      workflow,
+      definition,
+      workers,
+      starter,
+      content: input.content,
+      delivery: this.resolveDelivery(definition, input.delivery, starter, workers),
+    })
+  }
+
+  /** 建作业 + 启动任务 + 初始任务。 */
+  private async startJob(input: {
+    readonly workflow: WorkflowRecord
+    readonly definition: WorkflowDefinition
+    readonly workers: ReadonlyMap<string, WorkerInfo>
+    readonly starter: Starter
+    readonly content: JsonValue
+    readonly delivery: DeliveryRule
+  }): Promise<JobRecord> {
+    const { definition, workers, starter } = input
+    this.checkStartContent(definition, input.content)
+    const job = await this.insertJob({
+      workflow: input.workflow,
+      definition,
+      starter,
+      content: input.content,
+      delivery: input.delivery,
     })
     try {
       await this.store.runExclusive(job.id, async () => {
@@ -416,20 +460,20 @@ export class WorkflowEngine {
           position: 'start',
           type: 'start',
           channel: null,
-          payload: input.rawInput,
+          content: input.content,
           deps: [],
           status: 'completed',
           createdBy: null,
-          assignee: { kind: 'human' },
-          claimant: { kind: 'human', name: '本地用户', sessionId: null },
+          assignee:
+            starter.kind === 'human'
+              ? { kind: 'human' }
+              : { kind: 'session', sessionId: starter.sessionId },
+          claimant:
+            starter.kind === 'human'
+              ? { kind: 'human', name: '本地用户', sessionId: null }
+              : { kind: 'worker', name: 'starter', sessionId: starter.sessionId },
           attemptIds: [],
-          result: {
-            output: input.structuredInput,
-            text: '',
-            textBytes: 0,
-            textFile: null,
-            attachmentIds: [],
-          },
+          result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
           error: null,
           assistantBlocked: false,
           createdAt: now,
@@ -438,7 +482,10 @@ export class WorkflowEngine {
           updatedAt: now,
         }
         await this.store.insertTask(startTask)
-        await this.appendEvent(job.id, 'job/created', { seq: job.seq, starter: 'human' })
+        await this.appendEvent(job.id, 'job/created', {
+          seq: job.seq,
+          starter: starter.kind,
+        })
         await this.appendEvent(job.id, 'task/completed', { taskId: startTask.id, type: 'start' })
         const initial = buildInitialTasks({
           job,
@@ -470,63 +517,49 @@ export class WorkflowEngine {
         .catch(() => undefined)
       throw error
     }
-    const updated = this.store.getJob(job.id) ?? job
-    return updated
-  }
-
-  /**
-   * 会话启动作业：启动任务回到启动者会话执行（下一轮 agent 提交结构化输入）。
-   *
-   * @param input 工作流、原始输入与启动者会话
-   * @returns 新作业
-   */
-  async createJobFromSession(input: {
-    readonly workflowId: string
-    readonly rawInput: JsonValue
-    readonly sessionId: string
-  }): Promise<JobRecord> {
-    const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput)
-    if (inputProblems.length > 0) {
-      throw new WorkflowError('invalid-input', `raw input: ${inputProblems.join('; ')}`)
-    }
-    const job = await this.insertJob({
-      workflow,
-      definition,
-      starter: { kind: 'session', sessionId: input.sessionId },
-      rawInput: input.rawInput,
-    })
-    await this.store.runExclusive(job.id, async () => {
-      const now = nowIso()
-      const startTask: TaskRecord = {
-        id: START_TASK_ID,
-        jobId: job.id,
-        position: 'start',
-        type: 'start',
-        channel: null,
-        payload: input.rawInput,
-        deps: [],
-        status: 'pending',
-        createdBy: null,
-        assignee: { kind: 'session', sessionId: input.sessionId },
-        claimant: null,
-        attemptIds: [],
-        result: null,
-        error: null,
-        assistantBlocked: false,
-        createdAt: now,
-        startedAt: null,
-        finishedAt: null,
-        updatedAt: now,
-      }
-      await this.store.insertTask(startTask)
-      await this.appendEvent(job.id, 'job/created', { seq: job.seq, starter: 'session' })
-      await this.recomputeLocked(job.id)
-    })
     return this.store.getJob(job.id) ?? job
   }
 
-  /** 取一个可启动的工作流：必须存在且未停用。 */
+  /** 校验发起人给的任务内容。 */
+  private checkStartContent(definition: WorkflowDefinition, content: JsonValue): void {
+    const schema = definition.start.content
+    if (schema === undefined) return
+    const problems = contentIssues(schema, content)
+    if (problems.length > 0) {
+      throw new WorkflowError(
+        'invalid-input',
+        `content does not match the workflow input: ${problems
+          .map((issue) => `${issue.path} ${issue.message}`)
+          .join('; ')}`,
+      )
+    }
+  }
+
+  /** 校验交回方式：助理必须存在、是智能体、且标记为助理。 */
+  private resolveDelivery(
+    _definition: WorkflowDefinition,
+    delivery: DeliveryRule | undefined,
+    _starter: Starter,
+    workers: ReadonlyMap<string, WorkerInfo>,
+  ): DeliveryRule {
+    if (delivery === undefined || delivery.kind === 'starter') return { kind: 'starter' }
+    const worker = workers.get(delivery.name)
+    if (worker === undefined) {
+      throw new WorkflowError('invalid-delivery', `unknown assistant "${delivery.name}"`)
+    }
+    if (worker.driver !== 'agent') {
+      throw new WorkflowError('invalid-delivery', `assistant "${delivery.name}" must be an agent`)
+    }
+    if (!worker.assistant) {
+      throw new WorkflowError(
+        'invalid-delivery',
+        `worker "${delivery.name}" is not marked as an assistant in the Buka Workers plugin`,
+      )
+    }
+    return { kind: 'assistant', name: worker.name }
+  }
+
+  /** 取一个可启动的工作流：必须存在、未停用、且定义是当前版本。 */
   private requireStartableWorkflow(workflowId: string): {
     workflow: WorkflowRecord
     definition: WorkflowDefinition
@@ -539,6 +572,12 @@ export class WorkflowEngine {
         `workflow "${found.record.name}" is not enabled; enable it before starting a job`,
       )
     }
+    if (found.versionRecord.definition.version !== 7) {
+      throw new WorkflowError(
+        'definition-outdated',
+        `workflow "${found.record.name}" is not on the current definition version; ask the orchestrator to rewrite it before starting a job`,
+      )
+    }
     return { workflow: found.record, definition: found.versionRecord.definition }
   }
 
@@ -547,8 +586,8 @@ export class WorkflowEngine {
     readonly workflow: WorkflowRecord
     readonly definition: WorkflowDefinition
     readonly starter: Starter
-    readonly rawInput: JsonValue
-    readonly structuredInput?: JsonValue | undefined
+    readonly content: JsonValue
+    readonly delivery: DeliveryRule
   }): Promise<JobRecord> {
     const seq = await this.store.allocateJobSeq(input.workflow.id)
     const now = nowIso()
@@ -564,11 +603,9 @@ export class WorkflowEngine {
       definition: input.definition,
       status: 'running',
       starter: input.starter,
-      input: {
-        raw: input.rawInput,
-        ...(input.structuredInput === undefined ? {} : { structured: input.structuredInput }),
-      },
-      inputSummary: summarizeInput(input.rawInput),
+      input: input.content,
+      delivery: input.delivery,
+      inputSummary: summarizeInput(input.content),
       error: null,
       createdAt: now,
       updatedAt: now,
@@ -594,6 +631,8 @@ export class WorkflowEngine {
   async jobDetail(jobId: string): Promise<Record<string, unknown> | null> {
     const job = this.store.getJob(jobId)
     if (job === undefined) return null
+    // 旧版本定义的作业只留在列表里（带「旧版本」标记），不提供详情。
+    if (job.definition.version !== 7) return null
     const workers = await this.workers()
     const tasks = this.store.listTasks(jobId)
     return {
@@ -606,6 +645,7 @@ export class WorkflowEngine {
         workflowVersion: job.workflowVersion,
         starter: job.starter,
         input: job.input,
+        delivery: job.delivery,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
         error: job.error,
@@ -753,7 +793,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * 某个会话作为启动者的作业 id（最近创建的优先）。
+   * 某个会话作为发起人的作业 id（最近创建的优先）。
    *
    * @param sessionId 会话 id
    * @returns 作业 id；没有时 null
@@ -768,7 +808,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * 会话能否查看某个作业（启动者或执行中的任务会话）。
+   * 会话能否查看某个作业（发起人或执行中的任务会话）。
    *
    * @param sessionId 会话 id
    * @param jobId 作业 id
@@ -787,14 +827,14 @@ export class WorkflowEngine {
   /**
    * 执行中的任务沿一条通道创建派生任务。
    *
-   * @param input 会话、通道、类型、payload 与依赖
+   * @param input 会话、通道、类型、任务内容与依赖
    * @returns 新任务
    */
   async createTaskFromSession(input: {
     readonly sessionId: string
     readonly channel: string
     readonly type: string
-    readonly payload: JsonValue
+    readonly content: JsonValue
     readonly deps: readonly string[]
   }): Promise<TaskRecord> {
     const reference = this.sessionTasks.get(input.sessionId)
@@ -816,7 +856,7 @@ export class WorkflowEngine {
         creator,
         channel: input.channel,
         type: input.type,
-        payload: input.payload,
+        content: input.content,
         deps: input.deps,
         tasks,
         workers,
@@ -836,15 +876,151 @@ export class WorkflowEngine {
   }
 
   /**
+   * 当前任务可以创建的下游目标：只给任务类型与任务内容格式，不暴露岗位 / 通道。
+   *
+   * @param sessionId 任务会话
+   * @returns 目标列表；没有可创建目标时为空
+   */
+  creatableTargetsForSession(
+    sessionId: string,
+  ): Array<{ target: string; label: string; content?: JsonSchema }> {
+    const reference = this.sessionTasks.get(sessionId)
+    if (reference === undefined) return []
+    const job = this.store.getJob(reference.jobId)
+    const task = this.store.getTask(reference.taskId)
+    if (job === undefined || task === undefined) return []
+    const definition = job.definition
+    const targets = new Map<string, { target: string; label: string; content?: JsonSchema }>()
+    for (const channel of definition.channels) {
+      if (channel.from !== task.position) continue
+      if (channel.to === 'end') {
+        targets.set('end', {
+          target: 'end',
+          label: '结束任务',
+          ...(definition.end.content === undefined ? {} : { content: definition.end.content }),
+        })
+        continue
+      }
+      const types =
+        channel.types !== undefined && channel.types.length > 0
+          ? channel.types
+          : (definition.positions
+              .find((position) => position.id === channel.to)
+              ?.taskTypes.map((taskType) => taskType.id) ?? [])
+      for (const typeId of types) {
+        if (targets.has(typeId)) continue
+        const taskType = findTaskType(definition, typeId)
+        if (taskType === undefined) continue
+        targets.set(typeId, {
+          target: typeId,
+          label: taskType.label,
+          ...(taskType.content === undefined ? {} : { content: taskType.content }),
+        })
+      }
+    }
+    return [...targets.values()]
+  }
+
+  /**
+   * 当前任务可以点的动作（人任务）；助理代人处理时用。
+   *
+   * @param sessionId 任务会话
+   * @returns 动作列表与表单 schema；非人任务为空
+   */
+  taskActionsForSession(
+    sessionId: string,
+  ): Array<{ id: string; label: string; input?: JsonSchema }> {
+    const reference = this.sessionTasks.get(sessionId)
+    if (reference === undefined) return []
+    const job = this.store.getJob(reference.jobId)
+    const task = this.store.getTask(reference.taskId)
+    if (job === undefined || task === undefined) return []
+    const taskType = this.taskTypeOf(job.definition, task.type)
+    return (taskType?.actions ?? []).map((action) => ({
+      id: action.id,
+      label: action.label,
+      ...(action.input === undefined ? {} : { input: action.input }),
+    }))
+  }
+
+  /**
+   * 执行中的任务按目标创建派生任务：通道由引擎解析，调用方不需要知道通道。
+   *
+   * @param input 会话、目标、任务内容与依赖
+   * @returns 新任务
+   */
+  async createTaskFromTarget(input: {
+    readonly sessionId: string
+    readonly target: string
+    readonly content: JsonValue
+    readonly deps: readonly string[]
+  }): Promise<TaskRecord> {
+    const reference = this.sessionTasks.get(input.sessionId)
+    if (reference === undefined) {
+      throw new WorkflowError(
+        'no-task',
+        'this session is not executing a workflow task; only an executing task can create tasks',
+      )
+    }
+    const job = this.store.getJob(reference.jobId)
+    const creator = this.store.getTask(reference.taskId)
+    if (job === undefined || creator === undefined) {
+      throw new WorkflowError('not-found', 'task not found')
+    }
+    const channel = this.resolveTaskRoute(job.definition, creator.position, input.target)
+    return await this.createTaskFromSession({
+      sessionId: input.sessionId,
+      channel,
+      type: input.target,
+      content: input.content,
+      // 不给依赖时默认依赖创建者：执行者不必知道自己的任务 id。
+      deps: input.deps.length > 0 ? input.deps : [creator.id],
+    })
+  }
+
+  /** 把一个可创建目标解析成从当前节点出发的通道。 */
+  private resolveTaskRoute(definition: WorkflowDefinition, from: string, target: string): string {
+    const owner =
+      target === 'end'
+        ? undefined
+        : definition.positions.find((position) =>
+            position.taskTypes.some((taskType) => taskType.id === target),
+          )
+    if (target !== 'end' && owner === undefined) {
+      throw new WorkflowError('invalid-target', `task "${target}" is not declared by this workflow`)
+    }
+    const channels = definition.channels.filter((channel) => {
+      if (channel.from !== from) return false
+      if (target === 'end') return channel.to === 'end'
+      if (channel.to !== owner?.id) return false
+      return (
+        channel.types === undefined || channel.types.length === 0 || channel.types.includes(target)
+      )
+    })
+    const [channel] = channels
+    if (channel === undefined) {
+      throw new WorkflowError('invalid-target', `task "${target}" cannot be created from this task`)
+    }
+    if (channels.length > 1) {
+      throw new WorkflowError(
+        'invalid-target',
+        `task "${target}" has more than one route from this task; ask the orchestrator to disambiguate`,
+      )
+    }
+    return channel.id
+  }
+
+  /**
    * 执行中的任务 / 助理提交结果。
    *
-   * @param input 会话、结构化结果、文本与附件
+   * @param input 会话、文本与附件
    * @returns 任务与作业的最新状态
    */
   async completeTaskFromSession(input: {
     readonly sessionId: string
-    readonly output: JsonValue
     readonly text: string
+    readonly action?: string | undefined
+    readonly input?: JsonValue | undefined
     readonly attachments: unknown
   }): Promise<{ task: TaskRecord; job: JobRecord }> {
     const reference = this.sessionTasks.get(input.sessionId)
@@ -862,31 +1038,23 @@ export class WorkflowEngine {
           `task ${task.id} is ${task.status}; it cannot be completed again`,
         )
       }
-      if (task.id === START_TASK_ID) {
-        const planned = this.store.listTasks(job.id).length + job.definition.start.next.length
-        if (planned + 1 > job.definition.budgets.maxTasks) {
-          throw new WorkflowError(
-            'budget-exceeded',
-            `workflow budget maxTasks=${job.definition.budgets.maxTasks} would be exceeded by the initial tasks`,
-          )
-        }
-      }
-      const problems = this.outputProblemsFor(job, task, input.output)
-      if (problems.length > 0) {
-        throw new WorkflowError(
-          'invalid-output',
-          `output does not match the task contract: ${problems.join('; ')}`,
-        )
-      }
       const claimant = task.claimant
-      const workspace = this.workspaceFor(task)
-      const updated = await this.completeTaskLocked(job, task, {
-        output: input.output,
-        text: input.text,
-        attachments: input.attachments,
-        workspace,
-        createdBy: claimant?.name ?? '执行者',
-      })
+      const createdBy = claimant?.name ?? '执行者'
+      const updated =
+        task.assignee.kind === 'human'
+          ? await this.completeHumanTaskLocked(job, task, {
+              action: input.action,
+              input: input.input,
+              text: input.text,
+              attachments: input.attachments,
+              createdBy,
+            })
+          : await this.completeTaskLocked(job, task, {
+              text: input.text,
+              attachments: input.attachments,
+              workspace: this.workspaceFor(task),
+              createdBy,
+            })
       this.sessionTasks.delete(input.sessionId)
       await this.recomputeLocked(job.id)
       return { task: updated, job: this.store.getJob(job.id) ?? job }
@@ -945,15 +1113,18 @@ export class WorkflowEngine {
   }
 
   /**
-   * 页面：人填表提交一条人任务。
+   * 页面：人点一个动作提交一条人任务。
    *
-   * @param input 作业、任务、结构化结果、文本与附件
+   * 动作可以省略——那就是「只留结果、不创建任务」的提交。
+   *
+   * @param input 作业、任务、动作、表单、文本与附件
    * @returns 更新后的任务
    */
   async completeTaskAsHuman(input: {
     readonly jobId: string
     readonly taskId: string
-    readonly output: JsonValue
+    readonly action?: string | undefined
+    readonly input?: JsonValue | undefined
     readonly text: string
     readonly attachments: unknown
   }): Promise<TaskRecord> {
@@ -969,46 +1140,120 @@ export class WorkflowEngine {
           `task ${input.taskId} is ${task.status}; a human task can only be completed from ready/running`,
         )
       }
-      let prepared = task
-      if (task.status === 'ready') {
-        const now = nowIso()
-        const attempt: AttemptRecord = {
-          id: newAttemptId(),
-          jobId: job.id,
-          taskId: task.id,
-          sessionId: null,
-          startSeq: null,
-          status: 'running',
-          stopReason: null,
-          error: null,
-          promptFile: null,
-          startedAt: now,
-          finishedAt: null,
-        }
-        await this.store.insertAttempt(attempt)
-        prepared = await this.store.updateTask(task.id, (current) => ({
-          ...current,
-          claimant: { kind: 'human', name: '本地用户', sessionId: null },
-          attemptIds: [...current.attemptIds, attempt.id],
-          updatedAt: now,
-        }))
-      }
-      const problems = this.outputProblemsFor(job, prepared, input.output)
-      if (problems.length > 0) {
-        throw new WorkflowError(
-          'invalid-output',
-          `output does not match the task contract: ${problems.join('; ')}`,
-        )
-      }
-      const updated = await this.completeTaskLocked(job, prepared, {
-        output: input.output,
+      const updated = await this.completeHumanTaskLocked(job, task, {
+        action: input.action,
+        input: input.input,
         text: input.text,
         attachments: input.attachments,
-        workspace: undefined,
         createdBy: '本地用户',
       })
       await this.recomputeLocked(job.id)
       return updated
+    })
+  }
+
+  /**
+   * 人任务的提交：校验动作与表单、创建动作声明的任务、写入结果。
+   *
+   * 先渲染并校验全部创建，任何一条不合法都不落盘、也不完成任务。
+   */
+  private async completeHumanTaskLocked(
+    job: JobRecord,
+    task: TaskRecord,
+    input: {
+      readonly action?: string | undefined
+      readonly input?: JsonValue | undefined
+      readonly text: string
+      readonly attachments: unknown
+      readonly createdBy: string
+    },
+  ): Promise<TaskRecord> {
+    const taskType = this.taskTypeOf(job.definition, task.type)
+    const actionId = typeof input.action === 'string' ? input.action.trim() : ''
+    const action =
+      actionId === ''
+        ? undefined
+        : taskType?.actions?.find((candidate) => candidate.id === actionId)
+    if (actionId !== '' && action === undefined) {
+      throw new WorkflowError(
+        'invalid-action',
+        `task type "${task.type}" has no action "${actionId}"`,
+      )
+    }
+    const form = input.input ?? {}
+    if (action?.input !== undefined) {
+      const problems = schemaProblems(action.input, form)
+      if (problems.length > 0) {
+        throw new WorkflowError(
+          'invalid-input',
+          `input does not match the action contract: ${problems.join('; ')}`,
+        )
+      }
+    }
+    const workers = await this.workers()
+    const tasks = this.store.listTasks(job.id)
+    const creations = (action?.creates ?? []).map((creation) =>
+      renderCreation(job.definition, task.position, creation, {
+        content: task.content,
+        input: form,
+      }),
+    )
+    let prepared = task
+    if (task.status === 'ready') {
+      const now = nowIso()
+      const attempt: AttemptRecord = {
+        id: newAttemptId(),
+        jobId: job.id,
+        taskId: task.id,
+        sessionId: null,
+        startSeq: null,
+        status: 'running',
+        stopReason: null,
+        error: null,
+        promptFile: null,
+        startedAt: now,
+        finishedAt: null,
+      }
+      await this.store.insertAttempt(attempt)
+      prepared = await this.store.updateTask(task.id, (current) => ({
+        ...current,
+        status: 'running',
+        claimant: { kind: 'human', name: '本地用户', sessionId: null },
+        attemptIds: [...current.attemptIds, attempt.id],
+        startedAt: current.startedAt ?? now,
+        updatedAt: now,
+      }))
+    }
+    let known = tasks
+    for (const parsed of creations) {
+      const created = buildCreatedTask({
+        job,
+        creator: prepared,
+        channel: parsed.channel.id,
+        type: parsed.taskType.id,
+        content: parsed.content,
+        deps: [prepared.id],
+        tasks: known,
+        workers,
+      })
+      await this.store.insertTask(created.task)
+      known = [...known, created.task]
+      await this.appendEvent(job.id, 'task/created', {
+        taskId: created.task.id,
+        position: created.task.position,
+        type: created.task.type,
+        channel: created.task.channel,
+        deps: created.task.deps,
+        createdBy: prepared.id,
+      })
+    }
+    return await this.completeTaskLocked(job, prepared, {
+      text: input.text,
+      attachments: input.attachments,
+      workspace: undefined,
+      createdBy: input.createdBy,
+      ...(action === undefined ? {} : { action: { id: action.id, label: action.label } }),
+      ...(action?.input === undefined ? {} : { input: form }),
     })
   }
 
@@ -1144,7 +1389,10 @@ export class WorkflowEngine {
 
   /** 重启恢复：重建调度、续接 running 任务、补算 clock、重试交付。 */
   private async recover(): Promise<void> {
-    const jobs = this.store.allJobs().filter((job) => job.status === 'running')
+    // 旧版本定义的作业不参与恢复：它们只读、且随时可能被清掉。
+    const jobs = this.store
+      .allJobs()
+      .filter((job) => job.status === 'running' && job.definition.version === 7)
     for (const job of jobs) {
       try {
         await this.store.runExclusive(job.id, async () => {
@@ -1172,16 +1420,6 @@ export class WorkflowEngine {
           error: 'host restarted while this attempt was running',
           finishedAt: nowIso(),
         }))
-      }
-      if (task.position === 'start') {
-        // 启动任务：重新把提示词投进启动者会话；失败则任务失败。
-        const starter = job.starter
-        if (starter.kind === 'session' && attempt !== undefined) {
-          void this.resumeStartTask(job, task, attempt)
-          continue
-        }
-        await this.failTaskLocked(jobId, task.id, 'host restarted before the start task finished')
-        continue
       }
       if (task.position === 'end') {
         // 结束任务不占用 running：正常不会走到这里。
@@ -1240,39 +1478,6 @@ export class WorkflowEngine {
       }
     }
     await this.recomputeLocked(jobId)
-  }
-
-  /** 重新投递启动任务提示词。 */
-  private async resumeStartTask(
-    job: JobRecord,
-    task: TaskRecord,
-    attempt: AttemptRecord,
-  ): Promise<void> {
-    const starter = job.starter
-    if (starter.kind !== 'session') return
-    try {
-      const startSeq = await this.delivery.deliver(starter.sessionId, buildStartTaskPrompt(job))
-      await this.store.runExclusive(job.id, async () => {
-        await this.store.updateAttempt(attempt.id, (current) => ({
-          ...current,
-          status: 'running',
-          error: null,
-          finishedAt: null,
-          sessionId: starter.sessionId,
-          startSeq: startSeq ?? current.startSeq,
-        }))
-        this.sessionTasks.set(starter.sessionId, { jobId: job.id, taskId: task.id })
-      })
-    } catch (error) {
-      await this.store.runExclusive(job.id, async () => {
-        await this.failTaskLocked(
-          job.id,
-          task.id,
-          `could not resume the start task: ${describeError(error)}`,
-        )
-        await this.recomputeLocked(job.id)
-      })
-    }
   }
 
   /** 续接一个 agent / 助理任务会话。 */
@@ -1382,7 +1587,6 @@ export class WorkflowEngine {
     const tasks = this.store.listTasks(jobId)
     const ready = tasks.filter((task) => task.status === 'ready')
     if (ready.length === 0) return []
-    const workers = await this.workers()
     const launches: Launch[] = []
     const busyPositions = new Set<string>()
     for (const task of tasks) {
@@ -1395,17 +1599,20 @@ export class WorkflowEngine {
     )
     for (const task of sorted) {
       if (task.position === 'end') {
-        if (this.deliveryBlocked.has(task.id)) continue
-        const launch = await this.claimForDelivery(job, task)
-        if (launch !== null) launches.push(launch)
-        continue
-      }
-      if (task.position === 'start') {
-        if (job.starter.kind !== 'session') continue
-        if (busyPositions.has('start')) continue
-        const launch = await this.claimStartTask(job, task)
+        // 人发起：结束任务就是看板上的一条待办，等人点「已收到」。
+        if (task.assignee.kind === 'human') continue
+        // 会话发起：把最终报告投进那个会话，等它确认。
+        if (task.assignee.kind === 'session') {
+          if (this.deliveryBlocked.has(task.id)) continue
+          const launch = await this.claimForDelivery(job, task)
+          if (launch !== null) launches.push(launch)
+          continue
+        }
+        // 交给秘书：按普通智能体任务派发，由它代收。
+        if (busyPositions.has('end')) continue
+        const launch = await this.claimAgentTask(job, task, tasks)
         if (launch !== null) {
-          busyPositions.add('start')
+          busyPositions.add('end')
           launches.push(launch)
         }
         continue
@@ -1415,7 +1622,7 @@ export class WorkflowEngine {
         const assistantName = this.assistantFor(job.definition, task.type)
         if (assistantName === null || task.assistantBlocked) continue
         if (this.busyAssistants.has(assistantName)) continue
-        const launch = await this.claimAssistantTask(job, task, assistantName, tasks)
+        const launch = await this.claimAssistantTask(job, task, assistantName)
         if (launch !== null) {
           this.busyAssistants.add(assistantName)
           launches.push(launch)
@@ -1430,7 +1637,7 @@ export class WorkflowEngine {
         continue
       }
       if (busyPositions.has(task.position)) continue
-      const launch = await this.claimAgentTask(job, task, tasks, workers)
+      const launch = await this.claimAgentTask(job, task, tasks)
       if (launch !== null) {
         busyPositions.add(task.position)
         launches.push(launch)
@@ -1505,12 +1712,13 @@ export class WorkflowEngine {
   private async claimAgentTask(
     job: JobRecord,
     task: TaskRecord,
-    tasks: readonly TaskRecord[],
-    workers: ReadonlyMap<string, WorkerInfo>,
+    _tasks: readonly TaskRecord[],
   ): Promise<Launch | null> {
-    const position = positionOf(job.definition, task.position)
-    if (position === undefined || position.executor.kind !== 'worker') return null
-    const taskType = this.taskTypeOf(job.definition, task.type)
+    if (task.assignee.kind !== 'worker') return null
+    const taskType =
+      task.position === 'end'
+        ? resolveTargetTaskType(job.definition, 'end', '')
+        : this.taskTypeOf(job.definition, task.type)
     if (taskType === undefined) {
       await this.failTaskLocked(
         job.id,
@@ -1519,15 +1727,7 @@ export class WorkflowEngine {
       )
       return null
     }
-    const prompt = buildExecutionPrompt({
-      job,
-      task,
-      position,
-      taskType,
-      tasks,
-      attachments: this.store.listAttachments(job.id),
-      workspace: workers.get(position.executor.name)?.path,
-    })
+    const prompt = buildExecutionPrompt({ task, taskType })
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
     const promptFile = await this.store
       .writeText(job.id, 'prompts', attempt.id, prompt)
@@ -1538,7 +1738,7 @@ export class WorkflowEngine {
     await this.claimTaskRecord(
       job,
       task,
-      { kind: 'worker', name: position.executor.name, sessionId: null },
+      { kind: 'worker', name: task.assignee.name, sessionId: null },
       attempt.id,
     )
     return {
@@ -1546,7 +1746,7 @@ export class WorkflowEngine {
       jobId: job.id,
       taskId: task.id,
       attemptId: attempt.id,
-      worker: position.executor.name,
+      worker: task.assignee.name,
       prompt,
       planMode: taskType.mode === 'plan',
     }
@@ -1557,20 +1757,10 @@ export class WorkflowEngine {
     job: JobRecord,
     task: TaskRecord,
     assistantName: string,
-    tasks: readonly TaskRecord[],
   ): Promise<Launch | null> {
-    const position = positionOf(job.definition, task.position)
     const taskType = this.taskTypeOf(job.definition, task.type)
-    if (position === undefined || taskType === undefined) return null
-    const prompt = buildAssistantPrompt({
-      job,
-      task,
-      position,
-      taskType,
-      tasks,
-      attachments: this.store.listAttachments(job.id),
-      workspace: undefined,
-    })
+    if (taskType === undefined) return null
+    const prompt = buildAssistantPrompt({ task, taskType })
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
     const promptFile = await this.store
       .writeText(job.id, 'prompts', attempt.id, prompt)
@@ -1615,10 +1805,11 @@ export class WorkflowEngine {
     return { kind: 'program', jobId: job.id, taskId: task.id, attemptId: attempt.id, programId }
   }
 
-  /** 认领启动任务（会话启动者）。 */
-  private async claimStartTask(job: JobRecord, task: TaskRecord): Promise<Launch | null> {
+  /** 为结束任务准备一次投递：认领任务，投递后等发起人确认。 */
+  private async claimForDelivery(job: JobRecord, task: TaskRecord): Promise<Launch | null> {
     if (job.starter.kind !== 'session') return null
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
+    await this.appendEvent(job.id, 'delivery/attempt', { taskId: task.id, attemptId: attempt.id })
     await this.claimTaskRecord(
       job,
       task,
@@ -1626,20 +1817,12 @@ export class WorkflowEngine {
       attempt.id,
     )
     return {
-      kind: 'start',
+      kind: 'delivery',
       jobId: job.id,
       taskId: task.id,
       attemptId: attempt.id,
       sessionId: job.starter.sessionId,
-      prompt: buildStartTaskPrompt(job),
     }
-  }
-
-  /** 为结束任务准备一次投递。 */
-  private async claimForDelivery(job: JobRecord, task: TaskRecord): Promise<Launch | null> {
-    const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
-    await this.appendEvent(job.id, 'delivery/attempt', { taskId: task.id, attemptId: attempt.id })
-    return { kind: 'delivery', jobId: job.id, taskId: task.id, attemptId: attempt.id }
   }
 
   /** 在队列外启动一次执行。 */
@@ -1653,11 +1836,8 @@ export class WorkflowEngine {
       case 'program':
         void this.launchProgram(launch.jobId, launch.taskId, launch.attemptId, launch.programId)
         return
-      case 'start':
-        void this.launchStart(launch)
-        return
       case 'delivery':
-        void this.runDelivery(launch.jobId, launch.taskId, launch.attemptId)
+        void this.runDelivery(launch.jobId, launch.taskId, launch.attemptId, launch.sessionId)
     }
   }
 
@@ -1820,29 +2000,17 @@ export class WorkflowEngine {
       timeout: null,
     })
     try {
-      const tasks = this.store.listTasks(jobId)
-      const payload = renderTaskPayload(task.payload, tasks)
-      const result = await driver.run({ payload, signal: controller.signal })
+      const result = await driver.run({ content: task.content, signal: controller.signal })
       await this.store.runExclusive(jobId, async () => {
         this.active.delete(taskId)
         const current = this.store.getTask(taskId)
         if (current === undefined || current.status !== 'running') return
-        const outputProblems = this.outputProblemsFor(job, current, result.output)
-        if (outputProblems.length > 0) {
-          await this.failTaskLocked(
-            jobId,
-            taskId,
-            `program output is invalid: ${outputProblems.join('; ')}`,
-          )
-        } else {
-          await this.completeTaskLocked(job, current, {
-            output: result.output,
-            text: '',
-            attachments: [],
-            workspace: undefined,
-            createdBy: current.claimant?.name ?? programId,
-          })
-        }
+        await this.completeTaskLocked(job, current, {
+          text: result.text,
+          attachments: [],
+          workspace: undefined,
+          createdBy: current.claimant?.name ?? programId,
+        })
         await this.recomputeLocked(jobId)
       })
     } catch (error) {
@@ -1850,86 +2018,56 @@ export class WorkflowEngine {
     }
   }
 
-  /** 投递启动任务提示词到启动者会话。 */
-  private async launchStart(launch: Extract<Launch, { kind: 'start' }>): Promise<void> {
-    try {
-      const startSeq = await this.delivery.deliver(launch.sessionId, launch.prompt)
-      await this.store.runExclusive(launch.jobId, async () => {
-        const task = this.store.getTask(launch.taskId)
-        if (task === undefined || task.status !== 'running') return
-        await this.store.updateAttempt(launch.attemptId, (attempt) => ({
-          ...attempt,
-          sessionId: launch.sessionId,
-          startSeq,
-        }))
-        this.sessionTasks.set(launch.sessionId, { jobId: launch.jobId, taskId: launch.taskId })
-        await this.store.updateTask(launch.taskId, (record) => ({
-          ...record,
-          claimant: { kind: 'worker', name: 'starter', sessionId: launch.sessionId },
-          updatedAt: nowIso(),
-        }))
-      })
-      if (this.options.taskTimeoutMs > 0) {
-        setTimeout(() => {
-          void this.timeoutOutside(launch.jobId, launch.taskId, 'starter')
-        }, this.options.taskTimeoutMs).unref?.()
-      }
-    } catch (error) {
-      await this.failOutside(
-        launch.jobId,
-        launch.taskId,
-        `could not deliver the start task prompt to the starter session: ${describeError(error)}`,
-      )
-    }
-  }
-
-  /** 结束任务投递。 */
-  private async runDelivery(jobId: string, taskId: string, attemptId: string): Promise<void> {
+  /** 结束任务投递：把最终报告送到发起人会话，等它确认。 */
+  private async runDelivery(
+    jobId: string,
+    taskId: string,
+    attemptId: string,
+    sessionId: string,
+  ): Promise<void> {
     const job = this.store.getJob(jobId)
     const task = this.store.getTask(taskId)
-    if (job === undefined || task === undefined || task.status !== 'ready') {
+    if (job === undefined || task === undefined || task.status !== 'running') {
       await this.finishAttemptOutside(attemptId, 'cancelled', 'cancelled before delivery')
       return
     }
     let delivered = true
     let error: string | null = null
-    if (job.starter.kind === 'session') {
-      try {
-        await this.delivery.deliver(job.starter.sessionId, buildEndDeliveryText(job, task))
-      } catch (caught) {
-        delivered = false
-        error = describeError(caught)
-      }
+    let startSeq: number | null = null
+    try {
+      startSeq = await this.delivery.deliver(sessionId, buildEndDeliveryText(job, task))
+    } catch (caught) {
+      delivered = false
+      error = describeError(caught)
     }
     await this.store.runExclusive(jobId, async () => {
       const current = this.store.getTask(taskId)
       if (current === undefined) return
       if (!delivered) {
         this.deliveryBlocked.add(taskId)
+        this.sessionTasks.delete(sessionId)
         await this.store.updateAttempt(attemptId, (attempt) => ({
           ...attempt,
           status: 'failed',
           error,
           finishedAt: nowIso(),
         }))
+        await this.store.updateTask(taskId, (record) => ({
+          ...record,
+          status: 'ready',
+          claimant: null,
+          updatedAt: nowIso(),
+        }))
         await this.appendEvent(jobId, 'delivery/failed', { taskId, error })
         return
       }
+      this.sessionTasks.set(sessionId, { jobId, taskId })
       await this.store.updateAttempt(attemptId, (attempt) => ({
         ...attempt,
-        status: 'completed',
-        stopReason: 'delivered',
-        finishedAt: nowIso(),
+        sessionId,
+        ...(startSeq === null ? {} : { startSeq }),
       }))
-      const text = JSON.stringify(current.payload)
-      await this.completeRecordNoRecompute(job, current, {
-        output: null,
-        text,
-        attachmentIds: [],
-        createdBy: job.starter.kind === 'human' ? '本地用户' : 'starter',
-      })
-      await this.appendEvent(jobId, 'delivery/completed', { taskId })
-      await this.recomputeLocked(jobId)
+      await this.appendEvent(jobId, 'delivery/delivered', { taskId })
     })
   }
 
@@ -2066,11 +2204,12 @@ export class WorkflowEngine {
     job: JobRecord,
     task: TaskRecord,
     input: {
-      readonly output: JsonValue
       readonly text: string
       readonly attachments: unknown
       readonly workspace: string | undefined
       readonly createdBy: string
+      readonly action?: { readonly id: string; readonly label: string } | undefined
+      readonly input?: JsonValue | undefined
     },
   ): Promise<TaskRecord> {
     const jobDirectory = this.store.paths(job.id).root
@@ -2095,22 +2234,16 @@ export class WorkflowEngine {
       text.trim() === ''
         ? null
         : await this.store.writeText(job.id, 'results', attemptId, text).catch(() => null)
-    const result = {
-      output: input.output,
+    const result: TaskResult = {
       text: clipUtf8(text, RESULT_PREVIEW_BYTES),
       textBytes: Buffer.byteLength(text, 'utf8'),
       textFile,
       attachmentIds: attachmentRecords.map((attachment) => attachment.id),
+      ...(input.action === undefined ? {} : { action: input.action }),
+      ...(input.input === undefined ? {} : { input: input.input }),
     }
     if (task.claimant?.kind === 'assistant') this.busyAssistants.delete(task.claimant.name)
     const now = nowIso()
-    if (task.id === START_TASK_ID) {
-      await this.store.updateJob(job.id, (current) => ({
-        ...current,
-        input: { ...current.input, structured: input.output },
-        updatedAt: now,
-      }))
-    }
     if (!canTransitionTask(task.status, 'completed')) {
       throw new WorkflowError(
         'invalid-status',
@@ -2136,49 +2269,10 @@ export class WorkflowEngine {
     this.active.delete(task.id)
     this.dropSessionTask(task.id)
     await this.appendEvent(job.id, 'task/completed', { taskId: task.id, type: task.type })
-    if (task.id === START_TASK_ID) {
-      await this.spawnInitialTasksLocked(job, updated)
-    }
     return updated
   }
 
-  /** 完成结束任务（无 recompute，由调用方继续）。 */
-  private async completeRecordNoRecompute(
-    job: JobRecord,
-    task: TaskRecord,
-    result: {
-      readonly output: JsonValue | null
-      readonly text: string
-      readonly attachmentIds: readonly string[]
-      readonly createdBy: string
-    },
-  ): Promise<void> {
-    const now = nowIso()
-    const text = clipUtf8(result.text, this.options.maxResultTextBytes)
-    const resultRecord = {
-      output: result.output,
-      text: clipUtf8(text, RESULT_PREVIEW_BYTES),
-      textBytes: Buffer.byteLength(text, 'utf8'),
-      textFile: null,
-      attachmentIds: [...result.attachmentIds],
-    }
-    if (!canTransitionTask(task.status, 'completed')) return
-    await this.store.updateTask(task.id, (current) => ({
-      ...current,
-      status: 'completed',
-      result: resultRecord,
-      claimant: current.claimant ?? {
-        kind: job.starter.kind === 'human' ? 'human' : 'worker',
-        name: result.createdBy,
-        sessionId: job.starter.kind === 'session' ? job.starter.sessionId : null,
-      },
-      error: null,
-      finishedAt: now,
-      updatedAt: now,
-    }))
-  }
-
-  /** 启动任务完成后创建初始任务。 */
+  /** 启动任务完成后创建初始任务（崩溃恢复时补建）。 */
   private async spawnInitialTasksLocked(job: JobRecord, startTask: TaskRecord): Promise<void> {
     const workers = await this.workers()
     const initial = buildInitialTasks({
@@ -2311,16 +2405,6 @@ export class WorkflowEngine {
       }
     }
     return undefined
-  }
-
-  /** 按任务契约校验结构化结果。 */
-  private outputProblemsFor(job: JobRecord, task: TaskRecord, output: JsonValue): string[] {
-    const definition = job.definition
-    if (task.position === 'end') return []
-    if (task.id === START_TASK_ID) return schemaProblems(definition.start.task.output, output)
-    const taskType = this.taskTypeOf(definition, task.type)
-    if (taskType === undefined) return [`unknown task type "${task.type}"`]
-    return schemaProblems(taskType.output, output)
   }
 
   /** 任务执行者的工作区（打工人目录）。 */

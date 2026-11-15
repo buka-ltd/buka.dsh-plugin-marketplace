@@ -1,31 +1,32 @@
 /**
- * 工作流 v5 定义校验（ADR 0015）。
+ * 工作流 v7 定义校验。
  *
  * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
  * 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
  *
- * 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回向通道、模板引用）。
+ * 校验分两步：先解析出规范化定义，再跑跨节点规则（通道、可达性、动作、模板引用）。
  * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
  *
  * @module @buka/dsh-plugin-workflows/definition/validate
  */
 
 import type {
+  ActionDefinition,
   BudgetDefinition,
   ChannelDefinition,
+  CreationDefinition,
   DefinitionIssue,
   EndDefinition,
   ExecutorSpec,
   JsonValue,
   PositionDefinition,
   StartDefinition,
-  StartRouteDefinition,
   TaskTypeDefinition,
   WorkerInfo,
   WorkflowDefinition,
 } from '../domain/types.ts'
-import type { OutputSchema } from '../output.ts'
-import { isPlainObject, parseOutputSchema, resolveOutputPath } from '../output.ts'
+import type { JsonSchema } from '../json-schema.ts'
+import { isPlainObject, parseJsonSchema, resolveSchemaPath } from '../json-schema.ts'
 import { containsTemplate, inspectPayload } from './payload.ts'
 
 /** 校验入参。 */
@@ -63,7 +64,7 @@ class Issues {
 }
 
 /**
- * 校验一份工作流 v5 定义。
+ * 校验一份工作流 v7 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
  * @param options 打工人目录
@@ -79,7 +80,7 @@ export function validateWorkflowDefinition(
     return { ok: false, issues: issues.list }
   }
 
-  if (raw.version !== 5) issues.add('version', 'must be 5')
+  if (raw.version !== 7) issues.add('version', 'must be 7')
   const name = readName(raw, 'name', '', issues)
   const description = readOptionalString(raw, 'description', 'description', issues) ?? ''
   const budgets = readBudgets(raw.budgets, issues)
@@ -91,32 +92,19 @@ export function validateWorkflowDefinition(
     for (const taskType of position.taskTypes) typeById.set(taskType.id, taskType)
   }
 
-  // requires 引用的类型可以写在后面的岗位里，全部解析完再检查。
-  for (const [positionIndex, position] of positions.entries()) {
-    for (const [taskTypeIndex, taskType] of position.taskTypes.entries()) {
-      for (const [requirementIndex, requirement] of (taskType.requires ?? []).entries()) {
-        for (const requiredType of requirement.types) {
-          if (typeById.has(requiredType)) continue
-          issues.add(
-            `positions[${positionIndex}].taskTypes[${taskTypeIndex}].requires[${requirementIndex}].types`,
-            `unknown task type "${requiredType}": requires may only reference task types declared in this workflow`,
-          )
-        }
-      }
-    }
-  }
-
   const channels = readChannels(raw.channels, positionById, typeById, issues)
   const channelById = new Map(channels.map((channel) => [channel.id, channel]))
-  const start = readStart(raw.start, positionById, typeById, channelById, issues)
+  const start = readStart(raw.start, issues)
   const end = readEnd(raw.end, issues)
 
   checkChannels(channels, positions, issues)
   checkReachability(channels, positions, issues)
   checkEnd(channels, positions, issues)
+  const endContent = end?.content
+  checkStartRoutes(start, positionById, typeById, channelById, endContent, issues)
+  checkActions(positions, positionById, typeById, channelById, endContent, issues)
 
   if (issues.failed) return { ok: false, issues: issues.list }
-  // name / budgets / start / end 缺失时前面已经记录错误；这里只做类型收窄。
   if (name === null || budgets === null || start === null || end === null) {
     return { ok: false, issues: issues.list }
   }
@@ -124,7 +112,7 @@ export function validateWorkflowDefinition(
   return {
     ok: true,
     definition: {
-      version: 5,
+      version: 7,
       name,
       ...(description === '' ? {} : { description }),
       budgets,
@@ -215,7 +203,7 @@ function readPositions(
     const id = readPositionId(entry, path, seenPositions, issues)
     if (id === null) continue
     const label = readName(entry, 'label', path, issues)
-    const description = readOptionalString(entry, 'description', `${path}.description`, issues)
+    const note = readOptionalString(entry, 'note', `${path}.note`, issues)
     const executor = readExecutor(entry.executor, `${path}.executor`, workers, issues)
     const taskTypes = readTaskTypes(
       entry.taskTypes,
@@ -233,7 +221,7 @@ function readPositions(
     positions.push({
       id,
       label,
-      ...(description === null || description === '' ? {} : { description }),
+      ...(note === null || note === '' ? {} : { note }),
       executor,
       taskTypes,
     })
@@ -347,10 +335,10 @@ function readTaskType(
   }
   seenTypes.add(id)
   const label = readName(entry, 'label', path, issues)
-  const description = readOptionalString(entry, 'description', `${path}.description`, issues)
-  const payload = readSchema(entry.payload, `${path}.payload`, issues) ?? { type: 'object' }
-  const output = readSchema(entry.output, `${path}.output`, issues) ?? { type: 'object' }
-  const requires = readRequires(entry.requires, `${path}.requires`, issues)
+  const definition = readOptionalString(entry, 'definition', `${path}.definition`, issues)
+  const content = readSchema(entry.content, `${path}.content`, issues, 'value')
+  const human = executor?.kind === 'human'
+  const actions = readActions(entry.actions, `${path}.actions`, human, issues)
   const assistant = readAssistant(
     entry.assistant,
     `${path}.assistant`,
@@ -364,50 +352,109 @@ function readTaskType(
   return {
     id,
     label,
-    ...(description === null || description === '' ? {} : { description }),
-    payload,
-    output,
-    ...(requires === undefined ? {} : { requires }),
+    ...(definition === null || definition === '' ? {} : { definition }),
+    ...(content === null ? {} : { content }),
+    ...(actions === undefined ? {} : { actions }),
     ...(assistant === undefined ? {} : { assistant }),
     ...(mode === undefined ? {} : { mode }),
   }
 }
 
-/** 解析 schema 字段。 */
-function readSchema(raw: unknown, path: string, issues: Issues): OutputSchema | null {
-  if (raw === undefined || raw === null) return null
-  return parseOutputSchema(raw, path, (at, message) => issues.add(at, message))
-}
-
-/** 解析 `requires`。 */
-function readRequires(
+/** 解析 schema 字段；任务内容允许非对象顶层，表单与作业输入要求对象。 */
+function readSchema(
   raw: unknown,
   path: string,
   issues: Issues,
-): readonly { types: readonly string[] }[] | undefined {
+  root: 'object' | 'value' = 'object',
+): JsonSchema | null {
+  if (raw === undefined || raw === null) return null
+  return parseJsonSchema(raw, path, (at, message) => issues.add(at, message), { root })
+}
+
+/** 解析任务类型上的动作列表。 */
+function readActions(
+  raw: unknown,
+  path: string,
+  human: boolean,
+  issues: Issues,
+): readonly ActionDefinition[] | undefined {
   if (raw === undefined || raw === null) return undefined
-  if (!Array.isArray(raw)) {
-    issues.add(path, 'must be an array of { types: [...] } requirements')
+  if (!human) {
+    issues.add(path, 'actions are only valid on human positions')
     return undefined
   }
-  const requirements: { types: string[] }[] = []
+  if (!Array.isArray(raw)) {
+    issues.add(path, 'must be an array of actions')
+    return undefined
+  }
+  const actions: ActionDefinition[] = []
+  const seen = new Set<string>()
   for (const [index, entry] of raw.entries()) {
     const at = `${path}[${index}]`
-    if (!isPlainObject(entry) || !Array.isArray(entry.types) || entry.types.length === 0) {
-      issues.add(at, 'must be { types: [<task type ids>] } with at least one type')
+    if (!isPlainObject(entry)) {
+      issues.add(at, 'must be an object')
       continue
     }
-    const types: string[] = []
-    for (const [typeIndex, value] of entry.types.entries()) {
-      if (typeof value !== 'string' || value.trim() === '') {
-        issues.add(`${at}.types[${typeIndex}]`, 'must be a non-empty task type id')
-        continue
-      }
-      types.push(value.trim())
+    const id = typeof entry.id === 'string' ? entry.id.trim() : ''
+    if (id === '' || !ID_PATTERN.test(id)) {
+      issues.add(`${at}.id`, 'must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+      continue
     }
-    if (types.length > 0) requirements.push({ types })
+    if (seen.has(id)) {
+      issues.add(`${at}.id`, `duplicate action id "${id}" in this task type`)
+      continue
+    }
+    seen.add(id)
+    const label = readName(entry, 'label', at, issues)
+    if (label === null) continue
+    const input = readSchema(entry.input, `${at}.input`, issues)
+    const creates = readCreations(entry.creates, `${at}.creates`, issues)
+    if (creates === null) continue
+    actions.push({
+      id,
+      label,
+      ...(input === null ? {} : { input }),
+      creates,
+    })
   }
-  return requirements.length > 0 ? requirements : undefined
+  return actions.length > 0 ? actions : undefined
+}
+
+/** 解析一组创建声明（结构层；通道与模板在第二遍校验）。 */
+function readCreations(raw: unknown, path: string, issues: Issues): CreationDefinition[] | null {
+  if (!Array.isArray(raw)) {
+    issues.add(path, 'must be an array (it may be empty)')
+    return null
+  }
+  const creations: CreationDefinition[] = []
+  for (const [index, entry] of raw.entries()) {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.add(at, 'must be an object')
+      continue
+    }
+    const channel = typeof entry.channel === 'string' ? entry.channel.trim() : ''
+    if (channel === '') {
+      issues.add(`${at}.channel`, 'must be a channel id')
+      continue
+    }
+    const type =
+      entry.type === undefined || entry.type === null
+        ? undefined
+        : typeof entry.type === 'string' && entry.type.trim() !== ''
+          ? entry.type.trim()
+          : null
+    if (type === null) {
+      issues.add(`${at}.type`, 'must be a task type id (omit it only for the end task)')
+      continue
+    }
+    creations.push({
+      channel,
+      ...(type === undefined ? {} : { type }),
+      ...(entry.content === undefined ? {} : { content: entry.content as JsonValue }),
+    })
+  }
+  return creations
 }
 
 /** 解析助理字段；只对人岗位有效。 */
@@ -597,177 +644,190 @@ function readChannelTypes(
 }
 
 /** 解析开始节点。 */
-function readStart(
-  raw: unknown,
-  positionById: ReadonlyMap<string, PositionDefinition>,
-  typeById: ReadonlyMap<string, TaskTypeDefinition>,
-  channelById: ReadonlyMap<string, ChannelDefinition>,
-  issues: Issues,
-): StartDefinition | null {
+function readStart(raw: unknown, issues: Issues): StartDefinition | null {
   if (!isPlainObject(raw)) {
     issues.add('start', 'must declare the built-in start node task contract')
     return null
   }
-  const task = isPlainObject(raw.task) ? raw.task : null
-  if (task === null) {
-    issues.add('start.task', 'must declare payload and output schemas')
+  const content = readSchema(raw.content, 'start.content', issues)
+  const next = readCreations(raw.next, 'start.next', issues)
+  if (next === null || next.length === 0) {
+    issues.add('start.next', 'must declare at least one initial task')
     return null
   }
-  const payload = readSchema(task.payload, 'start.task.payload', issues) ?? { type: 'object' }
-  const output = readSchema(task.output, 'start.task.output', issues)
-  if (output === null) {
-    issues.add('start.task.output', 'is required: it is the structured input later tasks consume')
-    return null
-  }
-  const routes = readStartRoutes(
-    raw.next,
-    'start.next',
-    positionById,
-    typeById,
-    channelById,
-    output,
-    issues,
-  )
-  return { task: { payload, output }, next: routes }
+  return { ...(content === null ? {} : { content }), next }
 }
 
-/** 解析 `start.next` 模板列表。 */
-function readStartRoutes(
-  raw: unknown,
-  path: string,
+/** 解析结束节点。 */
+function readEnd(raw: unknown, issues: Issues): EndDefinition | null {
+  if (!isPlainObject(raw)) {
+    issues.add('end', 'must declare the built-in end node task contract')
+    return null
+  }
+  const content = readSchema(raw.content, 'end.content', issues, 'value')
+  return { ...(content === null ? {} : { content }) }
+}
+
+/** 校验开始节点的初始任务。 */
+function checkStartRoutes(
+  start: StartDefinition | null,
   positionById: ReadonlyMap<string, PositionDefinition>,
   typeById: ReadonlyMap<string, TaskTypeDefinition>,
   channelById: ReadonlyMap<string, ChannelDefinition>,
-  startOutput: OutputSchema,
-  issues: Issues,
-): StartRouteDefinition[] {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    issues.add(path, 'must be a non-empty array of initial task templates')
-    return []
-  }
-  const routes: StartRouteDefinition[] = []
-  for (const [index, entry] of raw.entries()) {
-    const at = `${path}[${index}]`
-    if (!isPlainObject(entry)) {
-      issues.add(at, 'must be an object')
-      continue
-    }
-    const channelId = typeof entry.channel === 'string' ? entry.channel.trim() : ''
-    const channel = channelById.get(channelId)
-    if (channel === undefined) {
-      issues.add(`${at}.channel`, `unknown channel "${String(entry.channel)}"`)
-      continue
-    }
-    if (channel.from !== START_ID) {
-      issues.add(
-        `${at}.channel`,
-        `initial tasks must leave the start node; channel "${channelId}" starts at "${channel.from}"`,
-      )
-      continue
-    }
-    const target = positionById.get(channel.to)
-    if (target === undefined) {
-      issues.add(
-        `${at}.channel`,
-        `channel "${channelId}" does not lead to a position; initial tasks cannot target "${channel.to}"`,
-      )
-      continue
-    }
-    const type = typeof entry.type === 'string' ? entry.type.trim() : ''
-    const taskType = typeById.get(type)
-    if (taskType === undefined || !target.taskTypes.some((candidate) => candidate.id === type)) {
-      issues.add(
-        `${at}.type`,
-        `"${String(entry.type)}" is not a task type of position "${target.id}"`,
-      )
-      continue
-    }
-    if (!channelAllowsType(channel, type)) {
-      issues.add(`${at}.type`, `channel "${channelId}" does not allow task type "${type}"`)
-      continue
-    }
-    if (!isPlainObject(entry.payload)) {
-      issues.add(`${at}.payload`, 'must be an object')
-      continue
-    }
-    const dependsOn = readStartDependsOn(entry.dependsOn, `${at}.dependsOn`, issues)
-    validateRoutePayload(entry.payload, `${at}.payload`, taskType, startOutput, issues)
-    routes.push({
-      channel: channelId,
-      type,
-      payload: entry.payload as Record<string, JsonValue>,
-      ...(dependsOn === undefined ? {} : { dependsOn }),
-    })
-  }
-  return routes
-}
-
-/** 解析初始任务的 `dependsOn`：目前只允许且必须包含 `$start`。 */
-function readStartDependsOn(
-  raw: unknown,
-  path: string,
-  issues: Issues,
-): readonly string[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    issues.add(path, 'must be ["$start"]: initial tasks explicitly depend on the start task')
-    return undefined
-  }
-  let valid = true
-  const deps: string[] = []
-  for (const [index, value] of raw.entries()) {
-    if (value !== '$start') {
-      issues.add(
-        `${path}[${index}]`,
-        'initial tasks can only depend on "$start"; they are created after the start task completes',
-      )
-      valid = false
-      continue
-    }
-    if (deps.includes('$start')) {
-      issues.add(`${path}[${index}]`, 'duplicate "$start" dependency')
-      valid = false
-      continue
-    }
-    deps.push('$start')
-  }
-  if (!deps.includes('$start')) {
-    issues.add(path, 'must include "$start": initial tasks explicitly depend on the start task')
-    valid = false
-  }
-  return valid ? deps : undefined
-}
-
-/** 按任务类型的 payload schema 校验模板 payload（含模板的子树留给运行期）。 */
-function validateRoutePayload(
-  payload: Record<string, unknown>,
-  path: string,
-  taskType: TaskTypeDefinition,
-  startOutput: OutputSchema,
+  endContent: JsonSchema | undefined,
   issues: Issues,
 ): void {
-  const inspection = inspectPayload(payload)
-  for (const error of inspection.syntaxErrors) issues.add(path, error)
-  for (const reference of inspection.references) {
-    if (reference.reference === null) {
-      issues.add(
-        path,
-        `template "{{${reference.path}}}" must reference start.output; initial tasks may only use {{start.output.<path>}}`,
-      )
-      continue
-    }
-    if (reference.reference.kind !== 'start') {
-      issues.add(
-        path,
-        `template "{{${reference.path}}}" must reference start.output: no other task exists yet`,
-      )
-      continue
-    }
-    const reason = resolveOutputPath(startOutput, reference.reference.segments)
-    if (reason !== null) {
-      issues.add(path, `template "{{${reference.path}}}" ${reason}`)
+  if (start === null) return
+  for (const [index, creation] of start.next.entries()) {
+    checkCreation(
+      creation,
+      `start.next[${index}]`,
+      START_ID,
+      start.content,
+      undefined,
+      endContent,
+      {
+        positionById,
+        typeById,
+        channelById,
+        issues,
+      },
+    )
+  }
+}
+
+/** 校验所有人任务类型上的动作。 */
+function checkActions(
+  positions: readonly PositionDefinition[],
+  positionById: ReadonlyMap<string, PositionDefinition>,
+  typeById: ReadonlyMap<string, TaskTypeDefinition>,
+  channelById: ReadonlyMap<string, ChannelDefinition>,
+  endContent: JsonSchema | undefined,
+  issues: Issues,
+): void {
+  for (const position of positions) {
+    for (const taskType of position.taskTypes) {
+      for (const [index, action] of (taskType.actions ?? []).entries()) {
+        for (const [creationIndex, creation] of action.creates.entries()) {
+          checkCreation(
+            creation,
+            `positions.${position.id}.taskTypes.${taskType.id}.actions[${index}].creates[${creationIndex}]`,
+            position.id,
+            taskType.content,
+            action.input,
+            endContent,
+            { positionById, typeById, channelById, issues },
+          )
+        }
+      }
     }
   }
-  checkTemplatedPayload(taskType.payload, payload, path, issues)
+}
+
+/** 校验一条创建声明：通道、目标类型、任务内容模板。 */
+function checkCreation(
+  creation: CreationDefinition,
+  path: string,
+  node: string,
+  creatorContent: JsonSchema | undefined,
+  actionInput: JsonSchema | undefined,
+  endContent: JsonSchema | undefined,
+  context: {
+    readonly positionById: ReadonlyMap<string, PositionDefinition>
+    readonly typeById: ReadonlyMap<string, TaskTypeDefinition>
+    readonly channelById: ReadonlyMap<string, ChannelDefinition>
+    readonly issues: Issues
+  },
+): void {
+  const { issues, channelById, positionById, typeById } = context
+  const channel = channelById.get(creation.channel)
+  if (channel === undefined) {
+    issues.add(`${path}.channel`, `unknown channel "${creation.channel}"`)
+    return
+  }
+  if (channel.from !== node) {
+    issues.add(
+      `${path}.channel`,
+      `channel "${channel.id}" starts at "${channel.from}", not at "${node}"`,
+    )
+    return
+  }
+  if (channel.to === END_ID) {
+    if (creation.type !== undefined && creation.type !== END_ID) {
+      issues.add(`${path}.type`, 'the end task has no task type; omit "type" for channels into end')
+    }
+    checkContent(creation.content, path, endContent, creatorContent, actionInput, issues)
+    return
+  }
+  const target = positionById.get(channel.to)
+  if (target === undefined) {
+    issues.add(`${path}.channel`, `channel "${channel.id}" does not lead to a position`)
+    return
+  }
+  if (creation.type === undefined) {
+    issues.add(`${path}.type`, `must name a task type of position "${target.id}"`)
+    return
+  }
+  const taskType = typeById.get(creation.type)
+  if (
+    taskType === undefined ||
+    !target.taskTypes.some((candidate) => candidate.id === creation.type)
+  ) {
+    issues.add(`${path}.type`, `"${creation.type}" is not a task type of position "${target.id}"`)
+    return
+  }
+  if (!channelAllowsType(channel, taskType.id)) {
+    issues.add(`${path}.type`, `channel "${channel.id}" does not allow task type "${taskType.id}"`)
+    return
+  }
+  checkContent(creation.content, path, taskType.content, creatorContent, actionInput, issues)
+}
+
+/**
+ * 校验任务内容：模板引用 + 按目标 schema 的结构检查。
+ *
+ * @param content 声明的任务内容（可含模板）
+ * @param path 定位路径
+ * @param target 目标任务内容的 schema
+ * @param creatorContent 声明方任务自己的 content schema
+ * @param actionInput 动作表单 schema（开始节点没有）
+ * @param issues 错误收集
+ */
+function checkContent(
+  content: JsonValue | undefined,
+  path: string,
+  target: JsonSchema | undefined,
+  creatorContent: JsonSchema | undefined,
+  actionInput: JsonSchema | undefined,
+  issues: Issues,
+): void {
+  const value: unknown = content ?? {}
+  const inspection = inspectPayload(value)
+  for (const error of inspection.syntaxErrors) issues.add(`${path}.content`, error)
+  for (const reference of inspection.references) {
+    const parsed = reference.reference
+    if (parsed === null) {
+      issues.add(
+        `${path}.content`,
+        `template "{{${reference.path}}}" must reference content.<path> or input.<path>`,
+      )
+      continue
+    }
+    const schema = parsed.kind === 'content' ? creatorContent : actionInput
+    if (schema === undefined) {
+      issues.add(
+        `${path}.content`,
+        `template "{{${reference.path}}}" cannot be resolved: the creating task declares no ${
+          parsed.kind === 'content' ? 'content schema' : 'input form'
+        }`,
+      )
+      continue
+    }
+    const reason = resolveSchemaPath(schema, parsed.segments)
+    if (reason !== null) issues.add(`${path}.content`, `template "{{${reference.path}}}" ${reason}`)
+  }
+  if (target === undefined) return
+  checkTemplatedContent(target, value, `${path}.content`, issues)
 }
 
 /**
@@ -776,8 +836,8 @@ function validateRoutePayload(
  * 含模板的子树跳过类型 / 枚举检查（值要到执行时才有），但对象 / 数组的结构、
  * required 与 additionalProperties 仍然检查。
  */
-function checkTemplatedPayload(
-  schema: OutputSchema,
+function checkTemplatedContent(
+  schema: JsonSchema,
   value: unknown,
   path: string,
   issues: Issues,
@@ -785,7 +845,7 @@ function checkTemplatedPayload(
   if (Array.isArray(schema.oneOf)) {
     const ok = schema.oneOf.some((branch) => {
       const probe = new Issues()
-      checkTemplatedPayload(branch, value, path, probe)
+      checkTemplatedContent(branch, value, path, probe)
       return !probe.failed
     })
     if (!ok) issues.add(path, 'does not match any oneOf variant')
@@ -821,7 +881,7 @@ function checkTemplatedPayload(
     }
     for (const [name, child] of Object.entries(properties)) {
       if (!Object.hasOwn(value, name)) continue
-      checkTemplatedPayload(child, value[name], `${path}.${name}`, issues)
+      checkTemplatedContent(child, value[name], `${path}.${name}`, issues)
     }
     return
   }
@@ -832,7 +892,7 @@ function checkTemplatedPayload(
     }
     if (isPlainObject(schema.items)) {
       value.forEach((item, index) => {
-        checkTemplatedPayload(schema.items as OutputSchema, item, `${path}[${index}]`, issues)
+        checkTemplatedContent(schema.items as JsonSchema, item, `${path}[${index}]`, issues)
       })
     }
     return
@@ -842,25 +902,6 @@ function checkTemplatedPayload(
     const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
     issues.add(path, `expected ${type}, got ${actual}`)
   }
-}
-
-/** 解析结束节点。 */
-function readEnd(raw: unknown, issues: Issues): EndDefinition | null {
-  if (!isPlainObject(raw)) {
-    issues.add('end', 'must declare the built-in end node task contract')
-    return null
-  }
-  const task = isPlainObject(raw.task) ? raw.task : null
-  if (task === null) {
-    issues.add('end.task', 'must declare the payload schema of the final deliverable')
-    return null
-  }
-  const payload = readSchema(task.payload, 'end.task.payload', issues)
-  if (payload === null) {
-    issues.add('end.task.payload', 'is required: it describes the final deliverable')
-    return null
-  }
-  return { task: { payload } }
 }
 
 /**
@@ -1110,16 +1151,16 @@ export function findTaskType(
 }
 
 /**
- * 按 schema 校验一个可能含模板的值，返回带路径的问题列表。
+ * 按 schema 校验任务内容，返回带路径的问题列表。
  *
- * 引擎创建任务时复用：payload 里的模板子树只做结构检查，类型与枚举留给执行时。
+ * 引擎创建任务时复用：模板子树只做结构检查，类型与枚举留给创建之后。
  *
- * @param schema 任务类型的 payload schema
- * @param value 待校验的 payload
+ * @param schema 任务类型的 content schema
+ * @param value 待校验的任务内容
  * @returns 问题列表；空数组表示通过
  */
-export function templatedPayloadIssues(schema: OutputSchema, value: unknown): DefinitionIssue[] {
+export function contentIssues(schema: JsonSchema, value: unknown): DefinitionIssue[] {
   const issues = new Issues()
-  checkTemplatedPayload(schema, value, 'payload', issues)
+  checkTemplatedContent(schema, value, 'content', issues)
   return issues.list
 }

@@ -1,21 +1,21 @@
 /**
- * 工作流 v5 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
+ * 工作流 v7 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
  *
- * 本模块是纯类型与常量，不 import 任何运行时依赖（除 `output.ts` 的类型），
+ * 本模块是纯类型与常量，不 import 任何运行时依赖（除 `json-schema.ts` 的类型），
  * 便于被校验、存储、引擎、路由与单测共同引用。
  *
- * 术语以根 `GLOSSARY.md` 为准：工作流 / 作业 / 任务 / 岗位 / 任务类型 / 通道 /
- * 启动者 / 执行者 / 承办者 / 执行记录 / 看板。
+ * 术语以根 `GLOSSARY.md` 为准：工作流 / 作业 / 任务 / 岗位 / 任务类型 / 动作 /
+ * 通道 / 发起人 / 执行者 / 承办者 / 执行记录 / 看板。
  *
  * @module @buka/dsh-plugin-workflows/domain/types
  */
 
-import type { OutputSchema } from '../output.ts'
+import type { JsonSchema } from '../json-schema.ts'
 
 /** 时间戳统一用 ISO 字符串，保证 storageDomain 里的记录是可 JSON 化的纯数据。 */
 export type IsoTime = string
 
-/** 可 JSON 化的值；payload / output / 结果都只允许这一类。 */
+/** 可 JSON 化的值；任务内容 / 动作表单 / 结果文本都只允许这一类。 */
 export type JsonValue =
   | null
   | boolean
@@ -30,7 +30,7 @@ export type WorkflowStatus = 'draft' | 'active' | 'retired'
 /** 作业状态；没有「等待人工」。 */
 export type JobStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
-/** 任务状态；业务上的「不通过」不是状态，写在结果里。 */
+/** 任务状态。 */
 export type TaskStatus =
   | 'pending'
   | 'ready'
@@ -76,7 +76,7 @@ export type StoredExecutor =
       readonly avatar?: string | undefined
     }
   | { readonly kind: 'human' }
-  /** 开始 / 结束任务的执行者是会话启动者。 */
+  /** 开始 / 结束任务的执行者是会话发起人。 */
   | { readonly kind: 'session'; readonly sessionId: string }
 
 /** 承办者：实际接走任务的一方。 */
@@ -89,33 +89,79 @@ export interface Claimant {
   readonly sessionId: string | null
 }
 
-/** 启动者：人（页面启动）或会话（`/job` 启动）。 */
+/** 发起人：人（页面启动）或会话（`/job` 启动）。 */
 export type Starter =
   | { readonly kind: 'human' }
   | { readonly kind: 'session'; readonly sessionId: string }
+
+/**
+ * 结束任务的交回方式，由发起人在创建作业时决定。
+ *
+ * - `starter`：交回发起人本人——会话发起时投递进那个会话，人发起时落在看板上；
+ * - `assistant`：交给一个助理打工人代收。
+ */
+export type DeliveryRule =
+  | { readonly kind: 'starter' }
+  | { readonly kind: 'assistant'; readonly name: string }
+
+/**
+ * 一条「创建任务」的声明：沿哪条通道、创建哪个任务类型、任务内容怎么来。
+ *
+ * 人工动作与开始节点的初始任务共用这个形状。`content` 里可以写模板：
+ * `{{content.<path>}}` 取正在完成的这张任务的任务内容，`{{input.<path>}}`
+ * 取动作表单。`type` 指向结束节点时可以省略。
+ */
+export interface CreationDefinition {
+  /** 从声明所在节点出发的通道 id。 */
+  readonly channel: string
+  /** 目标任务类型 id；通道指向结束节点时省略。 */
+  readonly type?: string | undefined
+  /** 目标任务内容（模板）。 */
+  readonly content?: JsonValue | undefined
+}
+
+/**
+ * 人任务类型上的一个动作：人点它，等于沿它声明的通道创建下面的任务。
+ *
+ * `input` 是给操作人填的表单；省略表示点击即派发，不需要填任何东西。
+ */
+export interface ActionDefinition {
+  /** 任务类型内唯一。 */
+  readonly id: string
+  /** 按钮文案，唯一进入界面的文本。 */
+  readonly label: string
+  /** 表单 schema；省略表示这个动作没有参数。 */
+  readonly input?: JsonSchema | undefined
+  /** 这个动作创建哪些任务；可以为空数组（只留结果，不推进流程）。 */
+  readonly creates: readonly CreationDefinition[]
+}
 
 /** 一个任务类型。 */
 export interface TaskTypeDefinition {
   readonly id: string
   readonly label: string
-  readonly description?: string | undefined
-  /** 创建者必须填的内容；受限 JSON Schema 子集。 */
-  readonly payload: OutputSchema
-  /** 执行者必须交回的结构化结果；受限 JSON Schema 子集。 */
-  readonly output: OutputSchema
-  /** 创建时校验：依赖集合里必须至少有一个指定类型的任务。 */
-  readonly requires?: readonly { readonly types: readonly string[] }[] | undefined
+  /**
+   * 这个任务类型是谁、要做什么、有什么预设信息；只给执行者看。
+   *
+   * 编排者预先写死的事实放这里（例如外部系统的地址），创建者不用、也不该重复提供。
+   */
+  readonly definition?: string | undefined
+  /** 任务内容的格式约束；创建者按它填写，引擎创建任务时校验。 */
+  readonly content?: JsonSchema | undefined
+  /** 仅人岗位：人可以点的动作。 */
+  readonly actions?: readonly ActionDefinition[] | undefined
   /** 仅人岗位：承担沟通的助理打工人名；null / 省略表示无助理。 */
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
   readonly mode?: 'plan' | null | undefined
 }
 
-/** 一个岗位：执行者 + 任务类型契约。 */
+/** 一个岗位：图上的节点，给人看清流程结构；执行者 + 任务类型。 */
 export interface PositionDefinition {
   readonly id: string
   readonly label: string
-  readonly description?: string | undefined
+  /** 给编排者看的备注，方便交接维护；不进执行者的提示词。 */
+  readonly note?: string | undefined
   readonly executor: ExecutorSpec
   readonly taskTypes: readonly TaskTypeDefinition[]
 }
@@ -134,31 +180,17 @@ export interface ChannelDefinition {
   readonly back?: boolean | undefined
 }
 
-/** `start.next` 里的一条初始任务模板。 */
-export interface StartRouteDefinition {
-  /** 从 `start` 出发的通道 id；目标岗位由通道推出。 */
-  readonly channel: string
-  readonly type: string
-  /** 模板对象：字符串里的 `{{start.output.<path>}}` 在执行开始时渲染。 */
-  readonly payload: Readonly<Record<string, JsonValue>>
-  /** 必须显式包含 `"$start"`。 */
-  readonly dependsOn?: readonly string[] | undefined
-}
-
-/** 内建开始节点的任务契约与初始任务模板。 */
+/** 内建开始节点的任务契约与初始任务。 */
 export interface StartDefinition {
-  readonly task: {
-    readonly payload: OutputSchema
-    readonly output: OutputSchema
-  }
-  readonly next: readonly StartRouteDefinition[]
+  /** 发起人填的任务内容。 */
+  readonly content?: JsonSchema | undefined
+  /** 发起人提交后创建的初始任务。 */
+  readonly next: readonly CreationDefinition[]
 }
 
-/** 内建结束节点的任务契约（没有 output，投递即完成）。 */
+/** 内建结束节点的任务内容（最终报告）。 */
 export interface EndDefinition {
-  readonly task: {
-    readonly payload: OutputSchema
-  }
+  readonly content?: JsonSchema | undefined
 }
 
 /** 预算；回向通道必须有预算兜底。 */
@@ -167,10 +199,11 @@ export interface BudgetDefinition {
   readonly maxDurationHours: number
 }
 
-/** 工作流 v5 定义。 */
+/** 工作流 v7 定义。 */
 export interface WorkflowDefinition {
-  readonly version: 5
+  readonly version: 7
   readonly name: string
+  /** 列表里的摘要；不是给执行者看的。 */
   readonly description?: string | undefined
   readonly budgets: BudgetDefinition
   readonly start: StartDefinition
@@ -178,6 +211,9 @@ export interface WorkflowDefinition {
   readonly positions: readonly PositionDefinition[]
   readonly channels: readonly ChannelDefinition[]
 }
+
+/** 定义格式的当前版本；其它版本一律视为「待升级」。 */
+export const DEFINITION_VERSION = 7 as const
 
 /** 工作流定义的一个版本快照。 */
 export interface WorkflowVersionRecord {
@@ -216,15 +252,24 @@ export interface AttemptRecord {
   readonly finishedAt: IsoTime | null
 }
 
-/** 任务结果：结构化产出 + 文本摘要 + 附件 id 清单。 */
+/** 人任务点过的动作。 */
+export interface ActionRecord {
+  readonly id: string
+  readonly label: string
+}
+
+/** 任务结果：一段总结文本 + 附件；没有结构化契约。 */
 export interface TaskResult {
-  readonly output: JsonValue | null
   /** 文本摘要（有上限）；全文在 `textFile`。 */
   readonly text: string
   readonly textBytes: number
   /** 全文相对作业目录的路径；没有文本时为 null。 */
   readonly textFile: string | null
   readonly attachmentIds: readonly string[]
+  /** 人任务：点的是哪个动作。 */
+  readonly action?: ActionRecord | undefined
+  /** 人任务：动作表单填了什么。 */
+  readonly input?: JsonValue | undefined
 }
 
 /** 任务记录。 */
@@ -238,7 +283,8 @@ export interface TaskRecord {
   readonly type: string
   /** 任务沿哪条通道派发而来；启动任务没有入站通道，为 null。 */
   readonly channel: string | null
-  readonly payload: JsonValue
+  /** 任务内容：创建者产出的、给执行者用的东西。 */
+  readonly content: JsonValue
   readonly deps: readonly string[]
   readonly status: TaskStatus
   readonly createdBy: { readonly taskId: string; readonly position: string } | null
@@ -246,7 +292,7 @@ export interface TaskRecord {
   readonly claimant: Claimant | null
   readonly attemptIds: readonly string[]
   readonly result: TaskResult | null
-  /** 技术失败原因（status=failed 时）；业务不通过写进 result.output。 */
+  /** 技术失败原因（status=failed 时）。 */
   readonly error: string | null
   /**
    * 人任务：被点名的助理承办失败后置 true。
@@ -259,12 +305,6 @@ export interface TaskRecord {
   readonly startedAt: IsoTime | null
   readonly finishedAt: IsoTime | null
   readonly updatedAt: IsoTime
-}
-
-/** 作业的输入：启动任务的原始输入 + 结构化输入。 */
-export interface JobInput {
-  readonly raw: JsonValue
-  readonly structured?: JsonValue | undefined
 }
 
 /** 作业记录；钉住创建时的工作流版本快照。 */
@@ -280,7 +320,10 @@ export interface JobRecord {
   readonly definition: WorkflowDefinition
   readonly status: JobStatus
   readonly starter: Starter
-  readonly input: JobInput
+  /** 发起人填的任务内容（也就是启动任务的任务内容）。 */
+  readonly input: JsonValue
+  /** 结束任务怎么交回发起人；创建作业时定。 */
+  readonly delivery: DeliveryRule
   /** 列表用的一句话输入摘要。 */
   readonly inputSummary: string
   readonly error: string | null

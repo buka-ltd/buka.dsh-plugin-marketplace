@@ -6,13 +6,13 @@
  */
 
 import { messageOf } from '../format.ts'
-import { fill } from '../i18n.ts'
 import {
+  actionOf,
   currentDefinition,
   currentJobDefinition,
   jobTasks,
   mergedDefinition,
-  outputSchemaFor,
+  taskTypeOf,
 } from '../model.ts'
 import { postJson } from '../request.ts'
 import { writeRouteHash } from '../routing.ts'
@@ -69,8 +69,8 @@ export interface AppActions extends ActionDeps {
   setWorkflowEnabled: (active: boolean) => Promise<void>
   openNewJob: () => void
   closeNewJob: () => void
-  setNewJobRaw: (name: string, value: string) => void
-  setNewJobStructured: (name: string, value: string) => void
+  setNewJobContent: (name: string, value: string) => void
+  setNewJobDelivery: (value: string) => void
   submitNewJob: () => Promise<void>
   cancelJob: () => Promise<void>
   retryDelivery: () => Promise<void>
@@ -78,6 +78,7 @@ export interface AppActions extends ActionDeps {
   closeTask: () => void
   setTaskField: (name: string, value: string) => void
   setTaskText: (text: string) => void
+  selectTaskAction: (actionId: string) => void
   runTaskAction: (action: 'claim' | 'complete' | 'cancel' | 'retry') => Promise<void>
   openSession: (sessionId: unknown) => Promise<void>
   openAttachment: (attachmentId: string, name: string) => void
@@ -259,7 +260,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
           nodeTasks: null,
           taskId: list[0]?.id ?? null,
           task: { status: 'loading', data: null, error: null },
-          taskForm: { values: {}, text: '', error: null, submitting: false },
+          taskForm: { action: null, values: {}, text: '', error: null, submitting: false },
         }))
         return
       }
@@ -313,95 +314,76 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
     openNewJob() {
       setState((current) => ({
         ...current,
-        newJob: { open: true, raw: {}, structured: {}, error: null, submitting: false },
+        newJob: { open: true, content: {}, delivery: 'starter', error: null, submitting: false },
       }))
     },
 
     closeNewJob() {
       setState((current) => ({
         ...current,
-        newJob: { open: false, raw: {}, structured: {}, error: null, submitting: false },
+        newJob: { open: false, content: {}, delivery: 'starter', error: null, submitting: false },
       }))
     },
 
-    setNewJobRaw(name, value) {
-      setState((current) => ({
-        ...current,
-        newJob: { ...current.newJob, raw: { ...current.newJob.raw, [name]: value }, error: null },
-      }))
-    },
-
-    setNewJobStructured(name, value) {
+    setNewJobContent(name, value) {
       setState((current) => ({
         ...current,
         newJob: {
           ...current.newJob,
-          structured: { ...current.newJob.structured, [name]: value },
+          content: { ...current.newJob.content, [name]: value },
           error: null,
         },
       }))
     },
 
+    setNewJobDelivery(value) {
+      setState((current) => ({
+        ...current,
+        newJob: { ...current.newJob, delivery: value, error: null },
+      }))
+    },
+
     async submitNewJob() {
       const current = state
-      const definition = currentDefinition(current)
       const workflowId = workflowIdOf(current)
       if (workflowId === '') return
-      const start = definition?.start?.task
-      const rawSchema = isRecord(start?.payload) ? start.payload : null
-      const structuredSchema = isRecord(start?.output) ? start.output : null
+      const definition = currentDefinition(current)
+      const start = definition?.start
+      const contentSchema = isRecord(start?.content) ? start.content : null
       const draft = current.newJob
 
-      let rawInput: Record<string, unknown>
-      if (schemaFields(rawSchema).length > 0) {
-        const parsed = parseSchemaValues(rawSchema, draft.raw, t)
+      let content: Record<string, unknown>
+      if (schemaFields(contentSchema).length > 0) {
+        const parsed = parseSchemaValues(contentSchema, draft.content, t)
         if ('error' in parsed) {
           setState((now) => ({ ...now, newJob: { ...now.newJob, error: parsed.error } }))
           return
         }
-        rawInput = parsed.value
+        content = parsed.value
       } else {
-        const request = (draft.raw.request ?? '').trim()
-        if (request === '') {
-          setState((now) => ({
-            ...now,
-            newJob: {
-              ...now.newJob,
-              error: fill(t, 'fieldRequired', { name: t('newJobRawFallback') }),
-            },
-          }))
-          return
-        }
-        rawInput = { request }
-      }
-
-      let structuredInput: Record<string, unknown>
-      if (schemaFields(structuredSchema).length > 0) {
-        const parsed = parseSchemaValues(structuredSchema, draft.structured, t)
-        if ('error' in parsed) {
-          setState((now) => ({ ...now, newJob: { ...now.newJob, error: parsed.error } }))
-          return
-        }
-        structuredInput = parsed.value
-      } else {
-        const text = (draft.structured.__json ?? '').trim()
-        if (text === '') {
-          structuredInput = {}
+        const json = (draft.content.__json ?? '').trim()
+        if (json === '') {
+          content = {}
         } else {
-          const parsed = parseJson(text)
+          const parsed = parseJson(json)
           if (!isRecord(parsed)) {
             setState((now) => ({
               ...now,
               newJob: {
                 ...now.newJob,
-                error: `${t('newJobJsonInvalid')} ${text.slice(0, 120)}`,
+                error: `${t('newJobJsonInvalid')} ${json.slice(0, 120)}`,
               },
             }))
             return
           }
-          structuredInput = parsed
+          content = parsed
         }
       }
+
+      const delivery =
+        draft.delivery.startsWith('assistant:') && draft.delivery.length > 'assistant:'.length
+          ? { kind: 'assistant', name: draft.delivery.slice('assistant:'.length) }
+          : { kind: 'starter' }
 
       setState((now) => ({
         ...now,
@@ -410,8 +392,8 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
       try {
         const body = await postJson<{ jobId?: string }>(JOB_START_ROUTE, {
           workflowId,
-          rawInput,
-          structuredInput,
+          content,
+          delivery,
         })
         const jobId = typeof body.jobId === 'string' ? body.jobId : ''
         if (jobId !== '') {
@@ -420,7 +402,13 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         setState((now) => {
           const next = {
             ...now,
-            newJob: { open: false, raw: {}, structured: {}, error: null, submitting: false },
+            newJob: {
+              open: false,
+              content: {},
+              delivery: 'starter',
+              error: null,
+              submitting: false,
+            },
             job: { status: 'loading' as const, data: null, error: null },
             finalTask: idle<TaskDetail>(),
             attachments: idle<AttachmentMeta[]>(),
@@ -479,7 +467,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         nodeTasks: null,
         taskId,
         task: { status: 'loading', data: null, error: null },
-        taskForm: { values: {}, text: '', error: null, submitting: false },
+        taskForm: { action: null, values: {}, text: '', error: null, submitting: false },
       }))
     },
 
@@ -488,7 +476,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         ...current,
         taskId: null,
         task: idle<TaskDetail>(),
-        taskForm: { values: {}, text: '', error: null, submitting: false },
+        taskForm: { action: null, values: {}, text: '', error: null, submitting: false },
       }))
     },
 
@@ -500,6 +488,13 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
           values: { ...current.taskForm.values, [name]: value },
           error: null,
         },
+      }))
+    },
+
+    selectTaskAction(actionId) {
+      setState((current) => ({
+        ...current,
+        taskForm: { ...current.taskForm, action: actionId === '' ? null : actionId, error: null },
       }))
     },
 
@@ -518,50 +513,30 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
       if (jobId === '') return
       const taskId = task.id
 
-      let output: Record<string, unknown> | null = null
+      let input: Record<string, unknown> | null = null
+      let selectedAction: string | null = null
       if (action === 'complete') {
         const workflowDefinition = currentDefinition(current)
         const jobDefinition = mergedDefinition(currentJobDefinition(current), workflowDefinition)
-        const schema = outputSchemaFor(jobDefinition, workflowDefinition, task)
         const form = current.taskForm
-        if (schemaFields(schema).length > 0) {
-          const parsed = parseSchemaValues(schema, form.values, t)
+        const selected = actionOf(taskTypeOf(current, task), form.action)
+        selectedAction = typeof selected?.id === 'string' && selected.id !== '' ? selected.id : null
+        if (selectedAction !== null && isRecord(selected?.input)) {
+          const parsed = parseSchemaValues(selected.input, form.values, t)
           if ('error' in parsed) {
             setState((now) => ({ ...now, taskForm: { ...now.taskForm, error: parsed.error } }))
             return
           }
-          output = parsed.value
-        } else {
-          const text = (form.values.__json ?? '').trim()
-          if (text === '') {
-            setState((now) => ({
-              ...now,
-              taskForm: {
-                ...now.taskForm,
-                error: fill(t, 'fieldRequired', { name: t('actionFormTitle') }),
-              },
-            }))
-            return
-          }
-          const parsed = parseJson(text)
-          if (!isRecord(parsed)) {
-            setState((now) => ({
-              ...now,
-              taskForm: {
-                ...now.taskForm,
-                error: `${t('actionJsonInvalid')} ${text}`,
-              },
-            }))
-            return
-          }
-          output = parsed
+          input = parsed.value
         }
+        void jobDefinition
       }
 
       setState((now) => ({ ...now, taskForm: { ...now.taskForm, submitting: true, error: null } }))
       try {
         const body: Record<string, unknown> = { jobId, taskId, action }
-        if (output !== null) body.output = output
+        if (selectedAction !== null) body.selectedAction = selectedAction
+        if (input !== null) body.input = input
         if (action === 'complete' && current.taskForm.text.trim() !== '') {
           body.text = current.taskForm.text.trim()
         }

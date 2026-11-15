@@ -8,7 +8,7 @@
  */
 
 import { clipUtf8 } from '../attachments/index.ts'
-import { findChannel, findTaskType } from '../definition/validate.ts'
+import { findChannel } from '../definition/validate.ts'
 import { TASK_STATUSES } from '../domain/status.ts'
 import type {
   AttachmentRecord,
@@ -76,12 +76,7 @@ export function taskSummary(
     attemptCount: task.attemptIds.length,
     attachmentCount: task.result?.attachmentIds.length ?? 0,
     resultSummary:
-      task.result === null
-        ? null
-        : clipUtf8(task.result.text.trim(), SUMMARY_BYTES) ||
-          (task.result.output === null
-            ? null
-            : clipUtf8(JSON.stringify(task.result.output), SUMMARY_BYTES)),
+      task.result === null ? null : clipUtf8(task.result.text.trim(), SUMMARY_BYTES) || null,
   }
 }
 
@@ -146,7 +141,6 @@ export interface TaskDetailInput {
 export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
   const { job, task } = input
   const definition = job.definition
-  const taskType = findTaskType(definition, task.type)
   const channel = task.channel === null ? undefined : findChannel(definition, task.channel)
   const dependencyTasks = task.deps
     .map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId))
@@ -161,11 +155,10 @@ export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
     positionLabel: positionLabel(definition, task.position),
     type: task.type,
     typeLabel: taskTypeLabel(definition, task.type),
-    typeDescription: taskType?.description ?? '',
     channel: task.channel,
     channelLabel: channel?.label ?? '',
     status: task.status,
-    payload: task.payload,
+    content: task.content,
     deps: dependencyTasks.map((dependency) => taskSummary(dependency, definition)),
     createdAt: task.createdAt,
     startedAt: task.startedAt,
@@ -177,7 +170,8 @@ export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
         ? null
         : {
             text: task.result.text,
-            output: task.result.output,
+            ...(task.result.action === undefined ? {} : { action: task.result.action }),
+            ...(task.result.input === undefined ? {} : { input: task.result.input }),
             attachments: attachments.map((attachment) => ({
               id: attachment.id,
               name: attachment.name,
@@ -208,6 +202,8 @@ export function jobSummary(job: JobRecord, tasks: readonly TaskRecord[]): Record
     seq: job.seq,
     status: job.status,
     inputSummary: job.inputSummary,
+    definitionVersion: job.definition.version,
+    delivery: job.delivery,
     taskCounts: countTasks(tasks),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
@@ -225,27 +221,33 @@ export function jobDefinition(
   workers?: ReadonlyMap<string, WorkerInfo>,
 ): Record<string, unknown> {
   return {
+    version: definition.version,
     name: definition.name,
     ...(definition.description === undefined ? {} : { description: definition.description }),
     positions: definition.positions.map((position) => ({
       id: position.id,
       label: position.label,
-      ...(position.description === undefined ? {} : { description: position.description }),
+      ...(position.note === undefined ? {} : { note: position.note }),
       executor: executorView(position.executor, workers),
       taskTypes: position.taskTypes.map((taskType) => ({
         id: taskType.id,
         label: taskType.label,
-        ...(taskType.description === undefined ? {} : { description: taskType.description }),
-        payload: taskType.payload,
-        output: taskType.output,
-        ...(taskType.requires === undefined ? {} : { requires: taskType.requires }),
+        ...(taskType.definition === undefined ? {} : { definition: taskType.definition }),
+        ...(taskType.content === undefined ? {} : { content: taskType.content }),
+        ...(taskType.actions === undefined ? {} : { actions: taskType.actions }),
         ...(taskType.assistant === undefined ? {} : { assistant: taskType.assistant }),
         ...(taskType.mode === undefined ? {} : { mode: taskType.mode }),
       })),
     })),
     channels: definition.channels,
-    start: { label: '开始' },
-    end: { label: '结束' },
+    start: {
+      label: '开始',
+      ...(definition.start.content === undefined ? {} : { content: definition.start.content }),
+    },
+    end: {
+      label: '结束',
+      ...(definition.end.content === undefined ? {} : { content: definition.end.content }),
+    },
   }
 }
 

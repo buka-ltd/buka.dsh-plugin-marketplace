@@ -33,6 +33,7 @@ import {
   TERMINAL_TASK_STATUSES,
 } from '../plugins/workflows/src/domain/status.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
+import { toV7 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // fixture：spec §5.7 的「研发交付」工作流与 workers 登记
@@ -52,10 +53,10 @@ function sampleWorkers() {
   )
 }
 
-/** 研发交付定义（v5 通道；approve 补了一条到 deploy 的通道，满足「每个岗位都能到达 end」）。 */
+/** 研发交付定义（v6；approve 补了一条到 deploy 的通道，满足「每个岗位都能到达 end」）。 */
 function sampleDefinition() {
-  return {
-    version: 5,
+  return toV7({
+    version: 6,
     name: '研发交付',
     description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
     budgets: { maxTasks: 200, maxDurationHours: 72 },
@@ -258,31 +259,7 @@ function sampleDefinition() {
       },
       { id: 'deploy.end', label: '交付', from: 'deploy', to: 'end' },
     ],
-  }
-}
-
-/** 把 v5 参考定义降级成 v4 形状，用来测一次性迁移。 */
-function legacyV4Definition() {
-  const definition = clone(sampleDefinition())
-  const byId = new Map(definition.channels.map((channel) => [channel.id, channel]))
-  definition.version = 4
-  definition.start.next = definition.start.next.map((route) => {
-    const channel = byId.get(route.channel)
-    return {
-      position: channel.to,
-      type: route.type,
-      payload: route.payload,
-      dependsOn: route.dependsOn,
-    }
   })
-  definition.edges = definition.channels.map((channel) => ({
-    from: channel.from,
-    to: channel.to,
-    ...(channel.types === undefined ? {} : { types: channel.types }),
-    ...(channel.back === true ? { back: true } : {}),
-  }))
-  delete definition.channels
-  return definition
 }
 
 // ---------------------------------------------------------------------------
@@ -469,17 +446,17 @@ test('domain: terminal helpers', () => {
 // 定义校验
 // ---------------------------------------------------------------------------
 
-test('definition: accepts the v5 研发交付 reference workflow', () => {
+test('definition: accepts the v7 研发交付 reference workflow', () => {
   const result = validateWorkflowDefinition(sampleDefinition(), { workers: sampleWorkers() })
   const definition = expectOk(result)
-  assert.equal(definition.version, 5)
+  assert.equal(definition.version, 7)
   assert.equal(definition.name, '研发交付')
   assert.equal(definition.positions.length, 5)
   assert.equal(definition.channels.length, 9)
   assert.equal(definition.budgets.maxTasks, 200)
   assert.equal(definition.start.next.length, 1)
   assert.equal(definition.start.next[0].channel, 'start.need')
-  assert.deepEqual(definition.start.next[0].dependsOn, ['$start'])
+  assert.deepEqual(definition.start.next[0].content, { focus: '{{content.requirement}}' })
   assert.equal(findPosition(definition, 'dev')?.executor.name, '软件工程师')
   assert.equal(findTaskType(definition, 'qa.verify')?.label, '验证')
   assert.equal(findChannel(definition, 'qa.dev.rework')?.back, true)
@@ -512,7 +489,7 @@ test('definition: allows parallel channels between the same pair and overlapping
 test('definition: rejects structural and identity errors', () => {
   const workers = sampleWorkers()
   const cases = [
-    [mutate((d) => (d.version = 4)), /^version$/, /must be 5/],
+    [mutate((d) => (d.version = 6)), /^version$/, /must be 7/],
     [mutate((d) => (d.positions = [])), /^positions$/, /non-empty array/],
     [
       mutate((d) => d.positions.push(clone(d.positions[0]))),
@@ -542,18 +519,18 @@ test('definition: rejects structural and identity errors', () => {
     ],
     [
       mutate((d) => {
-        d.positions[1].taskTypes[0].payload.type = 'object'
-        d.positions[1].taskTypes[0].payload.unknownKeyword = true
+        d.positions[1].taskTypes[0].content.type = 'object'
+        d.positions[1].taskTypes[0].content.unknownKeyword = true
       }),
-      /positions\[1\]\.taskTypes\[0\]\.payload\.unknownKeyword/,
+      /positions\[1\]\.taskTypes\[0\]\.content\.unknownKeyword/,
       /not a supported JSON Schema keyword/,
     ],
     [
       mutate((d) => {
-        d.positions[1].taskTypes[0].requires = [{ types: ['nope.type'] }]
+        d.positions[1].taskTypes[0].actions = []
       }),
-      /positions\[1\]\.taskTypes\[0\]\.requires\[0\]\.types/,
-      /unknown task type/,
+      /positions\[1\]\.taskTypes\[0\]\.actions/,
+      /only valid on human positions/,
     ],
     [
       mutate((d) => {
@@ -577,14 +554,36 @@ test('definition: rejects structural and identity errors', () => {
       /only valid for agent positions/,
     ],
     [
-      mutate((d) => (d.start.task.output = { type: 'string' })),
-      /start\.task\.output\.type/,
+      mutate((d) => (d.start.content = { type: 'string' })),
+      /start\.content\.type/,
       /must be "object"/,
     ],
   ]
   for (const [definition, pathPattern, messagePattern] of cases) {
     expectIssue(validateWorkflowDefinition(definition, { workers }), pathPattern, messagePattern)
   }
+})
+
+test('definition: task content may be a string, a form must stay an object', () => {
+  const workers = sampleWorkers()
+  const definition = mutate((d) => {
+    d.positions[1].taskTypes[0].content = { type: 'string' }
+    d.end.content = { type: 'string' }
+  })
+  const ok = validateWorkflowDefinition(definition, { workers })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.definition.positions[1].taskTypes[0].content?.type, 'string')
+
+  const badForm = mutate((d) => {
+    d.positions[3].taskTypes[0].actions = [
+      { id: 'go', label: '走', input: { type: 'string' }, creates: [] },
+    ]
+  })
+  expectIssue(
+    validateWorkflowDefinition(badForm, { workers }),
+    /actions\[0\]\.input\.type/,
+    /must be "object"/,
+  )
 })
 
 test('definition: rejects channel, cycle and reachability errors', () => {
@@ -702,16 +701,6 @@ test('definition: rejects start.next dependency and template errors', () => {
   const workers = sampleWorkers()
   const cases = [
     [
-      mutate((d) => (d.start.next[0].dependsOn = [])),
-      /start\.next\[0\]\.dependsOn/,
-      /must be \["\$start"\]/,
-    ],
-    [
-      mutate((d) => (d.start.next[0].dependsOn = ['$start', 'task-1'])),
-      /start\.next\[0\]\.dependsOn\[1\]/,
-      /can only depend on "\$start"/,
-    ],
-    [
       mutate((d) => (d.start.next[0].channel = 'nope')),
       /start\.next\[0\]\.channel/,
       /unknown channel/,
@@ -719,29 +708,29 @@ test('definition: rejects start.next dependency and template errors', () => {
     [
       mutate((d) => (d.start.next[0].channel = 'need.dev')),
       /start\.next\[0\]\.channel/,
-      /must leave the start node/,
+      /starts at "need", not at "start"/,
     ],
     [
       mutate((d) => {
         d.channels.push({ id: 'start.end', label: '直接结束', from: 'start', to: 'end' })
         d.start.next[0].channel = 'start.end'
       }),
-      /start\.next\[0\]\.channel/,
-      /does not lead to a position/,
+      /channels\[9\]\.from/,
+      /cannot dispatch the end task/,
     ],
     [
-      mutate((d) => (d.start.next[0].payload = { focus: '{{task.abc.output.focus}}' })),
-      /start\.next\[0\]\.payload/,
-      /no other task exists yet/,
+      mutate((d) => (d.start.next[0].content = { focus: '{{task.abc.output.focus}}' })),
+      /start\.next\[0\]\.content/,
+      /must reference content.<path> or input.<path>/,
     ],
     [
-      mutate((d) => (d.start.next[0].payload = { focus: '{{start.output.missing}}' })),
-      /start\.next\[0\]\.payload/,
+      mutate((d) => (d.start.next[0].content = { focus: '{{content.missing}}' })),
+      /start\.next\[0\]\.content/,
       /is not declared/,
     ],
     [
-      mutate((d) => (d.start.next[0].payload = {})),
-      /start\.next\[0\]\.payload\.focus/,
+      mutate((d) => (d.start.next[0].content = {})),
+      /start\.next\[0\]\.content\.focus/,
       /missing required field/,
     ],
   ]
@@ -761,12 +750,11 @@ test('definition: rejects budget and end contract errors', () => {
       /positive number/,
     ],
     [mutate((d) => delete d.end), /^end$/, /built-in end node/],
-    [mutate((d) => delete d.end.task.payload), /end\.task\.payload/, /required/],
     [
       mutate((d) => {
-        d.end.task.payload = { type: 'object', required: ['nope'] }
+        d.end.content = { type: 'object', required: ['nope'] }
       }),
-      /end\.task\.payload\.required\[0\]/,
+      /end\.content\.required\[0\]/,
       /not declared in properties/,
     ],
   ]
@@ -777,24 +765,20 @@ test('definition: rejects budget and end contract errors', () => {
 
 test('definition: workers are valid executors', () => {
   const definition = {
-    version: 5,
+    version: 7,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
     start: {
-      task: {
-        payload: { type: 'object' },
-        output: { type: 'object', properties: { request: { type: 'string' } } },
-      },
+      content: { type: 'object', properties: { request: { type: 'string' } } },
       next: [
         {
           channel: 'start.wait',
           type: 'wait.until',
-          payload: { until: '{{start.output.request}}' },
-          dependsOn: ['$start'],
+          content: { until: '{{content.request}}' },
         },
       ],
     },
-    end: { task: { payload: { type: 'object' } } },
+    end: { content: { type: 'object' } },
     positions: [
       {
         id: 'wait',
@@ -804,12 +788,11 @@ test('definition: workers are valid executors', () => {
           {
             id: 'wait.until',
             label: '等待到点',
-            payload: {
+            content: {
               type: 'object',
               properties: { until: { type: 'string' } },
               required: ['until'],
             },
-            output: { type: 'object' },
           },
         ],
       },
@@ -1104,101 +1087,6 @@ test('store: init normalizes legacy robot executor and claimant kinds', async ()
       domain.table('workflows').get('wf-1').versions['1'].definition.positions[0].executor.kind,
       'worker',
     )
-  } finally {
-    await fs.rm(dataDir, { recursive: true, force: true })
-  }
-})
-
-test('store: init upgrades v4 definitions and backfills task channels', async () => {
-  const dataDir = await makeDataDir()
-  try {
-    const domain = new FakeDomain()
-    const definition = legacyV4Definition()
-    await domain.table('workflows').put('wf-legacy', {
-      id: 'wf-legacy',
-      name: '研发交付',
-      description: '',
-      status: 'active',
-      latestVersion: 1,
-      versions: { 1: { version: 1, definition, createdAt: 't' } },
-      jobSeq: 1,
-      createdAt: 't',
-      updatedAt: 't',
-    })
-    await domain.table('jobs').put('job-legacy', {
-      id: 'job-legacy',
-      seq: 1,
-      workflowId: 'wf-legacy',
-      workflowVersion: 1,
-      workflowName: '研发交付',
-      workflowDescription: '',
-      definition,
-      status: 'running',
-      starter: { kind: 'human' },
-      input: { raw: 'x' },
-      inputSummary: 'x',
-      error: null,
-      createdAt: 't',
-      updatedAt: 't',
-      finishedAt: null,
-    })
-    const baseTask = {
-      jobId: 'job-legacy',
-      payload: {},
-      deps: [],
-      status: 'completed',
-      attemptIds: [],
-      result: null,
-      error: null,
-      assistantBlocked: false,
-      createdAt: 't',
-      startedAt: 't',
-      finishedAt: 't',
-      updatedAt: 't',
-      assignee: { kind: 'human' },
-      claimant: null,
-    }
-    await domain.table('tasks').put(START_TASK_ID, {
-      ...baseTask,
-      id: START_TASK_ID,
-      position: 'start',
-      type: 'start',
-      createdBy: null,
-    })
-    await domain.table('tasks').put('task-need', {
-      ...baseTask,
-      id: 'task-need',
-      position: 'need',
-      type: 'need.analyze',
-      createdBy: { taskId: START_TASK_ID, position: 'start' },
-    })
-    await domain.table('tasks').put('task-dev', {
-      ...baseTask,
-      id: 'task-dev',
-      position: 'dev',
-      type: 'dev.implement',
-      createdBy: { taskId: 'task-need', position: 'need' },
-    })
-
-    await new WorkflowStore({ domain, dataDir }).init()
-
-    const upgraded = domain.table('workflows').get('wf-legacy').versions['1'].definition
-    assert.equal(upgraded.version, 5)
-    assert.equal(upgraded.channels.length, 9)
-    assert.equal(upgraded.start.next[0].channel, 'start.need')
-    assert.equal(upgraded.channels[0].id, 'start.need')
-    assert.equal(upgraded.channels[0].label, 'start → 需求')
-    assert.equal(upgraded.channels.find((channel) => channel.back === true).id, 'qa.dev')
-    assert.equal(domain.table('jobs').get('job-legacy').definition.version, 5)
-
-    const startTask = domain.table('tasks').get(START_TASK_ID)
-    assert.equal(startTask.channel, null)
-    assert.equal(domain.table('tasks').get('task-need').channel, 'start.need')
-    assert.equal(domain.table('tasks').get('task-dev').channel, 'need.dev')
-
-    // 幂等：再 init 一次不改写已经升级的记录。
-    await new WorkflowStore({ domain, dataDir }).init()
-    assert.equal(domain.table('tasks').get('task-dev').channel, 'need.dev')
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true })
   }

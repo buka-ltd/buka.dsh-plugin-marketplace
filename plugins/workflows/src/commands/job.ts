@@ -1,5 +1,5 @@
 /**
- * `/job` 命令：普通会话启动作业，启动者 = 当前会话。
+ * `/job` 命令：普通会话启动作业，发起人 = 当前会话。
  *
  * 语法：
  *
@@ -57,7 +57,7 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
       const engine = await ready()
       const agentId = typeof invocation.agent?.id === 'string' ? invocation.agent.id : ''
       if (agentId === '') {
-        return { kind: 'error', text: '/job 需要在一个会话里使用（启动者 = 当前会话）' }
+        return { kind: 'error', text: '/job 需要在一个会话里使用（发起人 = 当前会话）' }
       }
       const raw = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
       if (raw === '') return { kind: 'success', text: describeAvailableWorkflows(engine) }
@@ -73,12 +73,12 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
       try {
         const job = await engine.createJobFromSession({
           workflowId,
-          rawInput: { request },
+          content: { request },
           sessionId: agentId,
         })
         return {
           kind: 'success',
-          text: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话：按提示把原始输入转换成结构化输入，并调用 buka_task_complete 提交。`,
+          text: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`,
         }
       } catch (error) {
         return {

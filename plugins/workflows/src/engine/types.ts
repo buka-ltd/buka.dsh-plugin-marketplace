@@ -2,7 +2,7 @@
  * 引擎依赖的宿主服务形状与公共类型。
  *
  * 跨插件只走服务：workers 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
- * 结构类型；启动者会话投递用宿主 `sessionController` / `agents` 的「解析 live
+ * 结构类型；发起人会话投递用宿主 `sessionController` / `agents` 的「解析 live
  * agent + followup」能力（与官方 schedule 插件同一机制）。
  *
  * @module @buka/dsh-plugin-workflows/engine/types
@@ -54,12 +54,12 @@ export interface TurnSnapshot {
   readonly startSeq: number | null
 }
 
-/** 宿主会话投递：把一段文本作为消息投进启动者会话。 */
+/** 宿主会话投递：把一段文本作为消息投进发起人会话。 */
 export interface SessionDelivery {
   /**
    * 投递一条用户消息；必要时先 resume 同一个会话。
    *
-   * @param sessionId 启动者会话 id
+   * @param sessionId 发起人会话 id
    * @param text 消息正文
    * @returns 投递时该会话的起点 seq（用于观察这一轮是否结束）；未知时是 null
    */

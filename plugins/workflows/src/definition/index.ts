@@ -15,7 +15,6 @@ export {
   type TemplateContextInput,
   type TemplatePath,
   type TemplateReference,
-  type TemplateTaskValue,
 } from './payload.ts'
 export {
   channelAllowsType,

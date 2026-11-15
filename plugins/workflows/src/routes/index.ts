@@ -1,5 +1,5 @@
 /**
- * 浏览器一半的 HTTP 路由（ADR 0015 的 v5 契约）：
+ * 浏览器一半的 HTTP 路由（ADR 0015 / 0017 的 v6 契约）：
  * 工作流 / 作业 / 任务 / 附件与动作。
  *
  * 所有路由沿用 web 组合的信任栅栏（`ctx.connection.requestRejection`），只接受
@@ -196,8 +196,8 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
       const engine = await ready()
       const job = await engine.createJobFromHuman({
         workflowId,
-        rawInput: (record.rawInput ?? {}) as never,
-        structuredInput: (record.structuredInput ?? {}) as never,
+        content: (record.content ?? {}) as never,
+        delivery: (record.delivery ?? { kind: 'starter' }) as never,
       })
       sendJson(res, 200, { ok: true, jobId: job.id, seq: job.seq })
     })
@@ -279,7 +279,8 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
           const task = await engine.completeTaskAsHuman({
             jobId,
             taskId,
-            output: (record.output ?? {}) as never,
+            action: typeof record.selectedAction === 'string' ? record.selectedAction : undefined,
+            input: record.input as never,
             text: typeof record.text === 'string' ? record.text : '',
             attachments: record.attachments,
           })

@@ -1,7 +1,7 @@
 /**
  * 浏览器一半的共享类型与常量。
  *
- * 这里的形状全部是**客户端本地定义**：按 ADR 0015 的 v5 契约声明，不 import
+ * 这里的形状全部是**客户端本地定义**：按 ADR 0015 / 0017 的 v6 契约声明，不 import
  * 宿主一半的任何模块，避免把 node 依赖带进浏览器包。
  *
  * 契约字段一律按「可能缺失」处理（响应来自新版 / 旧版 Host 都可能），页面
@@ -85,7 +85,7 @@ export interface Executor {
   driver?: string
 }
 
-/** 受限 JSON Schema 子集（与 `src/output.ts` 的规则一致，这里只做展示与表单）。 */
+/** 受限 JSON Schema 子集（与 `src/json-schema.ts` 的规则一致，这里只做展示与表单）。 */
 export interface JsonSchema {
   type?: string | string[]
   description?: string
@@ -98,14 +98,30 @@ export interface JsonSchema {
   oneOf?: JsonSchema[]
 }
 
+/** 一条「创建任务」的声明（人任务的动作里用）。 */
+export interface CreationDefinition {
+  channel?: string
+  type?: string
+  content?: unknown
+}
+
+/** 人任务类型上的一个动作。 */
+export interface ActionDefinition {
+  id?: string
+  label?: string
+  input?: JsonSchema
+  creates?: CreationDefinition[]
+}
+
 /** 任务类型定义（工作流定义快照里的一份）。 */
 export interface TaskTypeDefinition {
   id?: string
   label?: string
-  description?: string
-  payload?: JsonSchema
-  output?: JsonSchema
-  requires?: Array<{ types?: string[] }>
+  /** 预设信息：这个任务类型是谁、要做什么。 */
+  definition?: string
+  /** 任务内容的格式约束。 */
+  content?: JsonSchema
+  actions?: ActionDefinition[]
   assistant?: string | null
   mode?: string | null
 }
@@ -114,7 +130,8 @@ export interface TaskTypeDefinition {
 export interface PositionDefinition {
   id?: string
   label?: string
-  description?: string
+  /** 给编排者看的维护备注。 */
+  note?: string
   executor?: Executor
   taskTypes?: TaskTypeDefinition[]
 }
@@ -131,23 +148,13 @@ export interface ChannelDefinition {
 
 /** 开始节点契约。 */
 export interface StartDefinition {
-  task?: {
-    payload?: JsonSchema
-    output?: JsonSchema
-  }
-  next?: Array<{
-    channel?: string
-    type?: string
-    payload?: Record<string, unknown>
-    dependsOn?: string[]
-  }>
+  content?: JsonSchema
+  next?: CreationDefinition[]
 }
 
 /** 结束节点契约。 */
 export interface EndDefinition {
-  task?: {
-    payload?: JsonSchema
-  }
+  content?: JsonSchema
 }
 
 /** 工作流定义快照。 */
@@ -168,6 +175,7 @@ export interface WorkflowSummary {
   name?: string
   description?: string
   version?: number
+  definitionVersion?: number
   status?: string
   jobCount?: number
   updatedAt?: string | null
@@ -179,6 +187,8 @@ export interface JobSummary {
   seq?: number
   status?: string
   inputSummary?: string
+  definitionVersion?: number
+  delivery?: DeliveryRule
   taskCounts?: Partial<Record<TaskStatus, number>>
   createdAt?: string
   updatedAt?: string
@@ -191,7 +201,7 @@ export interface Claimant {
   sessionId?: string | null
 }
 
-/** 启动者：人，或某个会话。 */
+/** 发起人：人，或某个会话。 */
 export interface Starter {
   kind?: string
   sessionId?: string | null
@@ -243,7 +253,10 @@ export interface AttachmentMeta {
 /** 任务结果。 */
 export interface TaskResult {
   text?: string
-  output?: unknown
+  /** 人任务点过的动作。 */
+  action?: { id?: string; label?: string }
+  /** 人任务填的表单。 */
+  input?: unknown
   attachments?: AttachmentMeta[]
 }
 
@@ -255,11 +268,10 @@ export interface TaskDetail {
   positionLabel?: string
   type?: string
   typeLabel?: string
-  typeDescription?: string
   channel?: string | null
   channelLabel?: string
   status?: string
-  payload?: Record<string, unknown>
+  content?: unknown
   deps?: TaskSummary[]
   createdAt?: string
   startedAt?: string | null
@@ -286,6 +298,8 @@ export interface WorkflowDetail {
     start?: { label?: string }
     end?: { label?: string }
   }
+  /** 结束任务可以交给的助理（新建作业时选「交给秘书」）。 */
+  assistants?: Array<{ name?: string; description?: string; avatar?: string }>
   jobs?: JobSummary[]
 }
 
@@ -308,7 +322,8 @@ export interface JobDetail {
     workflowName?: string
     workflowVersion?: number
     starter?: Starter | null
-    input?: Record<string, unknown>
+    input?: unknown
+    delivery?: DeliveryRule
     createdAt?: string
     updatedAt?: string
     error?: unknown
@@ -327,7 +342,7 @@ export type WorkflowTab = 'jobs' | 'definition'
 /** 作业列表筛选。 */
 export type JobFilter = 'all' | 'running' | 'completed' | 'problem'
 
-/** 定义结构画布上的选中项：节点、边或全局信息。 */
+/** 结构图画布上的选中项：节点、边或全局信息。 */
 export type DefinitionSelection =
   | { kind: 'position'; id: string }
   | { kind: 'channel'; id: string }
@@ -362,8 +377,13 @@ export interface Notice {
   seq: number
 }
 
+/** 交回方式：交回发起人，或交给某个助理。 */
+export type DeliveryRule = { kind?: string; name?: string }
+
 /** 人任务表单的草稿。 */
 export interface TaskFormState {
+  /** 选中的动作 id；null 表示只提交结果、不创建任务。 */
+  action: string | null
   values: Record<string, string>
   text: string
   error: string | null
@@ -373,8 +393,10 @@ export interface TaskFormState {
 /** 新建作业表单的草稿。 */
 export interface NewJobState {
   open: boolean
-  raw: Record<string, string>
-  structured: Record<string, string>
+  /** 发起人填的任务内容（按 start.content schema 渲染）。 */
+  content: Record<string, string>
+  /** `starter` 或 `assistant:<name>`。 */
+  delivery: string
   error: string | null
   submitting: boolean
 }
@@ -408,7 +430,7 @@ export interface PageState {
   finalTask: Loadable<TaskDetail>
   /** 作业列表筛选。 */
   jobFilter: JobFilter
-  /** 定义结构画布的选中项。 */
+  /** 结构图画布的选中项。 */
   definitionSelection: DefinitionSelection
   /** 实时流程里打开的节点任务列表。 */
   nodeTasks: NodeTasksSelection | null

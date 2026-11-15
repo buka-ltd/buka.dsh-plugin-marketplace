@@ -37,18 +37,12 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
   if (job === undefined) return renderEmpty(t('notFound'))
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
   const tasks = jobTasks(state)
-  const input = isRecord(job.input) ? job.input : {}
-  const rawInput = isRecord(input.raw)
-    ? input.raw
-    : 'raw' in input || 'structured' in input
-      ? {}
-      : input
-  const structuredInput = isRecord(input.structured) ? input.structured : null
+  const input = job.input ?? {}
   const starter = isRecord(job.starter) ? job.starter : null
   const endTask = endTaskSummary(tasks)
   const finalTask = state.finalTask
-  const endSchema = isRecord(definition?.end?.task?.payload) ? definition?.end?.task?.payload : null
-  const startSchema = isRecord(definition?.start?.task) ? definition?.start?.task : null
+  const endSchema = isRecord(definition?.end?.content) ? definition?.end?.content : null
+  const startSchema = isRecord(definition?.start?.content) ? definition?.start?.content : null
 
   return h(
     'div',
@@ -60,25 +54,10 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
         { className: 'buka-workflows-overviewCard' },
         renderReadonlyValue(
           page,
-          isRecord(startSchema?.payload) ? startSchema.payload : null,
-          rawInput,
+          isRecord(startSchema) ? (startSchema as JsonSchema) : null,
+          input,
           t('overviewRequirementEmpty'),
         ),
-      ),
-    ),
-    renderSection(
-      t('overviewStructured'),
-      h(
-        'div',
-        { className: 'buka-workflows-overviewCard' },
-        structuredInput === null
-          ? h('p', { className: 'buka-workflows-hint' }, t('overviewStructuredEmpty'))
-          : renderReadonlyValue(
-              page,
-              isRecord(startSchema?.output) ? startSchema.output : null,
-              structuredInput,
-              t('overviewStructuredEmpty'),
-            ),
       ),
     ),
     renderSection(
@@ -122,6 +101,12 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
               : starter.kind === 'session'
                 ? t('starterSession')
                 : t('starterHuman'),
+          ],
+          [
+            t('overviewDelivery'),
+            job.delivery?.kind === 'assistant'
+              ? `${t('newJobDeliveryAssistant')} · ${job.delivery.name ?? ''}`
+              : t('newJobDeliveryStarter'),
           ],
           [t('jobCreatedAt'), formatTime(job.createdAt)],
           [t('jobUpdatedAt'), formatTime(job.updatedAt)],
@@ -184,7 +169,7 @@ function renderFinalDeliverable(
         ? h('span', { className: 'buka-workflows-hint' }, task.positionLabel)
         : null,
     ),
-    renderReadonlyValue(page, payloadSchema, task.payload ?? null, t('overviewFinalPending')),
+    renderReadonlyValue(page, payloadSchema, task.content ?? null, t('overviewFinalPending')),
     text === '' ? null : h('pre', { className: 'buka-workflows-pre' }, text),
     attachments.length === 0
       ? null

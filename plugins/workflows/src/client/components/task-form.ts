@@ -1,51 +1,54 @@
 /**
- * 任务结果表单：按任务类型的 `output` schema 渲染（人任务 / 认领后提交共用）。
+ * 人任务动作表单：按所选动作的 `input` schema 渲染；没有表单的动作不需要填。
+ *
+ * 表单值放在 `state.taskForm.values`，切换动作时保留（提交只取当前动作的字段）。
  */
 
 import type React from 'react'
 
 import { h } from '../element.ts'
-import {
-  currentDefinition,
-  currentJobDefinition,
-  mergedDefinition,
-  outputSchemaFor,
-} from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { renderJsonFallback, renderSchemaFields, schemaFields } from '../schema.ts'
 import type { TaskDetail } from '../types.ts'
+import { isRecord } from '../types.ts'
 
 /**
- * 渲染结果表单：schema 字段 + 说明 + 错误提示。
+ * 渲染动作表单：schema 字段 + 备注文本 + 错误提示。
  *
- * @param page
- * @param task
+ * @param page 页面上下文
+ * @param task 任务（只用于生成元素 id）
+ * @param schema 所选动作的 input schema；null 表示这个动作没有表单
  * @returns React 元素数组
  */
-export function renderTaskForm(page: AppContext, task: TaskDetail): React.ReactElement[] {
+export function renderTaskForm(
+  page: AppContext,
+  task: TaskDetail,
+  schema: Record<string, unknown> | null,
+): React.ReactElement[] {
   const { t, state, actions } = page
-  const workflowDefinition = currentDefinition(state)
-  const jobDefinition = mergedDefinition(currentJobDefinition(state), workflowDefinition)
-  const schema = outputSchemaFor(jobDefinition, workflowDefinition, task)
   const form = state.taskForm
   const elements: React.ReactElement[] = []
-  if (schemaFields(schema).length > 0) {
+  const typed = isRecord(schema) ? schema : null
+  if (typed !== null && schemaFields(typed as never).length > 0) {
     elements.push(
       ...renderSchemaFields(page, {
-        schema,
+        schema: typed as never,
         values: form.values,
         onChange: actions.setTaskField,
         idPrefix: `buka-workflows-task-${task.id}`,
       }),
     )
-  } else {
+  } else if (typed !== null) {
     elements.push(
-      h('p', { className: 'buka-workflows-hint', key: 'no-schema' }, t('actionFormNoSchema')),
-      renderJsonFallback(
-        page,
-        form.values.__json ?? '',
-        (next) => actions.setTaskField('__json', next),
-        `buka-workflows-task-${task.id}-json`,
+      h(
+        'div',
+        { key: 'json', className: 'buka-workflows-field' },
+        renderJsonFallback(
+          page,
+          form.values.__json ?? '',
+          (next) => actions.setTaskField('__json', next),
+          `buka-workflows-task-${task.id}-json`,
+        ),
       ),
     )
   }

@@ -1,8 +1,9 @@
 /**
- * 定义结构的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
+ * 结构图的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
  *
- * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，契约字段
- * 收成紧凑标签；预算、完整契约这类技术细节放进默认收起的折叠区。
+ * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，正文按
+ * 页签分区：岗位看可处理的任务类型（卡片），开始 / 结束看契约，通道看发送方、
+ * 接收方与允许的任务类型，定义信息看概览、初始任务与契约。
  */
 
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -10,11 +11,11 @@ import type React from 'react'
 
 import { renderAvatar } from '../avatars.ts'
 import { ClientModal, h } from '../element.ts'
-import { fill } from '../i18n.ts'
 import {
   allTaskTypes,
   channelOf,
   currentDefinition,
+  type PositionView,
   positionLabel,
   positionsOf,
   taskTypeLabels,
@@ -23,11 +24,12 @@ import type { AppContext } from '../page-context.ts'
 import type { JsonSchema, TaskTypeDefinition, WorkflowDefinition } from '../types.ts'
 import {
   ClampedText,
+  DrawerTabs,
   renderContractFields,
   renderDrawerHead,
   renderExecutor,
   renderFold,
-  renderSection,
+  renderKv,
   renderStatStrip,
 } from './parts.ts'
 
@@ -51,191 +53,21 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
     position !== undefined && typeof position.executor.avatar === 'string'
       ? renderAvatar(position.executor.avatar, 28, 'buka-workflows-drawerAvatar')
       : null
-
-  const body: React.ReactNode[] = []
-  if (selection.kind === 'info') {
-    const types = allTaskTypes(definition)
-    body.push(
-      renderStatStrip([
-        [t('workflowVersionName'), `v${workflow?.version ?? 0}`],
-        [t('definitionPositions'), String(positions.length)],
-        [t('taskTypesTitle'), String(types.length)],
-        [t('budgetMaxTasks'), budgetTasks(page, definition)],
-        [t('budgetMaxDuration'), budgetDuration(page, definition)],
-      ]),
-    )
-    if (typeof workflow?.description === 'string' && workflow.description !== '') {
-      body.push(
-        h(ClampedText, {
+  const tabs = definitionTabs(page, selection, { definition, workflow, positions, labels, builtin })
+  const backChannel =
+    selection.kind === 'channel' && channelOf(definition, selection.id)?.back === true
+      ? h(Tag, { tone: 'neutral' }, t('channelBack'))
+      : null
+  const lead =
+    selection.kind === 'position' && position !== undefined && position.note !== ''
+      ? h(ClampedText, {
           key: 'desc',
-          text: workflow.description,
+          text: position.note,
           className: 'buka-workflows-drawerText',
           expandLabel: t('expandText'),
           collapseLabel: t('collapseText'),
-        }),
-      )
-    }
-    body.push(
-      renderSection(
-        t('definitionInitialTasks'),
-        Array.isArray(definition.start?.next) && definition.start.next.length > 0
-          ? h(
-              'ul',
-              { className: 'buka-workflows-initialList' },
-              ...definition.start.next.map((initial, index) => {
-                const channel = channelOf(definition, initial.channel)
-                return h(
-                  'li',
-                  {
-                    key: `${initial.channel ?? ''}-${index}`,
-                    className: 'buka-workflows-initialRow',
-                  },
-                  h(
-                    'span',
-                    { className: 'buka-workflows-initialMain' },
-                    h(
-                      'strong',
-                      null,
-                      channel === null
-                        ? (initial.channel ?? '')
-                        : positionLabel(definition, channel.to, builtin),
-                    ),
-                    h(
-                      'span',
-                      { className: 'buka-workflows-hint' },
-                      [
-                        channel === null ? '' : `「${channel.label}」`,
-                        labels.get(initial.type ?? '') ?? initial.type ?? '',
-                      ]
-                        .filter((part) => part !== '')
-                        .join(' · '),
-                    ),
-                  ),
-                  h(
-                    'span',
-                    { className: 'buka-workflows-hint' },
-                    fill(t, 'initialDeps', { n: initial.dependsOn?.length ?? 0 }),
-                  ),
-                )
-              }),
-            )
-          : h('p', { className: 'buka-workflows-hint' }, t('definitionInitialEmpty')),
-      ),
-    )
-    body.push(
-      renderFold(
-        t('definitionStartContract'),
-        h(
-          'div',
-          { className: 'buka-workflows-contractStack' },
-          contractBlock(
-            page,
-            t('taskTypePayload'),
-            t('startPayloadHint'),
-            definition.start?.task?.payload,
-          ),
-          contractBlock(
-            page,
-            t('taskTypeOutput'),
-            t('startOutputHint'),
-            definition.start?.task?.output,
-          ),
-        ),
-      ),
-      renderFold(
-        t('definitionEndContract'),
-        contractBlock(
-          page,
-          t('taskTypePayload'),
-          t('endPayloadHint'),
-          definition.end?.task?.payload,
-        ),
-      ),
-    )
-  } else if (selection.kind === 'position') {
-    if (position === undefined) {
-      body.push(h('p', { className: 'buka-workflows-hint' }, t('notFound')))
-    } else {
-      if (position.description !== '') {
-        body.push(
-          h(ClampedText, {
-            key: 'desc',
-            text: position.description,
-            className: 'buka-workflows-drawerText',
-            expandLabel: t('expandText'),
-            collapseLabel: t('collapseText'),
-          }),
-        )
-      }
-      body.push(
-        renderSection(
-          t('taskTypesTitle'),
-          position.taskTypes.length === 0
-            ? h('p', { className: 'buka-workflows-hint' }, t('taskTypesEmpty'))
-            : h(
-                'div',
-                { className: 'buka-workflows-typeList' },
-                ...position.taskTypes.map((type) => renderTaskType(page, type, labels)),
-              ),
-        ),
-      )
-    }
-  } else if (selection.kind === 'start' || selection.kind === 'end') {
-    const isStart = selection.kind === 'start'
-    body.push(
-      h(
-        'p',
-        { className: 'buka-workflows-drawerText' },
-        isStart ? t('startContractHint') : t('endContractHint'),
-      ),
-      renderSection(
-        t('taskTypePayload'),
-        h(
-          'div',
-          { className: 'buka-workflows-contractStack' },
-          h(
-            'p',
-            { className: 'buka-workflows-sectionHint' },
-            isStart ? t('startPayloadHint') : t('endPayloadHint'),
-          ),
-          renderContractFields(page, definition.start?.task?.payload),
-        ),
-      ),
-    )
-    if (isStart) {
-      body.push(
-        renderSection(
-          t('taskTypeOutput'),
-          h(
-            'div',
-            { className: 'buka-workflows-contractStack' },
-            h('p', { className: 'buka-workflows-sectionHint' }, t('startOutputHint')),
-            renderContractFields(page, definition.start?.task?.output),
-          ),
-        ),
-      )
-    }
-  } else {
-    const channel = channelOf(definition, selection.id)
-    if (channel === null) {
-      body.push(h('p', { className: 'buka-workflows-hint' }, t('notFound')))
-    } else {
-      body.push(
-        renderSection(
-          t('channelAllowedTypes'),
-          channel.types.length === 0
-            ? h('p', { className: 'buka-workflows-hint' }, t('channelAllTypes'))
-            : h(
-                'div',
-                { className: 'buka-workflows-tagRow' },
-                ...channel.types.map((type) =>
-                  h(Tag, { key: type, tone: 'neutral' }, labels.get(type) ?? type),
-                ),
-              ),
-        ),
-      )
-    }
-  }
+        })
+      : null
 
   return h(
     ClientModal,
@@ -251,11 +83,275 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
     renderDrawerHead({
       title,
       avatar,
+      ...(backChannel === null ? {} : { tag: backChannel }),
       meta: headerMeta(page, selection, position, definition),
       onClose: () => actions.selectDefinition(null),
       closeLabel: t('close'),
     }),
-    h('div', { className: 'buka-workflows-drawerBody' }, ...body),
+    h(
+      'div',
+      { className: 'buka-workflows-drawerBody' },
+      lead,
+      h(DrawerTabs, {
+        key: selectionKey(selection),
+        label: t('definitionTabsAria'),
+        tabs,
+      }),
+    ),
+  )
+}
+
+/** 抽屉的分区页签。 */
+interface DefinitionTab {
+  id: string
+  label: string
+  content: React.ReactNode
+}
+
+/** 定义抽屉的上下文。 */
+interface DefinitionContext {
+  definition: WorkflowDefinition
+  workflow: { description?: string; version?: number } | undefined
+  positions: PositionView[]
+  labels: Map<string, string>
+  builtin: { start: string; end: string }
+}
+
+/** 按所选对象给出页签。 */
+function definitionTabs(
+  page: AppContext,
+  selection: NonNullable<AppContext['state']['definitionSelection']>,
+  context: DefinitionContext,
+): DefinitionTab[] {
+  const { t } = page
+  const { definition, workflow, positions, labels, builtin } = context
+  if (selection.kind === 'info') {
+    const overview: React.ReactNode[] = [
+      renderStatStrip([
+        [t('workflowVersionName'), `v${workflow?.version ?? 0}`],
+        [t('definitionPositions'), String(positions.length)],
+        [t('taskTypesTitle'), String(allTaskTypes(definition).length)],
+        [t('budgetMaxTasks'), budgetTasks(page, definition)],
+        [t('budgetMaxDuration'), budgetDuration(page, definition)],
+      ]),
+    ]
+    if (typeof workflow?.description === 'string' && workflow.description !== '') {
+      overview.push(
+        h(ClampedText, {
+          key: 'desc',
+          text: workflow.description,
+          className: 'buka-workflows-drawerText',
+          expandLabel: t('expandText'),
+          collapseLabel: t('collapseText'),
+        }),
+      )
+    }
+    return [
+      {
+        id: 'overview',
+        label: t('definitionTabOverview'),
+        content: h('div', { className: 'buka-workflows-drawerStack' }, ...overview),
+      },
+      {
+        id: 'initial',
+        label: t('definitionInitialTasks'),
+        content: initialTasks(page, definition, labels, builtin),
+      },
+      {
+        id: 'contract',
+        label: t('definitionTabContract'),
+        content: h(
+          'div',
+          { className: 'buka-workflows-drawerStack' },
+          renderFold(
+            t('definitionStartContract'),
+            h(
+              'div',
+              { className: 'buka-workflows-contractStack' },
+              contractBlock(
+                page,
+                t('startContentTitle'),
+                t('startPayloadHint'),
+                definition.start?.content,
+              ),
+            ),
+          ),
+          renderFold(
+            t('definitionEndContract'),
+            contractBlock(page, t('endContentTitle'), t('endPayloadHint'), definition.end?.content),
+          ),
+        ),
+      },
+    ]
+  }
+  if (selection.kind === 'position') {
+    const position = positions.find((item) => item.id === selection.id)
+    if (position === undefined) {
+      return [
+        {
+          id: 'missing',
+          label: t('positionTaskTypes'),
+          content: h('p', { className: 'buka-workflows-hint' }, t('notFound')),
+        },
+      ]
+    }
+    return [
+      {
+        id: 'types',
+        label: t('positionTaskTypes'),
+        content: h(
+          'div',
+          { className: 'buka-workflows-drawerStack' },
+          h('h3', { className: 'buka-workflows-sectionTitle' }, t('positionTaskTypes')),
+          position.taskTypes.length === 0
+            ? h('p', { className: 'buka-workflows-hint' }, t('taskTypesEmpty'))
+            : h(
+                'div',
+                { className: 'buka-workflows-typeList' },
+                ...position.taskTypes.map((type) => renderTaskType(page, type)),
+              ),
+        ),
+      },
+    ]
+  }
+  if (selection.kind === 'start' || selection.kind === 'end') {
+    const isStart = selection.kind === 'start'
+    if (!isStart) {
+      return [
+        {
+          id: 'deliverable',
+          label: t('finalDeliverableTitle'),
+          content: h(
+            'div',
+            { className: 'buka-workflows-contractStack' },
+            h('p', { className: 'buka-workflows-sectionHint' }, t('endPayloadHint')),
+            renderContractFields(page, definition.end?.content),
+          ),
+        },
+      ]
+    }
+    return [
+      {
+        id: 'input',
+        label: t('startContentTitle'),
+        content: h(
+          'div',
+          { className: 'buka-workflows-contractStack' },
+          h('p', { className: 'buka-workflows-sectionHint' }, t('startPayloadHint')),
+          renderContractFields(page, definition.start?.content),
+        ),
+      },
+    ]
+  }
+  const channel = channelOf(definition, selection.id)
+  if (channel === null) {
+    return [
+      {
+        id: 'missing',
+        label: t('channelTitle'),
+        content: h('p', { className: 'buka-workflows-hint' }, t('notFound')),
+      },
+    ]
+  }
+  return [
+    {
+      id: 'info',
+      label: t('channelTitle'),
+      content: h(
+        'div',
+        { className: 'buka-workflows-drawerStack' },
+        renderKv([
+          [t('channelSender'), channelEndpoint(page, definition, positions, channel.from, builtin)],
+          [t('channelReceiver'), channelEndpoint(page, definition, positions, channel.to, builtin)],
+        ]),
+        h(
+          'div',
+          { className: 'buka-workflows-section' },
+          h('h3', { className: 'buka-workflows-sectionTitle' }, t('channelAllowedTypes')),
+          channel.types.length === 0
+            ? h('p', { className: 'buka-workflows-hint' }, t('channelAllTypes'))
+            : h(
+                'div',
+                { className: 'buka-workflows-tagRow' },
+                ...channel.types.map((type) =>
+                  h(Tag, { key: type, tone: 'neutral' }, labels.get(type) ?? type),
+                ),
+              ),
+        ),
+      ),
+    },
+  ]
+}
+
+/** 初始任务列表。 */
+function initialTasks(
+  page: AppContext,
+  definition: WorkflowDefinition,
+  labels: Map<string, string>,
+  builtin: { start: string; end: string },
+): React.ReactNode {
+  const { t } = page
+  if (!Array.isArray(definition.start?.next) || definition.start.next.length === 0) {
+    return h('p', { className: 'buka-workflows-hint' }, t('definitionInitialEmpty'))
+  }
+  return h(
+    'ul',
+    { className: 'buka-workflows-initialList' },
+    ...definition.start.next.map((initial, index) => {
+      const channel = channelOf(definition, initial.channel)
+      return h(
+        'li',
+        { key: `${initial.channel ?? ''}-${index}`, className: 'buka-workflows-initialRow' },
+        h(
+          'span',
+          { className: 'buka-workflows-initialMain' },
+          h(
+            'strong',
+            null,
+            channel === null
+              ? (initial.channel ?? '')
+              : positionLabel(definition, channel.to, builtin),
+          ),
+          h(
+            'span',
+            { className: 'buka-workflows-hint' },
+            [
+              channel === null ? '' : `「${channel.label}」`,
+              labels.get(initial.type ?? '') ?? initial.type ?? '',
+            ]
+              .filter((part) => part !== '')
+              .join(' · '),
+          ),
+        ),
+        h(
+          'span',
+          { className: 'buka-workflows-hint' },
+          initial.content === undefined ? t('initialNoContent') : t('initialContent'),
+        ),
+      )
+    }),
+  )
+}
+
+/** 通道端点：岗位标签 + 执行者；内建开始 / 结束节点只有标签。 */
+function channelEndpoint(
+  page: AppContext,
+  definition: WorkflowDefinition,
+  positions: PositionView[],
+  nodeId: string,
+  builtin: { start: string; end: string },
+): React.ReactNode {
+  const label = positionLabel(definition, nodeId, builtin)
+  if (nodeId === 'start' || nodeId === 'end') return label
+  const position = positions.find((item) => item.id === nodeId)
+  if (position === undefined) return label
+  const executor = renderExecutor(page, position.executor)
+  if (executor === page.t('taskTypeUnset')) return label
+  return h(
+    'span',
+    { className: 'buka-workflows-inlineGroup' },
+    h('span', null, label),
+    h('span', { className: 'buka-workflows-hint' }, executor),
   )
 }
 
@@ -274,16 +370,7 @@ function headerMeta(
   }
   if (selection.kind === 'channel') {
     const channel = channelOf(definition, selection.id)
-    if (channel === null) return null
-    const builtin = { start: t('graphStart'), end: t('graphEnd') }
-    const route = `${positionLabel(definition, channel.from, builtin)} → ${positionLabel(
-      definition,
-      channel.to,
-      builtin,
-    )}`
-    return [channel.id, route, channel.back ? t('channelBack') : '']
-      .filter((part) => part !== '')
-      .join(' · ')
+    return channel === null ? null : channel.id
   }
   return null
 }
@@ -306,20 +393,21 @@ function titleOf(
   return channel === null ? t('channelTitle') : channel.label
 }
 
-/** 一个任务类型：标题 + 说明 + 输入 / 产出两行契约。 */
-function renderTaskType(
-  page: AppContext,
-  type: TaskTypeDefinition,
-  labels: Map<string, string>,
-): React.ReactElement {
+/** 页签的 `key`：换一个所选对象就重置到默认页签。 */
+function selectionKey(selection: NonNullable<AppContext['state']['definitionSelection']>): string {
+  return selection.kind === 'position' || selection.kind === 'channel'
+    ? `${selection.kind}:${selection.id}`
+    : selection.kind
+}
+
+/** 一个任务类型：一张卡片，标题 + 说明 + 输入 / 产出两行契约。 */
+function renderTaskType(page: AppContext, type: TaskTypeDefinition): React.ReactElement {
   const { t } = page
   const id = typeof type.id === 'string' ? type.id : ''
-  const requires = Array.isArray(type.requires)
-    ? type.requires.flatMap((item) => (Array.isArray(item.types) ? item.types : []))
-    : []
+  const actions = Array.isArray(type.actions) ? type.actions : []
   return h(
     'article',
-    { key: id === '' ? (type.label ?? 'type') : id, className: 'buka-workflows-typeRow' },
+    { key: id === '' ? (type.label ?? 'type') : id, className: 'buka-workflows-typeCard' },
     h(
       'div',
       { className: 'buka-workflows-typeRowHead' },
@@ -334,9 +422,9 @@ function renderTaskType(
         type.mode === 'plan' ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
       ),
     ),
-    typeof type.description === 'string' && type.description !== ''
+    typeof type.definition === 'string' && type.definition !== ''
       ? h(ClampedText, {
-          text: type.description,
+          text: type.definition,
           className: 'buka-workflows-typeDesc',
           expandLabel: t('expandText'),
           collapseLabel: t('collapseText'),
@@ -345,18 +433,21 @@ function renderTaskType(
     h(
       'div',
       { className: 'buka-workflows-contractStack is-tight' },
-      contractLine(t('taskTypePayload'), contractOrDash(page, type.payload)),
-      contractLine(t('taskTypeOutput'), contractOrDash(page, type.output)),
+      contractLine(t('taskTypeContent'), contractOrDash(page, type.content)),
     ),
-    requires.length === 0
+    actions.length === 0
       ? null
       : contractLine(
-          t('taskTypeRequires'),
+          t('taskTypeActions'),
           h(
             'div',
             { className: 'buka-workflows-tagRow' },
-            ...requires.map((required) =>
-              h(Tag, { key: required, tone: 'neutral' }, labels.get(required) ?? required),
+            ...actions.map((action) =>
+              h(
+                Tag,
+                { key: String(action.id ?? action.label), tone: 'neutral' },
+                action.label ?? String(action.id ?? ''),
+              ),
             ),
           ),
         ),

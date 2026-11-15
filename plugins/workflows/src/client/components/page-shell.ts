@@ -109,6 +109,10 @@ export function renderPage(page: AppContext): React.ReactElement {
           ]
         : null
   const activeTab = route.kind === 'workflow' ? route.tab : route.kind === 'job' ? route.view : ''
+  /** 结构图与实时流程是整块画布：画布撑满正文，图例固定在底部。 */
+  const graphView =
+    (route.kind === 'workflow' && route.tab === 'definition') ||
+    (route.kind === 'job' && route.view === 'flow')
 
   const toolbar: React.ReactNode[] = []
   if (route.kind === 'workflow') {
@@ -278,7 +282,7 @@ export function renderPage(page: AppContext): React.ReactElement {
       'div',
       {
         key: routeHash(route),
-        className: `buka-workflows-body${route.kind === 'job' ? ' is-wide' : ''}`,
+        className: `buka-workflows-body${route.kind === 'job' ? ' is-wide' : ''}${graphView ? ' is-graph' : ''}`,
       },
       body,
     ),

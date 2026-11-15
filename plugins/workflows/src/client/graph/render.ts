@@ -1,7 +1,7 @@
 /**
  * 流程图渲染：SVG 连线 + 绝对定位的节点卡片。
  *
- * 定义结构与实时流程共用同一套布局和卡片；区别只在节点 / 边的数据与
+ * 结构图与实时流程共用同一套布局和卡片；区别只在节点 / 边的数据与
  * 点击后的动作。
  */
 
@@ -30,7 +30,7 @@ export interface RenderGraphOptions {
   selectedNodeId?: string | null
   /** 当前选中的通道 id。 */
   selectedChannelId?: string | null
-  /** 图下方的说明。 */
+  /** 画布底部的说明，和图例一起固定在底部。 */
   caption?: string | null
   /** 定义图显示节点类型与边类型数；实时图显示任务状态。 */
   mode?: 'definition' | 'live'
@@ -47,6 +47,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
   const layout = layoutGraph(options.nodes, options.edges)
   const mode = options.mode ?? 'definition'
   const showLegend = options.showLegend ?? true
+  const caption = options.caption ?? null
   const fit = options.fit ?? true
   const selectedNodeId = options.selectedNodeId ?? null
   const selectedChannelId = options.selectedChannelId ?? null
@@ -259,10 +260,16 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
             ),
       ),
     ),
-    options.caption === null || options.caption === undefined
+    caption === null && !showLegend
       ? null
-      : h('p', { className: 'buka-workflows-hint buka-workflows-graphCaption' }, options.caption),
-    showLegend ? renderGraphLegend(page, mode) : null,
+      : h(
+          'div',
+          { className: 'buka-workflows-graphFooter' },
+          caption === null
+            ? null
+            : h('p', { className: 'buka-workflows-hint buka-workflows-graphHint' }, caption),
+          showLegend ? renderGraphLegend(page, mode) : null,
+        ),
   )
 }
 

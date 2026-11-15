@@ -1,15 +1,15 @@
 /**
- * payload 模板：路径解析、引用遍历与执行开始时的递归渲染。
+ * 任务内容模板：路径解析、引用遍历与渲染。
  *
- * 工作流 v5 的 payload 是 JSON 对象，字符串里可以写模板占位符：
+ * 只有两处声明会写模板：开始节点的初始任务、人任务类型的动作。可用占位符：
  *
- * - `{{start.output.<path>}}`：启动任务交回的结构化输入；
- * - `{{task.<id>.output.<path>}}`：依赖任务的结构化结果；
- * - `{{task.<id>.text}}`：依赖任务的文本结果。
+ * - `{{content.<path>}}`：正在完成的这张任务的任务内容（开始节点是发起人填的内容，
+ *   人任务类型是上游给这张任务的内容）；
+ * - `{{input.<path>}}`：动作表单里填的值（开始节点的初始任务没有表单）。
  *
- * 渲染在执行开始时进行（`renderPayload`）；定义校验阶段用 `inspectPayload`
- * 只提取路径、不求值，再按目标 schema / 已存在任务检查。路径不存在时抛错
- * （而不是静默变空串），避免把空提示词交给执行者。
+ * 渲染在创建任务时进行；定义校验阶段用 `inspectPayload` 只提取路径、不求值，
+ * 再按对应的 schema 检查。路径不存在时抛错（而不是静默变空串），避免把空内容
+ * 交给执行者。
  *
  * @module @buka/dsh-plugin-workflows/definition/payload
  */
@@ -18,16 +18,8 @@ import { getPath, inspectTemplate, renderTemplate } from '../template.ts'
 
 /** 一段模板引用的解析结果。 */
 export type TemplatePath =
-  | { readonly kind: 'start'; readonly segments: readonly string[] }
-  | {
-      readonly kind: 'task'
-      readonly taskId: string
-      readonly field: 'output' | 'text'
-      readonly segments: readonly string[]
-    }
-
-/** 一个任务 id 里允许的字符（`$start` 走 `start.` 前缀，不在这里）。 */
-const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/u
+  | { readonly kind: 'content'; readonly segments: readonly string[] }
+  | { readonly kind: 'input'; readonly segments: readonly string[] }
 
 /**
  * 解析一个模板占位符路径。
@@ -38,20 +30,8 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/u
 export function parseTemplatePath(path: string): TemplatePath | null {
   const segments = path.split('.')
   const head = segments[0]
-  if (head === 'start') {
-    if (segments[1] !== 'output') return null
-    return { kind: 'start', segments: segments.slice(2) }
-  }
-  if (head !== 'task') return null
-  const taskId = segments[1] ?? ''
-  const field = segments[2]
-  if (!TASK_ID_PATTERN.test(taskId)) return null
-  if (field === 'text') {
-    if (segments.length !== 3) return null
-    return { kind: 'task', taskId, field: 'text', segments: [] }
-  }
-  if (field === 'output')
-    return { kind: 'task', taskId, field: 'output', segments: segments.slice(3) }
+  if (head === 'content') return { kind: 'content', segments: segments.slice(1) }
+  if (head === 'input') return { kind: 'input', segments: segments.slice(1) }
   return null
 }
 
@@ -79,7 +59,7 @@ function walkTemplateValue(value: unknown, out: TemplateReference[]): void {
   }
 }
 
-/** payload 模板检查结果。 */
+/** 模板检查结果。 */
 export interface PayloadInspection {
   /** 出现的全部模板路径。 */
   readonly references: readonly TemplateReference[]
@@ -88,16 +68,15 @@ export interface PayloadInspection {
 }
 
 /**
- * 提取 payload 里的全部模板引用与语法错误；不求值。
+ * 提取一个值里的全部模板引用与语法错误；不求值。
  *
- * @param payload 待检查的 payload
+ * @param payload 待检查的值
  * @returns 引用与语法错误
  */
 export function inspectPayload(payload: unknown): PayloadInspection {
   const references: TemplateReference[] = []
   const syntaxErrors: string[] = []
   walkTemplateValue(payload, references)
-  // 语法错误要在最外层收集：inspectTemplate 对每个字符串单独返回错误。
   collectSyntaxErrors(payload, syntaxErrors)
   return { references, syntaxErrors }
 }
@@ -135,12 +114,11 @@ export function containsTemplate(value: unknown): boolean {
 }
 
 /**
- * 递归渲染 payload：字符串里的占位符按 `renderTemplate` 求值，容器逐项递归，
- * 其它值原样返回。返回新对象，不修改入参。
+ * 递归渲染：字符串里的占位符按 `renderTemplate` 求值，容器逐项递归，其它值原样返回。
  *
- * @param payload 含模板的 payload
- * @param context 模板上下文（`start` / `task`）
- * @returns 渲染后的 payload
+ * @param payload 含模板的值
+ * @param context 模板上下文（`content` / `input`）
+ * @returns 渲染后的值
  */
 export function renderPayload(payload: unknown, context: Record<string, unknown>): unknown {
   if (typeof payload === 'string') return renderTemplate(payload, context)
@@ -155,46 +133,24 @@ export function renderPayload(payload: unknown, context: Record<string, unknown>
   return payload
 }
 
-/** 一个任务的模板取值。 */
-export interface TemplateTaskValue {
-  readonly output?: unknown
-  readonly text?: string
-}
-
-/** 模板上下文输入。 */
+/** 渲染上下文：正在完成的任务内容 + 动作表单。 */
 export interface TemplateContextInput {
-  readonly startOutput?: unknown
-  readonly tasks?: ReadonlyMap<string, TemplateTaskValue> | undefined
+  readonly content?: unknown
+  readonly input?: unknown
 }
 
 /**
- * 组装模板上下文：
+ * 组装模板上下文。
  *
- * ```json
- * { "start": { "output": {...} }, "task": { "<id>": { "output": {...}, "text": "…" } } }
- * ```
- *
- * `start` 与 `task` 都是普通对象，所以 `getPath` 可以按点号路径取值。
- *
- * @param input 启动任务的结构化输入与依赖任务结果
- * @returns 模板上下文
+ * @param input 任务内容与动作表单
+ * @returns 可直接交给 `renderPayload` 的上下文
  */
 export function buildTemplateContext(input: TemplateContextInput): Record<string, unknown> {
-  const tasks: Record<string, unknown> = {}
-  for (const [taskId, value] of input.tasks ?? []) {
-    tasks[taskId] = {
-      ...(value.output === undefined ? {} : { output: value.output }),
-      ...(value.text === undefined ? {} : { text: value.text }),
-    }
-  }
-  return {
-    start: { output: input.startOutput ?? null },
-    task: tasks,
-  }
+  return { content: input.content ?? null, input: input.input ?? null }
 }
 
 /**
- * 按点号路径取值；供渲染以外的只读场景使用（例如任务摘要）。
+ * 按点号路径取值；供渲染以外的只读场景使用。
  *
  * @param source 取值来源
  * @param path 点号路径

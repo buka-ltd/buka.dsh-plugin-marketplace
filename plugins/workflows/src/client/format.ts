@@ -123,7 +123,7 @@ export function stateClass(status: unknown): string {
 }
 
 /**
- * 承办者 / 启动者种类 → 词典 key。
+ * 承办者 / 发起人种类 → 词典 key。
  *
  * @param kind
  * @returns

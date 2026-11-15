@@ -154,7 +154,7 @@ function normalizePresets(value) {
 * 引擎依赖的宿主服务形状与公共类型。
 *
 * 跨插件只走服务：workers 服务按 `.tmp/workflow-v4-api.md` 最后一节的契约收窄成
-* 结构类型；启动者会话投递用宿主 `sessionController` / `agents` 的「解析 live
+* 结构类型；发起人会话投递用宿主 `sessionController` / `agents` 的「解析 live
 * agent + followup」能力（与官方 schedule 插件同一机制）。
 *
 * @module @buka/dsh-plugin-workflows/engine/types
@@ -175,7 +175,7 @@ function describeError$1(error) {
 }
 // .build/workflows/commands/job.js
 /**
-* `/job` 命令：普通会话启动作业，启动者 = 当前会话。
+* `/job` 命令：普通会话启动作业，发起人 = 当前会话。
 *
 * 语法：
 *
@@ -205,7 +205,7 @@ function registerJobCommand({ ctx, ready }) {
 			const agentId = typeof invocation.agent?.id === "string" ? invocation.agent.id : "";
 			if (agentId === "") return {
 				kind: "error",
-				text: "/job 需要在一个会话里使用（启动者 = 当前会话）"
+				text: "/job 需要在一个会话里使用（发起人 = 当前会话）"
 			};
 			const raw = typeof invocation.rawInput === "string" ? invocation.rawInput.trim() : "";
 			if (raw === "") return {
@@ -222,12 +222,12 @@ function registerJobCommand({ ctx, ready }) {
 			try {
 				const job = await engine.createJobFromSession({
 					workflowId,
-					rawInput: { request },
+					content: { request },
 					sessionId: agentId
 				});
 				return {
 					kind: "success",
-					text: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话：按提示把原始输入转换成结构化输入，并调用 buka_task_complete 提交。`
+					text: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`
 				};
 			} catch (error) {
 				return {
@@ -344,7 +344,7 @@ function nowIso() {
 *
 * - 附件属于作业，每条附件必须有来源任务 / 岗位；
 * - 文件本体放在作业目录的 `attachments/` 下，记录里只存文件名；
-* - 附件对「产出它的任务、直接或传递依赖它的任务（下游）、启动者、看板页面」
+* - 附件对「产出它的任务、直接或传递依赖它的任务（下游）、发起人、看板页面」
 *   可见；引擎在任务上下文与检索时按这个集合过滤。
 *
 * 路径安全：相对路径基于任务执行者（打工人）的工作区；绝对路径必须位于工作区
@@ -717,18 +717,6 @@ async function readAttachmentRange(file, options = {}) {
 	};
 }
 /**
-* 一个任务可见的附件：自己产出的，以及它直接 / 传递依赖的任务产出的。
-*
-* @param tasks 作业里的全部任务
-* @param currentTaskId 当前任务 id
-* @param attachments 作业附件库
-* @returns 可见附件（顺序与附件库一致）
-*/
-function visibleAttachmentsForTask(tasks, currentTaskId, attachments) {
-	const visible = visibleTaskIds(tasks, currentTaskId);
-	return attachments.filter((attachment) => visible.has(attachment.sourceTaskId));
-}
-/**
 * 可见任务集合：当前任务 + 它的依赖闭包。
 *
 * @param tasks 作业里的全部任务
@@ -764,25 +752,25 @@ function searchAttachments(attachments, visible, query) {
 		return attachment.name.toLowerCase().includes(needle) || attachment.description.toLowerCase().includes(needle) || attachment.sourceTaskId.toLowerCase().includes(needle);
 	});
 }
-// .build/workflows/output.js
+// .build/workflows/json-schema.js
 /**
-* 受限 JSON Schema 子集：定义校验、运行期结果校验与模板路径检查。
+* 受限 JSON Schema 子集：任务内容、动作表单与作业输入共用的声明格式。
 *
-* 工作流 v5 里任务类型用 `payload` / `output` 声明创建者必须填的内容与
-* 执行者必须交回的结构化结果；开始 / 结束节点也各自声明任务契约。本模块
+* 工作流 v7 里任务类型用 `content` 声明创建者必须提供的任务内容，人任务类型
+* 的动作用 `input` 声明表单，开始 / 结束节点也各自声明任务内容格式。本模块
 * 只处理声明与值之间的纯逻辑（不读盘、不依赖 DSH）：
 *
-* - `parseOutputSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
+* - `parseJsonSchema`：定义校验时使用的 JSON Schema 子集检查。工作流定义
 *   由编排 agent 生成，所以这里只放行一组可移植关键字，避免把任意 schema
 *   直接当成工具参数；
-* - `schemaProblems`：运行期按声明的 schema 校验 payload / output；
-* - `resolveOutputPath`：定义校验时检查 `{{start.output.<path>}}` 这类模板
-*   引用的路径是否真的在目标 schema 里；
-* - `schemaJson`：给 prompt 用的 schema 序列化。
+* - `schemaProblems`：运行期按声明的 schema 校验任务内容与动作表单；
+* - `resolveSchemaPath`：定义校验时检查 `{{content.<path>}}` 这类模板引用
+*   的路径是否真的在目标 schema 里；
+* - `schemaJson`：给提示词用的 schema 序列化。
 *
 * 本模块不修改调用方传入的对象。
 *
-* @module @buka/dsh-plugin-workflows/output
+* @module @buka/dsh-plugin-workflows/json-schema
 */
 /** 单份 schema 序列化后的字节上限。 */
 const MAX_OUTPUT_SCHEMA_BYTES = 16384;
@@ -812,7 +800,7 @@ const ALLOWED_KEYWORDS = /* @__PURE__ */ new Set([
 ]);
 /** `description` 的最大字符数。 */
 const MAX_DESCRIPTION_LENGTH = 1e3;
-/** 运行期校验的递归深度上限（定义已经过 parseOutputSchema，正常不会触发）。 */
+/** 运行期校验的递归深度上限（定义已经过 parseJsonSchema，正常不会触发）。 */
 const MAX_CHECK_DEPTH = 32;
 /**
 * 判断一个值是不是普通对象。
@@ -833,24 +821,25 @@ function isPrimitive(value) {
 	return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 /**
-* 校验并规范化一份 payload / output schema。
+* 校验并规范化一份 schema。
 *
-* 顶层必须是 `type: "object"`：任务的 payload 与结构化结果都是 JSON 对象，
-* 页面表单与 `buka_task_complete` 都按对象读写。返回只包含合法关键字的新对象；
+* 顶层默认必须是 `type: "object"`；任务内容允许其它类型，所以任务类型与结束
+* 节点的 `content` 用 `root: "value"` 解析。返回只包含合法关键字的新对象；
 * 无法构成 schema 时返回 null（错误已记录）。
 *
 * @param raw 声明的 schema
 * @param path 出错时使用的路径前缀
 * @param fail 记录错误的回调
+* @param options 顶层类型约束
 * @returns 规范化后的 schema；不合法时是 `null`
 */
-function parseOutputSchema(raw, path, fail) {
+function parseJsonSchema(raw, path, fail, options = {}) {
 	if (!isPlainObject$1(raw)) {
 		fail(path, "must be a JSON Schema object");
 		return null;
 	}
-	if (raw.type !== "object") {
-		fail(`${path}.type`, "must be \"object\": task payload and results are JSON objects");
+	if ((options.root ?? "object") === "object" && raw.type !== "object") {
+		fail(`${path}.type`, "must be \"object\": forms and job input are JSON objects");
 		return null;
 	}
 	const schema = walkSchema(raw, path, 1, { properties: 0 }, fail);
@@ -1051,13 +1040,13 @@ function walkSchema(raw, path, depth, state, fail) {
 * @param segments 路径段（不含 `start.output` 前缀）
 * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
 */
-function resolveOutputPath(schema, segments) {
+function resolveSchemaPath(schema, segments) {
 	let current = schema;
 	const walked = [];
 	for (const segment of segments) {
 		if (!isPlainObject$1(current)) return "points into a value that is not an object";
 		if (Array.isArray(current.oneOf)) {
-			for (const branch of current.oneOf) if (resolveOutputPath(branch, segments.slice(walked.length)) !== null) return "is not declared in every oneOf variant";
+			for (const branch of current.oneOf) if (resolveSchemaPath(branch, segments.slice(walked.length)) !== null) return "is not declared in every oneOf variant";
 			return null;
 		}
 		if (current.type === "array") {
@@ -1188,15 +1177,6 @@ function actualType(value) {
 	if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
 	return typeof value;
 }
-/**
-* 把 schema 序列化成 prompt 里展示的 JSON 文本。
-*
-* @param schema 声明的 schema
-* @returns 格式化后的 JSON
-*/
-function schemaJson(schema) {
-	return JSON.stringify(schema, null, 2);
-}
 // .build/workflows/template.js
 /**
 * 节点 prompt 的模板渲染。
@@ -1325,22 +1305,20 @@ function formatValue(value) {
 }
 // .build/workflows/definition/payload.js
 /**
-* payload 模板：路径解析、引用遍历与执行开始时的递归渲染。
+* 任务内容模板：路径解析、引用遍历与渲染。
 *
-* 工作流 v5 的 payload 是 JSON 对象，字符串里可以写模板占位符：
+* 只有两处声明会写模板：开始节点的初始任务、人任务类型的动作。可用占位符：
 *
-* - `{{start.output.<path>}}`：启动任务交回的结构化输入；
-* - `{{task.<id>.output.<path>}}`：依赖任务的结构化结果；
-* - `{{task.<id>.text}}`：依赖任务的文本结果。
+* - `{{content.<path>}}`：正在完成的这张任务的任务内容（开始节点是发起人填的内容，
+*   人任务类型是上游给这张任务的内容）；
+* - `{{input.<path>}}`：动作表单里填的值（开始节点的初始任务没有表单）。
 *
-* 渲染在执行开始时进行（`renderPayload`）；定义校验阶段用 `inspectPayload`
-* 只提取路径、不求值，再按目标 schema / 已存在任务检查。路径不存在时抛错
-* （而不是静默变空串），避免把空提示词交给执行者。
+* 渲染在创建任务时进行；定义校验阶段用 `inspectPayload` 只提取路径、不求值，
+* 再按对应的 schema 检查。路径不存在时抛错（而不是静默变空串），避免把空内容
+* 交给执行者。
 *
 * @module @buka/dsh-plugin-workflows/definition/payload
 */
-/** 一个任务 id 里允许的字符（`$start` 走 `start.` 前缀，不在这里）。 */
-const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/u;
 /**
 * 解析一个模板占位符路径。
 *
@@ -1350,31 +1328,13 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/u;
 function parseTemplatePath(path) {
 	const segments = path.split(".");
 	const head = segments[0];
-	if (head === "start") {
-		if (segments[1] !== "output") return null;
-		return {
-			kind: "start",
-			segments: segments.slice(2)
-		};
-	}
-	if (head !== "task") return null;
-	const taskId = segments[1] ?? "";
-	const field = segments[2];
-	if (!TASK_ID_PATTERN.test(taskId)) return null;
-	if (field === "text") {
-		if (segments.length !== 3) return null;
-		return {
-			kind: "task",
-			taskId,
-			field: "text",
-			segments: []
-		};
-	}
-	if (field === "output") return {
-		kind: "task",
-		taskId,
-		field: "output",
-		segments: segments.slice(3)
+	if (head === "content") return {
+		kind: "content",
+		segments: segments.slice(1)
+	};
+	if (head === "input") return {
+		kind: "input",
+		segments: segments.slice(1)
 	};
 	return null;
 }
@@ -1395,9 +1355,9 @@ function walkTemplateValue(value, out) {
 	if (typeof value === "object" && value !== null) for (const item of Object.values(value)) walkTemplateValue(item, out);
 }
 /**
-* 提取 payload 里的全部模板引用与语法错误；不求值。
+* 提取一个值里的全部模板引用与语法错误；不求值。
 *
-* @param payload 待检查的 payload
+* @param payload 待检查的值
 * @returns 引用与语法错误
 */
 function inspectPayload(payload) {
@@ -1437,12 +1397,11 @@ function containsTemplate(value) {
 	return false;
 }
 /**
-* 递归渲染 payload：字符串里的占位符按 `renderTemplate` 求值，容器逐项递归，
-* 其它值原样返回。返回新对象，不修改入参。
+* 递归渲染：字符串里的占位符按 `renderTemplate` 求值，容器逐项递归，其它值原样返回。
 *
-* @param payload 含模板的 payload
-* @param context 模板上下文（`start` / `task`）
-* @returns 渲染后的 payload
+* @param payload 含模板的值
+* @param context 模板上下文（`content` / `input`）
+* @returns 渲染后的值
 */
 function renderPayload(payload, context) {
 	if (typeof payload === "string") return renderTemplate(payload, context);
@@ -1455,36 +1414,25 @@ function renderPayload(payload, context) {
 	return payload;
 }
 /**
-* 组装模板上下文：
+* 组装模板上下文。
 *
-* ```json
-* { "start": { "output": {...} }, "task": { "<id>": { "output": {...}, "text": "…" } } }
-* ```
-*
-* `start` 与 `task` 都是普通对象，所以 `getPath` 可以按点号路径取值。
-*
-* @param input 启动任务的结构化输入与依赖任务结果
-* @returns 模板上下文
+* @param input 任务内容与动作表单
+* @returns 可直接交给 `renderPayload` 的上下文
 */
 function buildTemplateContext(input) {
-	const tasks = {};
-	for (const [taskId, value] of input.tasks ?? []) tasks[taskId] = {
-		...value.output === void 0 ? {} : { output: value.output },
-		...value.text === void 0 ? {} : { text: value.text }
-	};
 	return {
-		start: { output: input.startOutput ?? null },
-		task: tasks
+		content: input.content ?? null,
+		input: input.input ?? null
 	};
 }
 // .build/workflows/definition/validate.js
 /**
-* 工作流 v5 定义校验（ADR 0015）。
+* 工作流 v7 定义校验。
 *
 * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
 * 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
 *
-* 校验分两步：先解析出规范化定义，再跑跨节点规则（可达性、回向通道、模板引用）。
+* 校验分两步：先解析出规范化定义，再跑跨节点规则（通道、可达性、动作、模板引用）。
 * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
 *
 * @module @buka/dsh-plugin-workflows/definition/validate
@@ -1510,7 +1458,7 @@ var Issues = class {
 	}
 };
 /**
-* 校验一份工作流 v5 定义。
+* 校验一份工作流 v7 定义。
 *
 * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
 * @param options 打工人目录
@@ -1525,7 +1473,7 @@ function validateWorkflowDefinition(raw, options) {
 			issues: issues.list
 		};
 	}
-	if (raw.version !== 5) issues.add("version", "must be 5");
+	if (raw.version !== 7) issues.add("version", "must be 7");
 	const name = readName(raw, "name", "", issues);
 	const description = readOptionalString(raw, "description", "description", issues) ?? "";
 	const budgets = readBudgets(raw.budgets, issues);
@@ -1533,17 +1481,16 @@ function validateWorkflowDefinition(raw, options) {
 	const positionById = new Map(positions.map((position) => [position.id, position]));
 	const typeById = /* @__PURE__ */ new Map();
 	for (const position of positions) for (const taskType of position.taskTypes) typeById.set(taskType.id, taskType);
-	for (const [positionIndex, position] of positions.entries()) for (const [taskTypeIndex, taskType] of position.taskTypes.entries()) for (const [requirementIndex, requirement] of (taskType.requires ?? []).entries()) for (const requiredType of requirement.types) {
-		if (typeById.has(requiredType)) continue;
-		issues.add(`positions[${positionIndex}].taskTypes[${taskTypeIndex}].requires[${requirementIndex}].types`, `unknown task type "${requiredType}": requires may only reference task types declared in this workflow`);
-	}
 	const channels = readChannels(raw.channels, positionById, typeById, issues);
 	const channelById = new Map(channels.map((channel) => [channel.id, channel]));
-	const start = readStart(raw.start, positionById, typeById, channelById, issues);
+	const start = readStart(raw.start, issues);
 	const end = readEnd(raw.end, issues);
 	checkChannels(channels, positions, issues);
 	checkReachability(channels, positions, issues);
 	checkEnd(channels, positions, issues);
+	const endContent = end?.content;
+	checkStartRoutes(start, positionById, typeById, channelById, endContent, issues);
+	checkActions(positions, positionById, typeById, channelById, endContent, issues);
 	if (issues.failed) return {
 		ok: false,
 		issues: issues.list
@@ -1555,7 +1502,7 @@ function validateWorkflowDefinition(raw, options) {
 	return {
 		ok: true,
 		definition: {
-			version: 5,
+			version: 7,
 			name,
 			...description === "" ? {} : { description },
 			budgets,
@@ -1627,7 +1574,7 @@ function readPositions(raw, workers, issues) {
 		const id = readPositionId(entry, path, seenPositions, issues);
 		if (id === null) continue;
 		const label = readName(entry, "label", path, issues);
-		const description = readOptionalString(entry, "description", `${path}.description`, issues);
+		const note = readOptionalString(entry, "note", `${path}.note`, issues);
 		const executor = readExecutor(entry.executor, `${path}.executor`, workers, issues);
 		const taskTypes = readTaskTypes(entry.taskTypes, `${path}.taskTypes`, id, executor, workers, seenTypes, issues);
 		if (label === null || executor === null) continue;
@@ -1635,7 +1582,7 @@ function readPositions(raw, workers, issues) {
 		positions.push({
 			id,
 			label,
-			...description === null || description === "" ? {} : { description },
+			...note === null || note === "" ? {} : { note },
 			executor,
 			taskTypes
 		});
@@ -1716,54 +1663,101 @@ function readTaskType(entry, path, positionId, executor, workers, seenTypes, iss
 	}
 	seenTypes.add(id);
 	const label = readName(entry, "label", path, issues);
-	const description = readOptionalString(entry, "description", `${path}.description`, issues);
-	const payload = readSchema(entry.payload, `${path}.payload`, issues) ?? { type: "object" };
-	const output = readSchema(entry.output, `${path}.output`, issues) ?? { type: "object" };
-	const requires = readRequires(entry.requires, `${path}.requires`, issues);
+	const definition = readOptionalString(entry, "definition", `${path}.definition`, issues);
+	const content = readSchema(entry.content, `${path}.content`, issues, "value");
+	const human = executor?.kind === "human";
+	const actions = readActions(entry.actions, `${path}.actions`, human, issues);
 	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, executor, workers, issues);
 	const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues);
 	if (label === null) return null;
 	return {
 		id,
 		label,
-		...description === null || description === "" ? {} : { description },
-		payload,
-		output,
-		...requires === void 0 ? {} : { requires },
+		...definition === null || definition === "" ? {} : { definition },
+		...content === null ? {} : { content },
+		...actions === void 0 ? {} : { actions },
 		...assistant === void 0 ? {} : { assistant },
 		...mode === void 0 ? {} : { mode }
 	};
 }
-/** 解析 schema 字段。 */
-function readSchema(raw, path, issues) {
+/** 解析 schema 字段；任务内容允许非对象顶层，表单与作业输入要求对象。 */
+function readSchema(raw, path, issues, root = "object") {
 	if (raw === void 0 || raw === null) return null;
-	return parseOutputSchema(raw, path, (at, message) => issues.add(at, message));
+	return parseJsonSchema(raw, path, (at, message) => issues.add(at, message), { root });
 }
-/** 解析 `requires`。 */
-function readRequires(raw, path, issues) {
+/** 解析任务类型上的动作列表。 */
+function readActions(raw, path, human, issues) {
 	if (raw === void 0 || raw === null) return void 0;
-	if (!Array.isArray(raw)) {
-		issues.add(path, "must be an array of { types: [...] } requirements");
+	if (!human) {
+		issues.add(path, "actions are only valid on human positions");
 		return;
 	}
-	const requirements = [];
+	if (!Array.isArray(raw)) {
+		issues.add(path, "must be an array of actions");
+		return;
+	}
+	const actions = [];
+	const seen = /* @__PURE__ */ new Set();
 	for (const [index, entry] of raw.entries()) {
 		const at = `${path}[${index}]`;
-		if (!isPlainObject$1(entry) || !Array.isArray(entry.types) || entry.types.length === 0) {
-			issues.add(at, "must be { types: [<task type ids>] } with at least one type");
+		if (!isPlainObject$1(entry)) {
+			issues.add(at, "must be an object");
 			continue;
 		}
-		const types = [];
-		for (const [typeIndex, value] of entry.types.entries()) {
-			if (typeof value !== "string" || value.trim() === "") {
-				issues.add(`${at}.types[${typeIndex}]`, "must be a non-empty task type id");
-				continue;
-			}
-			types.push(value.trim());
+		const id = typeof entry.id === "string" ? entry.id.trim() : "";
+		if (id === "" || !ID_PATTERN.test(id)) {
+			issues.add(`${at}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+			continue;
 		}
-		if (types.length > 0) requirements.push({ types });
+		if (seen.has(id)) {
+			issues.add(`${at}.id`, `duplicate action id "${id}" in this task type`);
+			continue;
+		}
+		seen.add(id);
+		const label = readName(entry, "label", at, issues);
+		if (label === null) continue;
+		const input = readSchema(entry.input, `${at}.input`, issues);
+		const creates = readCreations(entry.creates, `${at}.creates`, issues);
+		if (creates === null) continue;
+		actions.push({
+			id,
+			label,
+			...input === null ? {} : { input },
+			creates
+		});
 	}
-	return requirements.length > 0 ? requirements : void 0;
+	return actions.length > 0 ? actions : void 0;
+}
+/** 解析一组创建声明（结构层；通道与模板在第二遍校验）。 */
+function readCreations(raw, path, issues) {
+	if (!Array.isArray(raw)) {
+		issues.add(path, "must be an array (it may be empty)");
+		return null;
+	}
+	const creations = [];
+	for (const [index, entry] of raw.entries()) {
+		const at = `${path}[${index}]`;
+		if (!isPlainObject$1(entry)) {
+			issues.add(at, "must be an object");
+			continue;
+		}
+		const channel = typeof entry.channel === "string" ? entry.channel.trim() : "";
+		if (channel === "") {
+			issues.add(`${at}.channel`, "must be a channel id");
+			continue;
+		}
+		const type = entry.type === void 0 || entry.type === null ? void 0 : typeof entry.type === "string" && entry.type.trim() !== "" ? entry.type.trim() : null;
+		if (type === null) {
+			issues.add(`${at}.type`, "must be a task type id (omit it only for the end task)");
+			continue;
+		}
+		creations.push({
+			channel,
+			...type === void 0 ? {} : { type },
+			...entry.content === void 0 ? {} : { content: entry.content }
+		});
+	}
+	return creations;
 }
 /** 解析助理字段；只对人岗位有效。 */
 function readAssistant(raw, path, positionId, executor, workers, issues) {
@@ -1910,128 +1904,117 @@ function readChannelTypes(raw, path, to, positionById, typeById, issues) {
 	return types.length > 0 ? types : void 0;
 }
 /** 解析开始节点。 */
-function readStart(raw, positionById, typeById, channelById, issues) {
+function readStart(raw, issues) {
 	if (!isPlainObject$1(raw)) {
 		issues.add("start", "must declare the built-in start node task contract");
 		return null;
 	}
-	const task = isPlainObject$1(raw.task) ? raw.task : null;
-	if (task === null) {
-		issues.add("start.task", "must declare payload and output schemas");
+	const content = readSchema(raw.content, "start.content", issues);
+	const next = readCreations(raw.next, "start.next", issues);
+	if (next === null || next.length === 0) {
+		issues.add("start.next", "must declare at least one initial task");
 		return null;
 	}
-	const payload = readSchema(task.payload, "start.task.payload", issues) ?? { type: "object" };
-	const output = readSchema(task.output, "start.task.output", issues);
-	if (output === null) {
-		issues.add("start.task.output", "is required: it is the structured input later tasks consume");
-		return null;
-	}
-	const routes = readStartRoutes(raw.next, "start.next", positionById, typeById, channelById, output, issues);
 	return {
-		task: {
-			payload,
-			output
-		},
-		next: routes
+		...content === null ? {} : { content },
+		next
 	};
 }
-/** 解析 `start.next` 模板列表。 */
-function readStartRoutes(raw, path, positionById, typeById, channelById, startOutput, issues) {
-	if (!Array.isArray(raw) || raw.length === 0) {
-		issues.add(path, "must be a non-empty array of initial task templates");
-		return [];
+/** 解析结束节点。 */
+function readEnd(raw, issues) {
+	if (!isPlainObject$1(raw)) {
+		issues.add("end", "must declare the built-in end node task contract");
+		return null;
 	}
-	const routes = [];
-	for (const [index, entry] of raw.entries()) {
-		const at = `${path}[${index}]`;
-		if (!isPlainObject$1(entry)) {
-			issues.add(at, "must be an object");
-			continue;
-		}
-		const channelId = typeof entry.channel === "string" ? entry.channel.trim() : "";
-		const channel = channelById.get(channelId);
-		if (channel === void 0) {
-			issues.add(`${at}.channel`, `unknown channel "${String(entry.channel)}"`);
-			continue;
-		}
-		if (channel.from !== START_ID) {
-			issues.add(`${at}.channel`, `initial tasks must leave the start node; channel "${channelId}" starts at "${channel.from}"`);
-			continue;
-		}
-		const target = positionById.get(channel.to);
-		if (target === void 0) {
-			issues.add(`${at}.channel`, `channel "${channelId}" does not lead to a position; initial tasks cannot target "${channel.to}"`);
-			continue;
-		}
-		const type = typeof entry.type === "string" ? entry.type.trim() : "";
-		const taskType = typeById.get(type);
-		if (taskType === void 0 || !target.taskTypes.some((candidate) => candidate.id === type)) {
-			issues.add(`${at}.type`, `"${String(entry.type)}" is not a task type of position "${target.id}"`);
-			continue;
-		}
-		if (!channelAllowsType(channel, type)) {
-			issues.add(`${at}.type`, `channel "${channelId}" does not allow task type "${type}"`);
-			continue;
-		}
-		if (!isPlainObject$1(entry.payload)) {
-			issues.add(`${at}.payload`, "must be an object");
-			continue;
-		}
-		const dependsOn = readStartDependsOn(entry.dependsOn, `${at}.dependsOn`, issues);
-		validateRoutePayload(entry.payload, `${at}.payload`, taskType, startOutput, issues);
-		routes.push({
-			channel: channelId,
-			type,
-			payload: entry.payload,
-			...dependsOn === void 0 ? {} : { dependsOn }
-		});
-	}
-	return routes;
+	const content = readSchema(raw.content, "end.content", issues, "value");
+	return { ...content === null ? {} : { content } };
 }
-/** 解析初始任务的 `dependsOn`：目前只允许且必须包含 `$start`。 */
-function readStartDependsOn(raw, path, issues) {
-	if (!Array.isArray(raw) || raw.length === 0) {
-		issues.add(path, "must be [\"$start\"]: initial tasks explicitly depend on the start task");
+/** 校验开始节点的初始任务。 */
+function checkStartRoutes(start, positionById, typeById, channelById, endContent, issues) {
+	if (start === null) return;
+	for (const [index, creation] of start.next.entries()) checkCreation(creation, `start.next[${index}]`, START_ID, start.content, void 0, endContent, {
+		positionById,
+		typeById,
+		channelById,
+		issues
+	});
+}
+/** 校验所有人任务类型上的动作。 */
+function checkActions(positions, positionById, typeById, channelById, endContent, issues) {
+	for (const position of positions) for (const taskType of position.taskTypes) for (const [index, action] of (taskType.actions ?? []).entries()) for (const [creationIndex, creation] of action.creates.entries()) checkCreation(creation, `positions.${position.id}.taskTypes.${taskType.id}.actions[${index}].creates[${creationIndex}]`, position.id, taskType.content, action.input, endContent, {
+		positionById,
+		typeById,
+		channelById,
+		issues
+	});
+}
+/** 校验一条创建声明：通道、目标类型、任务内容模板。 */
+function checkCreation(creation, path, node, creatorContent, actionInput, endContent, context) {
+	const { issues, channelById, positionById, typeById } = context;
+	const channel = channelById.get(creation.channel);
+	if (channel === void 0) {
+		issues.add(`${path}.channel`, `unknown channel "${creation.channel}"`);
 		return;
 	}
-	let valid = true;
-	const deps = [];
-	for (const [index, value] of raw.entries()) {
-		if (value !== "$start") {
-			issues.add(`${path}[${index}]`, "initial tasks can only depend on \"$start\"; they are created after the start task completes");
-			valid = false;
-			continue;
-		}
-		if (deps.includes("$start")) {
-			issues.add(`${path}[${index}]`, "duplicate \"$start\" dependency");
-			valid = false;
-			continue;
-		}
-		deps.push("$start");
+	if (channel.from !== node) {
+		issues.add(`${path}.channel`, `channel "${channel.id}" starts at "${channel.from}", not at "${node}"`);
+		return;
 	}
-	if (!deps.includes("$start")) {
-		issues.add(path, "must include \"$start\": initial tasks explicitly depend on the start task");
-		valid = false;
+	if (channel.to === END_ID) {
+		if (creation.type !== void 0 && creation.type !== END_ID) issues.add(`${path}.type`, "the end task has no task type; omit \"type\" for channels into end");
+		checkContent(creation.content, path, endContent, creatorContent, actionInput, issues);
+		return;
 	}
-	return valid ? deps : void 0;
+	const target = positionById.get(channel.to);
+	if (target === void 0) {
+		issues.add(`${path}.channel`, `channel "${channel.id}" does not lead to a position`);
+		return;
+	}
+	if (creation.type === void 0) {
+		issues.add(`${path}.type`, `must name a task type of position "${target.id}"`);
+		return;
+	}
+	const taskType = typeById.get(creation.type);
+	if (taskType === void 0 || !target.taskTypes.some((candidate) => candidate.id === creation.type)) {
+		issues.add(`${path}.type`, `"${creation.type}" is not a task type of position "${target.id}"`);
+		return;
+	}
+	if (!channelAllowsType(channel, taskType.id)) {
+		issues.add(`${path}.type`, `channel "${channel.id}" does not allow task type "${taskType.id}"`);
+		return;
+	}
+	checkContent(creation.content, path, taskType.content, creatorContent, actionInput, issues);
 }
-/** 按任务类型的 payload schema 校验模板 payload（含模板的子树留给运行期）。 */
-function validateRoutePayload(payload, path, taskType, startOutput, issues) {
-	const inspection = inspectPayload(payload);
-	for (const error of inspection.syntaxErrors) issues.add(path, error);
+/**
+* 校验任务内容：模板引用 + 按目标 schema 的结构检查。
+*
+* @param content 声明的任务内容（可含模板）
+* @param path 定位路径
+* @param target 目标任务内容的 schema
+* @param creatorContent 声明方任务自己的 content schema
+* @param actionInput 动作表单 schema（开始节点没有）
+* @param issues 错误收集
+*/
+function checkContent(content, path, target, creatorContent, actionInput, issues) {
+	const value = content ?? {};
+	const inspection = inspectPayload(value);
+	for (const error of inspection.syntaxErrors) issues.add(`${path}.content`, error);
 	for (const reference of inspection.references) {
-		if (reference.reference === null) {
-			issues.add(path, `template "{{${reference.path}}}" must reference start.output; initial tasks may only use {{start.output.<path>}}`);
+		const parsed = reference.reference;
+		if (parsed === null) {
+			issues.add(`${path}.content`, `template "{{${reference.path}}}" must reference content.<path> or input.<path>`);
 			continue;
 		}
-		if (reference.reference.kind !== "start") {
-			issues.add(path, `template "{{${reference.path}}}" must reference start.output: no other task exists yet`);
+		const schema = parsed.kind === "content" ? creatorContent : actionInput;
+		if (schema === void 0) {
+			issues.add(`${path}.content`, `template "{{${reference.path}}}" cannot be resolved: the creating task declares no ${parsed.kind === "content" ? "content schema" : "input form"}`);
 			continue;
 		}
-		const reason = resolveOutputPath(startOutput, reference.reference.segments);
-		if (reason !== null) issues.add(path, `template "{{${reference.path}}}" ${reason}`);
+		const reason = resolveSchemaPath(schema, parsed.segments);
+		if (reason !== null) issues.add(`${path}.content`, `template "{{${reference.path}}}" ${reason}`);
 	}
-	checkTemplatedPayload(taskType.payload, payload, path, issues);
+	if (target === void 0) return;
+	checkTemplatedContent(target, value, `${path}.content`, issues);
 }
 /**
 * 按 schema 校验可能含模板的值。
@@ -2039,11 +2022,11 @@ function validateRoutePayload(payload, path, taskType, startOutput, issues) {
 * 含模板的子树跳过类型 / 枚举检查（值要到执行时才有），但对象 / 数组的结构、
 * required 与 additionalProperties 仍然检查。
 */
-function checkTemplatedPayload(schema, value, path, issues) {
+function checkTemplatedContent(schema, value, path, issues) {
 	if (Array.isArray(schema.oneOf)) {
 		if (!schema.oneOf.some((branch) => {
 			const probe = new Issues();
-			checkTemplatedPayload(branch, value, path, probe);
+			checkTemplatedContent(branch, value, path, probe);
 			return !probe.failed;
 		})) issues.add(path, "does not match any oneOf variant");
 		return;
@@ -2067,7 +2050,7 @@ function checkTemplatedPayload(schema, value, path, issues) {
 		}
 		for (const [name, child] of Object.entries(properties)) {
 			if (!Object.hasOwn(value, name)) continue;
-			checkTemplatedPayload(child, value[name], `${path}.${name}`, issues);
+			checkTemplatedContent(child, value[name], `${path}.${name}`, issues);
 		}
 		return;
 	}
@@ -2077,7 +2060,7 @@ function checkTemplatedPayload(schema, value, path, issues) {
 			return;
 		}
 		if (isPlainObject$1(schema.items)) value.forEach((item, index) => {
-			checkTemplatedPayload(schema.items, item, `${path}[${index}]`, issues);
+			checkTemplatedContent(schema.items, item, `${path}[${index}]`, issues);
 		});
 		return;
 	}
@@ -2086,24 +2069,6 @@ function checkTemplatedPayload(schema, value, path, issues) {
 		const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
 		issues.add(path, `expected ${type}, got ${actual}`);
 	}
-}
-/** 解析结束节点。 */
-function readEnd(raw, issues) {
-	if (!isPlainObject$1(raw)) {
-		issues.add("end", "must declare the built-in end node task contract");
-		return null;
-	}
-	const task = isPlainObject$1(raw.task) ? raw.task : null;
-	if (task === null) {
-		issues.add("end.task", "must declare the payload schema of the final deliverable");
-		return null;
-	}
-	const payload = readSchema(task.payload, "end.task.payload", issues);
-	if (payload === null) {
-		issues.add("end.task.payload", "is required: it describes the final deliverable");
-		return null;
-	}
-	return { task: { payload } };
 }
 /**
 * 通道与节点的结构检查：回向通道闭合、环上至少一条回向通道、同一对节点的
@@ -2294,17 +2259,17 @@ function findTaskType(definition, typeId) {
 	for (const position of definition.positions) for (const taskType of position.taskTypes) if (taskType.id === typeId) return taskType;
 }
 /**
-* 按 schema 校验一个可能含模板的值，返回带路径的问题列表。
+* 按 schema 校验任务内容，返回带路径的问题列表。
 *
-* 引擎创建任务时复用：payload 里的模板子树只做结构检查，类型与枚举留给执行时。
+* 引擎创建任务时复用：模板子树只做结构检查，类型与枚举留给创建之后。
 *
-* @param schema 任务类型的 payload schema
-* @param value 待校验的 payload
+* @param schema 任务类型的 content schema
+* @param value 待校验的任务内容
 * @returns 问题列表；空数组表示通过
 */
-function templatedPayloadIssues(schema, value) {
+function contentIssues(schema, value) {
 	const issues = new Issues();
-	checkTemplatedPayload(schema, value, "payload", issues);
+	checkTemplatedContent(schema, value, "content", issues);
 	return issues.list;
 }
 // .build/workflows/domain/status.js
@@ -2467,7 +2432,7 @@ function assertJobTransition(jobId, from, to) {
 /**
 * 机器人驱动：v1 只有内建 `clock`。
 *
-* `clock` 任务在 payload 里带 `until`（ISO 时间）；到点完成，不建会话、不占
+* `clock` 任务在任务内容里带 `until`（ISO 时间）；到点完成，不建会话、不占
 * 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
 *
 * @module @buka/dsh-plugin-workflows/program/clock
@@ -2477,14 +2442,14 @@ const CLOCK_PROGRAM_ID = "clock";
 /** Node `setTimeout` 的最大延迟；超过时分段计时。 */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 /**
-* 解析 payload 里的 `until`。
+* 解析任务内容里的 `until`。
 *
-* @param payload 任务 payload
+* @param content 任务内容
 * @returns 时间戳（毫秒）；不合法时是 null
 */
-function clockUntil(payload) {
-	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
-	const raw = payload.until;
+function clockUntil(content) {
+	if (content === null || typeof content !== "object" || Array.isArray(content)) return null;
+	const raw = content.until;
 	if (typeof raw !== "string" || raw.trim() === "") return null;
 	const parsed = Date.parse(raw);
 	return Number.isNaN(parsed) ? null : parsed;
@@ -2517,14 +2482,14 @@ function sleep(delayMs, signal) {
 /** v1 可用的 program 驱动表。 */
 const PROGRAM_DRIVERS = /* @__PURE__ */ new Map([[CLOCK_PROGRAM_ID, {
 	id: CLOCK_PROGRAM_ID,
-	async run({ payload, signal }) {
-		const until = clockUntil(payload);
-		if (until === null) throw new Error("clock task payload must contain an ISO timestamp \"until\"");
+	async run({ content, signal }) {
+		const until = clockUntil(content);
+		if (until === null) throw new Error("clock task content must contain an ISO timestamp \"until\"");
 		while (Date.now() < until) {
 			if (signal.aborted) throw new Error("clock task was cancelled");
 			await sleep(until - Date.now(), signal);
 		}
-		return { output: { completedAt: (/* @__PURE__ */ new Date()).toISOString() } };
+		return { text: `clock 到点：${(/* @__PURE__ */ new Date()).toISOString()}` };
 	}
 }]]);
 /**
@@ -2538,23 +2503,37 @@ function programDriver(programId) {
 }
 // .build/workflows/engine/prompt.js
 /**
-* 任务执行上下文组装（ADR 0015：通道 / 入站通道 / 可派发通道）。
+* 任务执行上下文组装。
 *
-* 一个任务 = 一条全新会话，上下文由引擎按依赖与任务契约组装：
+* 一个任务 = 一条全新会话。执行提示词只包含三段，顺序固定：
 *
-* 1. 岗位说明；
-* 2. 任务类型说明；
-* 3. 渲染后的 payload；
-* 4. 依赖任务摘要与可见附件清单；
-* 5. 产出契约（output schema + `buka_task_complete` + 附件规则）；
-* 6. 可派发的通道（id、label、目标岗位与类型白名单）。
+* 1. 工作流基准规则（引擎注入的能力说明：读写资产、创建后续任务、提交结果）；
+* 2. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
+* 3. 任务内容：创建者这一次给出的东西。
 *
-* 同时负责开始任务的「原始输入 → 结构化输入」提示与结束任务的投递文本。
+* 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
+* 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
+*
+* 同时负责结束任务的投递文本。
 *
 * @module @buka/dsh-plugin-workflows/engine/prompt
 */
-/** 依赖摘要里单段文本的上限。 */
-const PREVIEW_BYTES = 1200;
+/** 基准规则：能力说明，不暴露岗位 / 通道。 */
+const BASELINE_RULES = [
+	"## 工作流规则",
+	"- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。",
+	"- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。",
+	"- 创建后续任务：`buka_task_targets` 列出当前可创建的任务，`buka_task_create` 按 `target` 和 `content` 创建（不传 `deps` 时默认依赖本任务）；是否需要创建、创建什么，见下面的任务类型的定义。",
+	"- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。"
+].join("\n");
+/** 人任务助理的基准规则：代人处理，动作由人确认。 */
+const ASSISTANT_RULES = [
+	"## 工作流规则",
+	"- 你代表人与执行者沟通，拿到人的决定后用 `buka_task_complete` 提交。",
+	"- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件。",
+	"- 写入资产：提交结果时用 `attachments` 归档产出文件（path 相对你的工作目录）。",
+	"- 需要创建后续任务时，用 `buka_task_actions` 看这个任务可选的动作，用 `buka_task_complete` 带上 `action` 与 `input`。"
+].join("\n");
 /**
 * 按任务类型取岗位（任务的岗位在定义里唯一）。
 *
@@ -2589,155 +2568,41 @@ function positionLabel(definition, positionId) {
 	if (positionId === "end") return "结束";
 	return positionOf(definition, positionId)?.label ?? positionId;
 }
-/**
-* 渲染一个任务的 payload 模板。
-*
-* @param payload 原始 payload（可能含模板）
-* @param tasks 作业里的全部任务
-* @returns 渲染后的 payload
-*/
-function renderTaskPayload(payload, tasks) {
-	const start = tasks.find((task) => task.id === START_TASK_ID);
-	const values = /* @__PURE__ */ new Map();
-	for (const task of tasks) values.set(task.id, {
-		...task.result?.output === null || task.result?.output === void 0 ? {} : { output: task.result.output },
-		...task.result?.text === void 0 ? {} : { text: task.result.text }
-	});
-	return renderPayload(payload, buildTemplateContext({
-		startOutput: start?.result?.output ?? null,
-		tasks: values
-	}));
+/** 有内容时给出一段；空串 / 缺省时整段省略。 */
+function textSection(title, text) {
+	const trimmed = typeof text === "string" ? text.trim() : "";
+	return trimmed === "" ? null : `## ${title}\n${trimmed}`;
 }
-/**
-* 一段任务结果的摘要（id / 类型 / 状态 / 文本 / 结构化结果）。
-*
-* @param task 任务记录
-* @param definition 作业定义
-* @returns 可读摘要
-*/
-function summarizeTaskResult(task, definition) {
-	const channel = task.channel === null ? void 0 : findChannel(definition, task.channel);
-	const via = channel === void 0 ? "" : `（经「${channel.label}」）`;
-	const lines = [`- task ${task.id} [${task.status}] ${positionLabel(definition, task.position)} / ${taskTypeLabel(definition, task.type)}${via}`];
-	if (task.error !== null) lines.push(`  error: ${clipUtf8(task.error, PREVIEW_BYTES)}`);
-	const text = task.result?.text ?? "";
-	if (text.trim() !== "") lines.push(`  text: ${clipUtf8(text.trim(), PREVIEW_BYTES)}`);
-	if (task.result?.output !== null && task.result?.output !== void 0) lines.push(`  output: ${clipUtf8(JSON.stringify(task.result.output), PREVIEW_BYTES)}`);
-	return lines.join("\n");
+/** 任务内容段：字符串原样，其余按 JSON 展示。 */
+function contentSection(content) {
+	if (typeof content === "string") return ["## 任务内容", content].join("\n");
+	return [
+		"## 任务内容",
+		"```json",
+		JSON.stringify(content, null, 2),
+		"```"
+	].join("\n");
 }
-/**
-* 可派发的通道：id、label、目标岗位与允许的任务类型。
-*
-* @param definition 定义
-* @param fromPosition 创建者岗位
-* @returns 通道说明
-*/
-function successorLines(definition, fromPosition) {
-	const lines = [];
-	const fromLabel = positionLabel(definition, fromPosition);
-	for (const channel of channelsFrom(definition, fromPosition)) {
-		if (channel.to === "end") {
-			lines.push(`- 「${channel.label}」${fromLabel} → end（channel: ${channel.id}）: 结束任务（payload 为最终交付物，投递即完成）`);
-			continue;
-		}
-		const position = positionOf(definition, channel.to);
-		if (position === void 0) continue;
-		const labels = (channel.types ? channel.types : position.taskTypes.map((taskType) => taskType.id)).map((type) => `${type}（${taskTypeLabel(definition, type)}）`).join("、");
-		lines.push(`- 「${channel.label}」${fromLabel} → ${position.label}（channel: ${channel.id}）: ${labels}`);
-	}
-	return lines;
-}
-/** 入站通道说明：任务依据哪条通道抵达，启动任务没有。 */
-function inboundLine(definition, task) {
-	if (task.channel === null) return null;
-	const channel = findChannel(definition, task.channel);
-	if (channel === void 0) return `你由通道 "${task.channel}" 派发而来。`;
-	return `你由通道「${channel.label}」从 ${positionLabel(definition, channel.from)} 派发而来（channel: ${channel.id}）。`;
+/** 把非空段用空行拼起来。 */
+function joinSections(sections) {
+	return sections.filter((section) => section !== null).join("\n\n");
 }
 /**
 * 组装一个 agent 任务的完整 prompt。
 *
-* @param input 任务、定义与依赖信息
+* @param input 任务、岗位与任务类型
 * @returns prompt 文本
 */
 function buildExecutionPrompt(input) {
-	const { job, task, position, taskType } = input;
-	const definition = job.definition;
-	const payload = renderTaskPayload(task.payload, input.tasks);
-	const dependencies = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
-	const dependencyText = dependencies.length === 0 ? "（无依赖任务）" : dependencies.map((dependency) => summarizeTaskResult(dependency, definition)).join("\n");
-	const attachments = visibleAttachmentsForTask(input.tasks, task.id, input.attachments);
-	const attachmentLines = attachments.length === 0 ? "（依赖任务没有可见附件）" : attachments.map((attachment) => `- ${attachment.id} · ${attachment.name} (${attachment.bytes} bytes${attachment.mime === "" ? "" : `, ${attachment.mime}`})${attachment.description === "" ? "" : ` · ${attachment.description}`}`).join("\n");
-	const successors = successorLines(definition, position.id);
-	const inbound = inboundLine(definition, task);
-	return [
-		`你正在执行工作流${`作业 #${job.seq}「${job.workflowName}」 · task ${task.id}`}。`,
-		...inbound === null ? [] : [inbound],
-		"",
-		"## 岗位",
-		`- ${position.label}（${position.id}）${position.description === void 0 ? "" : `：${position.description}`}`,
-		"",
-		"## 任务类型",
-		`- ${taskType.label}（${taskType.id}）${taskType.description === void 0 ? "" : `：${taskType.description}`}`,
-		"",
-		"## 任务 payload",
-		"```json",
-		JSON.stringify(payload, null, 2),
-		"```",
-		"",
-		"## 依赖任务结果",
-		dependencyText,
-		"",
-		"## 可见附件",
-		attachmentLines,
-		input.workspace === void 0 ? "" : `附件源文件路径相对你的工作目录：${input.workspace}`,
-		"",
-		"## 产出契约",
-		"完成后必须调用 `buka_task_complete` 提交结果：",
-		"- `output`：一个 JSON 对象，匹配下面的 schema；",
-		"- `text`：可选，一段给人看的文本摘要；",
-		"- `attachments`：可选，需要归档的独立文件清单（`{ path, name?, description? }`，path 相对你的工作目录）；附件不是答案本身。",
-		"```json",
-		schemaJson(taskType.output),
-		"```",
-		"",
-		"## 你可以派发的任务",
-		"执行期间可以随时调用 `buka_task_create` 往本作业看板创建任务（可多次），参数：channel、type、payload、deps。",
-		"channel 必须是本岗位出发的通道 id；目标岗位由通道决定，通道的类型白名单决定你能派哪些任务类型。",
-		"deps 只能引用本作业里已创建的任务 id（包括刚创建但未完成的任务）；依赖图不能成环。",
-		...successors.length === 0 ? ["- （本岗位没有后继岗位）"] : successors,
-		"",
-		"## 只读工具",
-		"`buka_job_board` 读取整个作业看板，`buka_task_get` 读取某个任务与依赖结果，`buka_job_attachments` 检索 / 读取可见附件。",
-		taskType.mode === "plan" ? "本次任务以 plan 模式开始：先探索并提交计划，用户批准后继续实施。" : ""
-	].filter((line) => line !== "").join("\n");
+	const { taskType, task } = input;
+	return joinSections([
+		BASELINE_RULES,
+		textSection("任务类型的定义", taskType.definition),
+		contentSection(task.content)
+	]);
 }
 /**
-* 开始任务的执行提示：把原始输入转换成第一个结构化输入。
-*
-* @param job 作业
-* @returns prompt 文本
-*/
-function buildStartTaskPrompt(job) {
-	const start = job.definition.start;
-	return [
-		`工作流「${job.workflowName}」的启动任务（作业 #${job.seq}）由你执行：把原始输入转换成第一个结构化输入，后续任务只读这份结构化输入。`,
-		"",
-		"## 原始输入",
-		"```json",
-		JSON.stringify(job.input.raw, null, 2),
-		"```",
-		"",
-		"## 产出契约（启动任务）",
-		"完成后调用 `buka_task_complete` 提交 `output`，它是一个 JSON 对象，匹配下面的 schema：",
-		"```json",
-		schemaJson(start.task.output),
-		"```",
-		job.definition.description === void 0 ? "" : `工作流说明：${job.definition.description}`
-	].filter((line) => line !== "").join("\n");
-}
-/**
-* 结束任务的投递文本：把最终交付物交给启动者。
+* 结束任务的投递文本：把最终报告交给发起人，等待确认。
 *
 * @param job 作业
 * @param task 结束任务
@@ -2745,48 +2610,26 @@ function buildStartTaskPrompt(job) {
 */
 function buildEndDeliveryText(job, task) {
 	return [
-		`工作流「${job.workflowName}」的作业 #${job.seq} 已完成，最终交付物如下：`,
-		"```json",
-		JSON.stringify(task.payload, null, 2),
-		"```"
+		`工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
+		"",
+		contentSection(task.content),
+		"",
+		"如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。"
 	].join("\n");
 }
 /**
 * 助理承办人任务的 prompt。
 *
-* @param input 任务与定义
+* @param input 任务、岗位与任务类型
 * @returns prompt 文本
 */
 function buildAssistantPrompt(input) {
-	const { job, task, position, taskType } = input;
-	const payload = renderTaskPayload(task.payload, input.tasks);
-	const dependencies = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
-	const dependencyText = dependencies.length === 0 ? "（无依赖任务）" : dependencies.map((dependency) => summarizeTaskResult(dependency, job.definition)).join("\n");
-	const inbound = inboundLine(job.definition, task);
-	return [
-		`你被指派为工作流「${job.workflowName}」作业 #${job.seq} 的人任务助理。执行者是人：${position.label}（${position.id}）。`,
-		...inbound === null ? [] : [inbound],
-		"你的职责：代表这条任务与人沟通（按你自己的 skill 选择方式），拿到人给出的决定 / 结果后，调用 `buka_task_complete` 提交。",
-		"你只能读取并完成这条任务，不能往工作流派任务。",
-		"",
-		"## 任务类型",
-		`- ${taskType.label}（${taskType.id}）${taskType.description === void 0 ? "" : `：${taskType.description}`}`,
-		"",
-		"## 任务 payload",
-		"```json",
-		JSON.stringify(payload, null, 2),
-		"```",
-		"",
-		"## 依赖任务结果",
-		dependencyText,
-		"",
-		"## 产出契约",
-		"完成后调用 `buka_task_complete`，`output` 必须是匹配下面 schema 的 JSON 对象：",
-		"```json",
-		schemaJson(taskType.output),
-		"```",
-		"如果人迟迟不回复或你无法完成，直接结束本轮即可：任务会回到待认领，由人自己处理。"
-	].filter((line) => line !== "").join("\n");
+	const { taskType, task } = input;
+	return joinSections([
+		ASSISTANT_RULES,
+		textSection("任务类型的定义", taskType.definition),
+		contentSection(task.content)
+	]);
 }
 // .build/workflows/engine/board.js
 /**
@@ -2837,7 +2680,7 @@ function taskSummary(task, definition) {
 		claimant: task.claimant,
 		attemptCount: task.attemptIds.length,
 		attachmentCount: task.result?.attachmentIds.length ?? 0,
-		resultSummary: task.result === null ? null : clipUtf8(task.result.text.trim(), SUMMARY_BYTES) || (task.result.output === null ? null : clipUtf8(JSON.stringify(task.result.output), SUMMARY_BYTES))
+		resultSummary: task.result === null ? null : clipUtf8(task.result.text.trim(), SUMMARY_BYTES) || null
 	};
 }
 /**
@@ -2884,7 +2727,6 @@ function allowedTaskActions(job, task) {
 function taskDetail(input) {
 	const { job, task } = input;
 	const definition = job.definition;
-	const taskType = findTaskType(definition, task.type);
 	const channel = task.channel === null ? void 0 : findChannel(definition, task.channel);
 	const dependencyTasks = task.deps.map((dependencyId) => input.tasks.find((candidate) => candidate.id === dependencyId)).filter((candidate) => candidate !== void 0);
 	const attachments = input.attachments.filter((attachment) => task.result?.attachmentIds.includes(attachment.id));
@@ -2895,11 +2737,10 @@ function taskDetail(input) {
 		positionLabel: positionLabel(definition, task.position),
 		type: task.type,
 		typeLabel: taskTypeLabel(definition, task.type),
-		typeDescription: taskType?.description ?? "",
 		channel: task.channel,
 		channelLabel: channel?.label ?? "",
 		status: task.status,
-		payload: task.payload,
+		content: task.content,
 		deps: dependencyTasks.map((dependency) => taskSummary(dependency, definition)),
 		createdAt: task.createdAt,
 		startedAt: task.startedAt,
@@ -2908,7 +2749,8 @@ function taskDetail(input) {
 		attempts: input.attempts.map(attemptSummary),
 		result: task.result === null ? null : {
 			text: task.result.text,
-			output: task.result.output,
+			...task.result.action === void 0 ? {} : { action: task.result.action },
+			...task.result.input === void 0 ? {} : { input: task.result.input },
 			attachments: attachments.map((attachment) => ({
 				id: attachment.id,
 				name: attachment.name,
@@ -2938,6 +2780,8 @@ function jobSummary(job, tasks) {
 		seq: job.seq,
 		status: job.status,
 		inputSummary: job.inputSummary,
+		definitionVersion: job.definition.version,
+		delivery: job.delivery,
 		taskCounts: countTasks(tasks),
 		createdAt: job.createdAt,
 		updatedAt: job.updatedAt
@@ -2951,27 +2795,33 @@ function jobSummary(job, tasks) {
 */
 function jobDefinition(definition, workers) {
 	return {
+		version: definition.version,
 		name: definition.name,
 		...definition.description === void 0 ? {} : { description: definition.description },
 		positions: definition.positions.map((position) => ({
 			id: position.id,
 			label: position.label,
-			...position.description === void 0 ? {} : { description: position.description },
+			...position.note === void 0 ? {} : { note: position.note },
 			executor: executorView(position.executor, workers),
 			taskTypes: position.taskTypes.map((taskType) => ({
 				id: taskType.id,
 				label: taskType.label,
-				...taskType.description === void 0 ? {} : { description: taskType.description },
-				payload: taskType.payload,
-				output: taskType.output,
-				...taskType.requires === void 0 ? {} : { requires: taskType.requires },
+				...taskType.definition === void 0 ? {} : { definition: taskType.definition },
+				...taskType.content === void 0 ? {} : { content: taskType.content },
+				...taskType.actions === void 0 ? {} : { actions: taskType.actions },
 				...taskType.assistant === void 0 ? {} : { assistant: taskType.assistant },
 				...taskType.mode === void 0 ? {} : { mode: taskType.mode }
 			}))
 		})),
 		channels: definition.channels,
-		start: { label: "开始" },
-		end: { label: "结束" }
+		start: {
+			label: "开始",
+			...definition.start.content === void 0 ? {} : { content: definition.start.content }
+		},
+		end: {
+			label: "结束",
+			...definition.end.content === void 0 ? {} : { content: definition.end.content }
+		}
 	};
 }
 /**
@@ -3042,9 +2892,9 @@ async function appendJobEvent(store, logger, jobId, type, data) {
 }
 // .build/workflows/engine/session.js
 /**
-* 启动者会话投递与打工人句柄读取。
+* 发起人会话投递与打工人句柄读取。
 *
-* 开始 / 结束任务的执行者是启动者。启动者可能是普通会话：插件通过宿主
+* 开始 / 结束任务的执行者是发起人。发起人可能是普通会话：插件通过宿主
 * `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
 * agent，构造一条用户消息 `followup` 进去，再用 `sessions.flush` 等持久化确认。
 * 这与官方 `@deepseek-ai/dsh-schedule` 的提醒投递是同一机制。
@@ -3182,24 +3032,24 @@ function poll(intervalMs, check) {
 }
 // .build/workflows/engine/tasks.js
 /**
-* 任务创建校验与记录构造（ADR 0015）。
+* 任务创建校验与记录构造。
 *
-* 创建任务的入口只有两个：引擎按 `start.next` 生成初始任务；执行中的任务通过
-* `buka_task_create` 派生任务。通道是派发单元：目标岗位由通道的 `to` 推出。
+* 创建任务的入口有三个：引擎按 `start.next` 生成初始任务、执行中的任务通过
+* `buka_task_create` 派生任务、人任务的动作创建任务。三者共享同一套校验：
 *
-* 两条路径共享的纯校验：
-*
-* 1. 通道存在、起点是创建者岗位；
-* 2. 任务类型是目标岗位声明的类型（结束任务用 `end.task`）；
+* 1. 通道存在、起点是创建任务的节点；
+* 2. 任务类型是目标岗位声明的类型（结束任务用 `end` 契约）；
 * 3. 通道写了类型白名单时，类型在白名单里；
-* 4. payload 符合类型 schema，模板只引用已存在的数据路径；
-* 5. 依赖 id 属于本作业、已存在、不是自己、依赖图不成环；`requires` 满足；
+* 4. 任务内容符合目标任务类型的 content schema；
+* 5. 依赖 id 属于本作业、已存在、不是自己、依赖图不成环；
 * 6. 作业预算未超。
 *
 * @module @buka/dsh-plugin-workflows/engine/tasks
 */
 /**
-* 解析岗位执行者，构造任务记录里钉住的执行者。
+* 解析节点执行者，构造任务记录里钉住的执行者。
+*
+* 开始 / 结束任务的执行者都是发起人；结束任务选了「交给秘书」时是那个助理。
 *
 * @param definition 定义
 * @param positionId 岗位 id
@@ -3208,10 +3058,23 @@ function poll(intervalMs, check) {
 * @returns 钉住的执行者
 */
 function resolveExecutor(definition, positionId, job, workers) {
-	if (positionId === "start" || positionId === "end") return job.starter.kind === "human" ? { kind: "human" } : {
-		kind: "session",
-		sessionId: job.starter.sessionId
-	};
+	if (positionId === "start" || positionId === "end") {
+		if (positionId === "end" && job.delivery.kind === "assistant") {
+			const worker = workers.get(job.delivery.name);
+			if (worker === void 0) throw new WorkflowError("unknown-worker", `the delivery assistant "${job.delivery.name}" is not registered`);
+			return {
+				kind: "worker",
+				name: worker.name,
+				driver: worker.driver,
+				...worker.program === void 0 ? {} : { program: worker.program },
+				...worker.avatar === void 0 ? {} : { avatar: worker.avatar }
+			};
+		}
+		return job.starter.kind === "human" ? { kind: "human" } : {
+			kind: "session",
+			sessionId: job.starter.sessionId
+		};
+	}
 	const position = findPosition(definition, positionId);
 	if (position === void 0) throw new WorkflowError("unknown-position", `unknown position "${positionId}"`);
 	if (position.executor.kind === "human") return { kind: "human" };
@@ -3224,42 +3087,6 @@ function resolveExecutor(definition, positionId, job, workers) {
 		...worker.program === void 0 ? {} : { program: worker.program },
 		...worker.avatar === void 0 ? {} : { avatar: worker.avatar }
 	};
-}
-/**
-* 校验模板引用：只允许 start.output 与已存在任务的 output / text。
-*
-* @param payload payload
-* @param tasks 作业里已创建的任务
-* @param definition 定义
-* @param startOutputSchema 启动任务 output schema
-* @returns 错误消息列表
-*/
-function templateReferenceIssues(payload, tasks, definition, startOutputSchema) {
-	const issues = [];
-	const byId = new Map(tasks.map((task) => [task.id, task]));
-	for (const reference of inspectPayload(payload).references) {
-		const parsed = reference.reference;
-		if (parsed === null) {
-			issues.push(`template "{{${reference.path}}}" must be start.output, task.<id>.output or task.<id>.text`);
-			continue;
-		}
-		if (parsed.kind === "start") {
-			const reason = resolveOutputPath(startOutputSchema, parsed.segments);
-			if (reason !== null) issues.push(`template "{{${reference.path}}}" ${reason}`);
-			continue;
-		}
-		const task = byId.get(parsed.taskId);
-		if (task === void 0) {
-			issues.push(`template "{{${reference.path}}}" references task "${parsed.taskId}", which does not exist in this job`);
-			continue;
-		}
-		if (parsed.field === "text") continue;
-		const type = findTaskType(definition, task.type);
-		if (type === void 0) continue;
-		const reason = resolveOutputPath(type.output, parsed.segments);
-		if (reason !== null) issues.push(`template "{{${reference.path}}}" ${reason}`);
-	}
-	return issues;
 }
 /**
 * 判断一个任务在加入新依赖后依赖图是否成环。
@@ -3294,26 +3121,22 @@ function findDependencyCycle(tasks) {
 /**
 * 校验并构造一条派生任务。
 *
-* @param input 创建者、目标岗位、类型、payload 与依赖
+* @param input 创建者、通道、类型、任务内容与依赖
 * @returns 新任务记录与初始状态
 * @throws `WorkflowError`（code 稳定）表示创建被拒绝
 */
 function buildCreatedTask(input) {
-	const { job, creator, channel: channelId, type, payload, deps, tasks, workers } = input;
+	const { job, creator, channel: channelId, type, content, deps, tasks, workers } = input;
 	const definition = job.definition;
 	if (job.status !== "running") throw new WorkflowError("job-not-running", `job ${job.id} is not running`);
-	if (creator.status !== "running") throw new WorkflowError("creator-not-running", `task ${creator.id} is not running; only an executing task can create tasks`);
+	if (creator.status !== "running") throw new WorkflowError("creator-not-running", `task ${creator.id} is not ${creator.status}; only a running task can create tasks`);
 	const channel = resolveDispatchChannel(definition, creator.position, channelId);
 	const position = channel.to;
 	if (position === "start") throw new WorkflowError("invalid-target", "tasks cannot be dispatched to the built-in start node");
 	const taskType = resolveTargetTaskType(definition, position, type);
 	if (!channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`);
-	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new WorkflowError("invalid-payload", "payload must be a JSON object");
-	const schemaIssues = templatedPayloadIssues(taskType.payload, payload);
-	if (schemaIssues.length > 0) throw new WorkflowError("invalid-payload", `payload does not match task type "${taskType.id}": ${schemaIssues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
-	const startType = definition.start.task.output;
-	const templateIssues = templateReferenceIssues(payload, tasks, definition, startType);
-	if (templateIssues.length > 0) throw new WorkflowError("invalid-template", templateIssues.join("; "));
+	const problems = contentProblems(taskType, content);
+	if (problems.length > 0) throw new WorkflowError("invalid-content", `content does not match task type "${taskType.id}": ${problems.join("; ")}`);
 	const taskId = newTaskId();
 	const dependencyIds = [];
 	for (const dependency of deps) {
@@ -3324,7 +3147,6 @@ function buildCreatedTask(input) {
 		dependencyIds.push(dependency);
 	}
 	if (findDependencyCycle(tasks) !== null) throw new WorkflowError("dependency-cycle", "the job task dependency graph already contains a cycle");
-	for (const requirement of taskType.requires ?? []) if (!tasks.some((task) => dependencyIds.includes(task.id) && requirement.types.includes(task.type))) throw new WorkflowError("requires-not-met", `task type "${taskType.id}" requires a dependency of type: ${requirement.types.join(" | ")}`);
 	const budget = definition.budgets.maxTasks;
 	if (tasks.length + 1 > budget) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${budget} would be exceeded (job ${job.id} already has ${tasks.length} tasks)`);
 	const now = nowIso();
@@ -3336,7 +3158,7 @@ function buildCreatedTask(input) {
 			position,
 			type: taskType.id,
 			channel: channel.id,
-			payload,
+			content,
 			deps: dependencyIds,
 			status: ready ? "ready" : "pending",
 			createdBy: {
@@ -3358,6 +3180,17 @@ function buildCreatedTask(input) {
 	};
 }
 /**
+* 按任务类型校验任务内容，返回可读的问题列表。
+*
+* @param taskType 目标任务类型（结束任务是合成契约）
+* @param content 任务内容
+* @returns 问题列表；空表示通过
+*/
+function contentProblems(taskType, content) {
+	if (taskType.content === void 0) return [];
+	return contentIssues(taskType.content, content).map((issue) => `${issue.path} ${issue.message}`);
+}
+/**
 * 解析一条可用的派发通道：必须存在、从创建者岗位出发。
 *
 * @param definition 定义
@@ -3376,6 +3209,27 @@ function resolveDispatchChannel(definition, from, channelId) {
 	return channel;
 }
 /**
+* 解析目标岗位与任务类型（结束任务用内建契约）。
+*
+* @param definition 定义
+* @param position 目标岗位
+* @param type 请求的类型 id
+* @returns 目标岗位与任务类型
+*/
+function resolveTarget(definition, position, type) {
+	if (position === "end") return {
+		position,
+		taskType: resolveTargetTaskType(definition, position, type)
+	};
+	const taskType = findTaskType(definition, type);
+	const positionDef = definition.positions.find((candidate) => candidate.id === position);
+	if (taskType === void 0 || positionDef?.taskTypes.every((candidate) => candidate.id !== type)) throw new WorkflowError("invalid-type", `"${type}" is not a task type of position "${position}"`);
+	return {
+		position,
+		taskType
+	};
+}
+/**
 * 解析目标任务类型；`end` 用内建契约，既不是岗位类型也不存在。
 *
 * @param definition 定义
@@ -3389,9 +3243,8 @@ function resolveTargetTaskType(definition, position, type) {
 		return {
 			id: "end",
 			label: "结束任务",
-			description: "把最终交付物交给启动者，投递即完成。",
-			payload: definition.end.task.payload,
-			output: { type: "object" }
+			definition: "把作业的最终报告交给发起人；发起人确认收到后完成。",
+			...definition.end.content === void 0 ? {} : { content: definition.end.content }
 		};
 	}
 	const taskType = findTaskType(definition, type);
@@ -3400,12 +3253,40 @@ function resolveTargetTaskType(definition, position, type) {
 	return taskType;
 }
 /**
+* 渲染一条创建声明：解析通道、目标类型与任务内容。
+*
+* @param definition 定义
+* @param from 声明所在的节点（`start` 或岗位 id）
+* @param creation 创建声明
+* @param context 模板上下文（`content` / `input`）
+* @returns 渲染好的目标、通道与任务内容
+*/
+function renderCreation(definition, from, creation, context) {
+	const channel = resolveDispatchChannel(definition, from, creation.channel);
+	const position = channel.to;
+	if (position === "start") throw new WorkflowError("invalid-target", "tasks cannot be dispatched to the start node");
+	const { taskType } = resolveTarget(definition, position, position === "end" ? "end" : creation.type ?? "");
+	if (position !== "end" && !channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" does not allow task type "${taskType.id}"`);
+	const rendered = renderPayload(creation.content ?? {}, buildTemplateContext({
+		content: context.content ?? null,
+		input: context.input ?? null
+	}));
+	const problems = contentProblems(taskType, rendered);
+	if (problems.length > 0) throw new WorkflowError("invalid-content", `content does not match task type "${taskType.id}": ${problems.join("; ")}`);
+	return {
+		channel,
+		position,
+		taskType,
+		content: rendered
+	};
+}
+/**
 * 生成 `start.next` 发布的初始任务。
 *
-* 启动任务已完成：结构化输入是它们的唯一依赖（定义里的 `$start`，落盘为
-* `START_TASK_ID`），所以初始状态都是 `ready`（本版不允许依赖别的初始任务）。
+* 启动任务已完成：它们的唯一依赖是启动任务（`START_TASK_ID`），所以初始状态
+* 都是 `ready`。
 *
-* @param input 作业、启动任务、模板、已有任务与打工人表
+* @param input 作业、启动任务、已有任务与打工人表
 * @returns 新任务记录
 */
 function buildInitialTasks(input) {
@@ -3413,56 +3294,38 @@ function buildInitialTasks(input) {
 	const definition = job.definition;
 	const tasks = [...input.tasks];
 	const created = [];
-	for (const [index, route] of definition.start.next.entries()) {
+	for (const [index, creation] of definition.start.next.entries()) {
 		if (tasks.length + 1 > definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${definition.budgets.maxTasks} would be exceeded by initial task ${index}`);
-		const task = buildInitialTask({
-			job,
-			route,
-			startTask,
-			tasks,
-			workers,
-			definition
-		});
+		const parsed = renderCreation(definition, "start", creation, { content: startTask.content });
+		const now = nowIso();
+		const task = {
+			id: newTaskId(),
+			jobId: job.id,
+			position: parsed.position,
+			type: parsed.taskType.id,
+			channel: parsed.channel.id,
+			content: parsed.content,
+			deps: [START_TASK_ID],
+			status: "ready",
+			createdBy: {
+				taskId: startTask.id,
+				position: "start"
+			},
+			assignee: resolveExecutor(definition, parsed.position, job, workers),
+			claimant: null,
+			attemptIds: [],
+			result: null,
+			error: null,
+			assistantBlocked: false,
+			createdAt: now,
+			startedAt: null,
+			finishedAt: null,
+			updatedAt: now
+		};
 		tasks.push(task);
 		created.push(task);
 	}
 	return created;
-}
-/** 构造单条初始任务。 */
-function buildInitialTask(input) {
-	const { job, route, startTask, tasks, workers, definition } = input;
-	const channel = resolveDispatchChannel(definition, "start", route.channel);
-	const position = findPosition(definition, channel.to);
-	if (position === void 0) throw new WorkflowError("unknown-position", `start.next channel "${channel.id}" leads to "${channel.to}", which is not a position`);
-	const taskType = resolveTargetTaskType(definition, position.id, route.type);
-	if (!channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`);
-	const templateIssues = templateReferenceIssues(route.payload, tasks, definition, definition.start.task.output);
-	if (templateIssues.length > 0) throw new WorkflowError("invalid-template", templateIssues.join("; "));
-	const now = nowIso();
-	return {
-		id: newTaskId(),
-		jobId: job.id,
-		position: position.id,
-		type: taskType.id,
-		channel: channel.id,
-		payload: route.payload,
-		deps: [START_TASK_ID],
-		status: "ready",
-		createdBy: {
-			taskId: startTask.id,
-			position: "start"
-		},
-		assignee: resolveExecutor(definition, position.id, job, workers),
-		claimant: null,
-		attemptIds: [],
-		result: null,
-		error: null,
-		assistantBlocked: false,
-		createdAt: now,
-		startedAt: null,
-		finishedAt: null,
-		updatedAt: now
-	};
 }
 // .build/workflows/engine/engine.js
 /**
@@ -3627,6 +3490,7 @@ var WorkflowEngine = class {
 				name: workflow.name,
 				description: workflow.description,
 				version: workflow.latestVersion,
+				definitionVersion: this.store.readWorkflowVersion(workflow.id)?.versionRecord.definition.version,
 				status: workflow.status,
 				jobCount: this.store.countJobs(workflow.id),
 				updatedAt: workflow.updatedAt
@@ -3658,6 +3522,11 @@ var WorkflowEngine = class {
 				definition: found.versionRecord.definition
 			},
 			graph: workflowGraph(found.versionRecord.definition, workers),
+			assistants: [...workers.values()].filter((worker) => worker.assistant && worker.driver === "agent").map((worker) => ({
+				name: worker.name,
+				...worker.description === void 0 ? {} : { description: worker.description },
+				...worker.avatar === void 0 ? {} : { avatar: worker.avatar }
+			})),
 			jobs
 		};
 	}
@@ -3673,24 +3542,55 @@ var WorkflowEngine = class {
 		return await this.store.activateWorkflow(workflowId, active);
 	}
 	/**
-	* 页面人启动作业：原始输入与结构化输入一起提交，启动任务即刻完成。
+	* 页面人启动作业：发起人填的任务内容就是启动任务的内容，启动任务即刻完成。
 	*
-	* @param input 工作流、原始输入与结构化输入
+	* @param input 工作流、任务内容与交回方式
 	* @returns 新作业
 	*/
 	async createJobFromHuman(input) {
 		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
 		const workers = await this.workers();
-		const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput);
-		if (inputProblems.length > 0) throw new WorkflowError("invalid-input", `raw input: ${inputProblems.join("; ")}`);
-		const structuredProblems = schemaProblems(definition.start.task.output, input.structuredInput);
-		if (structuredProblems.length > 0) throw new WorkflowError("invalid-input", `structured input: ${structuredProblems.join("; ")}`);
-		const job = await this.insertJob({
+		return await this.startJob({
 			workflow,
 			definition,
+			workers,
 			starter: { kind: "human" },
-			rawInput: input.rawInput,
-			structuredInput: input.structuredInput
+			content: input.content,
+			delivery: this.resolveDelivery(definition, input.delivery, { kind: "human" }, workers)
+		});
+	}
+	/**
+	* 会话启动作业：发起人会话给出任务内容，启动任务即刻完成。
+	*
+	* @param input 工作流、任务内容、发起人会话与交回方式
+	* @returns 新作业
+	*/
+	async createJobFromSession(input) {
+		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
+		const workers = await this.workers();
+		const starter = {
+			kind: "session",
+			sessionId: input.sessionId
+		};
+		return await this.startJob({
+			workflow,
+			definition,
+			workers,
+			starter,
+			content: input.content,
+			delivery: this.resolveDelivery(definition, input.delivery, starter, workers)
+		});
+	}
+	/** 建作业 + 启动任务 + 初始任务。 */
+	async startJob(input) {
+		const { definition, workers, starter } = input;
+		this.checkStartContent(definition, input.content);
+		const job = await this.insertJob({
+			workflow: input.workflow,
+			definition,
+			starter,
+			content: input.content,
+			delivery: input.delivery
 		});
 		try {
 			await this.store.runExclusive(job.id, async () => {
@@ -3701,19 +3601,25 @@ var WorkflowEngine = class {
 					position: "start",
 					type: "start",
 					channel: null,
-					payload: input.rawInput,
+					content: input.content,
 					deps: [],
 					status: "completed",
 					createdBy: null,
-					assignee: { kind: "human" },
-					claimant: {
+					assignee: starter.kind === "human" ? { kind: "human" } : {
+						kind: "session",
+						sessionId: starter.sessionId
+					},
+					claimant: starter.kind === "human" ? {
 						kind: "human",
 						name: "本地用户",
 						sessionId: null
+					} : {
+						kind: "worker",
+						name: "starter",
+						sessionId: starter.sessionId
 					},
 					attemptIds: [],
 					result: {
-						output: input.structuredInput,
 						text: "",
 						textBytes: 0,
 						textFile: null,
@@ -3729,7 +3635,7 @@ var WorkflowEngine = class {
 				await this.store.insertTask(startTask);
 				await this.appendEvent(job.id, "job/created", {
 					seq: job.seq,
-					starter: "human"
+					starter: starter.kind
 				});
 				await this.appendEvent(job.id, "task/completed", {
 					taskId: startTask.id,
@@ -3765,65 +3671,31 @@ var WorkflowEngine = class {
 		}
 		return this.store.getJob(job.id) ?? job;
 	}
-	/**
-	* 会话启动作业：启动任务回到启动者会话执行（下一轮 agent 提交结构化输入）。
-	*
-	* @param input 工作流、原始输入与启动者会话
-	* @returns 新作业
-	*/
-	async createJobFromSession(input) {
-		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
-		const inputProblems = schemaProblems(definition.start.task.payload, input.rawInput);
-		if (inputProblems.length > 0) throw new WorkflowError("invalid-input", `raw input: ${inputProblems.join("; ")}`);
-		const job = await this.insertJob({
-			workflow,
-			definition,
-			starter: {
-				kind: "session",
-				sessionId: input.sessionId
-			},
-			rawInput: input.rawInput
-		});
-		await this.store.runExclusive(job.id, async () => {
-			const now = nowIso();
-			const startTask = {
-				id: START_TASK_ID,
-				jobId: job.id,
-				position: "start",
-				type: "start",
-				channel: null,
-				payload: input.rawInput,
-				deps: [],
-				status: "pending",
-				createdBy: null,
-				assignee: {
-					kind: "session",
-					sessionId: input.sessionId
-				},
-				claimant: null,
-				attemptIds: [],
-				result: null,
-				error: null,
-				assistantBlocked: false,
-				createdAt: now,
-				startedAt: null,
-				finishedAt: null,
-				updatedAt: now
-			};
-			await this.store.insertTask(startTask);
-			await this.appendEvent(job.id, "job/created", {
-				seq: job.seq,
-				starter: "session"
-			});
-			await this.recomputeLocked(job.id);
-		});
-		return this.store.getJob(job.id) ?? job;
+	/** 校验发起人给的任务内容。 */
+	checkStartContent(definition, content) {
+		const schema = definition.start.content;
+		if (schema === void 0) return;
+		const problems = contentIssues(schema, content);
+		if (problems.length > 0) throw new WorkflowError("invalid-input", `content does not match the workflow input: ${problems.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
 	}
-	/** 取一个可启动的工作流：必须存在且未停用。 */
+	/** 校验交回方式：助理必须存在、是智能体、且标记为助理。 */
+	resolveDelivery(_definition, delivery, _starter, workers) {
+		if (delivery === void 0 || delivery.kind === "starter") return { kind: "starter" };
+		const worker = workers.get(delivery.name);
+		if (worker === void 0) throw new WorkflowError("invalid-delivery", `unknown assistant "${delivery.name}"`);
+		if (worker.driver !== "agent") throw new WorkflowError("invalid-delivery", `assistant "${delivery.name}" must be an agent`);
+		if (!worker.assistant) throw new WorkflowError("invalid-delivery", `worker "${delivery.name}" is not marked as an assistant in the Buka Workers plugin`);
+		return {
+			kind: "assistant",
+			name: worker.name
+		};
+	}
+	/** 取一个可启动的工作流：必须存在、未停用、且定义是当前版本。 */
 	requireStartableWorkflow(workflowId) {
 		const found = this.store.readWorkflowVersion(workflowId);
 		if (found === null) throw new WorkflowError("not-found", `workflow not found: ${workflowId}`);
 		if (found.record.status !== "active") throw new WorkflowError("workflow-retired", `workflow "${found.record.name}" is not enabled; enable it before starting a job`);
+		if (found.versionRecord.definition.version !== 7) throw new WorkflowError("definition-outdated", `workflow "${found.record.name}" is not on the current definition version; ask the orchestrator to rewrite it before starting a job`);
 		return {
 			workflow: found.record,
 			definition: found.versionRecord.definition
@@ -3844,11 +3716,9 @@ var WorkflowEngine = class {
 			definition: input.definition,
 			status: "running",
 			starter: input.starter,
-			input: {
-				raw: input.rawInput,
-				...input.structuredInput === void 0 ? {} : { structured: input.structuredInput }
-			},
-			inputSummary: summarizeInput(input.rawInput),
+			input: input.content,
+			delivery: input.delivery,
+			inputSummary: summarizeInput(input.content),
 			error: null,
 			createdAt: now,
 			updatedAt: now,
@@ -3869,6 +3739,7 @@ var WorkflowEngine = class {
 	async jobDetail(jobId) {
 		const job = this.store.getJob(jobId);
 		if (job === void 0) return null;
+		if (job.definition.version !== 7) return null;
 		const workers = await this.workers();
 		const tasks = this.store.listTasks(jobId);
 		return {
@@ -3881,6 +3752,7 @@ var WorkflowEngine = class {
 				workflowVersion: job.workflowVersion,
 				starter: job.starter,
 				input: job.input,
+				delivery: job.delivery,
 				createdAt: job.createdAt,
 				updatedAt: job.updatedAt,
 				error: job.error
@@ -4008,7 +3880,7 @@ var WorkflowEngine = class {
 		return this.sessionTasks.get(sessionId) ?? null;
 	}
 	/**
-	* 某个会话作为启动者的作业 id（最近创建的优先）。
+	* 某个会话作为发起人的作业 id（最近创建的优先）。
 	*
 	* @param sessionId 会话 id
 	* @returns 作业 id；没有时 null
@@ -4022,7 +3894,7 @@ var WorkflowEngine = class {
 		return found?.id ?? null;
 	}
 	/**
-	* 会话能否查看某个作业（启动者或执行中的任务会话）。
+	* 会话能否查看某个作业（发起人或执行中的任务会话）。
 	*
 	* @param sessionId 会话 id
 	* @param jobId 作业 id
@@ -4036,7 +3908,7 @@ var WorkflowEngine = class {
 	/**
 	* 执行中的任务沿一条通道创建派生任务。
 	*
-	* @param input 会话、通道、类型、payload 与依赖
+	* @param input 会话、通道、类型、任务内容与依赖
 	* @returns 新任务
 	*/
 	async createTaskFromSession(input) {
@@ -4054,7 +3926,7 @@ var WorkflowEngine = class {
 				creator,
 				channel: input.channel,
 				type: input.type,
-				payload: input.payload,
+				content: input.content,
 				deps: input.deps,
 				tasks,
 				workers
@@ -4073,9 +3945,101 @@ var WorkflowEngine = class {
 		});
 	}
 	/**
+	* 当前任务可以创建的下游目标：只给任务类型与任务内容格式，不暴露岗位 / 通道。
+	*
+	* @param sessionId 任务会话
+	* @returns 目标列表；没有可创建目标时为空
+	*/
+	creatableTargetsForSession(sessionId) {
+		const reference = this.sessionTasks.get(sessionId);
+		if (reference === void 0) return [];
+		const job = this.store.getJob(reference.jobId);
+		const task = this.store.getTask(reference.taskId);
+		if (job === void 0 || task === void 0) return [];
+		const definition = job.definition;
+		const targets = /* @__PURE__ */ new Map();
+		for (const channel of definition.channels) {
+			if (channel.from !== task.position) continue;
+			if (channel.to === "end") {
+				targets.set("end", {
+					target: "end",
+					label: "结束任务",
+					...definition.end.content === void 0 ? {} : { content: definition.end.content }
+				});
+				continue;
+			}
+			const types = channel.types !== void 0 && channel.types.length > 0 ? channel.types : definition.positions.find((position) => position.id === channel.to)?.taskTypes.map((taskType) => taskType.id) ?? [];
+			for (const typeId of types) {
+				if (targets.has(typeId)) continue;
+				const taskType = findTaskType(definition, typeId);
+				if (taskType === void 0) continue;
+				targets.set(typeId, {
+					target: typeId,
+					label: taskType.label,
+					...taskType.content === void 0 ? {} : { content: taskType.content }
+				});
+			}
+		}
+		return [...targets.values()];
+	}
+	/**
+	* 当前任务可以点的动作（人任务）；助理代人处理时用。
+	*
+	* @param sessionId 任务会话
+	* @returns 动作列表与表单 schema；非人任务为空
+	*/
+	taskActionsForSession(sessionId) {
+		const reference = this.sessionTasks.get(sessionId);
+		if (reference === void 0) return [];
+		const job = this.store.getJob(reference.jobId);
+		const task = this.store.getTask(reference.taskId);
+		if (job === void 0 || task === void 0) return [];
+		return (this.taskTypeOf(job.definition, task.type)?.actions ?? []).map((action) => ({
+			id: action.id,
+			label: action.label,
+			...action.input === void 0 ? {} : { input: action.input }
+		}));
+	}
+	/**
+	* 执行中的任务按目标创建派生任务：通道由引擎解析，调用方不需要知道通道。
+	*
+	* @param input 会话、目标、任务内容与依赖
+	* @returns 新任务
+	*/
+	async createTaskFromTarget(input) {
+		const reference = this.sessionTasks.get(input.sessionId);
+		if (reference === void 0) throw new WorkflowError("no-task", "this session is not executing a workflow task; only an executing task can create tasks");
+		const job = this.store.getJob(reference.jobId);
+		const creator = this.store.getTask(reference.taskId);
+		if (job === void 0 || creator === void 0) throw new WorkflowError("not-found", "task not found");
+		const channel = this.resolveTaskRoute(job.definition, creator.position, input.target);
+		return await this.createTaskFromSession({
+			sessionId: input.sessionId,
+			channel,
+			type: input.target,
+			content: input.content,
+			deps: input.deps.length > 0 ? input.deps : [creator.id]
+		});
+	}
+	/** 把一个可创建目标解析成从当前节点出发的通道。 */
+	resolveTaskRoute(definition, from, target) {
+		const owner = target === "end" ? void 0 : definition.positions.find((position) => position.taskTypes.some((taskType) => taskType.id === target));
+		if (target !== "end" && owner === void 0) throw new WorkflowError("invalid-target", `task "${target}" is not declared by this workflow`);
+		const channels = definition.channels.filter((channel) => {
+			if (channel.from !== from) return false;
+			if (target === "end") return channel.to === "end";
+			if (channel.to !== owner?.id) return false;
+			return channel.types === void 0 || channel.types.length === 0 || channel.types.includes(target);
+		});
+		const [channel] = channels;
+		if (channel === void 0) throw new WorkflowError("invalid-target", `task "${target}" cannot be created from this task`);
+		if (channels.length > 1) throw new WorkflowError("invalid-target", `task "${target}" has more than one route from this task; ask the orchestrator to disambiguate`);
+		return channel.id;
+	}
+	/**
 	* 执行中的任务 / 助理提交结果。
 	*
-	* @param input 会话、结构化结果、文本与附件
+	* @param input 会话、文本与附件
 	* @returns 任务与作业的最新状态
 	*/
 	async completeTaskFromSession(input) {
@@ -4087,19 +4051,18 @@ var WorkflowEngine = class {
 			const task = this.store.getTask(reference.taskId);
 			if (task === void 0) throw new WorkflowError("not-found", "task not found");
 			if (task.status !== "running") throw new WorkflowError("task-not-running", `task ${task.id} is ${task.status}; it cannot be completed again`);
-			if (task.id === "start-task") {
-				if (this.store.listTasks(job.id).length + job.definition.start.next.length + 1 > job.definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${job.definition.budgets.maxTasks} would be exceeded by the initial tasks`);
-			}
-			const problems = this.outputProblemsFor(job, task, input.output);
-			if (problems.length > 0) throw new WorkflowError("invalid-output", `output does not match the task contract: ${problems.join("; ")}`);
-			const claimant = task.claimant;
-			const workspace = this.workspaceFor(task);
-			const updated = await this.completeTaskLocked(job, task, {
-				output: input.output,
+			const createdBy = task.claimant?.name ?? "执行者";
+			const updated = task.assignee.kind === "human" ? await this.completeHumanTaskLocked(job, task, {
+				action: input.action,
+				input: input.input,
 				text: input.text,
 				attachments: input.attachments,
-				workspace,
-				createdBy: claimant?.name ?? "执行者"
+				createdBy
+			}) : await this.completeTaskLocked(job, task, {
+				text: input.text,
+				attachments: input.attachments,
+				workspace: this.workspaceFor(task),
+				createdBy
 			});
 			this.sessionTasks.delete(input.sessionId);
 			await this.recomputeLocked(job.id);
@@ -4160,9 +4123,11 @@ var WorkflowEngine = class {
 		});
 	}
 	/**
-	* 页面：人填表提交一条人任务。
+	* 页面：人点一个动作提交一条人任务。
 	*
-	* @param input 作业、任务、结构化结果、文本与附件
+	* 动作可以省略——那就是「只留结果、不创建任务」的提交。
+	*
+	* @param input 作业、任务、动作、表单、文本与附件
 	* @returns 更新后的任务
 	*/
 	async completeTaskAsHuman(input) {
@@ -4171,45 +4136,101 @@ var WorkflowEngine = class {
 			const task = this.requireTask(input.jobId, input.taskId);
 			if (task.assignee.kind !== "human") throw new WorkflowError("not-human-task", `task ${input.taskId} is not a human task`);
 			if (task.status !== "running" && task.status !== "ready") throw new WorkflowError("invalid-status", `task ${input.taskId} is ${task.status}; a human task can only be completed from ready/running`);
-			let prepared = task;
-			if (task.status === "ready") {
-				const now = nowIso();
-				const attempt = {
-					id: newAttemptId(),
-					jobId: job.id,
-					taskId: task.id,
-					sessionId: null,
-					startSeq: null,
-					status: "running",
-					stopReason: null,
-					error: null,
-					promptFile: null,
-					startedAt: now,
-					finishedAt: null
-				};
-				await this.store.insertAttempt(attempt);
-				prepared = await this.store.updateTask(task.id, (current) => ({
-					...current,
-					claimant: {
-						kind: "human",
-						name: "本地用户",
-						sessionId: null
-					},
-					attemptIds: [...current.attemptIds, attempt.id],
-					updatedAt: now
-				}));
-			}
-			const problems = this.outputProblemsFor(job, prepared, input.output);
-			if (problems.length > 0) throw new WorkflowError("invalid-output", `output does not match the task contract: ${problems.join("; ")}`);
-			const updated = await this.completeTaskLocked(job, prepared, {
-				output: input.output,
+			const updated = await this.completeHumanTaskLocked(job, task, {
+				action: input.action,
+				input: input.input,
 				text: input.text,
 				attachments: input.attachments,
-				workspace: void 0,
 				createdBy: "本地用户"
 			});
 			await this.recomputeLocked(job.id);
 			return updated;
+		});
+	}
+	/**
+	* 人任务的提交：校验动作与表单、创建动作声明的任务、写入结果。
+	*
+	* 先渲染并校验全部创建，任何一条不合法都不落盘、也不完成任务。
+	*/
+	async completeHumanTaskLocked(job, task, input) {
+		const taskType = this.taskTypeOf(job.definition, task.type);
+		const actionId = typeof input.action === "string" ? input.action.trim() : "";
+		const action = actionId === "" ? void 0 : taskType?.actions?.find((candidate) => candidate.id === actionId);
+		if (actionId !== "" && action === void 0) throw new WorkflowError("invalid-action", `task type "${task.type}" has no action "${actionId}"`);
+		const form = input.input ?? {};
+		if (action?.input !== void 0) {
+			const problems = schemaProblems(action.input, form);
+			if (problems.length > 0) throw new WorkflowError("invalid-input", `input does not match the action contract: ${problems.join("; ")}`);
+		}
+		const workers = await this.workers();
+		const tasks = this.store.listTasks(job.id);
+		const creations = (action?.creates ?? []).map((creation) => renderCreation(job.definition, task.position, creation, {
+			content: task.content,
+			input: form
+		}));
+		let prepared = task;
+		if (task.status === "ready") {
+			const now = nowIso();
+			const attempt = {
+				id: newAttemptId(),
+				jobId: job.id,
+				taskId: task.id,
+				sessionId: null,
+				startSeq: null,
+				status: "running",
+				stopReason: null,
+				error: null,
+				promptFile: null,
+				startedAt: now,
+				finishedAt: null
+			};
+			await this.store.insertAttempt(attempt);
+			prepared = await this.store.updateTask(task.id, (current) => ({
+				...current,
+				status: "running",
+				claimant: {
+					kind: "human",
+					name: "本地用户",
+					sessionId: null
+				},
+				attemptIds: [...current.attemptIds, attempt.id],
+				startedAt: current.startedAt ?? now,
+				updatedAt: now
+			}));
+		}
+		let known = tasks;
+		for (const parsed of creations) {
+			const created = buildCreatedTask({
+				job,
+				creator: prepared,
+				channel: parsed.channel.id,
+				type: parsed.taskType.id,
+				content: parsed.content,
+				deps: [prepared.id],
+				tasks: known,
+				workers
+			});
+			await this.store.insertTask(created.task);
+			known = [...known, created.task];
+			await this.appendEvent(job.id, "task/created", {
+				taskId: created.task.id,
+				position: created.task.position,
+				type: created.task.type,
+				channel: created.task.channel,
+				deps: created.task.deps,
+				createdBy: prepared.id
+			});
+		}
+		return await this.completeTaskLocked(job, prepared, {
+			text: input.text,
+			attachments: input.attachments,
+			workspace: void 0,
+			createdBy: input.createdBy,
+			...action === void 0 ? {} : { action: {
+				id: action.id,
+				label: action.label
+			} },
+			...action?.input === void 0 ? {} : { input: form }
 		});
 	}
 	/**
@@ -4323,7 +4344,7 @@ var WorkflowEngine = class {
 	}
 	/** 重启恢复：重建调度、续接 running 任务、补算 clock、重试交付。 */
 	async recover() {
-		const jobs = this.store.allJobs().filter((job) => job.status === "running");
+		const jobs = this.store.allJobs().filter((job) => job.status === "running" && job.definition.version === 7);
 		for (const job of jobs) try {
 			await this.store.runExclusive(job.id, async () => {
 				await this.recoverJobLocked(job.id);
@@ -4345,14 +4366,6 @@ var WorkflowEngine = class {
 				error: "host restarted while this attempt was running",
 				finishedAt: nowIso()
 			}));
-			if (task.position === "start") {
-				if (job.starter.kind === "session" && attempt !== void 0) {
-					this.resumeStartTask(job, task, attempt);
-					continue;
-				}
-				await this.failTaskLocked(jobId, task.id, "host restarted before the start task finished");
-				continue;
-			}
 			if (task.position === "end") continue;
 			const executor = task.assignee;
 			if (executor.kind === "worker" && executor.driver === "robot") {
@@ -4381,33 +4394,6 @@ var WorkflowEngine = class {
 			this.logger?.warn?.(`buka-workflows: could not rebuild initial tasks for job ${jobId}: ${describeError$1(error)}`);
 		}
 		await this.recomputeLocked(jobId);
-	}
-	/** 重新投递启动任务提示词。 */
-	async resumeStartTask(job, task, attempt) {
-		const starter = job.starter;
-		if (starter.kind !== "session") return;
-		try {
-			const startSeq = await this.delivery.deliver(starter.sessionId, buildStartTaskPrompt(job));
-			await this.store.runExclusive(job.id, async () => {
-				await this.store.updateAttempt(attempt.id, (current) => ({
-					...current,
-					status: "running",
-					error: null,
-					finishedAt: null,
-					sessionId: starter.sessionId,
-					startSeq: startSeq ?? current.startSeq
-				}));
-				this.sessionTasks.set(starter.sessionId, {
-					jobId: job.id,
-					taskId: task.id
-				});
-			});
-		} catch (error) {
-			await this.store.runExclusive(job.id, async () => {
-				await this.failTaskLocked(job.id, task.id, `could not resume the start task: ${describeError$1(error)}`);
-				await this.recomputeLocked(job.id);
-			});
-		}
 	}
 	/** 续接一个 agent / 助理任务会话。 */
 	async resumeAgentAttempt(jobId, task, attempt, worker, sessionId) {
@@ -4498,24 +4484,23 @@ var WorkflowEngine = class {
 		const tasks = this.store.listTasks(jobId);
 		const ready = tasks.filter((task) => task.status === "ready");
 		if (ready.length === 0) return [];
-		const workers = await this.workers();
 		const launches = [];
 		const busyPositions = /* @__PURE__ */ new Set();
 		for (const task of tasks) if (task.status === "running") busyPositions.add(task.position);
 		const sorted = [...ready].sort((left, right) => left.createdAt === right.createdAt ? left.id.localeCompare(right.id) : left.createdAt.localeCompare(right.createdAt));
 		for (const task of sorted) {
 			if (task.position === "end") {
-				if (this.deliveryBlocked.has(task.id)) continue;
-				const launch = await this.claimForDelivery(job, task);
-				if (launch !== null) launches.push(launch);
-				continue;
-			}
-			if (task.position === "start") {
-				if (job.starter.kind !== "session") continue;
-				if (busyPositions.has("start")) continue;
-				const launch = await this.claimStartTask(job, task);
+				if (task.assignee.kind === "human") continue;
+				if (task.assignee.kind === "session") {
+					if (this.deliveryBlocked.has(task.id)) continue;
+					const launch = await this.claimForDelivery(job, task);
+					if (launch !== null) launches.push(launch);
+					continue;
+				}
+				if (busyPositions.has("end")) continue;
+				const launch = await this.claimAgentTask(job, task, tasks);
 				if (launch !== null) {
-					busyPositions.add("start");
+					busyPositions.add("end");
 					launches.push(launch);
 				}
 				continue;
@@ -4525,7 +4510,7 @@ var WorkflowEngine = class {
 				const assistantName = this.assistantFor(job.definition, task.type);
 				if (assistantName === null || task.assistantBlocked) continue;
 				if (this.busyAssistants.has(assistantName)) continue;
-				const launch = await this.claimAssistantTask(job, task, assistantName, tasks);
+				const launch = await this.claimAssistantTask(job, task, assistantName);
 				if (launch !== null) {
 					this.busyAssistants.add(assistantName);
 					launches.push(launch);
@@ -4540,7 +4525,7 @@ var WorkflowEngine = class {
 				continue;
 			}
 			if (busyPositions.has(task.position)) continue;
-			const launch = await this.claimAgentTask(job, task, tasks, workers);
+			const launch = await this.claimAgentTask(job, task, tasks);
 			if (launch !== null) {
 				busyPositions.add(task.position);
 				launches.push(launch);
@@ -4591,22 +4576,16 @@ var WorkflowEngine = class {
 		return updated;
 	}
 	/** 认领 agent 任务并写 prompt。 */
-	async claimAgentTask(job, task, tasks, workers) {
-		const position = positionOf(job.definition, task.position);
-		if (position === void 0 || position.executor.kind !== "worker") return null;
-		const taskType = this.taskTypeOf(job.definition, task.type);
+	async claimAgentTask(job, task, _tasks) {
+		if (task.assignee.kind !== "worker") return null;
+		const taskType = task.position === "end" ? resolveTargetTaskType(job.definition, "end", "") : this.taskTypeOf(job.definition, task.type);
 		if (taskType === void 0) {
 			await this.failTaskLocked(job.id, task.id, `task type "${task.type}" is not declared in the workflow`);
 			return null;
 		}
 		const prompt = buildExecutionPrompt({
-			job,
 			task,
-			position,
-			taskType,
-			tasks,
-			attachments: this.store.listAttachments(job.id),
-			workspace: workers.get(position.executor.name)?.path
+			taskType
 		});
 		const attempt = await this.createAttempt({
 			jobId: job.id,
@@ -4620,7 +4599,7 @@ var WorkflowEngine = class {
 		}));
 		await this.claimTaskRecord(job, task, {
 			kind: "worker",
-			name: position.executor.name,
+			name: task.assignee.name,
 			sessionId: null
 		}, attempt.id);
 		return {
@@ -4628,24 +4607,18 @@ var WorkflowEngine = class {
 			jobId: job.id,
 			taskId: task.id,
 			attemptId: attempt.id,
-			worker: position.executor.name,
+			worker: task.assignee.name,
 			prompt,
 			planMode: taskType.mode === "plan"
 		};
 	}
 	/** 认领助理承办的人任务。 */
-	async claimAssistantTask(job, task, assistantName, tasks) {
-		const position = positionOf(job.definition, task.position);
+	async claimAssistantTask(job, task, assistantName) {
 		const taskType = this.taskTypeOf(job.definition, task.type);
-		if (position === void 0 || taskType === void 0) return null;
+		if (taskType === void 0) return null;
 		const prompt = buildAssistantPrompt({
-			job,
 			task,
-			position,
-			taskType,
-			tasks,
-			attachments: this.store.listAttachments(job.id),
-			workspace: void 0
+			taskType
 		});
 		const attempt = await this.createAttempt({
 			jobId: job.id,
@@ -4692,30 +4665,9 @@ var WorkflowEngine = class {
 			programId
 		};
 	}
-	/** 认领启动任务（会话启动者）。 */
-	async claimStartTask(job, task) {
-		if (job.starter.kind !== "session") return null;
-		const attempt = await this.createAttempt({
-			jobId: job.id,
-			taskId: task.id,
-			promptFile: null
-		});
-		await this.claimTaskRecord(job, task, {
-			kind: "worker",
-			name: "starter",
-			sessionId: job.starter.sessionId
-		}, attempt.id);
-		return {
-			kind: "start",
-			jobId: job.id,
-			taskId: task.id,
-			attemptId: attempt.id,
-			sessionId: job.starter.sessionId,
-			prompt: buildStartTaskPrompt(job)
-		};
-	}
-	/** 为结束任务准备一次投递。 */
+	/** 为结束任务准备一次投递：认领任务，投递后等发起人确认。 */
 	async claimForDelivery(job, task) {
+		if (job.starter.kind !== "session") return null;
 		const attempt = await this.createAttempt({
 			jobId: job.id,
 			taskId: task.id,
@@ -4725,11 +4677,17 @@ var WorkflowEngine = class {
 			taskId: task.id,
 			attemptId: attempt.id
 		});
+		await this.claimTaskRecord(job, task, {
+			kind: "worker",
+			name: "starter",
+			sessionId: job.starter.sessionId
+		}, attempt.id);
 		return {
 			kind: "delivery",
 			jobId: job.id,
 			taskId: task.id,
-			attemptId: attempt.id
+			attemptId: attempt.id,
+			sessionId: job.starter.sessionId
 		};
 	}
 	/** 在队列外启动一次执行。 */
@@ -4743,10 +4701,7 @@ var WorkflowEngine = class {
 			case "program":
 				this.launchProgram(launch.jobId, launch.taskId, launch.attemptId, launch.programId);
 				return;
-			case "start":
-				this.launchStart(launch);
-				return;
-			case "delivery": this.runDelivery(launch.jobId, launch.taskId, launch.attemptId);
+			case "delivery": this.runDelivery(launch.jobId, launch.taskId, launch.attemptId, launch.sessionId);
 		}
 	}
 	/** 启动一个 agent / 助理会话。 */
@@ -4880,21 +4835,16 @@ var WorkflowEngine = class {
 			timeout: null
 		});
 		try {
-			const tasks = this.store.listTasks(jobId);
-			const payload = renderTaskPayload(task.payload, tasks);
 			const result = await driver.run({
-				payload,
+				content: task.content,
 				signal: controller.signal
 			});
 			await this.store.runExclusive(jobId, async () => {
 				this.active.delete(taskId);
 				const current = this.store.getTask(taskId);
 				if (current === void 0 || current.status !== "running") return;
-				const outputProblems = this.outputProblemsFor(job, current, result.output);
-				if (outputProblems.length > 0) await this.failTaskLocked(jobId, taskId, `program output is invalid: ${outputProblems.join("; ")}`);
-				else await this.completeTaskLocked(job, current, {
-					output: result.output,
-					text: "",
+				await this.completeTaskLocked(job, current, {
+					text: result.text,
 					attachments: [],
 					workspace: void 0,
 					createdBy: current.claimant?.name ?? programId
@@ -4905,65 +4855,39 @@ var WorkflowEngine = class {
 			await this.failOutside(jobId, taskId, `program task failed: ${describeError$1(error)}`);
 		}
 	}
-	/** 投递启动任务提示词到启动者会话。 */
-	async launchStart(launch) {
-		try {
-			const startSeq = await this.delivery.deliver(launch.sessionId, launch.prompt);
-			await this.store.runExclusive(launch.jobId, async () => {
-				const task = this.store.getTask(launch.taskId);
-				if (task === void 0 || task.status !== "running") return;
-				await this.store.updateAttempt(launch.attemptId, (attempt) => ({
-					...attempt,
-					sessionId: launch.sessionId,
-					startSeq
-				}));
-				this.sessionTasks.set(launch.sessionId, {
-					jobId: launch.jobId,
-					taskId: launch.taskId
-				});
-				await this.store.updateTask(launch.taskId, (record) => ({
-					...record,
-					claimant: {
-						kind: "worker",
-						name: "starter",
-						sessionId: launch.sessionId
-					},
-					updatedAt: nowIso()
-				}));
-			});
-			if (this.options.taskTimeoutMs > 0) setTimeout(() => {
-				this.timeoutOutside(launch.jobId, launch.taskId, "starter");
-			}, this.options.taskTimeoutMs).unref?.();
-		} catch (error) {
-			await this.failOutside(launch.jobId, launch.taskId, `could not deliver the start task prompt to the starter session: ${describeError$1(error)}`);
-		}
-	}
-	/** 结束任务投递。 */
-	async runDelivery(jobId, taskId, attemptId) {
+	/** 结束任务投递：把最终报告送到发起人会话，等它确认。 */
+	async runDelivery(jobId, taskId, attemptId, sessionId) {
 		const job = this.store.getJob(jobId);
 		const task = this.store.getTask(taskId);
-		if (job === void 0 || task === void 0 || task.status !== "ready") {
+		if (job === void 0 || task === void 0 || task.status !== "running") {
 			await this.finishAttemptOutside(attemptId, "cancelled", "cancelled before delivery");
 			return;
 		}
 		let delivered = true;
 		let error = null;
-		if (job.starter.kind === "session") try {
-			await this.delivery.deliver(job.starter.sessionId, buildEndDeliveryText(job, task));
+		let startSeq = null;
+		try {
+			startSeq = await this.delivery.deliver(sessionId, buildEndDeliveryText(job, task));
 		} catch (caught) {
 			delivered = false;
 			error = describeError$1(caught);
 		}
 		await this.store.runExclusive(jobId, async () => {
-			const current = this.store.getTask(taskId);
-			if (current === void 0) return;
+			if (this.store.getTask(taskId) === void 0) return;
 			if (!delivered) {
 				this.deliveryBlocked.add(taskId);
+				this.sessionTasks.delete(sessionId);
 				await this.store.updateAttempt(attemptId, (attempt) => ({
 					...attempt,
 					status: "failed",
 					error,
 					finishedAt: nowIso()
+				}));
+				await this.store.updateTask(taskId, (record) => ({
+					...record,
+					status: "ready",
+					claimant: null,
+					updatedAt: nowIso()
 				}));
 				await this.appendEvent(jobId, "delivery/failed", {
 					taskId,
@@ -4971,21 +4895,16 @@ var WorkflowEngine = class {
 				});
 				return;
 			}
+			this.sessionTasks.set(sessionId, {
+				jobId,
+				taskId
+			});
 			await this.store.updateAttempt(attemptId, (attempt) => ({
 				...attempt,
-				status: "completed",
-				stopReason: "delivered",
-				finishedAt: nowIso()
+				sessionId,
+				...startSeq === null ? {} : { startSeq }
 			}));
-			const text = JSON.stringify(current.payload);
-			await this.completeRecordNoRecompute(job, current, {
-				output: null,
-				text,
-				attachmentIds: [],
-				createdBy: job.starter.kind === "human" ? "本地用户" : "starter"
-			});
-			await this.appendEvent(jobId, "delivery/completed", { taskId });
-			await this.recomputeLocked(jobId);
+			await this.appendEvent(jobId, "delivery/delivered", { taskId });
 		});
 	}
 	/** 尝试结束任务之外的其它任务在超时后失败。 */
@@ -5103,22 +5022,15 @@ var WorkflowEngine = class {
 		const text = clipUtf8(input.text, this.options.maxResultTextBytes);
 		const textFile = text.trim() === "" ? null : await this.store.writeText(job.id, "results", attemptId, text).catch(() => null);
 		const result = {
-			output: input.output,
 			text: clipUtf8(text, RESULT_PREVIEW_BYTES),
 			textBytes: Buffer.byteLength(text, "utf8"),
 			textFile,
-			attachmentIds: attachmentRecords.map((attachment) => attachment.id)
+			attachmentIds: attachmentRecords.map((attachment) => attachment.id),
+			...input.action === void 0 ? {} : { action: input.action },
+			...input.input === void 0 ? {} : { input: input.input }
 		};
 		if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
 		const now = nowIso();
-		if (task.id === "start-task") await this.store.updateJob(job.id, (current) => ({
-			...current,
-			input: {
-				...current.input,
-				structured: input.output
-			},
-			updatedAt: now
-		}));
 		if (!canTransitionTask(task.status, "completed")) throw new WorkflowError("invalid-status", `task ${task.id} is ${task.status}, cannot complete`);
 		const updated = await this.store.updateTask(task.id, (current) => ({
 			...current,
@@ -5140,36 +5052,9 @@ var WorkflowEngine = class {
 			taskId: task.id,
 			type: task.type
 		});
-		if (task.id === "start-task") await this.spawnInitialTasksLocked(job, updated);
 		return updated;
 	}
-	/** 完成结束任务（无 recompute，由调用方继续）。 */
-	async completeRecordNoRecompute(job, task, result) {
-		const now = nowIso();
-		const text = clipUtf8(result.text, this.options.maxResultTextBytes);
-		const resultRecord = {
-			output: result.output,
-			text: clipUtf8(text, RESULT_PREVIEW_BYTES),
-			textBytes: Buffer.byteLength(text, "utf8"),
-			textFile: null,
-			attachmentIds: [...result.attachmentIds]
-		};
-		if (!canTransitionTask(task.status, "completed")) return;
-		await this.store.updateTask(task.id, (current) => ({
-			...current,
-			status: "completed",
-			result: resultRecord,
-			claimant: current.claimant ?? {
-				kind: job.starter.kind === "human" ? "human" : "worker",
-				name: result.createdBy,
-				sessionId: job.starter.kind === "session" ? job.starter.sessionId : null
-			},
-			error: null,
-			finishedAt: now,
-			updatedAt: now
-		}));
-	}
-	/** 启动任务完成后创建初始任务。 */
+	/** 启动任务完成后创建初始任务（崩溃恢复时补建）。 */
 	async spawnInitialTasksLocked(job, startTask) {
 		const workers = await this.workers();
 		const initial = buildInitialTasks({
@@ -5271,15 +5156,6 @@ var WorkflowEngine = class {
 	/** 按 id 取任务类型。 */
 	taskTypeOf(definition, typeId) {
 		for (const position of definition.positions) for (const taskType of position.taskTypes) if (taskType.id === typeId) return taskType;
-	}
-	/** 按任务契约校验结构化结果。 */
-	outputProblemsFor(job, task, output) {
-		const definition = job.definition;
-		if (task.position === "end") return [];
-		if (task.id === "start-task") return schemaProblems(definition.start.task.output, output);
-		const taskType = this.taskTypeOf(definition, task.type);
-		if (taskType === void 0) return [`unknown task type "${task.type}"`];
-		return schemaProblems(taskType.output, output);
 	}
 	/** 任务执行者的工作区（打工人目录）。 */
 	workspaceFor(task) {
@@ -5646,7 +5522,7 @@ function sendMethodNotAllowed(res, allow) {
 }
 // .build/workflows/routes/index.js
 /**
-* 浏览器一半的 HTTP 路由（ADR 0015 的 v5 契约）：
+* 浏览器一半的 HTTP 路由（ADR 0015 / 0017 的 v6 契约）：
 * 工作流 / 作业 / 任务 / 附件与动作。
 *
 * 所有路由沿用 web 组合的信任栅栏（`ctx.connection.requestRejection`），只接受
@@ -5789,8 +5665,8 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			if (workflowId === "") return sendError(res, 400, "invalid-id", "workflowId is required");
 			const job = await (await ready()).createJobFromHuman({
 				workflowId,
-				rawInput: record.rawInput ?? {},
-				structuredInput: record.structuredInput ?? {}
+				content: record.content ?? {},
+				delivery: record.delivery ?? { kind: "starter" }
 			});
 			sendJson(res, 200, {
 				ok: true,
@@ -5901,7 +5777,8 @@ function registerWorkflowRoutes({ ctx, ready }) {
 					const task = await engine.completeTaskAsHuman({
 						jobId,
 						taskId,
-						output: record.output ?? {},
+						action: typeof record.selectedAction === "string" ? record.selectedAction : void 0,
+						input: record.input,
 						text: typeof record.text === "string" ? record.text : "",
 						attachments: record.attachments
 					});
@@ -6003,127 +5880,6 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			});
 		});
 	});
-}
-// .build/workflows/definition/upgrade.js
-/**
-* v4 → v5 定义升级（ADR 0015）：一次性存储迁移与读取兜底共用。
-*
-* v4 的边 `{ from, to, types?, back? }` 升级成通道 `{ id, label, from, to, types?, back? }`：
-*
-* - `id` 派生为 `<from>.<to>`（小写；同一对节点在 v4 里唯一，冲突时追加 `.2`、
-*   `.3`），保证引用稳定；
-* - `label` 派生为端点显示名（`研发 → 测试`；内建节点用 `start` / `end`），迁移
-*   只做形式升级，不猜语义，真正的名字留给之后的编排 agent；
-* - `start.next` 的 `position` 换成对应的 `channel` id，目标岗位由通道推出；
-* - 任务按 `createdBy.position → position` + 类型反查通道，回填 `channel`。
-*
-* 纯函数：不读盘、不改记录；幂等（已是 v5 时返回 null）。
-*
-* @module @buka/dsh-plugin-workflows/definition/upgrade
-*/
-/** 判一个值是不是普通对象。 */
-function isRecord(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-/** 通道 id 的基础形式：小写、点分；超长时截断，冲突由调用方追加后缀。 */
-function baseChannelId(from, to) {
-	return (`${from}.${to}`.toLowerCase().replace(/[^a-z0-9._-]/gu, "-").replace(/[._-]+$/u, "") || "channel").slice(0, 58).replace(/[._-]+$/u, "") || "channel";
-}
-/** 判一个定义是不是已升级的 v5。 */
-function isV5Definition(raw) {
-	return isRecord(raw) && raw.version === 5 && Array.isArray(raw.channels);
-}
-/**
-* 把一份 v4 定义升级成 v5。
-*
-* @param raw 已通过 v4 校验的原始定义
-* @returns v5 定义；已经是 v5 或形状不完整时返回 null
-*/
-function upgradeV4Definition(raw) {
-	if (!isRecord(raw)) return null;
-	if (isV5Definition(raw)) return null;
-	const definition = raw;
-	if (definition.version !== 4) return null;
-	if (!Array.isArray(definition.positions)) return null;
-	if (!isRecord(definition.start) || !isRecord(definition.end)) return null;
-	if (!isRecord(definition.budgets)) return null;
-	if (!Array.isArray(definition.edges)) return null;
-	const edges = definition.edges.filter((edge) => isRecord(edge));
-	const positions = definition.positions;
-	const labelOf = (nodeId) => {
-		if (nodeId === "start" || nodeId === "end") return nodeId;
-		return positions.find((candidate) => candidate.id === nodeId)?.label ?? nodeId;
-	};
-	const used = /* @__PURE__ */ new Set();
-	const byPair = /* @__PURE__ */ new Map();
-	const channels = [];
-	for (const edge of edges) {
-		const from = typeof edge.from === "string" ? edge.from : "";
-		const to = typeof edge.to === "string" ? edge.to : "";
-		if (from === "" || to === "") continue;
-		const base = baseChannelId(from, to);
-		let id = base;
-		let suffix = 2;
-		while (used.has(id)) {
-			id = `${base}.${suffix}`;
-			suffix += 1;
-		}
-		used.add(id);
-		byPair.set(`${from}\u0000${to}`, id);
-		channels.push({
-			id,
-			label: `${labelOf(from)} → ${labelOf(to)}`,
-			from,
-			to,
-			...Array.isArray(edge.types) ? { types: edge.types.filter((type) => typeof type === "string") } : {},
-			...edge.back === true ? { back: true } : {}
-		});
-	}
-	const start = definition.start;
-	const rawRoutes = Array.isArray(start.next) ? start.next : [];
-	const routes = [];
-	for (const entry of rawRoutes) {
-		if (!isRecord(entry)) continue;
-		const route = entry;
-		const position = typeof route.position === "string" ? route.position : "";
-		const type = typeof route.type === "string" ? route.type : "";
-		if (position === "" || type === "" || !isRecord(route.payload)) continue;
-		routes.push({
-			channel: byPair.get(`start\u0000${position}`) ?? baseChannelId("start", position),
-			type,
-			payload: route.payload,
-			...Array.isArray(route.dependsOn) ? { dependsOn: route.dependsOn.filter((dependency) => typeof dependency === "string") } : {}
-		});
-	}
-	return {
-		version: 5,
-		name: typeof definition.name === "string" ? definition.name : "",
-		...typeof definition.description === "string" && definition.description !== "" ? { description: definition.description } : {},
-		budgets: definition.budgets,
-		start: {
-			task: start.task,
-			next: routes
-		},
-		end: definition.end,
-		positions,
-		channels
-	};
-}
-/**
-* 按 v4 的唯一派发关系，给一条历史任务回填通道 id。
-*
-* 启动任务没有入站通道，返回 null；推不出来时也返回 null，由调用方决定是否记日志。
-*
-* @param definition 已升级的 v5 定义
-* @param task 历史任务（v4 记录）
-* @returns 通道 id 或 null
-*/
-function upgradeV4TaskChannel(definition, task) {
-	if (task.id === "start-task") return null;
-	if (typeof task.position !== "string" || typeof task.type !== "string") return null;
-	const from = isRecord(task.createdBy) && typeof task.createdBy.position === "string" ? task.createdBy.position : null;
-	if (from === null) return null;
-	return (Array.isArray(definition.channels) ? definition.channels : []).find((candidate) => candidate.from === from && candidate.to === task.position && (candidate.types === void 0 || candidate.types.includes(task.type)))?.id ?? null;
 }
 // .build/workflows/store/dirs.js
 /**
@@ -10598,14 +10354,14 @@ const claimantSchema = object({
 	name: string(),
 	sessionId: string().nullable()
 }).passthrough();
-/** 启动者。 */
+/** 发起人。 */
 const starterSchema = discriminatedUnion("kind", [object({ kind: literal("human") }).passthrough(), object({
 	kind: literal("session"),
 	sessionId: string()
 }).passthrough()]);
-/** 任务结果。 */
+/** 任务结果；v6 及更早的记录带 output，打开后按旧版本作业处理。 */
 const taskResultSchema = object({
-	output: unknown().nullable(),
+	output: unknown().nullable().optional(),
 	text: string(),
 	textBytes: number().int().nonnegative(),
 	textFile: string().nullable(),
@@ -10640,10 +10396,8 @@ const jobRecordSchema = object({
 	definition: looseObject,
 	status: jobStatusSchema,
 	starter: starterSchema,
-	input: object({
-		raw: unknown(),
-		structured: unknown().optional()
-	}).passthrough(),
+	input: unknown(),
+	delivery: unknown().optional(),
 	inputSummary: string(),
 	error: string().nullable(),
 	createdAt: string(),
@@ -10657,7 +10411,8 @@ const taskRecordSchema = object({
 	position: string().min(1),
 	type: string().min(1),
 	channel: string().nullable().optional(),
-	payload: unknown(),
+	content: unknown().optional(),
+	payload: unknown().optional(),
 	deps: array(string()),
 	status: taskStatusSchema,
 	createdBy: object({
@@ -10845,67 +10600,6 @@ var WorkflowStore = class {
 		}
 		if (tasks > 0 || jobs > 0 || workflows > 0) this.logger?.info?.(`buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s), ${workflows} workflow(s))`);
 	}
-	/**
-	* v4 → v5 一次性迁移：把工作流（全部版本）与作业快照升级成通道定义，
-	* 并按 v4 的唯一派发关系给任务回填 `channel`。
-	*
-	* 幂等：已升级的定义返回 null，已带 `channel` 的任务跳过。某条记录升级失败
-	* 时只记日志、保留原样，避免一次坏数据让整个插件起不来。
-	*/
-	async upgradeDefinitionsToV5() {
-		let workflows = 0;
-		for (const [id, record] of this.domain.table("workflows").entries()) {
-			let changed = false;
-			const versions = {};
-			for (const [version, snapshot] of Object.entries(record.versions)) {
-				const upgraded = upgradeV4Definition(snapshot.definition);
-				if (upgraded === null) {
-					versions[version] = snapshot;
-					continue;
-				}
-				changed = true;
-				versions[version] = {
-					...snapshot,
-					definition: upgraded
-				};
-			}
-			if (!changed) continue;
-			await this.domain.table("workflows").update(id, (current) => ({
-				...current,
-				versions
-			}));
-			workflows += 1;
-		}
-		if (workflows > 0) this.logger?.info?.(`buka-workflows: upgraded ${workflows} workflow(s) to definition v5`);
-		let jobs = 0;
-		const definitions = /* @__PURE__ */ new Map();
-		for (const [id, record] of this.domain.table("jobs").entries()) {
-			const upgraded = upgradeV4Definition(record.definition);
-			if (upgraded === null) {
-				definitions.set(id, record.definition);
-				continue;
-			}
-			definitions.set(id, upgraded);
-			await this.domain.table("jobs").update(id, (current) => ({
-				...current,
-				definition: upgraded
-			}));
-			jobs += 1;
-		}
-		if (jobs > 0) this.logger?.info?.(`buka-workflows: upgraded ${jobs} job snapshot(s) to definition v5`);
-		let tasks = 0;
-		for (const [id, record] of this.domain.table("tasks").entries()) {
-			if (Object.hasOwn(record, "channel")) continue;
-			const definition = definitions.get(record.jobId);
-			const channel = definition === void 0 ? null : upgradeV4TaskChannel(definition, record);
-			await this.domain.table("tasks").update(id, (current) => ({
-				...current,
-				channel
-			}));
-			tasks += 1;
-		}
-		if (tasks > 0) this.logger?.info?.(`buka-workflows: backfilled channel on ${tasks} legacy task(s)`);
-	}
 	/** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
 	async init() {
 		for (const [key, record] of this.domain.table("workflows").entries()) if (key !== record.id) throw new Error(`workflows: stored key "${key}" differs from record id`);
@@ -10914,7 +10608,6 @@ var WorkflowStore = class {
 		for (const [key, record] of this.domain.table("attempts").entries()) if (key !== record.id) throw new Error(`attempts: stored key "${key}" differs from record id`);
 		for (const [key, record] of this.domain.table("attachments").entries()) if (key !== record.id) throw new Error(`attachments: stored key "${key}" differs from record id`);
 		await this.normalizeLegacyWorkerKinds();
-		await this.upgradeDefinitionsToV5();
 		let promoted = 0;
 		for (const [id, record] of this.domain.table("workflows").entries()) {
 			if (record.status !== "draft") continue;
@@ -11366,15 +11059,43 @@ function openWorkflowStore(ctx, options) {
 *
 * 可见性：
 * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
-* - 启动 / 状态 / 取消工具对普通会话可见（启动者 = 当前会话）；
+* - 启动 / 状态 / 取消工具对普通会话可见（发起人 = 当前会话）；
 * - 执行工具（建任务 / 提交结果 / 看板 / 任务 / 附件）只对引擎创建的任务会话、
-*   助理会话与启动者会话可见，并在 `execute` 里按会话再校验一次。
+*   助理会话与发起人会话可见，并在 `execute` 里按会话再校验一次。
 *
 * @module @buka/dsh-plugin-workflows/tools
 */
-/** 把已知 JSON 兼容的运行时对象标成工具输出的 json 类型。 */
+/**
+* 把已知 JSON 兼容的运行时对象标成工具输出的 json 类型。
+*
+* @param value 运行时的 JSON 对象
+* @returns 工具输出可接受的 json 值
+*/
 function toolJson(value) {
 	return value;
+}
+/** 模型可读的任务投影：不带岗位 / 通道等编排信息。 */
+function taskForModel(task, withContent = false) {
+	const result = task.result;
+	return {
+		id: task.id,
+		type: task.typeLabel ?? task.type,
+		status: task.status,
+		deps: task.deps,
+		...withContent ? { content: task.content } : {},
+		...result === null || result === void 0 ? {} : {
+			text: result.text,
+			...result.action === void 0 ? {} : { action: result.action },
+			...result.input === void 0 ? {} : { input: result.input },
+			attachments: Array.isArray(result.attachments) ? result.attachments.map((attachment) => ({
+				id: attachment.id,
+				name: attachment.name,
+				bytes: attachment.bytes,
+				mime: attachment.mime,
+				description: attachment.description
+			})) : []
+		}
+	};
 }
 /** 一段模型可读文本。 */
 function text(value) {
@@ -11388,39 +11109,42 @@ function sessionIdOf(context) {
 	return typeof context.agent?.id === "string" ? context.agent.id : "";
 }
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v5) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
 {
-  "version": 5, "name": "...", "description": "...",
+  "version": 7, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
-    "task": {
-      "payload": <JSON Schema object: the raw input form>,
-      "output":  <JSON Schema object: the first structured input>
-    },
+    "content": <JSON Schema object: what the starter fills in>,
     "next": [
       { "channel": "<channel id leaving start>", "type": "<task type id>",
-        "payload": { ...templates... }, "dependsOn": ["$start"] }
+        "content": { ...templates over {{content.<path}}...} }
     ]
   },
-  "end": { "task": { "payload": <JSON Schema object: the final deliverable> } },
+  "end": { "content": <JSON Schema object: the final report> },
   "positions": [
-    { "id": "dev", "label": "研发", "description": "...",
+    { "id": "dev", "label": "研发", "note": "<optional note for whoever maintains this flow>",
       "executor": { "kind": "worker", "name": "<registered worker>" } | { "kind": "human" },
       "taskTypes": [
-        { "id": "dev.implement", "label": "开发", "description": "...",
-          "payload": <JSON Schema object>, "output": <JSON Schema object>,
-          "requires": [{ "types": ["qa.prepare"] }], "assistant": "<assistant worker>" | null,
-          "mode": "plan" | null }
+        { "id": "dev.implement", "label": "开发",
+          "definition": "<what this kind of task is and what to do; preset facts live here>",
+          "content": <JSON Schema object: the task content the creator must supply>,
+          "assistant": "<assistant worker>" | null, "mode": "plan" | null,
+          "actions": [   // human positions only
+            { "id": "pass", "label": "通过",
+              "input": <JSON Schema object: the form the human fills, optional>,
+              "creates": [ { "channel": "<channel id from this position>", "type": "<task type id>",
+                             "content": { "field": "{{input.reason}}" } } ] }
+          ] }
       ] }
   ],
   "channels": [
     { "id": "start.dev", "label": "受理", "from": "start", "to": "dev" },
     { "id": "dev.qa", "label": "提测", "from": "dev", "to": "qa", "types": ["qa.verify"] },
-    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.rework"], "back": true },
+    { "id": "qa.dev.rework", "label": "返工", "from": "qa", "to": "dev", "types": ["dev.fix"], "back": true },
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Multiple channels may connect the same ordered pair and their type whitelists may overlap; tasks are created by channel id, and the target position comes from the channel. Channels into "end" cannot whitelist types. Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". start.next entries must leave the start node via a channel and depend on "$start". Task payload templates may reference {{start.output.<path>}}, {{task.<id>.output.<path>}} and {{task.<id>.text}}. Channels carry no prompt: instructions live in task payloads and task type contracts.`;
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
 /**
 * 注册全部工作流工具。
 *
@@ -11434,12 +11158,12 @@ function registerWorkflowTools(deps) {
 	};
 	register(defineTool({
 		name: "buka_workflow_save",
-		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v5 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v7 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
 		parameters: {
 			definition: {
 				type: "json",
 				required: true,
-				description: "The complete workflow v5 definition object."
+				description: "The complete workflow v6 definition object."
 			},
 			id: {
 				type: "string",
@@ -11555,17 +11279,20 @@ function registerWorkflowTools(deps) {
 	}), orchestratorVisible);
 	register(defineTool({
 		name: "buka_job_start",
-		description: "Start a workflow job from this session. The starter is this session: the start task comes back as a new message in this conversation, asking you to convert the raw request into the first structured input and submit it with buka_task_complete. Use /job instead when the host supports commands.",
+		description: "Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema; on mismatch the error lists the missing fields). The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.",
 		parameters: {
 			workflowId: {
 				type: "string",
 				required: true,
 				description: "Workflow id to start."
 			},
-			request: {
-				type: "string",
-				required: true,
-				description: "The raw request / input text."
+			content: {
+				type: "json",
+				description: "Workflow input matching the start.content schema; omit for no input."
+			},
+			delivery: {
+				type: "json",
+				description: "How the end task comes back: {\"kind\":\"starter\"} (default) or {\"kind\":\"assistant\",\"name\":\"<assistant worker>\"}."
 			}
 		},
 		output: {
@@ -11598,19 +11325,22 @@ function registerWorkflowTools(deps) {
 			if (sessionId === "") throw new Error("buka_job_start must be called from a session");
 			const job = await (await ready()).createJobFromSession({
 				workflowId: args.workflowId,
-				rawInput: { request: args.request },
-				sessionId
+				content: args.content ?? {},
+				sessionId,
+				delivery: args.delivery
 			});
 			return {
 				jobId: job.id,
 				seq: job.seq,
 				workflowName: job.workflowName,
-				message: `已创建作业 #${job.seq}「${job.workflowName}」。启动任务会作为一条新消息发到本会话；按它给的结构化输入契约调用 buka_task_complete 提交后，作业进入看板调度。`
+				message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`
 			};
 		}
 	}));
 	register(defineJobStatusTool(ready), starterVisible);
 	register(defineJobCancelTool(ready), starterVisible);
+	register(defineTaskTargetsTool(ready), executionVisible);
+	register(defineTaskActionsTool(ready), executionVisible);
 	register(defineTaskCreateTool(ready), executionVisible);
 	register(defineTaskCompleteTool(ready), executionVisible);
 	register(defineBoardTool(ready), executionVisible);
@@ -11706,31 +11436,74 @@ function defineJobCancelTool(ready) {
 		}
 	});
 }
+/** 可创建目标工具。 */
+function defineTaskTargetsTool(ready) {
+	return defineTool({
+		name: "buka_task_targets",
+		description: "List the tasks this task can create next in the current job. Each target carries the content schema it expects. Call this before buka_task_create.",
+		parameters: {},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { targets: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => text(JSON.stringify(value.targets, null, 2))
+		},
+		async execute(_args, exec) {
+			const sessionId = sessionIdOf(exec);
+			if (sessionId === "") throw new Error("buka_task_targets must be called from a task session");
+			return { targets: toolJson((await ready()).creatableTargetsForSession(sessionId)) };
+		}
+	});
+}
+/** 人任务动作工具。 */
+function defineTaskActionsTool(ready) {
+	return defineTool({
+		name: "buka_task_actions",
+		description: "List the actions the human task this session is handling can take: each action carries a label and, when it needs input, a form schema. Pick one, fill the form, then call buka_task_complete with `action` (and `input`).",
+		parameters: {},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { actions: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => text(JSON.stringify(value.actions, null, 2))
+		},
+		async execute(_args, exec) {
+			const sessionId = sessionIdOf(exec);
+			if (sessionId === "") throw new Error("buka_task_actions must be called from a task session");
+			return { actions: toolJson((await ready()).taskActionsForSession(sessionId)) };
+		}
+	});
+}
 /** 派生任务工具。 */
 function defineTaskCreateTool(ready) {
 	return defineTool({
 		name: "buka_task_create",
-		description: "Create a task on the current job board (callable any number of times while executing a task). The engine validates the channel (it must start at your position and allow the task type), payload schema, dependencies (must exist in this job, no cycles) and the workflow budget.",
+		description: "Create a task in the current job (callable any number of times while executing a task). Call buka_task_targets first to see the available targets and their content schema. Dependencies default to the current task when omitted. The engine validates the content, dependencies (must exist in this job, no cycles) and the workflow budget.",
 		parameters: {
-			channel: {
+			target: {
 				type: "string",
 				required: true,
-				description: "Channel id to dispatch along (listed in the prompt under \"你可以派发的任务\"). It must start at your position and allow the task type; the target position comes from the channel."
+				description: "Target id from buka_task_targets (\"end\" for the final delivery task)."
 			},
-			type: {
-				type: "string",
-				required: true,
-				description: "Task type id declared by the target position (\"end\" for the end task)."
-			},
-			payload: {
+			content: {
 				type: "json",
 				required: true,
-				description: "Task payload matching the task type payload schema; templates are rendered when the task starts."
+				description: "Task content matching the target content schema."
 			},
 			deps: {
 				type: "array",
 				items: { type: "string" },
-				description: "Task ids in this job that must complete first."
+				description: "Task ids in this job that must complete first; omit to depend on this task."
 			}
 		},
 		output: {
@@ -11753,11 +11526,12 @@ function defineTaskCreateTool(ready) {
 		async execute(args, exec) {
 			const sessionId = sessionIdOf(exec);
 			if (sessionId === "") throw new Error("buka_task_create must be called from a task session");
-			const task = await (await ready()).createTaskFromSession({
+			const target = typeof args.target === "string" ? args.target.trim() : "";
+			if (target === "") throw new Error("buka_task_create requires a target from buka_task_targets");
+			const task = await (await ready()).createTaskFromTarget({
 				sessionId,
-				channel: args.channel,
-				type: args.type,
-				payload: args.payload ?? {},
+				target,
+				content: args.content ?? {},
 				deps: Array.isArray(args.deps) ? args.deps : []
 			});
 			return {
@@ -11771,16 +11545,20 @@ function defineTaskCreateTool(ready) {
 function defineTaskCompleteTool(ready) {
 	return defineTool({
 		name: "buka_task_complete",
-		description: "Submit the structured result of the task this session is executing. The engine validates `output` against the task type output schema (invalid output is returned as an error so you can correct it in the same turn), copies any attachments into the job attachment library, and advances the workflow.",
+		description: "Submit the result of the task this session is executing: a summary `text` plus optional attachments. There is no structured result schema. Assistants of a human task also pass `action` (from buka_task_actions) and the action `input`.",
 		parameters: {
-			output: {
-				type: "json",
-				required: true,
-				description: "Structured result matching the task type output schema."
-			},
 			text: {
 				type: "string",
-				description: "Optional human-readable summary."
+				required: true,
+				description: "Human-readable summary of the result."
+			},
+			action: {
+				type: "string",
+				description: "Human tasks only: the action id from buka_task_actions."
+			},
+			input: {
+				type: "json",
+				description: "Human tasks only: the form values for the chosen action."
 			},
 			attachments: {
 				type: "array",
@@ -11814,8 +11592,9 @@ function defineTaskCompleteTool(ready) {
 			if (sessionId === "") throw new Error("buka_task_complete must be called from a task session");
 			const result = await (await ready()).completeTaskFromSession({
 				sessionId,
-				output: args.output ?? {},
 				text: typeof args.text === "string" ? args.text : "",
+				action: typeof args.action === "string" ? args.action : void 0,
+				input: args.input,
 				attachments: args.attachments
 			});
 			return {
@@ -11830,7 +11609,7 @@ function defineTaskCompleteTool(ready) {
 function defineBoardTool(ready) {
 	return defineTool({
 		name: "buka_job_board",
-		description: "Read the read-only board of the job this session is executing: every task with status, dependencies, claimant and result summary. Useful to gather task ids when creating tasks across branches.",
+		description: "Read the tasks of the job this session is executing: id, type, status, dependencies, result text and attachments. Useful to gather task ids when creating follow-up tasks.",
 		parameters: {},
 		output: {
 			schema: {
@@ -11850,10 +11629,10 @@ function defineBoardTool(ready) {
 			render: (_args, value) => {
 				const job = value.job;
 				const tasks = Array.isArray(value.tasks) ? value.tasks : [];
-				const lines = [`作业 #${String(job.seq)}「${String(job.workflowName)}」状态 ${String(job.status)}`];
+				const lines = [`作业 #${String(job.seq)} 状态 ${String(job.status)}`];
 				for (const task of tasks) {
 					const record = task;
-					lines.push(`- ${String(record.id)} ${String(record.position)}/${String(record.typeLabel)} [${String(record.status)}] via=${record.channel === null || record.channel === void 0 ? "-" : String(record.channel)} deps=${Array.isArray(record.deps) ? record.deps.join(",") : ""}`);
+					lines.push(`- ${String(record.id)} ${String(record.type)} [${String(record.status)}] deps=${Array.isArray(record.deps) ? record.deps.join(",") : ""}`);
 				}
 				return text(lines.join("\n"));
 			}
@@ -11865,9 +11644,14 @@ function defineBoardTool(ready) {
 			if (reference === null) throw new Error("this session is not executing a workflow task");
 			const detail = await engine.jobDetail(reference.jobId);
 			if (detail === null) throw new Error("job not found");
+			const job = detail.job;
+			const tasks = Array.isArray(detail.tasks) ? detail.tasks : [];
 			return {
-				job: toolJson(detail.job),
-				tasks: toolJson(detail.tasks)
+				job: toolJson({
+					seq: job.seq,
+					status: job.status
+				}),
+				tasks: toolJson(tasks.map((task) => taskForModel(task)))
 			};
 		}
 	});
@@ -11876,7 +11660,7 @@ function defineBoardTool(ready) {
 function defineTaskGetTool(ready) {
 	return defineTool({
 		name: "buka_task_get",
-		description: "Read one task of the job this session is executing: payload, dependencies, attempts, result and attachments.",
+		description: "Read one task of the job this session is executing: content, dependencies, result and attachments.",
 		parameters: { taskId: {
 			type: "string",
 			required: true,
@@ -11900,7 +11684,7 @@ function defineTaskGetTool(ready) {
 			if (reference === null) throw new Error("this session is not executing a workflow task");
 			const detail = engine.taskDetail(reference.jobId, args.taskId);
 			if (detail === null) throw new Error(`task not found: ${args.taskId}`);
-			return { task: toolJson(detail) };
+			return { task: toolJson(taskForModel(detail, true)) };
 		}
 	});
 }
@@ -12032,7 +11816,7 @@ function apply(ctx, config) {
 		if (sessionId === "") return false;
 		return (await ensureReady()).taskForSession(sessionId) !== null;
 	};
-	/** 启动者 / 执行会话可见性：作业状态与取消。 */
+	/** 发起人 / 执行会话可见性：作业状态与取消。 */
 	const starterVisible = async (context) => {
 		const sessionId = typeof context.agent?.id === "string" ? context.agent.id : "";
 		if (sessionId === "") return false;

@@ -41,8 +41,11 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
   }
   const visible = sortJobs(filterJobs(jobs, state.jobFilter))
 
+  const outdated =
+    typeof state.workflow.data?.workflow?.definition?.version === 'number' &&
+    state.workflow.data?.workflow?.definition?.version !== 7
   const newJobAction =
-    retired || workflowId === ''
+    retired || outdated || workflowId === ''
       ? null
       : h(
           'button',
@@ -58,7 +61,7 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
   if (jobs.length === 0) {
     return renderEmptyAction(
       t('jobsEmpty'),
-      retired ? t('jobsEmptyRetired') : t('jobsEmptyHint'),
+      outdated ? t('jobsEmptyOutdated') : retired ? t('jobsEmptyRetired') : t('jobsEmptyHint'),
       newJobAction,
     )
   }
@@ -108,6 +111,7 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
 /** 一张作业卡片。 */
 function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): React.ReactElement {
   const { t, actions } = page
+  const legacy = typeof job.definitionVersion === 'number' && job.definitionVersion !== 7
   const total = Object.values(job.taskCounts ?? {}).reduce(
     (sum, value) => sum + (typeof value === 'number' ? value : 0),
     0,
@@ -138,8 +142,10 @@ function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): R
       'button',
       {
         type: 'button',
-        className: 'buka-workflows-card',
-        onClick: () => actions.openJob(workflowId, job.id),
+        className: `buka-workflows-card${legacy ? ' is-disabled' : ''}`,
+        disabled: legacy,
+        title: legacy ? t('jobLegacyHint') : undefined,
+        onClick: legacy ? undefined : () => actions.openJob(workflowId, job.id),
       },
       h(
         'span',
@@ -150,7 +156,12 @@ function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): R
           h('span', { className: 'buka-workflows-seq' }, fill(t, 'jobSeq', { seq: job.seq ?? 0 })),
           h('span', { className: 'buka-workflows-cardTitle' }, job.inputSummary ?? job.id),
         ),
-        renderStatusTag(t, job.status, 'job'),
+        h(
+          'span',
+          { className: 'buka-workflows-cardTags' },
+          legacy ? h('span', { className: 'buka-workflows-tag' }, t('jobLegacy')) : null,
+          renderStatusTag(t, job.status, 'job'),
+        ),
       ),
       h('span', { className: 'buka-workflows-meta' }, parts.join(' · ')),
       total > 0

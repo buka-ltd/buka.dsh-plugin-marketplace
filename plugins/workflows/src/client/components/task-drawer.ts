@@ -25,7 +25,6 @@ import { attachmentUrl } from '../request.ts'
 import type { Attempt, JsonSchema, TaskDetail, TaskTypeDefinition } from '../types.ts'
 import { isRecord } from '../types.ts'
 import {
-  ClampedText,
   ConfirmButton,
   renderAttachmentLink,
   renderDrawerHead,
@@ -122,18 +121,6 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
 
   const elements: React.ReactElement[] = []
 
-  if (typeof task.typeDescription === 'string' && task.typeDescription !== '') {
-    elements.push(
-      h(ClampedText, {
-        key: 'type-desc',
-        text: task.typeDescription,
-        className: 'buka-workflows-drawerText',
-        expandLabel: t('expandText'),
-        collapseLabel: t('collapseText'),
-      }),
-    )
-  }
-
   if (showForm) {
     elements.push(renderFormSection(page, task, allowed, canClaim, canComplete))
   }
@@ -150,16 +137,16 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
   }
 
   if (!isEnd) {
-    const payloadSchema = isRecord(typeDefinition?.payload)
-      ? (typeDefinition.payload as JsonSchema)
+    const contentSchema = isRecord(typeDefinition?.content)
+      ? (typeDefinition.content as JsonSchema)
       : null
     elements.push(
       renderSection(
-        t('taskPayloadTitle'),
+        t('taskContentTitle'),
         h(
           'div',
           { className: 'buka-workflows-contractBody' },
-          renderReadonlyValue(page, payloadSchema, task.payload ?? null, t('taskPayloadEmpty')),
+          renderReadonlyValue(page, contentSchema, task.content ?? null, t('taskContentEmpty')),
         ),
       ),
     )
@@ -216,7 +203,7 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
   return elements
 }
 
-/** 人任务的填写表单；对需要动手的人来说，这是抽屉里最该先看到的东西。 */
+/** 人任务的填写表单：先选动作，再按动作的表单填，最后提交。 */
 function renderFormSection(
   page: AppContext,
   task: TaskDetail,
@@ -225,13 +212,42 @@ function renderFormSection(
   canComplete: boolean,
 ): React.ReactElement {
   const { t, state, actions } = page
+  const typeDefinition = taskTypeOf(state, task)
+  const actionList = Array.isArray(typeDefinition?.actions) ? typeDefinition.actions : []
+  const selected = actionList.find((action) => action.id === state.taskForm.action) ?? null
+  const inputSchema = isRecord(selected?.input) ? (selected.input as Record<string, unknown>) : null
+  const hasActions = actionList.length > 0
   return renderSection(
     t('actionFormTitle'),
     h(
       'div',
       { className: 'buka-workflows-taskForm' },
-      h('p', { className: 'buka-workflows-sectionHint' }, t('actionFormHint')),
-      ...renderTaskForm(page, task),
+      h(
+        'p',
+        { className: 'buka-workflows-sectionHint' },
+        hasActions ? t('actionFormHint') : t('actionFormNoActions'),
+      ),
+      hasActions
+        ? h(
+            'div',
+            { className: 'buka-workflows-actionRow' },
+            ...actionList.map((action) =>
+              h(
+                Button,
+                {
+                  key: String(action.id ?? action.label),
+                  variant: state.taskForm.action === action.id ? 'primary' : 'outline',
+                  size: 'sm',
+                  className: 'buka-workflows-smallButton',
+                  onClick: () => actions.selectTaskAction(String(action.id ?? '')),
+                  disabled: state.taskForm.submitting,
+                },
+                action.label ?? String(action.id ?? ''),
+              ),
+            ),
+          )
+        : null,
+      ...renderTaskForm(page, task, inputSchema),
       h(
         'div',
         { className: 'buka-workflows-formActions' },
@@ -245,7 +261,11 @@ function renderFormSection(
             onClick: () => void actions.runTaskAction('complete'),
             disabled: state.taskForm.submitting || !canComplete,
           },
-          state.taskForm.submitting ? t('actionSubmitting') : t('actionSubmitComplete'),
+          state.taskForm.submitting
+            ? t('actionSubmitting')
+            : state.taskForm.action === null
+              ? t('actionSubmitCompleteOnly')
+              : t('actionSubmitAction'),
         ),
       ),
     ),
@@ -343,7 +363,7 @@ function actionButtons(
 /** 结束任务的交付物：置顶，并跳过重复的「任务输入」。 */
 function renderFinalDeliverable(page: AppContext, task: TaskDetail): React.ReactElement {
   const { t, state } = page
-  const endSchema = currentJobDefinition(state)?.end?.task?.payload
+  const endSchema = currentJobDefinition(state)?.end?.content
   return renderSection(
     t('finalDeliverableTitle'),
     h(
@@ -352,8 +372,8 @@ function renderFinalDeliverable(page: AppContext, task: TaskDetail): React.React
       renderReadonlyValue(
         page,
         isRecord(endSchema) ? (endSchema as JsonSchema) : null,
-        task.payload ?? null,
-        t('taskPayloadEmpty'),
+        task.content ?? null,
+        t('taskContentEmpty'),
       ),
     ),
   )
@@ -412,28 +432,34 @@ function renderAttempt(page: AppContext, attempt: Attempt): React.ReactElement {
 
 /** 结果区：说明 + 结构化产出 + 附件。 */
 function renderTaskResult(page: AppContext, task: TaskDetail): React.ReactElement | null {
-  const { t, actions, state } = page
+  const { t, actions } = page
   const result = isRecord(task.result) ? task.result : null
   if (result === null) return null
   const text = typeof result.text === 'string' ? result.text : ''
-  const output = result.output
+  const action = isRecord(result.action) ? result.action : null
+  const input = result.input
   const attachments = Array.isArray(result.attachments) ? result.attachments : []
-  const typeDefinition = taskTypeOf(state, task)
-  const outputSchema = isRecord(typeDefinition?.output)
-    ? (typeDefinition.output as JsonSchema)
-    : null
   const blocks: React.ReactNode[] = []
+  if (action !== null && typeof action.label === 'string') {
+    blocks.push(
+      h(
+        'p',
+        { key: 'action', className: 'buka-workflows-resultMeta' },
+        `${t('taskResultAction')}: ${action.label}`,
+      ),
+    )
+  }
   if (text !== '') {
     blocks.push(h('p', { key: 'text', className: 'buka-workflows-resultText' }, text))
   }
-  if (output !== undefined && output !== null) {
+  if (input !== undefined && input !== null) {
     blocks.push(
       resultBlock(
-        t('taskResultOutput'),
+        t('taskResultInput'),
         h(
           'div',
           { className: 'buka-workflows-contractBody' },
-          renderReadonlyValue(page, outputSchema, output, t('taskResultEmpty')),
+          renderReadonlyValue(page, null, input, t('taskResultEmpty')),
         ),
       ),
     )
