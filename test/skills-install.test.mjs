@@ -23,7 +23,9 @@ import {
   installGlobalSkill,
   installProjectSkill,
   installSavedSkill,
+  installSavedSkillGroup,
   isInstallableSkillName,
+  MAX_GROUP_SKILLS,
   skillDirName,
 } from '../plugins/skills/src/skill-install.ts'
 
@@ -662,6 +664,231 @@ test('页面入口：安装到打工人 / 工作区由 Host 解析目录，失�
       runNpx: async () => ({ ok: true }),
     })
     assert.equal(noResolver.code, 'no-target-resolver')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('目录安装：按目录下每个 skill 依次装到全局，已装过的跳过', async () => {
+  const { root, homes } = await makeHomes()
+  try {
+    await addSavedRepo({ homes, source: 'owner/repo' })
+    const catalog = {
+      async listSkills() {
+        return {
+          ok: true,
+          skills: [
+            { name: 'Alpha', path: 'skills/a/SKILL.md', plugin: 'grp' },
+            { name: 'Beta', path: 'skills/b/SKILL.md', plugin: 'grp' },
+            { name: 'Gamma', path: 'skills/c/SKILL.md', plugin: 'grp' },
+          ],
+        }
+      },
+    }
+    // Beta 已经装过：目录安装应跳过它，而不是整体失败。
+    await writeSkill(path.join(homes.agentsHome, 'skills', 'beta'), 'Beta')
+    const calls = []
+    const result = await installSavedSkillGroup({
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      catalog,
+      source: 'owner/repo',
+      // 同一路径传两次也只装一次。
+      skillPaths: [
+        'skills/a/SKILL.md',
+        'skills/b/SKILL.md',
+        'skills/b/SKILL.md',
+        'skills/c/SKILL.md',
+      ],
+      runNpx: fakeInstaller(homes, calls),
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.batch, true)
+    assert.equal(result.target, 'global')
+    assert.deepEqual(
+      result.installed.map((one) => one.name),
+      ['Alpha', 'Gamma'],
+    )
+    assert.deepEqual(result.skipped, [{ name: 'Beta' }])
+    assert.deepEqual(result.failed, [])
+    assert.deepEqual(
+      calls.map((args) => args[args.indexOf('--skill') + 1]),
+      ['Alpha', 'Gamma'],
+      '只该为没装过的 skill 调用 npx',
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('目录安装：单个失败不中断后续，结果聚合失败原因', async () => {
+  const { root, homes } = await makeHomes()
+  try {
+    await addSavedRepo({ homes, source: 'owner/repo' })
+    const catalog = {
+      async listSkills() {
+        return {
+          ok: true,
+          skills: [
+            { name: 'Alpha', path: 'skills/a/SKILL.md' },
+            { name: 'Beta', path: 'skills/b/SKILL.md' },
+          ],
+        }
+      },
+    }
+    const calls = []
+    const result = await installSavedSkillGroup({
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      catalog,
+      source: 'owner/repo',
+      skillPaths: ['skills/a/SKILL.md', 'skills/b/SKILL.md'],
+      runNpx: async (args) => {
+        calls.push(args)
+        const name = args[args.indexOf('--skill') + 1]
+        if (name === 'Alpha') return { ok: false, message: 'exit 1', output: 'network down' }
+        await writeSkill(path.join(homes.agentsHome, 'skills', skillDirName(name)), name)
+        return { ok: true, output: 'installed' }
+      },
+    })
+
+    assert.equal(calls.length, 2, '前一个失败后应继续装后面的 skill')
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'npx-failed')
+    assert.deepEqual(
+      result.installed.map((one) => one.name),
+      ['Beta'],
+    )
+    assert.deepEqual(
+      result.failed.map((one) => ({ name: one.name, code: one.code })),
+      [{ name: 'Alpha', code: 'npx-failed' }],
+    )
+    assert.ok(result.message.includes('Alpha'), result.message)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('目录安装：路径形状、数量上限与未知 skill 都在调用 npx 之前拒绝', async () => {
+  const { root, homes } = await makeHomes()
+  try {
+    await addSavedRepo({ homes, source: 'owner/repo' })
+    let calls = 0
+    const notCalled = async () => {
+      calls += 1
+      return { ok: true }
+    }
+    const catalog = {
+      async listSkills() {
+        return { ok: true, skills: [{ name: 'Alpha', path: 'skills/a/SKILL.md' }] }
+      },
+    }
+    const base = {
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      catalog,
+      source: 'owner/repo',
+      runNpx: notCalled,
+    }
+
+    const notArray = await installSavedSkillGroup({ ...base, skillPaths: 'skills/a/SKILL.md' })
+    assert.equal(notArray.code, 'invalid-skill-paths')
+
+    const empty = await installSavedSkillGroup({ ...base, skillPaths: [] })
+    assert.equal(empty.code, 'invalid-skill-paths')
+
+    const tooMany = await installSavedSkillGroup({
+      ...base,
+      skillPaths: Array.from(
+        { length: MAX_GROUP_SKILLS + 1 },
+        (_, index) => `skills/${index}/SKILL.md`,
+      ),
+    })
+    assert.equal(tooMany.code, 'invalid-skill-paths')
+
+    const unknown = await installSavedSkillGroup({ ...base, skillPaths: ['skills/gone/SKILL.md'] })
+    assert.equal(unknown.code, 'skill-not-found')
+
+    const badTarget = await installSavedSkillGroup({
+      ...base,
+      target: 'elsewhere',
+      skillPaths: ['skills/a/SKILL.md'],
+    })
+    assert.equal(badTarget.code, 'invalid-target')
+
+    const noRunner = await installSavedSkillGroup({
+      homes,
+      canonicalAgentsHome: homes.agentsHome,
+      catalog,
+      source: 'owner/repo',
+      skillPaths: ['skills/a/SKILL.md'],
+    })
+    assert.equal(noRunner.code, 'no-runner')
+
+    const mismatch = await installSavedSkillGroup({
+      ...base,
+      canonicalAgentsHome: path.join(root, 'another-agents'),
+      skillPaths: ['skills/a/SKILL.md'],
+    })
+    assert.equal(mismatch.code, 'unsupported-home')
+    assert.ok(mismatch.message.includes('DSH_AGENTS_HOME'), mismatch.message)
+
+    assert.equal(calls, 0, '以上都应该在调用 npx 之前返回')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('目录安装到打工人：整组都写进解析出的目标目录', async () => {
+  const { root, homes } = await makeHomes()
+  try {
+    await addSavedRepo({ homes, source: 'owner/repo' })
+    const targetDir = path.join(root, 'worker')
+    await fs.mkdir(targetDir, { recursive: true })
+    const catalog = {
+      async listSkills() {
+        return {
+          ok: true,
+          skills: [
+            { name: 'Alpha', path: 'skills/a/SKILL.md' },
+            { name: 'Beta', path: 'skills/b/SKILL.md' },
+          ],
+        }
+      },
+    }
+    const calls = []
+    const resolved = []
+    const result = await installSavedSkillGroup({
+      homes,
+      catalog,
+      source: 'owner/repo',
+      target: 'worker',
+      worker: 'bot',
+      resolveTarget: async (request) => {
+        resolved.push(request)
+        return { ok: true, path: targetDir, label: 'bot' }
+      },
+      skillPaths: ['skills/a/SKILL.md', 'skills/b/SKILL.md'],
+      runNpx: projectInstaller(calls),
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.target, 'worker')
+    assert.deepEqual(
+      result.installed.map((one) => one.name),
+      ['Alpha', 'Beta'],
+    )
+    assert.deepEqual(resolved, [{ target: 'worker', worker: 'bot', workspace: undefined }])
+    assert.deepEqual(
+      calls.map((call) => call.cwd),
+      [targetDir, targetDir],
+      '每个 skill 都要在目标目录里执行 npx',
+    )
+    // 打工人同时落 .agents 与 .claude 两个 agent 目录。
+    const args = calls[0].args
+    assert.ok(args.includes('-a') && args.includes('universal'), args.join(' '))
+    assert.ok(args.includes('claude-code'), args.join(' '))
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

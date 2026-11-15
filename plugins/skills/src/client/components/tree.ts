@@ -6,6 +6,9 @@
  * `createTreeRenderer()` 把这份状态绑成 `renderTree` / `renderTreeNode` 两个
  * 函数，供「收藏」面板复用。
  *
+ * 目录与 skill 叶子都带三个安装入口：目录行装的是**目录下全部 skill**（有的
+ * 仓库里一个插件 / 合集就是一个目录，逐个点 skill 太慢），skill 行只装自己。
+ *
  * @module @buka/dsh-plugin-skills/client/components/tree
  */
 
@@ -13,7 +16,7 @@ import type { ReactElement } from 'react'
 
 import { errorCode, messageOf } from '../api.ts'
 import type { Translate } from '../dictionary.ts'
-import { countSkills, installKeyOf, skillKeyOf } from '../keys.ts'
+import { countSkills, installKeyOf, skillKeyOf, skillLeavesOf } from '../keys.ts'
 import {
   Button,
   h,
@@ -25,7 +28,9 @@ import {
 import type {
   RepoRef,
   SkillTreeChild,
+  SkillTreeDir,
   SkillTreeLeaf,
+  SkillTreeSelection,
   TargetDialogKind,
   TreeState,
 } from '../types.ts'
@@ -57,6 +62,20 @@ function treeFailureText(t: Translate, failure: unknown): string {
   }
 }
 
+/**
+ * 目录下的 skill 是不是全部已全局安装。
+ *
+ * 部分已安装时目录按钮保持「全部安装」可用：Host 会跳过已装过的，只装剩下的，
+ * 所以这里不能只看「有一个已安装」就禁用。
+ *
+ * @param dir 目录节点
+ * @param installedSkillKeys 已安装 skill 的目录键集合
+ */
+function allSkillsInstalled(dir: SkillTreeDir, installedSkillKeys: ReadonlySet<string>): boolean {
+  const leaves = skillLeavesOf(dir)
+  return leaves.length > 0 && leaves.every((leaf) => installedSkillKeys.has(skillKeyOf(leaf.name)))
+}
+
 /** 渲染树需要的页面状态与动作。 */
 export interface TreeRendererState {
   /** 翻译函数。 */
@@ -77,8 +96,14 @@ export interface TreeRendererState {
   readonly toggleDir: (repo: RepoRef, dirPath: string) => void
   /** 安装树里的一个 skill 到全局。 */
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
+  /** 安装一个目录里的全部 skill 到全局。 */
+  readonly installDir: (repo: RepoRef, node: SkillTreeDir) => Promise<void>
   /** 打开「安装到打工人 / 工作区」对话框。 */
-  readonly openTargetDialog: (kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf) => void
+  readonly openTargetDialog: (
+    kind: TargetDialogKind,
+    repo: RepoRef,
+    node: SkillTreeSelection,
+  ) => void
 }
 
 /** 绑定好状态的树渲染函数。 */
@@ -105,6 +130,7 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
     loadTree,
     toggleDir,
     installSkill,
+    installDir,
     openTargetDialog,
   } = props
 
@@ -159,16 +185,89 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
   }
 
   /**
-   * 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 三个安装入口）。
+   * 一个节点右侧的三个安装入口，目录与 skill 叶子共用。
    *
-   * skill 叶子右侧固定三个按钮：「全局安装」「安装到打工人」「安装到工作区」。
-   * 只有全局安装会在已安装时变成禁用的「全局已安装」：它的判断只看全局安装
-   * 列表（名字按 npx 的 sanitize 规则归一），不依赖仓库来源，所以同一个 skill
-   * 从别的仓库装过也不给重复安装按钮；打工人 / 工作区是每次临时选的目标，
-   * 不做已安装判断。
+   * 目录行把「全局安装」换成「全部安装」（装目录下全部 skill），其余两个入口
+   * 在两种行上含义相同：选一个打工人 / 工作区作为目标。三个按钮在任一安装
+   * 进行中统一禁用；只有全局入口会在已安装时变成禁用的「全局已安装」，
+   * 打工人 / 工作区是每次临时选的目标，不做已安装判断。
    *
-   * 全局按钮正在安装时显示「安装中…」并占据同一个操作位；三个入口都要等
-   * Host 侧串行队列空出来，所以任何安装进行中时三个按钮统一禁用。
+   * @param repo 一条收藏
+   * @param node 目录或 skill 节点
+   * @param installed 这个节点是否已全局安装（目录要求全部 skill 都已安装）
+   * @param busy 这个节点是否正在安装
+   * @param onInstall 点「全局安装 / 全部安装」时执行的动作
+   */
+  function renderActions(
+    repo: RepoRef,
+    node: SkillTreeSelection,
+    installed: boolean,
+    busy: boolean,
+    onInstall: () => void,
+  ): ReactElement {
+    const installLabel = node.type === 'dir' ? t('installAll') : t('installGlobal')
+    return h(
+      'div',
+      { className: 'buka-skills-treeSkillAction' },
+      installed
+        ? h(
+            Button,
+            {
+              variant: 'outline',
+              size: 'sm',
+              disabled: true,
+              icon: h(IconCheckOutlineRegular, { size: 13 }),
+              'aria-label': `${t('installedBadgeGlobal')} ${node.name}`,
+            },
+            t('installedBadgeGlobal'),
+          )
+        : busy
+          ? h(
+              'span',
+              { className: 'buka-skills-statusWithDot', role: 'status' },
+              h(StateDot, { state: 'ongoing' }),
+              t('installing'),
+            )
+          : h(
+              Button,
+              {
+                variant: 'outline',
+                size: 'sm',
+                icon: h(IconDownloadOutlineRegular, { size: 13 }),
+                'aria-label': `${installLabel} ${node.name}`,
+                disabled: installing !== null || targetInstalling,
+                onClick: onInstall,
+              },
+              installLabel,
+            ),
+      h(
+        Button,
+        {
+          variant: 'outline',
+          size: 'sm',
+          'aria-label': `${t('installWorker')} ${node.name}`,
+          disabled: installing !== null || targetInstalling,
+          onClick: () => openTargetDialog('worker', repo, node),
+        },
+        t('installWorker'),
+      ),
+      h(
+        Button,
+        {
+          variant: 'outline',
+          size: 'sm',
+          'aria-label': `${t('installWorkspace')} ${node.name}`,
+          disabled: installing !== null || targetInstalling,
+          onClick: () => openTargetDialog('workspace', repo, node),
+        },
+        t('installWorkspace'),
+      ),
+    )
+  }
+
+  /**
+   * 递归渲染树节点：目录可折叠并带「全部安装」，skill 是叶子（名称 + 一行
+   * 描述 + 三个安装入口）。
    *
    * @param repo 一条收藏
    * @param node Host 返回的树节点
@@ -181,16 +280,27 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
         'li',
         { className: 'buka-skills-treeItem', key: node.path },
         h(
-          'button',
-          {
-            type: 'button',
-            className: 'buka-skills-treeToggle',
-            'aria-expanded': !collapsed,
-            onClick: () => toggleDir(repo, node.path),
-          },
-          h(IconChevronRightOutlineRegular, { size: 12 }),
-          h('span', { className: 'buka-skills-treeName' }, node.name),
-          h('span', { className: 'buka-skills-treeCount' }, `· ${countSkills(node)}`),
+          'div',
+          { className: 'buka-skills-treeDir' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'buka-skills-treeToggle',
+              'aria-expanded': !collapsed,
+              onClick: () => toggleDir(repo, node.path),
+            },
+            h(IconChevronRightOutlineRegular, { size: 12 }),
+            h('span', { className: 'buka-skills-treeName' }, node.name),
+            h('span', { className: 'buka-skills-treeCount' }, `· ${countSkills(node)}`),
+          ),
+          renderActions(
+            repo,
+            node,
+            allSkillsInstalled(node, installedSkillKeys),
+            installing === installKeyOf(repo, node),
+            () => installDir(repo, node),
+          ),
         ),
         collapsed
           ? null
@@ -218,63 +328,7 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
             ? null
             : h('span', { className: 'buka-skills-treeSkillDesc' }, description),
         ),
-        h(
-          'div',
-          { className: 'buka-skills-treeSkillAction' },
-          installed
-            ? h(
-                Button,
-                {
-                  variant: 'outline',
-                  size: 'sm',
-                  disabled: true,
-                  icon: h(IconCheckOutlineRegular, { size: 13 }),
-                  'aria-label': `${t('installedBadgeGlobal')} ${node.name}`,
-                },
-                t('installedBadgeGlobal'),
-              )
-            : busy
-              ? h(
-                  'span',
-                  { className: 'buka-skills-statusWithDot', role: 'status' },
-                  h(StateDot, { state: 'ongoing' }),
-                  t('installing'),
-                )
-              : h(
-                  Button,
-                  {
-                    variant: 'outline',
-                    size: 'sm',
-                    icon: h(IconDownloadOutlineRegular, { size: 13 }),
-                    'aria-label': `${t('installGlobal')} ${node.name}`,
-                    disabled: installing !== null || targetInstalling,
-                    onClick: () => installSkill(repo, node),
-                  },
-                  t('installGlobal'),
-                ),
-          h(
-            Button,
-            {
-              variant: 'outline',
-              size: 'sm',
-              'aria-label': `${t('installWorker')} ${node.name}`,
-              disabled: installing !== null || targetInstalling,
-              onClick: () => openTargetDialog('worker', repo, node),
-            },
-            t('installWorker'),
-          ),
-          h(
-            Button,
-            {
-              variant: 'outline',
-              size: 'sm',
-              'aria-label': `${t('installWorkspace')} ${node.name}`,
-              disabled: installing !== null || targetInstalling,
-              onClick: () => openTargetDialog('workspace', repo, node),
-            },
-            t('installWorkspace'),
-          ),
-        ),
+        renderActions(repo, node, installed, busy, () => installSkill(repo, node)),
       ),
     )
   }

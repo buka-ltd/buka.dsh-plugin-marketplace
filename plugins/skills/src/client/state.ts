@@ -32,6 +32,7 @@ import {
   entryKey,
   installKeyOf,
   skillKeyOf,
+  skillLeavesOf,
   targetItemsOf,
   targetKeyOf,
   targetLabelOf,
@@ -48,8 +49,11 @@ import type {
   RepoTreeData,
   SavedRepo,
   SavedSnapshot,
+  SkillGroupInstallSnapshot,
   SkillsPageState,
+  SkillTreeDir,
   SkillTreeLeaf,
+  SkillTreeSelection,
   TargetDialog,
   TargetDialogKind,
   TreeState,
@@ -410,6 +414,49 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
+   * 安装一个目录里的全部 skill：把目录下每个 skill 的仓库路径一起交给 Host，
+   * 由 Host 逐个走 `npx skills`，全局安装时已装过的会跳过。成功后只刷新已
+   * 安装列表，树保持展开，用户能接着装别的目录。
+   *
+   * @param repo 一条收藏
+   * @param node 树里的目录节点
+   */
+  async function installDir(repo: RepoRef, node: SkillTreeDir): Promise<void> {
+    if (installing !== null || targetInstalling) return
+    const paths = skillLeavesOf(node).map((leaf) => leaf.path)
+    if (paths.length === 0) return
+    setInstalling(installKeyOf(repo, node))
+    try {
+      const body = await requestJson<SkillGroupInstallSnapshot>(INSTALL_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ source: repo.source, paths }),
+      })
+      const installed = body.installed?.length ?? 0
+      const skipped = body.skipped?.length ?? 0
+      flash(
+        'success',
+        installed === 0
+          ? t('dirAllInstalled')
+          : `${t('installedDirToast')} ${installed}${
+              skipped > 0 ? ` · ${t('skippedInstalledToast')} ${skipped}` : ''
+            }`,
+      )
+      await refreshInstalled()
+    } catch (failure) {
+      // 批量里可能已经有若干装好了：失败也刷新列表，让树里的已安装标记与
+      // Host 的真实状态对得上。
+      await refreshInstalled()
+      const text =
+        errorCode(failure) === 'skill-not-found'
+          ? t('installMissing')
+          : `${t('installFailed')} ${messageOf(failure)}`
+      flash('error', text)
+    } finally {
+      setInstalling(null)
+    }
+  }
+
+  /**
    * 读一次目标列表；成功后默认选中第一项，让「安装」按钮直接可用。
    *
    * @param kind 目标类型
@@ -434,9 +481,9 @@ function useSkillsPageState(t: Translate): SkillsPageState {
    *
    * @param kind 目标类型
    * @param repo 一条收藏
-   * @param node Host 返回的 skill 节点
+   * @param node Host 返回的 skill 或目录节点
    */
-  function openTargetDialog(kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf): void {
+  function openTargetDialog(kind: TargetDialogKind, repo: RepoRef, node: SkillTreeSelection): void {
     if (installing !== null || targetInstalling) return
     targetRequestRef.current += 1
     setTargetDialog({ kind, repo, node })
@@ -468,8 +515,9 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 把当前 skill 安装到选中的打工人 / 工作区。Host 会把选择换回登记表里的
-   * 可信目录；成功后关掉对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
+   * 把当前选中的 skill / 目录安装到选中的打工人 / 工作区。Host 会把选择换回
+   * 登记表里的可信目录；目录会把其下每个 skill 的路径一起传上去。成功后关掉
+   * 对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
    */
   async function installToTarget(): Promise<void> {
     if (targetDialog === null || targetInstalling) return
@@ -480,25 +528,37 @@ function useSkillsPageState(t: Translate): SkillsPageState {
       (item) => targetKeyOf(kind, item) === choice,
     )
     const label = targetLabelOf(kind, chosen) || choice
+    const node = targetDialog.node
     setTargetInstalling(true)
     setTargetError(null)
     try {
-      const body = await requestJson<{ name?: string }>(INSTALL_ROUTE, {
+      const body = await requestJson<SkillGroupInstallSnapshot & { name?: string }>(INSTALL_ROUTE, {
         method: 'POST',
         body: JSON.stringify({
           source: targetDialog.repo.source,
-          path: targetDialog.node.path,
+          ...(node.type === 'dir'
+            ? { paths: skillLeavesOf(node).map((leaf) => leaf.path) }
+            : { path: node.path }),
           target: kind,
           ...(kind === 'worker' ? { worker: choice } : { workspace: choice }),
         }),
       })
       resetTargetDialog()
-      flash(
-        'success',
-        `${t(kind === 'worker' ? 'installedToWorker' : 'installedToWorkspace')} ${
-          body.name ?? targetDialog.node.name
-        } → ${label}`,
-      )
+      if (node.type === 'dir') {
+        flash(
+          'success',
+          `${t(kind === 'worker' ? 'installedDirToWorker' : 'installedDirToWorkspace')} ${label} · ${
+            body.installed?.length ?? 0
+          }`,
+        )
+      } else {
+        flash(
+          'success',
+          `${t(kind === 'worker' ? 'installedToWorker' : 'installedToWorkspace')} ${
+            body.name ?? node.name
+          } → ${label}`,
+        )
+      }
     } catch (failure) {
       const text =
         errorCode(failure) === 'skill-not-found'
@@ -650,6 +710,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     uninstall,
     refreshInstalled,
     installSkill,
+    installDir,
     openTargetDialog,
     closeTargetDialog,
     setTargetChoice,

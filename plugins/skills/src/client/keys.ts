@@ -7,7 +7,12 @@
  * @module @buka/dsh-plugin-skills/client/keys
  */
 
-import type { InstallTargetsSnapshot, SkillTreeChild, TargetDialogKind } from './types.ts'
+import type {
+  InstallTargetsSnapshot,
+  SkillTreeChild,
+  SkillTreeLeaf,
+  TargetDialogKind,
+} from './types.ts'
 
 /**
  * 同名的 skill 可能同时存在于两个全局根，所以页面状态用「根 + 名称」做键。
@@ -56,6 +61,20 @@ function countSkills(node: SkillTreeChild): number {
   let total = 0
   for (const child of children) total += countSkills(child)
   return total
+}
+
+/**
+ * 一个树节点里的全部 skill 叶子；目录按深度优先展开。
+ *
+ * 目录行上的「全部安装」用它收集要装的 skill；目录节点的 `path` 只是展示
+ * 分组键（npx 仓库是插件名，marketplace 是插件根），不能当仓库路径用。
+ *
+ * @param node Host 返回的树节点
+ */
+function skillLeavesOf(node: SkillTreeChild): SkillTreeLeaf[] {
+  if (node.type === 'skill') return [node]
+  const children = Array.isArray(node.children) ? node.children : []
+  return children.flatMap((child) => skillLeavesOf(child))
 }
 
 /**
@@ -109,6 +128,7 @@ export {
   entryKey,
   installKeyOf,
   skillKeyOf,
+  skillLeavesOf,
   targetItemsOf,
   targetKeyOf,
   targetLabelOf,

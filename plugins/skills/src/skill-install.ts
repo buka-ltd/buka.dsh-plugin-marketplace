@@ -42,6 +42,14 @@ import { AGENTS_DIR, globalRoots, resolveHomes, scanRoot } from './skill-store.t
 export const MAX_SKILL_NAME_LENGTH = 255
 
 /**
+ * 一次「目录安装」最多接受多少个 skill。
+ *
+ * 页面把目录里所有 skill 的路径一起传上来，Host 逐个交给 `npx skills add`；
+ * 这里只防页面构造超长请求，正常的插件 / 合集目录远达不到这个数量。
+ */
+export const MAX_GROUP_SKILLS = 200
+
+/**
  * 安装时指定的 `npx skills` agent。
  *
  * 不指定 agent 时（`-y`）CLI 会把 skill 装到**本机检测到的所有 agent** 目录里：
@@ -246,6 +254,19 @@ function checkSourceAndName(
 }
 
 /**
+ * `npx skills` 的全局副本目录与 DSH 扫描的目录是否一致；不一致时返回拒绝理由。
+ *
+ * 单条安装与目录批量安装共用这一条判断，避免两处文案分叉。
+ *
+ * @param homes 两个全局 skills 根目录
+ * @param canonicalAgentsHome `npx skills` 会写入的全局目录（`~/.agents`）
+ */
+function globalHomeMismatch(homes: Homes, canonicalAgentsHome: string): string | null {
+  if (path.resolve(canonicalAgentsHome) === path.resolve(homes.agentsHome)) return null
+  return `npx skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, 'skills')}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, 'skills')}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`
+}
+
+/**
  * 把单个 skill 从某个 `npx skills` 来源安装到全局 `~/.agents/skills`。
  *
  * 失败码：
@@ -282,7 +303,7 @@ export async function installGlobalSkill({
     return {
       ok: false,
       code: 'unsupported-home',
-      message: `npx skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, 'skills')}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, 'skills')}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`,
+      message: globalHomeMismatch(homes, canonicalAgentsHome) ?? '',
     }
   }
 
@@ -446,6 +467,134 @@ export async function installProjectSkill({
   }
 }
 
+/** 仓库列表里一条可安装 skill 的形状（Host 读到的字段）。 */
+interface CatalogSkill {
+  name: string
+  path: string
+  plugin?: string | null
+}
+
+/** 单条安装与目录安装共用的前半段结果。 */
+interface SavedInstallContext {
+  readonly repoSource: string
+  readonly skills: CatalogSkill[]
+  readonly targetDir: string | null
+}
+
+type SavedInstallPrepared =
+  | { readonly ok: true; readonly context: SavedInstallContext }
+  | { readonly ok: false; readonly result: SkillInstallResult }
+
+/**
+ * 单条安装与目录安装共用的前半段：校验来源是收藏、解析目标目录、读仓库列表。
+ *
+ * 顺序有意保持：目标先解析，目标不存在时不必为了列仓库去打一次网络请求；
+ * 来源与目标都以 Host 这次读到的数据为准，浏览器传来的只是名字 / 路径。
+ *
+ * @returns 成功时给出规范化来源、仓库里的 skill 列表与（项目级安装时的）目标目录
+ */
+async function resolveSavedInstall({
+  homes,
+  catalog,
+  source,
+  target,
+  worker,
+  workspace,
+  resolveTarget,
+}: {
+  homes: Homes
+  catalog: InstallCatalog
+  source?: unknown
+  target: InstallTargetKind
+  worker?: unknown
+  workspace?: unknown
+  resolveTarget: InstallTargetResolver | null
+}): Promise<SavedInstallPrepared> {
+  if (target !== 'global' && resolveTarget === null) {
+    return {
+      ok: false,
+      result: { ok: false, code: 'no-target-resolver', message: '缺少解析安装目标的能力' },
+    }
+  }
+
+  const normalized = normalizeRepoSource(source)
+  if (normalized === null) {
+    return {
+      ok: false,
+      result: { ok: false, code: 'invalid-source', message: '来源格式不对，无法安装' },
+    }
+  }
+
+  let store: Awaited<ReturnType<typeof listSavedRepos>>
+  try {
+    store = await listSavedRepos({ homes })
+  } catch (error) {
+    return {
+      ok: false,
+      result: { ok: false, code: 'store-unreadable', message: errorText(error) },
+    }
+  }
+  if (store.corrupt) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        code: 'store-unreadable',
+        message: `收藏文件无法解析（${store.file}），请先修复或删除它再安装`,
+      },
+    }
+  }
+  const repo = store.repos.find((one) => repoKey(one.source) === repoKey(normalized))
+  if (repo === undefined) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        code: 'not-saved',
+        message: `只允许安装收藏过的来源，请先收藏再安装：${normalized}`,
+      },
+    }
+  }
+  if (catalog === undefined || typeof catalog?.listSkills !== 'function') {
+    return {
+      ok: false,
+      result: { ok: false, code: 'no-catalog', message: '缺少读取仓库的能力' },
+    }
+  }
+
+  let targetDir: string | null = null
+  if (target !== 'global' && resolveTarget !== null) {
+    const resolved = await resolveTarget({ target, worker, workspace })
+    if (!resolved.ok) {
+      return { ok: false, result: { ok: false, code: resolved.code, message: resolved.message } }
+    }
+    targetDir = resolved.path
+  }
+
+  let listed: Awaited<ReturnType<InstallCatalog['listSkills']>>
+  try {
+    listed = await catalog.listSkills({ source: repo.source })
+  } catch (error) {
+    return {
+      ok: false,
+      result: { ok: false, code: 'fetch-failed', message: errorText(error) },
+    }
+  }
+  if (!listed?.ok) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        code: listed?.code ?? 'fetch-failed',
+        message: listed?.message ?? '无法读取这个仓库的 skill 列表',
+      },
+    }
+  }
+
+  const skills = Array.isArray(listed.skills) ? (listed.skills as CatalogSkill[]) : []
+  return { ok: true, context: { repoSource: repo.source, skills, targetDir } }
+}
+
 /**
  * 页面「安装」按钮的完整流程：校验来源是收藏、skill 在仓库列表里，再按
  * `target` 交给全局安装或某个打工人 / 工作区的项目级安装。
@@ -484,63 +633,19 @@ export async function installSavedSkill({
     return { ok: false, code: 'invalid-target', message: `未知的安装目标：${String(target)}` }
   }
   const resolver = typeof resolveTarget === 'function' ? resolveTarget : null
-  if (target !== 'global' && resolver === null) {
-    return { ok: false, code: 'no-target-resolver', message: '缺少解析安装目标的能力' }
-  }
 
-  const normalized = normalizeRepoSource(source)
-  if (normalized === null) {
-    return { ok: false, code: 'invalid-source', message: '来源格式不对，无法安装' }
-  }
+  const prepared = await resolveSavedInstall({
+    homes,
+    catalog,
+    source,
+    target,
+    worker,
+    workspace,
+    resolveTarget: resolver,
+  })
+  if (!prepared.ok) return prepared.result
+  const { repoSource, skills, targetDir } = prepared.context
 
-  let store: Awaited<ReturnType<typeof listSavedRepos>>
-  try {
-    store = await listSavedRepos({ homes })
-  } catch (error) {
-    return { ok: false, code: 'store-unreadable', message: errorText(error) }
-  }
-  if (store.corrupt) {
-    return {
-      ok: false,
-      code: 'store-unreadable',
-      message: `收藏文件无法解析（${store.file}），请先修复或删除它再安装`,
-    }
-  }
-  const repo = store.repos.find((one) => repoKey(one.source) === repoKey(normalized))
-  if (repo === undefined) {
-    return {
-      ok: false,
-      code: 'not-saved',
-      message: `只允许安装收藏过的来源，请先收藏再安装：${normalized}`,
-    }
-  }
-  if (catalog === undefined || typeof catalog?.listSkills !== 'function') {
-    return { ok: false, code: 'no-catalog', message: '缺少读取仓库的能力' }
-  }
-
-  // 目标先解析：目标不存在时不必为了列仓库去打一次网络请求。
-  let targetDir: string | null = null
-  if (target !== 'global') {
-    const resolved = await (resolver as InstallTargetResolver)({ target, worker, workspace })
-    if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message }
-    targetDir = resolved.path
-  }
-
-  let listed: Awaited<ReturnType<InstallCatalog['listSkills']>>
-  try {
-    listed = await catalog.listSkills({ source: repo.source })
-  } catch (error) {
-    return { ok: false, code: 'fetch-failed', message: errorText(error) }
-  }
-  if (!listed?.ok) {
-    return {
-      ok: false,
-      code: listed?.code ?? 'fetch-failed',
-      message: listed?.message ?? '无法读取这个仓库的 skill 列表',
-    }
-  }
-
-  const skills = Array.isArray(listed.skills) ? listed.skills : []
   const requestedPath = typeof skillPath === 'string' ? skillPath : ''
   const requestedName = typeof name === 'string' ? name : ''
   const match =
@@ -559,21 +664,212 @@ export async function installSavedSkill({
     const installed = await installGlobalSkill({
       homes,
       canonicalAgentsHome,
-      source: repo.source,
+      source: repoSource,
       name: match.name,
       runNpx,
     })
     if (!installed.ok) return installed
-    return { ...installed, repo: repo.source, plugin: match.plugin ?? null }
+    return { ...installed, repo: repoSource, plugin: match.plugin ?? null }
   }
 
   const installed = await installProjectSkill({
     targetDir: targetDir ?? '',
     target,
-    source: repo.source,
+    source: repoSource,
     name: match.name,
     runNpx,
   })
   if (!installed.ok) return installed
-  return { ...installed, repo: repo.source, plugin: match.plugin ?? null }
+  return { ...installed, repo: repoSource, plugin: match.plugin ?? null }
+}
+
+/** 一次「目录安装」里每个 skill 的最终去向。 */
+export interface SkillGroupInstallResult {
+  ok: boolean
+  code?: string
+  message?: string
+  /** 固定为 true：与单条安装的返回区分开。 */
+  batch: true
+  target: InstallTargetKind
+  repo?: string
+  /** 这次真的装上的 skill。 */
+  installed: Array<{ name: string; id?: string; path?: string }>
+  /** 已经装过（两个全局根里同名）而跳过的 skill；只可能出现在全局安装。 */
+  skipped: Array<{ name: string }>
+  /** 没装上的 skill 与原因；有一个就整体 `ok: false`。 */
+  failed: Array<{ name: string; code: string; message: string }>
+}
+
+/**
+ * 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的打工人 / 工作区。
+ *
+ * 浏览器传的是目录里各个 skill 的仓库路径（树的叶子路径），Host 逐个回到这次
+ * 读到的仓库列表里核对，再交给自己串行队列里的安装；目录节点本身不是仓库路径，
+ * 所以不能让 Host 按目录前缀自己找 skill。
+ *
+ * 全局安装会跳过已经装过的 skill（与单条安装的 `already-installed` 对应），
+ * 这样「装全部」在部分装过时仍然可用；项目级安装每次都装，不跳过。任何一个
+ * skill 失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
+ * 有失败时整体 `ok: false`，`message` 列出每个失败的名字与原因。
+ */
+export async function installSavedSkillGroup({
+  homes = resolveHomes(),
+  canonicalAgentsHome = npxGlobalAgentsHome(),
+  catalog,
+  source,
+  skillPaths,
+  target = 'global',
+  worker,
+  workspace,
+  resolveTarget,
+  runNpx,
+}: {
+  homes?: Homes
+  canonicalAgentsHome?: string
+  catalog: InstallCatalog
+  source?: unknown
+  /** 目录里每个 skill 的仓库路径；由页面从树叶子收集。 */
+  skillPaths?: unknown
+  target?: unknown
+  worker?: unknown
+  workspace?: unknown
+  resolveTarget?: InstallTargetResolver
+  runNpx: InstallNpxRunner
+}): Promise<SkillGroupInstallResult> {
+  if (target !== 'global' && target !== 'worker' && target !== 'workspace') {
+    return {
+      ok: false,
+      code: 'invalid-target',
+      message: `未知的安装目标：${String(target)}`,
+      batch: true,
+      target: 'global',
+      installed: [],
+      skipped: [],
+      failed: [],
+    }
+  }
+  const settle = (code: string, message: string): SkillGroupInstallResult => ({
+    ok: false,
+    code,
+    message,
+    batch: true,
+    target,
+    installed: [],
+    skipped: [],
+    failed: [],
+  })
+
+  const paths = requestedSkillPaths(skillPaths)
+  if (paths === null || paths.length === 0) {
+    return settle(
+      'invalid-skill-paths',
+      `目录安装需要一组 skill 路径（最多 ${MAX_GROUP_SKILLS} 个），且不能为空`,
+    )
+  }
+  if (typeof runNpx !== 'function') return settle('no-runner', '缺少执行 npx 的能力')
+  if (target === 'global') {
+    const mismatch = globalHomeMismatch(homes, canonicalAgentsHome)
+    if (mismatch !== null) return settle('unsupported-home', mismatch)
+  }
+
+  const resolver = typeof resolveTarget === 'function' ? resolveTarget : null
+  const prepared = await resolveSavedInstall({
+    homes,
+    catalog,
+    source,
+    target,
+    worker,
+    workspace,
+    resolveTarget: resolver,
+  })
+  if (!prepared.ok) {
+    return settle(prepared.result.code ?? 'fetch-failed', prepared.result.message ?? '无法安装')
+  }
+  const { repoSource, skills, targetDir } = prepared.context
+
+  const byPath = new Map(skills.map((one) => [one.path, one]))
+  const selected: CatalogSkill[] = []
+  for (const wanted of paths) {
+    const found = byPath.get(wanted)
+    if (found === undefined) {
+      return settle(
+        'skill-not-found',
+        '仓库列表里没有目录下的这个 skill，仓库可能已经更新，请刷新后再试',
+      )
+    }
+    selected.push(found)
+  }
+
+  const installed: SkillGroupInstallResult['installed'] = []
+  const skipped: SkillGroupInstallResult['skipped'] = []
+  const failed: SkillGroupInstallResult['failed'] = []
+  for (const skill of selected) {
+    const one =
+      target === 'global'
+        ? await installGlobalSkill({
+            homes,
+            canonicalAgentsHome,
+            source: repoSource,
+            name: skill.name,
+            runNpx,
+          })
+        : await installProjectSkill({
+            targetDir: targetDir ?? '',
+            target,
+            source: repoSource,
+            name: skill.name,
+            runNpx,
+          })
+    if (one.ok) {
+      const entry: SkillGroupInstallResult['installed'][number] = { name: skill.name }
+      if (one.id !== undefined) entry.id = one.id
+      if (one.path !== undefined) entry.path = one.path
+      installed.push(entry)
+      continue
+    }
+    if (one.code === 'already-installed') {
+      skipped.push({ name: skill.name })
+      continue
+    }
+    failed.push({
+      name: skill.name,
+      code: one.code ?? 'npx-failed',
+      message: one.message ?? '安装失败',
+    })
+  }
+
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      code: failed[0]?.code ?? 'npx-failed',
+      message: failed.map((one) => `${one.name}（${one.message}）`).join('；'),
+      batch: true,
+      target,
+      repo: repoSource,
+      installed,
+      skipped,
+      failed,
+    }
+  }
+
+  return { ok: true, batch: true, target, repo: repoSource, installed, skipped, failed }
+}
+
+/**
+ * 目录安装请求里的 skill 路径：必须是字符串数组、去重、数量不超过上限。
+ *
+ * @returns 规范化后的路径；形状不对或超过上限时返回 null
+ */
+function requestedSkillPaths(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string' || item === '') return null
+    if (seen.has(item)) continue
+    seen.add(item)
+    paths.push(item)
+  }
+  if (paths.length > MAX_GROUP_SKILLS) return null
+  return paths
 }

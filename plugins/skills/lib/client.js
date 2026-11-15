@@ -334,6 +334,18 @@ window.__ModuleLoader__.load({
     	return total;
     }
     /**
+    * 一个树节点里的全部 skill 叶子；目录按深度优先展开。
+    *
+    * 目录行上的「全部安装」用它收集要装的 skill；目录节点的 `path` 只是展示
+    * 分组键（npx 仓库是插件名，marketplace 是插件根），不能当仓库路径用。
+    *
+    * @param node Host 返回的树节点
+    */
+    function skillLeavesOf(node) {
+    	if (node.type === "skill") return [node];
+    	return (Array.isArray(node.children) ? node.children : []).flatMap((child) => skillLeavesOf(child));
+    }
+    /**
     * 对话框里一类目标的条目；快照缺字段时当作空列表。
     *
     * @param kind 目标类型
@@ -967,6 +979,38 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
+    	* 安装一个目录里的全部 skill：把目录下每个 skill 的仓库路径一起交给 Host，
+    	* 由 Host 逐个走 `npx skills`，全局安装时已装过的会跳过。成功后只刷新已
+    	* 安装列表，树保持展开，用户能接着装别的目录。
+    	*
+    	* @param repo 一条收藏
+    	* @param node 树里的目录节点
+    	*/
+    	async function installDir(repo, node) {
+    		if (installing !== null || targetInstalling) return;
+    		const paths = skillLeavesOf(node).map((leaf) => leaf.path);
+    		if (paths.length === 0) return;
+    		setInstalling(installKeyOf(repo, node));
+    		try {
+    			const body = await requestJson(INSTALL_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({
+    					source: repo.source,
+    					paths
+    				})
+    			});
+    			const installed = body.installed?.length ?? 0;
+    			const skipped = body.skipped?.length ?? 0;
+    			flash("success", installed === 0 ? t("dirAllInstalled") : `${t("installedDirToast")} ${installed}${skipped > 0 ? ` · ${t("skippedInstalledToast")} ${skipped}` : ""}`);
+    			await refreshInstalled();
+    		} catch (failure) {
+    			await refreshInstalled();
+    			flash("error", errorCode(failure) === "skill-not-found" ? t("installMissing") : `${t("installFailed")} ${messageOf(failure)}`);
+    		} finally {
+    			setInstalling(null);
+    		}
+    	}
+    	/**
     	* 读一次目标列表；成功后默认选中第一项，让「安装」按钮直接可用。
     	*
     	* @param kind 目标类型
@@ -1002,7 +1046,7 @@ window.__ModuleLoader__.load({
     	*
     	* @param kind 目标类型
     	* @param repo 一条收藏
-    	* @param node Host 返回的 skill 节点
+    	* @param node Host 返回的 skill 或目录节点
     	*/
     	function openTargetDialog(kind, repo, node) {
     		if (installing !== null || targetInstalling) return;
@@ -1044,8 +1088,9 @@ window.__ModuleLoader__.load({
     		loadTargets(targetDialog.kind);
     	}
     	/**
-    	* 把当前 skill 安装到选中的打工人 / 工作区。Host 会把选择换回登记表里的
-    	* 可信目录；成功后关掉对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
+    	* 把当前选中的 skill / 目录安装到选中的打工人 / 工作区。Host 会把选择换回
+    	* 登记表里的可信目录；目录会把其下每个 skill 的路径一起传上去。成功后关掉
+    	* 对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
     	*/
     	async function installToTarget() {
     		if (targetDialog === null || targetInstalling) return;
@@ -1053,6 +1098,7 @@ window.__ModuleLoader__.load({
     		const choice = targetChoice;
     		if (choice === "") return;
     		const label = targetLabelOf(kind, targetItemsOf(kind, targets.data).find((item) => targetKeyOf(kind, item) === choice)) || choice;
+    		const node = targetDialog.node;
     		setTargetInstalling(true);
     		setTargetError(null);
     		try {
@@ -1060,13 +1106,14 @@ window.__ModuleLoader__.load({
     				method: "POST",
     				body: JSON.stringify({
     					source: targetDialog.repo.source,
-    					path: targetDialog.node.path,
+    					...node.type === "dir" ? { paths: skillLeavesOf(node).map((leaf) => leaf.path) } : { path: node.path },
     					target: kind,
     					...kind === "worker" ? { worker: choice } : { workspace: choice }
     				})
     			});
     			resetTargetDialog();
-    			flash("success", `${t(kind === "worker" ? "installedToWorker" : "installedToWorkspace")} ${body.name ?? targetDialog.node.name} → ${label}`);
+    			if (node.type === "dir") flash("success", `${t(kind === "worker" ? "installedDirToWorker" : "installedDirToWorkspace")} ${label} · ${body.installed?.length ?? 0}`);
+    			else flash("success", `${t(kind === "worker" ? "installedToWorker" : "installedToWorkspace")} ${body.name ?? node.name} → ${label}`);
     		} catch (failure) {
     			const text = errorCode(failure) === "skill-not-found" ? t("installMissing") : `${t("installFailed")} ${messageOf(failure)}`;
     			setTargetError(text);
@@ -1209,6 +1256,7 @@ window.__ModuleLoader__.load({
     		uninstall,
     		refreshInstalled,
     		installSkill,
+    		installDir,
     		openTargetDialog,
     		closeTargetDialog,
     		setTargetChoice,
@@ -1400,6 +1448,9 @@ window.__ModuleLoader__.load({
     * `createTreeRenderer()` 把这份状态绑成 `renderTree` / `renderTreeNode` 两个
     * 函数，供「收藏」面板复用。
     *
+    * 目录与 skill 叶子都带三个安装入口：目录行装的是**目录下全部 skill**（有的
+    * 仓库里一个插件 / 合集就是一个目录，逐个点 skill 太慢），skill 行只装自己。
+    *
     * @module @buka/dsh-plugin-skills/client/components/tree
     */
     /**
@@ -1422,12 +1473,25 @@ window.__ModuleLoader__.load({
     	}
     }
     /**
+    * 目录下的 skill 是不是全部已全局安装。
+    *
+    * 部分已安装时目录按钮保持「全部安装」可用：Host 会跳过已装过的，只装剩下的，
+    * 所以这里不能只看「有一个已安装」就禁用。
+    *
+    * @param dir 目录节点
+    * @param installedSkillKeys 已安装 skill 的目录键集合
+    */
+    function allSkillsInstalled(dir, installedSkillKeys) {
+    	const leaves = skillLeavesOf(dir);
+    	return leaves.length > 0 && leaves.every((leaf) => installedSkillKeys.has(skillKeyOf(leaf.name)));
+    }
+    /**
     * 把页面状态绑成树渲染函数。
     *
     * @param props 渲染树需要的页面状态与动作
     */
     function createTreeRenderer(props) {
-    	const { t, trees, collapsedDirs, installedSkillKeys, installing, targetInstalling, loadTree, toggleDir, installSkill, openTargetDialog } = props;
+    	const { t, trees, collapsedDirs, installedSkillKeys, installing, targetInstalling, loadTree, toggleDir, installSkill, installDir, openTargetDialog } = props;
     	/**
     	* 一个仓库展开后的内容：加载中 / 失败可重试 / 空 / 递归树。
     	*
@@ -1457,44 +1521,22 @@ window.__ModuleLoader__.load({
     		return h("div", { className: "buka-skills-treeArea" }, failure, body);
     	}
     	/**
-    	* 递归渲染树节点：目录可折叠，skill 是叶子（名称 + 一行描述 + 三个安装入口）。
+    	* 一个节点右侧的三个安装入口，目录与 skill 叶子共用。
     	*
-    	* skill 叶子右侧固定三个按钮：「全局安装」「安装到打工人」「安装到工作区」。
-    	* 只有全局安装会在已安装时变成禁用的「全局已安装」：它的判断只看全局安装
-    	* 列表（名字按 npx 的 sanitize 规则归一），不依赖仓库来源，所以同一个 skill
-    	* 从别的仓库装过也不给重复安装按钮；打工人 / 工作区是每次临时选的目标，
-    	* 不做已安装判断。
-    	*
-    	* 全局按钮正在安装时显示「安装中…」并占据同一个操作位；三个入口都要等
-    	* Host 侧串行队列空出来，所以任何安装进行中时三个按钮统一禁用。
+    	* 目录行把「全局安装」换成「全部安装」（装目录下全部 skill），其余两个入口
+    	* 在两种行上含义相同：选一个打工人 / 工作区作为目标。三个按钮在任一安装
+    	* 进行中统一禁用；只有全局入口会在已安装时变成禁用的「全局已安装」，
+    	* 打工人 / 工作区是每次临时选的目标，不做已安装判断。
     	*
     	* @param repo 一条收藏
-    	* @param node Host 返回的树节点
+    	* @param node 目录或 skill 节点
+    	* @param installed 这个节点是否已全局安装（目录要求全部 skill 都已安装）
+    	* @param busy 这个节点是否正在安装
+    	* @param onInstall 点「全局安装 / 全部安装」时执行的动作
     	*/
-    	function renderTreeNode(repo, node) {
-    		if (node.type === "dir") {
-    			const collapsed = collapsedDirs[repo.id]?.[node.path] === true;
-    			const children = Array.isArray(node.children) ? node.children : [];
-    			return h("li", {
-    				className: "buka-skills-treeItem",
-    				key: node.path
-    			}, h("button", {
-    				type: "button",
-    				className: "buka-skills-treeToggle",
-    				"aria-expanded": !collapsed,
-    				onClick: () => toggleDir(repo, node.path)
-    			}, h(IconChevronRightOutlineRegular, { size: 12 }), h("span", { className: "buka-skills-treeName" }, node.name), h("span", { className: "buka-skills-treeCount" }, `· ${countSkills(node)}`)), collapsed ? null : h("ul", { className: "buka-skills-treeGroup" }, ...children.map((child) => renderTreeNode(repo, child))));
-    		}
-    		const description = typeof node.description === "string" ? node.description : "";
-    		const installed = installedSkillKeys.has(skillKeyOf(node.name));
-    		const busy = installing === installKeyOf(repo, node);
-    		return h("li", {
-    			className: "buka-skills-treeItem",
-    			key: node.path
-    		}, h("div", {
-    			className: "buka-skills-treeSkill",
-    			title: description === "" ? node.path : description
-    		}, h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), h("div", { className: "buka-skills-treeSkillAction" }, installed ? h(Button, {
+    	function renderActions(repo, node, installed, busy, onInstall) {
+    		const installLabel = node.type === "dir" ? t("installAll") : t("installGlobal");
+    		return h("div", { className: "buka-skills-treeSkillAction" }, installed ? h(Button, {
     			variant: "outline",
     			size: "sm",
     			disabled: true,
@@ -1507,10 +1549,10 @@ window.__ModuleLoader__.load({
     			variant: "outline",
     			size: "sm",
     			icon: h(IconDownloadOutlineRegular, { size: 13 }),
-    			"aria-label": `${t("installGlobal")} ${node.name}`,
+    			"aria-label": `${installLabel} ${node.name}`,
     			disabled: installing !== null || targetInstalling,
-    			onClick: () => installSkill(repo, node)
-    		}, t("installGlobal")), h(Button, {
+    			onClick: onInstall
+    		}, installLabel), h(Button, {
     			variant: "outline",
     			size: "sm",
     			"aria-label": `${t("installWorker")} ${node.name}`,
@@ -1522,7 +1564,39 @@ window.__ModuleLoader__.load({
     			"aria-label": `${t("installWorkspace")} ${node.name}`,
     			disabled: installing !== null || targetInstalling,
     			onClick: () => openTargetDialog("workspace", repo, node)
-    		}, t("installWorkspace")))));
+    		}, t("installWorkspace")));
+    	}
+    	/**
+    	* 递归渲染树节点：目录可折叠并带「全部安装」，skill 是叶子（名称 + 一行
+    	* 描述 + 三个安装入口）。
+    	*
+    	* @param repo 一条收藏
+    	* @param node Host 返回的树节点
+    	*/
+    	function renderTreeNode(repo, node) {
+    		if (node.type === "dir") {
+    			const collapsed = collapsedDirs[repo.id]?.[node.path] === true;
+    			const children = Array.isArray(node.children) ? node.children : [];
+    			return h("li", {
+    				className: "buka-skills-treeItem",
+    				key: node.path
+    			}, h("div", { className: "buka-skills-treeDir" }, h("button", {
+    				type: "button",
+    				className: "buka-skills-treeToggle",
+    				"aria-expanded": !collapsed,
+    				onClick: () => toggleDir(repo, node.path)
+    			}, h(IconChevronRightOutlineRegular, { size: 12 }), h("span", { className: "buka-skills-treeName" }, node.name), h("span", { className: "buka-skills-treeCount" }, `· ${countSkills(node)}`)), renderActions(repo, node, allSkillsInstalled(node, installedSkillKeys), installing === installKeyOf(repo, node), () => installDir(repo, node))), collapsed ? null : h("ul", { className: "buka-skills-treeGroup" }, ...children.map((child) => renderTreeNode(repo, child))));
+    		}
+    		const description = typeof node.description === "string" ? node.description : "";
+    		const installed = installedSkillKeys.has(skillKeyOf(node.name));
+    		const busy = installing === installKeyOf(repo, node);
+    		return h("li", {
+    			className: "buka-skills-treeItem",
+    			key: node.path
+    		}, h("div", {
+    			className: "buka-skills-treeSkill",
+    			title: description === "" ? node.path : description
+    		}, h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), renderActions(repo, node, installed, busy, () => installSkill(repo, node))));
     	}
     	return {
     		renderTree,
@@ -1618,6 +1692,9 @@ window.__ModuleLoader__.load({
     /**
     * 「安装到打工人 / 工作区」对话框：读取目标列表、单选，确认后安装。
     *
+    * 选中项可以是单个 skill，也可以是目录（装其下全部 skill）；标题下的说明行
+    * 分别显示「目标 skill」或「目标目录 · 数量」。
+    *
     * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
     * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用名字 / 路径回去
     * 解析一次，所以这里展示的列表只用于选择。
@@ -1707,7 +1784,7 @@ window.__ModuleLoader__.load({
     				installToTarget();
     			}
     		}, installing ? t("targetInstalling") : t("targetInstall")))
-    	}, dialog === null ? null : h("div", { className: "buka-skills-targetBody" }, h("p", { className: "buka-skills-meta" }, `${t("targetFor")} ${dialog.node.name}`), renderBody(props, kind), error === null ? null : h("div", {
+    	}, dialog === null ? null : h("div", { className: "buka-skills-targetBody" }, h("p", { className: "buka-skills-meta" }, dialog.node.type === "dir" ? `${t("targetForDir")} ${dialog.node.name} · ${countSkills(dialog.node)}` : `${t("targetFor")} ${dialog.node.name}`), renderBody(props, kind), error === null ? null : h("div", {
     		className: "buka-skills-targetFailure",
     		role: "alert"
     	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, error))));
@@ -1869,15 +1946,20 @@ window.__ModuleLoader__.load({
     	installedBadge: "installed",
     	installedBadgeGlobal: "Installed globally",
     	installGlobal: "Install globally",
+    	installAll: "Install all",
     	installWorker: "Install to worker",
     	installWorkspace: "Install to workspace",
     	installing: "Installing…",
     	installedToast: "Installed:",
+    	installedDirToast: "Installed skills in this directory:",
+    	skippedInstalledToast: "skipped already installed:",
+    	dirAllInstalled: "Every skill in this directory is already installed.",
     	installFailed: "Install failed:",
     	installMissing: "This skill is no longer in the repository list. Refresh the repository and try again.",
     	targetWorkerTitle: "Install to worker",
     	targetWorkspaceTitle: "Install to workspace",
     	targetFor: "Skill:",
+    	targetForDir: "Directory:",
     	targetLoading: "Loading targets…",
     	targetLoadFailed: "Could not load install targets:",
     	targetEmptyWorkers: "No agents are available. Install the workers plugin or create one first.",
@@ -1888,6 +1970,8 @@ window.__ModuleLoader__.load({
     	targetInstalling: "Installing…",
     	installedToWorker: "Installed to worker:",
     	installedToWorkspace: "Installed to workspace:",
+    	installedDirToWorker: "Installed all skills in this directory to worker:",
+    	installedDirToWorkspace: "Installed all skills in this directory to workspace:",
     	expandRepo: "Show skills",
     	collapseRepo: "Hide skills",
     	treeLoading: "Loading skills…",
@@ -1950,15 +2034,20 @@ window.__ModuleLoader__.load({
     	installedBadge: "已安装",
     	installedBadgeGlobal: "全局已安装",
     	installGlobal: "全局安装",
+    	installAll: "全部安装",
     	installWorker: "安装到打工人",
     	installWorkspace: "安装到工作区",
     	installing: "安装中…",
     	installedToast: "已安装：",
+    	installedDirToast: "已安装该目录下的 skill：",
+    	skippedInstalledToast: "跳过已安装：",
+    	dirAllInstalled: "这个目录下的 skill 都已安装。",
     	installFailed: "安装失败：",
     	installMissing: "仓库列表里已经找不到这个 skill，刷新仓库后再试。",
     	targetWorkerTitle: "安装到打工人",
     	targetWorkspaceTitle: "安装到工作区",
     	targetFor: "目标 skill：",
+    	targetForDir: "目标目录：",
     	targetLoading: "正在读取目标…",
     	targetLoadFailed: "读取目标失败：",
     	targetEmptyWorkers: "没有可用的智能体；装好打工人插件并创建打工人后再试。",
@@ -1969,6 +2058,8 @@ window.__ModuleLoader__.load({
     	targetInstalling: "安装中…",
     	installedToWorker: "已安装到打工人：",
     	installedToWorkspace: "已安装到工作区：",
+    	installedDirToWorker: "已将该目录下的 skill 安装到打工人：",
+    	installedDirToWorkspace: "已将该目录下的 skill 安装到工作区：",
     	expandRepo: "展开 skills",
     	collapseRepo: "收起 skills",
     	treeLoading: "正在获取 skills…",
@@ -2036,7 +2127,7 @@ window.__ModuleLoader__.load({
     .buka-skills-chevron:focus-visible{border-radius:var(--dsw-radius-sm);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
     .buka-skills-tree{margin:2px 0 0;padding:0 0 0 28px;list-style:none;display:flex;flex-direction:column;gap:1px}
     .buka-skills-treeItem{min-width:0;flex-direction:column;gap:1px;display:flex}
-    .buka-skills-treeToggle{box-sizing:border-box;width:100%;min-width:0;gap:6px;padding:2px 6px;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-secondary);text-align:left;cursor:pointer;font-size:13px;line-height:20px;display:flex;align-items:center}
+    .buka-skills-treeToggle{box-sizing:border-box;flex:1 1 auto;min-width:0;gap:6px;padding:2px 6px;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-secondary);text-align:left;cursor:pointer;font-size:13px;line-height:20px;display:flex;align-items:center}
     .buka-skills-treeToggle>svg{color:var(--dsw-alias-label-caption);flex:none;transition:transform .12s ease}
     .buka-skills-treeToggle[aria-expanded=true]>svg{transform:rotate(90deg)}
     @media (hover:hover){.buka-skills-treeToggle:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}}
@@ -2044,6 +2135,8 @@ window.__ModuleLoader__.load({
     .buka-skills-treeName{min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
     .buka-skills-treeCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px;line-height:18px}
     .buka-skills-treeGroup{margin:0;padding:0 0 0 16px;list-style:none;flex-direction:column;gap:1px;display:flex}
+    .buka-skills-treeDir{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 6px;display:flex}
+    @media (hover:hover){.buka-skills-treeDir:hover{background:var(--dsw-alias-interactive-bg-hover)}}
     .buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 6px;display:flex}
     @media (hover:hover){.buka-skills-treeSkill:hover{background:var(--dsw-alias-interactive-bg-hover)}}
     .buka-skills-treeSkillMain{min-width:0;flex:1 1 160px;flex-direction:column;display:flex}
@@ -2101,6 +2194,8 @@ window.__ModuleLoader__.load({
     *   「全局安装」「安装到打工人」「安装到工作区」。后两个打开对话框，分别列出
     *   `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册工作区；
     *   只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾图标）。
+    *   目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个 skill
+    *   交给 Host 逐个安装，已装过的跳过。
     *
     * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
     * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。

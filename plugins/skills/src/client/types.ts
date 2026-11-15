@@ -90,7 +90,8 @@ export interface InstallTargetsSnapshot {
 export interface TargetDialog {
   readonly kind: TargetDialogKind
   readonly repo: RepoRef
-  readonly node: SkillTreeLeaf
+  /** 单个 skill，或选中安装其下全部 skill 的目录。 */
+  readonly node: SkillTreeSelection
 }
 
 /** 树里的目录节点。 */
@@ -103,6 +104,16 @@ export interface SkillTreeDir {
 
 /** 一个树节点。 */
 export type SkillTreeChild = SkillTreeLeaf | SkillTreeDir
+
+/** 一次安装的目标：单个 skill 叶子，或整个目录（装其下全部 skill）。 */
+export type SkillTreeSelection = SkillTreeLeaf | SkillTreeDir
+
+/** Host `POST /buka-skills/install` 在目录安装时返回的每个 skill 的去向。 */
+export interface SkillGroupInstallSnapshot {
+  readonly installed?: Array<{ name?: string; id?: string; path?: string }>
+  readonly skipped?: Array<{ name?: string }>
+  readonly failed?: Array<{ name?: string; message?: string }>
+}
 
 /** Host `GET /buka-skills/repo-skills` 返回的仓库树。 */
 export interface RepoTreeData {
@@ -236,8 +247,14 @@ export interface SkillsPageState {
   readonly refreshInstalled: () => Promise<void>
   /** 安装树里的一个 skill。 */
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
+  /** 安装一个目录里的全部 skill（目录行的「全部安装」）。 */
+  readonly installDir: (repo: RepoRef, node: SkillTreeDir) => Promise<void>
   /** 打开「安装到打工人 / 工作区」对话框。 */
-  readonly openTargetDialog: (kind: TargetDialogKind, repo: RepoRef, node: SkillTreeLeaf) => void
+  readonly openTargetDialog: (
+    kind: TargetDialogKind,
+    repo: RepoRef,
+    node: SkillTreeSelection,
+  ) => void
   /** 关闭对话框；安装中不响应。 */
   readonly closeTargetDialog: () => void
   /** 选择对话框里的目标。 */

@@ -1,6 +1,9 @@
 /**
  * 「安装到打工人 / 工作区」对话框：读取目标列表、单选，确认后安装。
  *
+ * 选中项可以是单个 skill，也可以是目录（装其下全部 skill）；标题下的说明行
+ * 分别显示「目标 skill」或「目标目录 · 数量」。
+ *
  * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
  * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用名字 / 路径回去
  * 解析一次，所以这里展示的列表只用于选择。
@@ -12,7 +15,7 @@ import type { ReactElement } from 'react'
 import { Fragment } from 'react'
 
 import type { Translate } from '../dictionary.ts'
-import { targetItemsOf, targetKeyOf, targetLabelOf, targetPathOf } from '../keys.ts'
+import { countSkills, targetItemsOf, targetKeyOf, targetLabelOf, targetPathOf } from '../keys.ts'
 import { Button, h, IconWarningOutlineRegular, Modal, StateDot } from '../primitives.ts'
 import type {
   InstallTargetsSnapshot,
@@ -183,7 +186,13 @@ function renderTargetDialog(props: TargetDialogProps): ReactElement {
       : h(
           'div',
           { className: 'buka-skills-targetBody' },
-          h('p', { className: 'buka-skills-meta' }, `${t('targetFor')} ${dialog.node.name}`),
+          h(
+            'p',
+            { className: 'buka-skills-meta' },
+            dialog.node.type === 'dir'
+              ? `${t('targetForDir')} ${dialog.node.name} · ${countSkills(dialog.node)}`
+              : `${t('targetFor')} ${dialog.node.name}`,
+          ),
           renderBody(props, kind),
           error === null
             ? null

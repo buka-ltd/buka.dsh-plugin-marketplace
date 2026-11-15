@@ -7,8 +7,8 @@
  * - `POST /buka-skills/uninstall` 卸载一个；
  * - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
  *   （`ctx.workspaceRegistry`）；
- * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill 安装到全局、
- *   某个打工人目录或某个工作区目录；
+ * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
+ *   skill）安装到全局、某个打工人目录或某个工作区目录；
  * - `GET /buka-skills/repos` 列出用户收藏的仓库，
  * - `POST /buka-skills/repos` 收藏一个，
  * - `POST /buka-skills/repos/remove` 移除一个，
@@ -29,7 +29,8 @@ import { describeError, parseQuery, readJsonBody, sendJson, sendMethodNotAllowed
 import { listInstallTargets, resolveInstallTarget } from './install-targets.ts'
 import { addSavedRepo, listSavedRepos, removeSavedRepo } from './repo-store.ts'
 import type { SkillsCatalogService } from './service.ts'
-import { installSavedSkill } from './skill-install.ts'
+import type { SkillGroupInstallResult, SkillInstallResult } from './skill-install.ts'
+import { installSavedSkill, installSavedSkillGroup } from './skill-install.ts'
 import type { GlobalSkillsSnapshot, Homes } from './skill-store.ts'
 import { uninstallGlobalSkill } from './skill-store.ts'
 
@@ -42,7 +43,7 @@ const UNINSTALL_ROUTE = '/buka-skills/uninstall'
 /** 页面读取可安装目标（打工人 / 工作区）用的路由。 */
 const TARGETS_ROUTE = '/buka-skills/targets'
 
-/** 页面把收藏仓库里的一个 skill 安装到全局 / 打工人 / 工作区用的路由。 */
+/** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 打工人 / 工作区用的路由。 */
 const INSTALL_ROUTE = '/buka-skills/install'
 
 /** 收藏仓库的列表 / 添加路由。 */
@@ -61,6 +62,8 @@ interface RequestBody {
   source?: unknown
   note?: unknown
   path?: unknown
+  /** 目录安装：目录里每个 skill 的仓库路径；与 `path` 二选一。 */
+  paths?: unknown
   target?: unknown
   worker?: unknown
   workspace?: unknown
@@ -215,24 +218,40 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             if (body === undefined) return
             const fields = body as RequestBody | null
             try {
-              const result = await serializeNpx(() =>
-                installSavedSkill({
-                  homes,
-                  catalog,
-                  source: fields?.source,
-                  skillPath: fields?.path,
-                  target: fields?.target,
-                  worker: fields?.worker,
-                  workspace: fields?.workspace,
-                  resolveTarget: (request) => resolveInstallTarget(webCtx, request),
-                  runNpx,
-                }),
+              const result = await serializeNpx<SkillGroupInstallResult | SkillInstallResult>(() =>
+                Array.isArray(fields?.paths)
+                  ? installSavedSkillGroup({
+                      homes,
+                      catalog,
+                      source: fields?.source,
+                      skillPaths: fields?.paths,
+                      target: fields?.target,
+                      worker: fields?.worker,
+                      workspace: fields?.workspace,
+                      resolveTarget: (request) => resolveInstallTarget(webCtx, request),
+                      runNpx,
+                    })
+                  : installSavedSkill({
+                      homes,
+                      catalog,
+                      source: fields?.source,
+                      skillPath: fields?.path,
+                      target: fields?.target,
+                      worker: fields?.worker,
+                      workspace: fields?.workspace,
+                      resolveTarget: (request) => resolveInstallTarget(webCtx, request),
+                      runNpx,
+                    }),
               )
               if (result.ok) {
+                const count =
+                  'installed' in result && Array.isArray(result.installed)
+                    ? result.installed.length
+                    : 1
                 webCtx.logger?.info?.(
-                  'buka-skills: 已安装 %s（%s，%s）',
-                  String(result.name),
-                  String(result.repo),
+                  'buka-skills: 已安装 %d 个 skill（%s，%s）',
+                  count,
+                  String('repo' in result ? result.repo : ''),
                   result.target ?? 'global',
                 )
               }
@@ -372,7 +391,8 @@ function statusFor(code: string | undefined): number {
 /**
  * 安装操作的失败码 → HTTP 状态码。
  *
- * `not-saved` / `invalid-source` / `invalid-skill-name` / `invalid-target` /
+ * `not-saved` / `invalid-source` / `invalid-skill-name` / `invalid-skill-paths` /
+ * `invalid-target` /
  * `invalid-worker` / `invalid-workspace` 是请求本身的问题（400）；
  * `skill-not-found`、仓库不存在、`unknown-worker` / `unknown-workspace` 是 404；
  * `already-installed` / `store-unreadable` / `missing-target` /
@@ -387,6 +407,7 @@ function installStatusFor(code: string | undefined): number {
   if (
     code === 'invalid-source' ||
     code === 'invalid-skill-name' ||
+    code === 'invalid-skill-paths' ||
     code === 'not-saved' ||
     code === 'unsupported-source' ||
     code === 'invalid-target' ||
