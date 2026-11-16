@@ -45,6 +45,7 @@ const reactStub = path.join(stubRoot, 'react.mjs')
 const pluginUiStub = path.join(stubRoot, 'plugin-ui.mjs')
 const primitivesStub = path.join(stubRoot, 'primitives.mjs')
 const realAvatars = pathToFileURL(path.resolve('packages/plugin-ui/src/avatars.ts')).href
+const realWorkerLabel = pathToFileURL(path.resolve('packages/plugin-ui/src/worker-label.ts')).href
 
 writeFileSync(
   reactStub,
@@ -68,6 +69,7 @@ writeFileSync(
     'export const h = (...args) => globalThis.__dshH(...args)',
     'export const messageOf = (failure) =>',
     '  failure instanceof Error ? failure.message : String(failure ?? "")',
+    `export { workerDisplayName, workerIdentityLabel } from '${realWorkerLabel}'`,
     'export const requestJson = async () => {',
     '  throw new Error("client test: network is disabled")',
     '}',
@@ -417,6 +419,7 @@ const zh = {
   deleteFinishedJobs: '引用它的已结束作业数：',
   deleteAffectedWorkflows: '会因此变成不可用的工作流：',
   deleteNoWorkflows: '没有工作流引用这个打工人。',
+  deleteOpenJob: '打开作业',
   deleteBlockedTitle: '运行中的作业阻塞删除',
   deleteBlockedByJobs:
     '有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。',
@@ -1015,6 +1018,7 @@ test('删除弹窗：列出影响面、硬删说明，被 running 作业阻塞�
   assert.match(blockedText, /AGENTS\.md 与项目 skills 也会一起消失/u)
   assert.ok(blockedText.includes(workerEntry.path), 'the directory to delete is shown')
   assert.match(blockedText, /写作流程 #3/u, 'running jobs are listed')
+  assert.match(blockedText, /打开作业/u, 'each blocking job links to its job page')
   assert.match(blockedText, /运行中的作业阻塞删除/u)
   assert.match(blockedText, /请先在这些作业的作业页主动终止它们/u)
   assert.match(blockedText, /引用它的已结束作业数： 2/u)

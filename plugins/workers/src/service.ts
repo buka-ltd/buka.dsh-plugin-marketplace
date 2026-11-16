@@ -833,10 +833,9 @@ export class WorkerSessionService {
   /**
    * 按标识符解析打工人并在登记表 / 磁盘上确认。
    *
-   * 请求里的 `worker` 字段是打工人标识符；为兼容工作流插件还没升级到按
-   * 标识符引用的版本，标识符查不到时再按展示名兜底匹配一次（旧的「名字即
-   * 身份」调用）。机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
-   * 这里直接拒绝，让调用方知道该走 program 路径。
+   * 请求里的 `worker` 字段是打工人标识符；展示名不参与解析——名称可以随时改、
+   * 也不要求唯一，把它当引用键会把会话派给错的人。机器人没有目录、也不建会话：
+   * 它们由工作流按 `program` 驱动，这里直接拒绝，让调用方知道该走 program 路径。
    *
    */
   async #resolveWorker(workerRef: unknown): Promise<WorkerTarget> {
@@ -844,9 +843,7 @@ export class WorkerSessionService {
     if (trimmed === '') throw new Error(`invalid worker identifier: ${String(workerRef)}`)
     const registry = await readWorkerRegistry({ file: this.registryFile })
     if (!registry.corrupt) {
-      const worker =
-        registry.workers.find((entry) => entry.id === trimmed) ??
-        registry.workers.find((entry) => entry.name === trimmed)
+      const worker = registry.workers.find((entry) => entry.id === trimmed)
       if (worker !== undefined) {
         if (worker.driver === 'robot') {
           throw new Error(

@@ -3160,6 +3160,30 @@ async function syncWorkspaceTitle(workspace, title) {
 	} catch {}
 }
 /**
+* 只同步已挂载工作区的标题，不新建工作区注册。
+*
+* 改名只改展示名：目录、工作区注册行与引用都不变；原先没挂载的打工人也不会
+* 因为改名被顺手挂上。未挂载时返回 `mounted: false`、`workspaceId: null`。
+*
+*/
+async function syncWorkerTitle({ workspaceRegistry, workerPath, title } = {}) {
+	const existing = await currentMount({
+		workspaceRegistry,
+		workerPath
+	});
+	if (existing === null) return {
+		mounted: false,
+		workspaceId: null,
+		mountError: null
+	};
+	await syncWorkspaceTitle(existing, title);
+	return {
+		mounted: true,
+		workspaceId: existing.id ?? null,
+		mountError: null
+	};
+}
+/**
 * 确保打工人目录已挂成 DSH 工作区。
 *
 * 已挂载时不动它（不重命名、不重排），只按需同步工作区标题；未挂载时用
@@ -3785,7 +3809,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 						id,
 						name: nextName
 					});
-					const mount = await mountWorker({
+					const mount = await syncWorkerTitle({
 						workspaceRegistry: ctx.workspaceRegistry,
 						workerPath: renamed.worker.path,
 						title: workerDisplayName(renamed.worker)
@@ -4876,10 +4900,9 @@ var WorkerSessionService = class {
 	/**
 	* 按标识符解析打工人并在登记表 / 磁盘上确认。
 	*
-	* 请求里的 `worker` 字段是打工人标识符；为兼容工作流插件还没升级到按
-	* 标识符引用的版本，标识符查不到时再按展示名兜底匹配一次（旧的「名字即
-	* 身份」调用）。机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
-	* 这里直接拒绝，让调用方知道该走 program 路径。
+	* 请求里的 `worker` 字段是打工人标识符；展示名不参与解析——名称可以随时改、
+	* 也不要求唯一，把它当引用键会把会话派给错的人。机器人没有目录、也不建会话：
+	* 它们由工作流按 `program` 驱动，这里直接拒绝，让调用方知道该走 program 路径。
 	*
 	*/
 	async #resolveWorker(workerRef) {
@@ -4887,7 +4910,7 @@ var WorkerSessionService = class {
 		if (trimmed === "") throw new Error(`invalid worker identifier: ${String(workerRef)}`);
 		const registry = await readWorkerRegistry({ file: this.registryFile });
 		if (!registry.corrupt) {
-			const worker = registry.workers.find((entry) => entry.id === trimmed) ?? registry.workers.find((entry) => entry.name === trimmed);
+			const worker = registry.workers.find((entry) => entry.id === trimmed);
 			if (worker !== void 0) {
 				if (worker.driver === "robot") throw new Error(`worker "${worker.id}" is a robot and has no session; drive it by its "program" id instead of dispatching a session`);
 				let stat;

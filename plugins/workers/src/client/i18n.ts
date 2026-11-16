@@ -96,6 +96,7 @@ export const en = {
   deleteFinishedJobs: 'Finished jobs that referenced it:',
   deleteAffectedWorkflows: 'Workflows that will become unavailable:',
   deleteNoWorkflows: 'No workflow references this worker.',
+  deleteOpenJob: 'Open job',
   deleteBlockedTitle: 'Running jobs block deletion',
   deleteBlockedByJobs:
     'Running jobs reference this worker. Terminate those jobs on their job pages first, then delete the worker; force delete is not available.',
@@ -289,6 +290,7 @@ export const zh: Record<keyof typeof en, string> = {
   deleteFinishedJobs: '引用它的已结束作业数：',
   deleteAffectedWorkflows: '会因此变成不可用的工作流：',
   deleteNoWorkflows: '没有工作流引用这个打工人。',
+  deleteOpenJob: '打开作业',
   deleteBlockedTitle: '运行中的作业阻塞删除',
   deleteBlockedByJobs:
     '有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。',

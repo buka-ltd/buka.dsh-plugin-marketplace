@@ -4,6 +4,7 @@
  * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
  */
 
+import { workerIdentityLabel } from '@buka/plugin-ui'
 import { fill } from './i18n.ts'
 import type {
   ActionDefinition,
@@ -75,11 +76,7 @@ export function workerIdentityText(
     | null
     | undefined,
 ): string {
-  const identity = workerIdentity(ref)
-  if (identity.id === '') return ''
-  return identity.displayName === identity.id
-    ? identity.id
-    : `${identity.displayName} · ${identity.id}`
+  return workerIdentityLabel(ref)
 }
 
 /**

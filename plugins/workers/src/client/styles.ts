@@ -127,6 +127,7 @@ export const CSS = `
 @media (width<=372px){.buka-workers-tabList{min-width:0}}
 .buka-workers-panel{display:flex;flex-direction:column;gap:24px;flex:1 1 auto;min-height:0}
 .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.buka-workers-jobBlocker{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .buka-workers-plainList{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
 .buka-workers-candidatesHead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .buka-workers-candidates{display:flex;flex-direction:column;gap:2px;max-height:320px;overflow:auto;overscroll-behavior:contain;margin:0;padding:4px;list-style:none;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}

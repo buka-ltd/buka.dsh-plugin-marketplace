@@ -14,7 +14,7 @@
 
 import type { ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { mountWorker } from '../builder.ts'
+import { syncWorkerTitle } from '../builder.ts'
 import { optionalService } from '../engine/session-runtime.ts'
 import { buildWorkerModelCatalog } from '../model-catalog.ts'
 import { revealDirectory } from '../reveal.ts'
@@ -572,7 +572,8 @@ export function registerWorkerRoutes(
                 id,
                 name: nextName,
               })
-              const mount = await mountWorker({
+              // 只同步已挂载工作区的标题：改名不新建工作区注册，也不碰目录。
+              const mount = await syncWorkerTitle({
                 workspaceRegistry: ctx.workspaceRegistry,
                 workerPath: renamed.worker.path,
                 title: workerDisplayName(renamed.worker),

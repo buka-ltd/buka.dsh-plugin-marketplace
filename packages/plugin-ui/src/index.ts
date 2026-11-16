@@ -8,3 +8,4 @@
 export * from './avatars.ts'
 export * from './h.ts'
 export * from './request.ts'
+export * from './worker-label.ts'

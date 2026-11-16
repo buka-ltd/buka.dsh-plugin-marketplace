@@ -210,6 +210,42 @@ window.__ModuleLoader__.load({
     function messageOf(failure) {
     	return failure instanceof Error ? failure.message : String(failure);
     }
+    // packages/plugin-ui/lib/worker-label.js
+    /**
+    * 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+    *
+    * 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
+    * 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
+    * 标识符缺失时退回带过来的 `name`（v7 旧作业快照的形状）。
+    *
+    * @module @buka/plugin-ui/worker-label
+    */
+    /** 取一个字段的 trim 值；不是字符串或为空时给空串。 */
+    function text(value) {
+    	return typeof value === "string" ? value.trim() : "";
+    }
+    /**
+    * 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+    *
+    */
+    function workerDisplayName(worker) {
+    	const name = text(worker?.name);
+    	if (name !== "") return name;
+    	const display = text(worker?.displayName);
+    	if (display !== "") return display;
+    	return text(worker?.id);
+    }
+    /**
+    * 「展示名 · 标识符」：列表、详情与对话框里用来消歧。展示名等于标识符
+    * （没设置名称）时只显示标识符，避免出现 `writer · writer`。
+    *
+    */
+    function workerIdentityLabel(worker) {
+    	const id = text(worker?.id) || text(worker?.name);
+    	const display = workerDisplayName(worker);
+    	if (id === "") return display;
+    	return display === "" || display === id ? id : `${display} · ${id}`;
+    }
     // .build/workers/client/avatar.js
     /**
     * 预设头像与头像渲染。
@@ -356,25 +392,6 @@ window.__ModuleLoader__.load({
     */
     function countBadge(count, t) {
     	return String(t("skillsBadge")).replace("{n}", String(count));
-    }
-    /**
-    * 打工人展示名：`name` 非空时用它，否则回退到标识符。
-    *
-    */
-    function workerDisplayName(worker) {
-    	const name = typeof worker?.name === "string" ? worker.name.trim() : "";
-    	if (name !== "") return name;
-    	return typeof worker?.id === "string" ? worker.id : "";
-    }
-    /**
-    * 「展示名 · id」：列表、详情与对话框里用来消歧。没有设置展示名时只显示 id，
-    * 避免出现 `writer · writer`。
-    *
-    */
-    function workerIdentityLabel(worker) {
-    	const id = typeof worker?.id === "string" ? worker.id : "";
-    	const display = workerDisplayName(worker);
-    	return display === "" || display === id ? id : `${display} · ${id}`;
     }
     /** 是否机器人（只读、没有目录与会话）。 */
     function isRobotWorker(worker) {
@@ -1095,6 +1112,24 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
+    	* 打开一个引用了该打工人的运行中作业。
+    	*
+    	* 先让布局服务切到工作流面板，再写 hash：工作流页按 hash 打开具体作业。
+    	* 布局服务不可用时（非 Web 组合）只写 hash，不额外报错。
+    	*
+    	*/
+    	function openJob(job) {
+    		const layout = service("layout");
+    		try {
+    			layout?.selectPanel?.("buka-workflows");
+    		} catch {}
+    		if (typeof window !== "undefined") {
+    			const workflowId = encodeURIComponent(job.workflowId);
+    			const jobId = encodeURIComponent(job.jobId);
+    			window.location.hash = `#/job/${workflowId}/${jobId}/overview`;
+    		}
+    	}
+    	/**
     	* 打开删除确认弹窗：先拉影响面，列出阻塞的作业、会变成不可用的工作流、
     	* 历史作业数量与将被删除的目录。删除是硬删，目录里的 AGENTS.md 与项目
     	* skills 会一起消失（弹窗文案会写明）。
@@ -1198,6 +1233,7 @@ window.__ModuleLoader__.load({
     		openCreateDialog,
     		closeCreateDialog,
     		createWorker,
+    		openJob,
     		openDeleteDialog,
     		closeDeleteDialog,
     		confirmDeleteWorker,
@@ -2348,7 +2384,7 @@ window.__ModuleLoader__.load({
     */
     function DeleteWorkerDialog({ t, state, actions }) {
     	const { deleteDialog } = state;
-    	const { closeDeleteDialog, confirmDeleteWorker } = actions;
+    	const { closeDeleteDialog, confirmDeleteWorker, openJob } = actions;
     	const target = deleteDialog.target;
     	const impact = deleteDialog.impact;
     	const runningJobs = impact?.blockers.runningJobs ?? [];
@@ -2370,7 +2406,13 @@ window.__ModuleLoader__.load({
     		title: target === null ? t("deleteTitle") : `${t("deleteTitle")} · ${workerIdentityLabel(target)}`,
     		closeLabel: t("close"),
     		footer
-    	}, target === null ? null : h("div", { className: "buka-workers-dialogForm" }, h("p", { className: "buka-workers-fieldHint" }, t("deleteHardDeleteNote")), deleteDialog.loading ? h("p", { className: "buka-workers-fieldHint" }, t("deleteImpactLoading")) : null, impact === null ? null : h(react.default.Fragment, null, h("p", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteDir")), h("code", { className: "buka-workers-inlineCode" }, impact.path)), h("p", { className: "buka-workers-fieldHint" }, impact.mounted ? t("deleteMounted") : t("deleteNotMounted")), h("p", { className: "buka-workers-fieldHint" }, `${t("deleteFinishedJobs")} ${String(impact.finishedJobs)}`), h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, `${t("deleteAffectedWorkflows")} ${String(workflows.length)}`), workflows.length === 0 ? h("span", { className: "buka-workers-fieldHint" }, t("deleteNoWorkflows")) : h("ul", { className: "buka-workers-plainList" }, ...workflows.map((workflow) => h("li", { key: workflow.workflowId }, `${workflow.name || workflow.workflowId} · ${workflow.status}`)))), blocked ? h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteBlockedTitle")), h("ul", { className: "buka-workers-plainList" }, ...runningJobs.map((job) => h("li", { key: job.jobId }, `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`))), h("p", {
+    	}, target === null ? null : h("div", { className: "buka-workers-dialogForm" }, h("p", { className: "buka-workers-fieldHint" }, t("deleteHardDeleteNote")), deleteDialog.loading ? h("p", { className: "buka-workers-fieldHint" }, t("deleteImpactLoading")) : null, impact === null ? null : h(react.default.Fragment, null, h("p", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteDir")), h("code", { className: "buka-workers-inlineCode" }, impact.path)), h("p", { className: "buka-workers-fieldHint" }, impact.mounted ? t("deleteMounted") : t("deleteNotMounted")), h("p", { className: "buka-workers-fieldHint" }, `${t("deleteFinishedJobs")} ${String(impact.finishedJobs)}`), h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, `${t("deleteAffectedWorkflows")} ${String(workflows.length)}`), workflows.length === 0 ? h("span", { className: "buka-workers-fieldHint" }, t("deleteNoWorkflows")) : h("ul", { className: "buka-workers-plainList" }, ...workflows.map((workflow) => h("li", { key: workflow.workflowId }, `${workflow.name || workflow.workflowId} · ${workflow.status}`)))), blocked ? h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteBlockedTitle")), h("ul", { className: "buka-workers-plainList" }, ...runningJobs.map((job) => h("li", {
+    		key: job.jobId,
+    		className: "buka-workers-jobBlocker"
+    	}, h("span", null, `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		onClick: () => openJob(job)
+    	}, t("deleteOpenJob"))))), h("p", {
     		className: "buka-workers-formError",
     		role: "alert"
     	}, t("deleteBlockedByJobs"))) : null), deleteDialog.error === null ? null : h("p", {
@@ -2641,6 +2683,7 @@ window.__ModuleLoader__.load({
     	deleteFinishedJobs: "Finished jobs that referenced it:",
     	deleteAffectedWorkflows: "Workflows that will become unavailable:",
     	deleteNoWorkflows: "No workflow references this worker.",
+    	deleteOpenJob: "Open job",
     	deleteBlockedTitle: "Running jobs block deletion",
     	deleteBlockedByJobs: "Running jobs reference this worker. Terminate those jobs on their job pages first, then delete the worker; force delete is not available.",
     	deleteHint: "The worker directory and files are kept.",
@@ -2819,6 +2862,7 @@ window.__ModuleLoader__.load({
     	deleteFinishedJobs: "引用它的已结束作业数：",
     	deleteAffectedWorkflows: "会因此变成不可用的工作流：",
     	deleteNoWorkflows: "没有工作流引用这个打工人。",
+    	deleteOpenJob: "打开作业",
     	deleteBlockedTitle: "运行中的作业阻塞删除",
     	deleteBlockedByJobs: "有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。",
     	deleteHint: "打工人目录、文件保留。",
@@ -3043,6 +3087,7 @@ window.__ModuleLoader__.load({
     @media (width<=372px){.buka-workers-tabList{min-width:0}}
     .buka-workers-panel{display:flex;flex-direction:column;gap:24px;flex:1 1 auto;min-height:0}
     .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workers-jobBlocker{display:flex;align-items:center;justify-content:space-between;gap:8px}
     .buka-workers-plainList{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
     .buka-workers-candidatesHead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
     .buka-workers-candidates{display:flex;flex-direction:column;gap:2px;max-height:320px;overflow:auto;overscroll-behavior:contain;margin:0;padding:4px;list-style:none;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}

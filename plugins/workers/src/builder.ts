@@ -258,6 +258,28 @@ async function syncWorkspaceTitle(
 }
 
 /**
+ * 只同步已挂载工作区的标题，不新建工作区注册。
+ *
+ * 改名只改展示名：目录、工作区注册行与引用都不变；原先没挂载的打工人也不会
+ * 因为改名被顺手挂上。未挂载时返回 `mounted: false`、`workspaceId: null`。
+ *
+ */
+export async function syncWorkerTitle({
+  workspaceRegistry,
+  workerPath,
+  title,
+}: {
+  workspaceRegistry?: WorkspaceRegistryForBuild | null | undefined
+  workerPath?: string | undefined
+  title?: string | undefined
+} = {}): Promise<{ mounted: boolean; workspaceId: unknown; mountError: string | null }> {
+  const existing = await currentMount({ workspaceRegistry, workerPath })
+  if (existing === null) return { mounted: false, workspaceId: null, mountError: null }
+  await syncWorkspaceTitle(existing, title)
+  return { mounted: true, workspaceId: existing.id ?? null, mountError: null }
+}
+
+/**
  * 确保打工人目录已挂成 DSH 工作区。
  *
  * 已挂载时不动它（不重命名、不重排），只按需同步工作区标题；未挂载时用

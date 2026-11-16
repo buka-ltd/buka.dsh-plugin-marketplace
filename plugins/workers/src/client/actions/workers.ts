@@ -31,6 +31,7 @@ import type {
   UiWorkspaceService,
   Worker,
   WorkerRemoveImpact,
+  WorkerUsageJob,
   WorkspacesService,
 } from '../types.ts'
 
@@ -264,6 +265,27 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
+   * 打开一个引用了该打工人的运行中作业。
+   *
+   * 先让布局服务切到工作流面板，再写 hash：工作流页按 hash 打开具体作业。
+   * 布局服务不可用时（非 Web 组合）只写 hash，不额外报错。
+   *
+   */
+  function openJob(job: WorkerUsageJob) {
+    const layout = service<{ selectPanel?: (id: string | null) => void }>('layout')
+    try {
+      layout?.selectPanel?.('buka-workflows')
+    } catch {
+      // 面板切换失败不影响后面的地址写入。
+    }
+    if (typeof window !== 'undefined') {
+      const workflowId = encodeURIComponent(job.workflowId)
+      const jobId = encodeURIComponent(job.jobId)
+      window.location.hash = `#/job/${workflowId}/${jobId}/overview`
+    }
+  }
+
+  /**
    * 打开删除确认弹窗：先拉影响面，列出阻塞的作业、会变成不可用的工作流、
    * 历史作业数量与将被删除的目录。删除是硬删，目录里的 AGENTS.md 与项目
    * skills 会一起消失（弹窗文案会写明）。
@@ -363,6 +385,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     openCreateDialog,
     closeCreateDialog,
     createWorker,
+    openJob,
     openDeleteDialog,
     closeDeleteDialog,
     confirmDeleteWorker,

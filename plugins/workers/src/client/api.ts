@@ -8,6 +8,7 @@
  */
 
 import { messageOf, requestJson as requestJsonBase } from '@buka/plugin-ui'
+
 import type {
   HostResponse,
   Translate,
@@ -17,6 +18,7 @@ import type {
   WorkerSkill,
 } from './types.ts'
 
+export { workerDisplayName, workerIdentityLabel } from '@buka/plugin-ui'
 export { messageOf }
 
 /** 读带错误码的错误的 `code`；不是对象或没有字符串 `code` 时返回 undefined。 */
@@ -108,31 +110,6 @@ export function failureText(t: Translate, failure: unknown): string {
  */
 export function countBadge(count: number, t: (arg0: string) => string): string {
   return String(t('skillsBadge')).replace('{n}', String(count))
-}
-
-/**
- * 打工人展示名：`name` 非空时用它，否则回退到标识符。
- *
- */
-export function workerDisplayName(
-  worker: { id?: unknown; name?: unknown } | null | undefined,
-): string {
-  const name = typeof worker?.name === 'string' ? worker.name.trim() : ''
-  if (name !== '') return name
-  return typeof worker?.id === 'string' ? worker.id : ''
-}
-
-/**
- * 「展示名 · id」：列表、详情与对话框里用来消歧。没有设置展示名时只显示 id，
- * 避免出现 `writer · writer`。
- *
- */
-export function workerIdentityLabel(
-  worker: { id?: unknown; name?: unknown } | null | undefined,
-): string {
-  const id = typeof worker?.id === 'string' ? worker.id : ''
-  const display = workerDisplayName(worker)
-  return display === '' || display === id ? id : `${display} · ${id}`
 }
 
 /** 是否机器人（只读、没有目录与会话）。 */

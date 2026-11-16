@@ -354,7 +354,7 @@ export function DeleteWorkerDialog({
   actions: WorkerActions
 }): ReactElement {
   const { deleteDialog } = state
-  const { closeDeleteDialog, confirmDeleteWorker } = actions
+  const { closeDeleteDialog, confirmDeleteWorker, openJob } = actions
   const target = deleteDialog.target
   const impact = deleteDialog.impact
   const runningJobs = impact?.blockers.runningJobs ?? []
@@ -460,8 +460,17 @@ export function DeleteWorkerDialog({
                         ...runningJobs.map((job) =>
                           h(
                             'li',
-                            { key: job.jobId },
-                            `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`,
+                            { key: job.jobId, className: 'buka-workers-jobBlocker' },
+                            h(
+                              'span',
+                              null,
+                              `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`,
+                            ),
+                            h(
+                              Button,
+                              { variant: 'outline', onClick: () => openJob(job) },
+                              t('deleteOpenJob'),
+                            ),
                           ),
                         ),
                       ),
