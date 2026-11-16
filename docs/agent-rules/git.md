@@ -29,6 +29,7 @@
 - 一个 commit 只做一件事：新增插件、改索引规则、改文档分别提交，不要混在一起
 - 正文写「为什么改」与影响面，不复述 diff
 - `scope` 用插件目录名（`feat(bell): 增加试听音量`）或仓库级模块（`docs`、`ci`、`market`）
+- 这个 commit 是为了修某个 issue 时，正文末尾单独一行写 `Closes #<n>`（多个 issue 写 `Closes #1, #2`），合入 `main` 后 GitHub 自动关单；只是关联、不打算关单时写 `Refs #<n>`
 
 ## 同步与合入
 
