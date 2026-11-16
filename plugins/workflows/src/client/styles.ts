@@ -264,6 +264,9 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-dialogForm{display:flex;flex-direction:column;gap:14px}
 .buka-workflows-dialogSection{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
 .buka-workflows-dialogSectionTitle{margin:0;font-size:13px;font-weight:600;line-height:20px}
+.buka-workflows-restartTasks{display:flex;flex-direction:column;gap:4px}
+.buka-workflows-restartTaskList{margin:0;padding:0 0 0 18px;display:flex;flex-direction:column;gap:2px}
+.buka-workflows-restartTask{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
 .buka-workflows-avatarMissing{background:var(--dsw-alias-fill-secondary);border-color:var(--dsw-alias-border-secondary);color:var(--dsw-alias-label-tertiary);font-weight:600}
 .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(720px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}

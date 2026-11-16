@@ -37,6 +37,23 @@ export function renderJobDetail(page: AppContext): React.ReactElement {
   return h(
     'div',
     { className: 'buka-workflows-detail' },
+    job.status === 'failed'
+      ? h(
+          'div',
+          { className: 'buka-workflows-notice', role: 'status' },
+          h('p', { className: 'buka-workflows-noticeText' }, t('restartEntryHint')),
+          h(
+            Button,
+            {
+              variant: 'outline',
+              size: 'sm',
+              className: 'buka-workflows-smallButton',
+              onClick: actions.openRestart,
+            },
+            t('restartJob'),
+          ),
+        )
+      : null,
     page.state.job.data?.canRetryDelivery === true
       ? h(
           'div',

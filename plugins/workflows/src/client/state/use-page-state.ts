@@ -31,6 +31,7 @@ export function createInitialState(): PageState {
     task: { status: 'idle', data: null, error: null },
     taskForm: { action: null, values: {}, text: '', error: null, submitting: false },
     newJob: { open: false, content: {}, delivery: 'starter', error: null, submitting: false },
+    restart: { open: false, submitting: false, error: null },
     attachment: null,
     busy: null,
     notice: null,

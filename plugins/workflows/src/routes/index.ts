@@ -44,6 +44,7 @@ const ROUTES = {
   jobStart: '/buka-workflows/job/start',
   job: '/buka-workflows/job',
   jobAction: '/buka-workflows/job/action',
+  jobRestart: '/buka-workflows/job/restart',
   task: '/buka-workflows/task',
   taskAction: '/buka-workflows/task/action',
   attachments: '/buka-workflows/attachments',
@@ -66,6 +67,9 @@ function statusForError(error: unknown): number {
       case 'not-ready':
       case 'not-failed':
       case 'no-pending-delivery':
+      case 'job-not-failed':
+      case 'no-failed-tasks':
+      case 'definition-outdated':
         return 409
       default:
         return 400
@@ -232,6 +236,29 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
         return
       }
       sendError(res, 400, 'invalid-action', 'action must be cancel or retry-delivery')
+    })
+
+    route(ROUTES.jobRestart, async (req, res) => {
+      if (req.method !== 'POST') return sendMethodNotAllowed(res, 'POST')
+      const body = await readJsonBody(req, res)
+      if (body === undefined) return
+      const record = body as Record<string, unknown>
+      const jobId = typeof record.jobId === 'string' ? record.jobId.trim() : ''
+      if (jobId === '') return sendError(res, 400, 'invalid-id', 'jobId is required')
+      const mode = record.mode
+      if (mode !== 'failed' && mode !== 'scratch') {
+        return sendError(res, 400, 'invalid-mode', 'mode must be failed or scratch')
+      }
+      const engine = await ready()
+      const outcome = await engine.restartJob(jobId, mode)
+      sendJson(res, 200, {
+        ok: true,
+        mode: outcome.mode,
+        jobId: outcome.job.id,
+        seq: outcome.job.seq,
+        sourceJobId: outcome.source.id,
+        sourceSeq: outcome.source.seq,
+      })
     })
 
     // ---- 任务 -----------------------------------------------------------

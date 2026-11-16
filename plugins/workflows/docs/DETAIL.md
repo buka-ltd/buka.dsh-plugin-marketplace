@@ -19,6 +19,7 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 - **Start / end**: built-in nodes executed by the starter. The start node `content` is the job input the starter fills in, and its `next` list creates the initial tasks; the end node `content` is the final report, and the job only settles after the starter confirms receipt.
 - **Delivery rule**: chosen when the job is created — back to the starter (a session starter gets it delivered into that conversation, a human starter gets it as a board task), or to an assistant (an agent named by worker identifier) receiving it on the person's behalf.
 - **Job**: one workflow plus one input, pinned to a workflow version; numbering is per workflow. There are no cross-workflow jobs.
+- **Restart**: the two ways to continue a failed job — resume in place at the failure, or start over with a new job from the same input.
 - **Task**: a card on the board with seven states: pending / ready / running / completed / failed / blocked / cancelled. Every task except the start task records its inbound channel. Dependencies are explicit and the task graph is acyclic; each rework creates a new task record.
 - **Board**: rows are positions (including start / end), columns are queue / ready / running / done / exception.
 
@@ -66,7 +67,17 @@ Position labels, channel ids, job numbers, dependency lists and attachment lists
 - A human task type names an `assistant` (an agent identifier) or `null`:
   - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets the whole task card (content, actions and their forms), talks to the person, and applies the action on their behalf.
   - `null`: the task waits in ready; the person claims it, picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything.
-- If the named assistant does not hand back a result (its session ends without submitting, the task times out, or the session cannot be resumed), the task fails and the job immediately fails: the other open tasks are cancelled with a written reason, and the job error names the task, the assistant and the cause. There is no automatic switch and the person cannot take over. Restarting failed jobs is not part of this stage (see #7 stage 2).
+- If the named assistant does not hand back a result (its session ends without submitting, the task times out, or the session cannot be resumed), the task fails and the job immediately fails: the other open tasks are cancelled with a written reason, and the job error names the task, the assistant and the cause. There is no automatic switch and the person cannot take over.
+
+## Restarting a failed job
+
+A failed job is not a dead end: only a `failed` job shows the "Restart job" entry; `completed` and `cancelled` jobs have none. The dialog offers two options whose availability and reasons are decided by the server, and the client only renders them.
+
+- **Resume from the failure**: the same job recovers in place, `failed → running`. The failed task goes back to `ready` and is dispatched again to the named executor with a new attempt record; tasks that job failure cancelled go back to `pending` and become ready through their dependencies; blocked tasks go back to `pending` once their dependencies are no longer failed, blocked or cancelled by a person. Tasks a person cancelled stay cancelled, and completed tasks keep their results and attempts. The job records the restart count and resets the duration budget start to the restart time.
+- **Start over**: create a new job from the same input using the workflow version that is **enabled now**; the starter is the person who clicked restart, and the delivery rule follows the source job (back-to-starter becomes back to the new starter). The new job records the source job id; the failed job stays `failed` as the scene and remains readable. This option is unavailable when the workflow is disabled or not on the current definition version.
+- A failed job with no failed task (for example every branch was cancelled, or end-task delivery failed) only offers "Start over".
+- Restart is an explicit human action, not an automatic retry: if the assistant fails again the job fails again and can be restarted again. Resuming uses the definition version pinned by the job; only starting over picks up a changed workflow, and the two jobs keep separate budgets and boards.
+- The state machine gained three transitions: job `failed → running`; task `blocked → pending` and engine-cancelled `cancelled → pending`. The task transitions are only used by the engine while restarting; a person cancellation writes no error at termination, so the restart tells them apart and never revives them.
 
 ## Unavailable (derived state)
 
@@ -105,6 +116,7 @@ Sidebar "Workflows" has one path: **workflow list → workflow → job**.
   - **Board**: rows are positions, columns are queued / claimable / running / completed / problems; narrow screens fall back to a status-grouped list.
   - **Assets**: the asset pool grouped by source task; the final report is also shown on Overview.
 - **Task drawer**: the result and available actions come first, followed by task content, dependencies and attachments. Human tasks start by picking an action and then fill that action's form; attempts, type and timestamps fold into "Details"; a failed end delivery offers "Retry delivery".
+- **Restarting a job**: a failed job shows the restart entry at the top of the job page. The dialog explains which task resumes and which tasks are re-dispatched, that starting over creates a second job, and disables each option with the server-provided reason when unavailable. The overview shows the restart count, and a job created by "Start over" links back to its source job.
 
 ## Dependencies and storage
 

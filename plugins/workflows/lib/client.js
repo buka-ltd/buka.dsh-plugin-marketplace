@@ -427,6 +427,30 @@ window.__ModuleLoader__.load({
     	retryDelivery: "Retry delivery",
     	deliveryRetryHint: "The end task is still waiting because delivery failed.",
     	deliveryRetryStarted: "Delivery retry requested.",
+    	restartJob: "Restart job",
+    	restartEntryHint: "This job failed. You can resume from the failure or start over from the same input.",
+    	restartTitle: "Restart job",
+    	restartHint: "Only a failed job can be restarted. Pick how to continue; the job page will refresh with the result.",
+    	restartFromFailed: "Resume from the failure",
+    	restartFromFailedHint: "Continue in this job: the failed task is dispatched again, tasks that the job failure cancelled are queued again, and completed tasks keep their results and attempts. Tasks a person cancelled stay cancelled. The duration budget restarts now.",
+    	restartFromFailedTasks: "Failed tasks to re-dispatch",
+    	restartScratch: "Start over",
+    	restartScratchHint: "Create a new job from the same input using the definition version this workflow has enabled now. The failed job stays as it is so you can still inspect it.",
+    	restartUnavailable: "Unavailable",
+    	restartSubmitting: "Restarting…",
+    	restartFailed: "Could not restart the job: ",
+    	restartFromFailedStarted: "Job resumed from the failure.",
+    	restartScratchStarted: "New job created from the same input.",
+    	restartCount: "Restarts",
+    	restartSource: "Restarted from",
+    	restartSourceJob: "Job #{seq}",
+    	restartSourceOpen: "Open the job it came from",
+    	restartReasonJobNotFailed: "Only a failed job can be restarted.",
+    	restartReasonNoFailedTasks: "This job has no failed task; start over in a new job instead.",
+    	restartReasonWorkflowNotFound: "The workflow no longer exists.",
+    	restartReasonWorkflowRetired: "The workflow is disabled; enable it before starting over.",
+    	restartReasonDefinitionOutdated: "The workflow is not on the current definition version.",
+    	restartReasonUnknown: "This option is not available.",
     	flowHint: "Select a node to see its tasks. Heavier lines have already been traversed.",
     	flowTaskCount: "{n} tasks",
     	flowBuiltinStart: "Start",
@@ -690,6 +714,30 @@ window.__ModuleLoader__.load({
     	retryDelivery: "重试交付",
     	deliveryRetryHint: "结束任务仍在等待：交付没有成功。",
     	deliveryRetryStarted: "已发起重试交付。",
+    	restartJob: "重启作业",
+    	restartEntryHint: "这个作业已经失败。你可以从失败位置继续，或按原输入从头开始。",
+    	restartTitle: "重启作业",
+    	restartHint: "只有失败的作业能重启。选择继续方式；完成后作业页会自动刷新。",
+    	restartFromFailed: "从失败位置开始",
+    	restartFromFailedHint: "在同一个作业里继续：失败的任务重新派发，因作业失败被取消的任务重新排队，已完成的任务保留结果与执行记录。人主动取消的任务保持取消。最长时长预算从现在重新计时。",
+    	restartFromFailedTasks: "会重新派发的失败任务",
+    	restartScratch: "从头开始",
+    	restartScratchHint: "按原作业输入、用这个工作流当前启用的定义版本新建一个作业。原作业保持失败现场，仍可查看。",
+    	restartUnavailable: "不可用",
+    	restartSubmitting: "正在重启…",
+    	restartFailed: "重启作业失败：",
+    	restartFromFailedStarted: "作业已从失败位置继续。",
+    	restartScratchStarted: "已按原输入新建作业。",
+    	restartCount: "重启次数",
+    	restartSource: "来源作业",
+    	restartSourceJob: "作业 #{seq}",
+    	restartSourceOpen: "打开来源作业",
+    	restartReasonJobNotFailed: "只有失败的作业能重启。",
+    	restartReasonNoFailedTasks: "这个作业没有失败任务，请从头开始新建作业。",
+    	restartReasonWorkflowNotFound: "工作流已不存在。",
+    	restartReasonWorkflowRetired: "工作流已停用；启用后才能从头开始。",
+    	restartReasonDefinitionOutdated: "工作流不在当前定义版本。",
+    	restartReasonUnknown: "这个选项不可用。",
     	flowHint: "点节点查看这个岗位的任务；加重的通道表示已经走过。",
     	flowTaskCount: "{n} 个任务",
     	flowBuiltinStart: "开始",
@@ -907,6 +955,8 @@ window.__ModuleLoader__.load({
     const JOB_START_ROUTE = "/buka-workflows/job/start";
     /** 作业动作：cancel / retry-delivery。 */
     const JOB_ACTION_ROUTE = "/buka-workflows/job/action";
+    /** 重启失败作业：failed（从失败位置）/ scratch（从头开始）。 */
+    const JOB_RESTART_ROUTE = "/buka-workflows/job/restart";
     /** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
     const TASK_ROUTE = "/buka-workflows/task";
     /** 任务动作：cancel / retry / claim / complete。 */
@@ -1413,6 +1463,11 @@ window.__ModuleLoader__.load({
     function starterText(starter, t) {
     	if (!isRecord(starter)) return "";
     	return starter.kind === "session" ? t("starterSession") : t("starterHuman");
+    }
+    /** 从工作流详情里找一条作业摘要。 */
+    function jobSummary(workflow, jobId) {
+    	if (workflow === null || typeof jobId !== "string" || jobId === "") return null;
+    	return (Array.isArray(workflow.jobs) ? workflow.jobs : []).find((job) => job?.id === jobId) ?? null;
     }
     /**
     * 任务摘要的展示顺序：创建时间升序，同一时间按 id 稳定排序。
@@ -3384,18 +3439,30 @@ window.__ModuleLoader__.load({
     	const finalTask = state.finalTask;
     	const endSchema = isRecord(definition?.end?.content) ? definition?.end?.content : null;
     	const startSchema = isRecord(definition?.start?.content) ? definition?.start?.content : null;
-    	return h("div", { className: "buka-workflows-overview" }, renderSection(t("overviewRequirement"), h("div", { className: "buka-workflows-overviewCard" }, renderReadonlyValue(page, isRecord(startSchema) ? startSchema : null, input, t("overviewRequirementEmpty")))), renderSection(t("overviewFinal"), renderFinalDeliverable$1(page, finalTask.data, finalTask.status, endTask?.id ?? null, endSchema), endTask === null ? h("span", { className: "buka-workflows-hint" }, t("overviewFinalEmpty")) : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		onClick: () => actions.openTask(endTask.id)
-    	}, t("overviewOpenFinalTask"))), renderSection(t("overviewStarter"), h("div", { className: "buka-workflows-overviewCard" }, renderKv([
+    	const restartedFrom = typeof job.restartedFrom === "string" && job.restartedFrom !== "" ? job.restartedFrom : null;
+    	const sourceJob = jobSummary(state.workflow.data, restartedFrom);
+    	const restartCount = typeof job.restartCount === "number" ? job.restartCount : 0;
+    	const workflowId = typeof job.workflowId === "string" && job.workflowId !== "" ? job.workflowId : state.route.kind === "job" ? state.route.workflowId : "";
+    	const starterRows = [
     		[t("overviewWorkflow"), `${job.workflowName ?? job.workflowId ?? ""}${typeof job.workflowVersion === "number" ? ` · v${job.workflowVersion}` : ""}`],
     		[t("starter"), starter === null ? t("taskTypeUnset") : starter.kind === "session" ? t("starterSession") : t("starterHuman")],
     		[t("overviewDelivery"), job.delivery?.kind === "assistant" ? `${t("newJobDeliveryAssistant")} · ${workerIdentityText(deliveryIdentity(job.delivery))}${job.delivery.missing === true || isWorkerMissing(state, workerIdentity(deliveryIdentity(job.delivery)).id) ? ` · ${t("workerDeleted")}` : ""}` : t("newJobDeliveryStarter")],
     		[t("jobCreatedAt"), formatTime(job.createdAt)],
     		[t("jobUpdatedAt"), formatTime(job.updatedAt)]
-    	]), starter !== null && starter.kind === "session" && typeof starter.sessionId === "string" && starter.sessionId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	];
+    	if (restartCount > 0) starterRows.push([t("restartCount"), String(restartCount)]);
+    	if (restartedFrom !== null) starterRows.push([t("restartSource"), typeof sourceJob?.seq === "number" ? fill(t, "restartSourceJob", { seq: sourceJob.seq }) : restartedFrom]);
+    	return h("div", { className: "buka-workflows-overview" }, renderSection(t("overviewRequirement"), h("div", { className: "buka-workflows-overviewCard" }, renderReadonlyValue(page, isRecord(startSchema) ? startSchema : null, input, t("overviewRequirementEmpty")))), renderSection(t("overviewFinal"), renderFinalDeliverable$1(page, finalTask.data, finalTask.status, endTask?.id ?? null, endSchema), endTask === null ? h("span", { className: "buka-workflows-hint" }, t("overviewFinalEmpty")) : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.openTask(endTask.id)
+    	}, t("overviewOpenFinalTask"))), renderSection(t("overviewStarter"), h("div", { className: "buka-workflows-overviewCard" }, renderKv(starterRows), restartedFrom !== null && workflowId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: () => actions.openJob(workflowId, restartedFrom)
+    	}, t("restartSourceOpen")) : null, starter !== null && starter.kind === "session" && typeof starter.sessionId === "string" && starter.sessionId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "outline",
     		size: "sm",
     		className: "buka-workflows-smallButton",
@@ -3438,10 +3505,19 @@ window.__ModuleLoader__.load({
     	const loaded = state.job;
     	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
     	if (loaded.data === null) return renderLoading(page);
-    	if (loaded.data.job === void 0) return renderEmpty(t("notFound"));
+    	const job = loaded.data.job;
+    	if (job === void 0) return renderEmpty(t("notFound"));
     	const view = state.route.kind === "job" ? state.route.view : "overview";
     	const body = view === "flow" ? renderJobFlow(page) : view === "board" ? renderBoard(page) : view === "outputs" ? renderJobOutputs(page) : renderJobOverview(page);
-    	return h("div", { className: "buka-workflows-detail" }, page.state.job.data?.canRetryDelivery === true ? h("div", {
+    	return h("div", { className: "buka-workflows-detail" }, job.status === "failed" ? h("div", {
+    		className: "buka-workflows-notice",
+    		role: "status"
+    	}, h("p", { className: "buka-workflows-noticeText" }, t("restartEntryHint")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		onClick: actions.openRestart
+    	}, t("restartJob"))) : null, page.state.job.data?.canRetryDelivery === true ? h("div", {
     		className: "buka-workflows-notice",
     		role: "status"
     	}, h("p", { className: "buka-workflows-noticeText" }, t("deliveryRetryHint")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -3562,6 +3638,92 @@ window.__ModuleLoader__.load({
     		className: `buka-workflows-taskCard is-${task.status ?? "pending"}`,
     		onClick: () => actions.openTask(task.id)
     	}, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), renderStatusTag(t, task.status, "task")), typeof task.resultSummary === "string" && task.resultSummary !== "" ? h("span", { className: "buka-workflows-taskCardSummary" }, task.resultSummary) : null, actor === "" && waiting === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, [actor, waiting === "" ? "" : fill(t, "boardCardWaiting", { duration: waiting })].filter((part) => part !== "").join(" · "))));
+    }
+    // .build/workflows/client/components/restart-dialog.js
+    /**
+    * 重启失败作业对话框：两个选项——从失败位置开始 / 从头开始。
+    *
+    * 可用性与不可用原因由服务端 `restart` 投影给出，客户端只按它置灰与显示原因，
+    * 不自己判断作业状态或工作流能否启动。
+    */
+    /** 服务端原因代码 → 词典 key。 */
+    const REASON_KEYS = {
+    	"job-not-failed": "restartReasonJobNotFailed",
+    	"no-failed-tasks": "restartReasonNoFailedTasks",
+    	"workflow-not-found": "restartReasonWorkflowNotFound",
+    	"workflow-retired": "restartReasonWorkflowRetired",
+    	"definition-outdated": "restartReasonDefinitionOutdated"
+    };
+    /** 渲染一个不可用原因；未知代码退回通用文案。 */
+    function reasonText(page, option) {
+    	const reason = typeof option?.reason === "string" ? option.reason : "";
+    	return page.t(REASON_KEYS[reason] ?? "restartReasonUnknown");
+    }
+    /** 一个重启选项。 */
+    function renderOption(input) {
+    	const { page, option } = input;
+    	const { t, state, actions } = page;
+    	const available = option?.available === true;
+    	const submitting = state.restart.submitting === input.mode;
+    	const busy = state.restart.submitting !== false;
+    	return h("section", {
+    		key: input.mode,
+    		className: "buka-workflows-dialogSection"
+    	}, h("h3", { className: "buka-workflows-dialogSectionTitle" }, input.title), h("p", { className: "buka-workflows-fieldHint" }, input.hint), input.extra ?? null, available ? null : h("p", { className: "buka-workflows-hint" }, `${t("restartUnavailable")} · ${reasonText(page, option)}`), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workflows-smallButton",
+    		disabled: !available || busy,
+    		onClick: () => void actions.restartJob(input.mode)
+    	}, submitting ? t("restartSubmitting") : input.title));
+    }
+    /** 重启失败作业对话框。 */
+    function renderRestartDialog(page) {
+    	const { t, state, actions } = page;
+    	const dialog = state.restart;
+    	const restart = state.job.data?.restart;
+    	const failedTasks = jobTasks(state).filter((task) => task.status === "failed");
+    	const failedTaskList = failedTasks.length === 0 ? null : h("div", { className: "buka-workflows-restartTasks" }, h("p", { className: "buka-workflows-hint" }, t("restartFromFailedTasks")), h("ul", { className: "buka-workflows-restartTaskList" }, ...failedTasks.map((task) => h("li", {
+    		key: task.id,
+    		className: "buka-workflows-restartTask"
+    	}, typeof task.typeLabel === "string" && task.typeLabel !== "" ? task.typeLabel : task.type ?? task.id))));
+    	const body = [
+    		h("p", {
+    			key: "hint",
+    			className: "buka-workflows-hint"
+    		}, t("restartHint")),
+    		renderOption({
+    			page,
+    			mode: "failed",
+    			title: t("restartFromFailed"),
+    			hint: t("restartFromFailedHint"),
+    			option: restart?.failed,
+    			...failedTaskList === null ? {} : { extra: failedTaskList }
+    		}),
+    		renderOption({
+    			page,
+    			mode: "scratch",
+    			title: t("restartScratch"),
+    			hint: t("restartScratchHint"),
+    			option: restart?.scratch
+    		}),
+    		dialog.error === null ? null : h("p", {
+    			key: "error",
+    			className: "buka-workflows-formError",
+    			role: "alert"
+    		}, dialog.error)
+    	];
+    	return h(ClientModal, {
+    		open: dialog.open,
+    		onClose: actions.closeRestart,
+    		title: t("restartTitle"),
+    		closeLabel: t("close"),
+    		footer: h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			variant: "outline",
+    			onClick: actions.closeRestart,
+    			disabled: dialog.submitting !== false
+    		}, t("cancel"))
+    	}, h("div", { className: "buka-workflows-dialogForm" }, ...body));
     }
     // .build/workflows/client/components/task-form.js
     /**
@@ -4217,7 +4379,7 @@ window.__ModuleLoader__.load({
     	})))), h("div", {
     		key: routeHash(route),
     		className: `buka-workflows-body${route.kind === "job" ? " is-wide" : ""}${graphView ? " is-graph" : ""}`
-    	}, renderAvailabilityNotice(page, availability), body), renderNewJobDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
+    	}, renderAvailabilityNotice(page, availability), body), renderNewJobDialog(page), renderRestartDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
     		key: state.notice.seq,
     		text: state.notice.text,
     		...state.notice.kind === "success" ? { tone: "success" } : {},
@@ -4725,6 +4887,96 @@ window.__ModuleLoader__.load({
     				flash("error", `${t("taskActionFailed")} ${messageOf(failure)}`);
     			}
     		},
+    		openRestart() {
+    			setState((current) => ({
+    				...current,
+    				restart: {
+    					open: true,
+    					submitting: false,
+    					error: null
+    				}
+    			}));
+    		},
+    		closeRestart() {
+    			setState((current) => ({
+    				...current,
+    				restart: {
+    					open: false,
+    					submitting: false,
+    					error: null
+    				}
+    			}));
+    		},
+    		async restartJob(mode) {
+    			const current = state;
+    			const jobId = jobIdOf(current);
+    			if (jobId === "") return;
+    			const workflowId = workflowIdOf(current);
+    			setState((now) => ({
+    				...now,
+    				restart: {
+    					...now.restart,
+    					submitting: mode,
+    					error: null
+    				}
+    			}));
+    			try {
+    				const body = await postJson(JOB_RESTART_ROUTE, {
+    					jobId,
+    					mode
+    				});
+    				const nextJobId = typeof body.jobId === "string" && body.jobId !== "" ? body.jobId : jobId;
+    				if (mode === "scratch") writeRouteHash({
+    					kind: "job",
+    					workflowId,
+    					jobId: nextJobId,
+    					view: "overview"
+    				});
+    				setState((now) => {
+    					const base = {
+    						...now,
+    						restart: {
+    							open: false,
+    							submitting: false,
+    							error: null
+    						},
+    						job: mode === "scratch" ? {
+    							status: "loading",
+    							data: null,
+    							error: null
+    						} : {
+    							...now.job,
+    							status: "loading"
+    						},
+    						finalTask: idle$1(),
+    						attachments: idle$1(),
+    						taskId: null,
+    						task: idle$1(),
+    						attachment: null,
+    						tick: now.tick + 1
+    					};
+    					return mode === "scratch" ? {
+    						...base,
+    						route: {
+    							kind: "job",
+    							workflowId,
+    							jobId: nextJobId,
+    							view: "overview"
+    						}
+    					} : base;
+    				});
+    				flash("success", t(mode === "scratch" ? "restartScratchStarted" : "restartFromFailedStarted"));
+    			} catch (failure) {
+    				setState((now) => ({
+    					...now,
+    					restart: {
+    						...now.restart,
+    						submitting: false,
+    						error: `${t("restartFailed")} ${messageOf(failure)}`
+    					}
+    				}));
+    			}
+    		},
     		openTask(taskId) {
     			setState((current) => ({
     				...current,
@@ -4996,6 +5248,11 @@ window.__ModuleLoader__.load({
     			delivery: "starter",
     			error: null,
     			submitting: false
+    		},
+    		restart: {
+    			open: false,
+    			submitting: false,
+    			error: null
     		}
     	};
     	if (next.kind === "workflows") return {
@@ -5389,6 +5646,11 @@ window.__ModuleLoader__.load({
     			error: null,
     			submitting: false
     		},
+    		restart: {
+    			open: false,
+    			submitting: false,
+    			error: null
+    		},
     		attachment: null,
     		busy: null,
     		notice: null,
@@ -5739,6 +6001,9 @@ window.__ModuleLoader__.load({
     .buka-workflows-dialogForm{display:flex;flex-direction:column;gap:14px}
     .buka-workflows-dialogSection{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
     .buka-workflows-dialogSectionTitle{margin:0;font-size:13px;font-weight:600;line-height:20px}
+    .buka-workflows-restartTasks{display:flex;flex-direction:column;gap:4px}
+    .buka-workflows-restartTaskList{margin:0;padding:0 0 0 18px;display:flex;flex-direction:column;gap:2px}
+    .buka-workflows-restartTask{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
     .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
     .buka-workflows-avatarMissing{background:var(--dsw-alias-fill-secondary);border-color:var(--dsw-alias-border-secondary);color:var(--dsw-alias-label-tertiary);font-weight:600}
     .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(720px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}

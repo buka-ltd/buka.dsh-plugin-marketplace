@@ -41,6 +41,9 @@ export const JOB_START_ROUTE = '/buka-workflows/job/start'
 /** 作业动作：cancel / retry-delivery。 */
 export const JOB_ACTION_ROUTE = '/buka-workflows/job/action'
 
+/** 重启失败作业：failed（从失败位置）/ scratch（从头开始）。 */
+export const JOB_RESTART_ROUTE = '/buka-workflows/job/restart'
+
 /** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
 export const TASK_ROUTE = '/buka-workflows/task'
 
@@ -357,13 +360,35 @@ export interface JobDetail {
     createdAt?: string
     updatedAt?: string
     error?: unknown
+    /** 人重启过几次；旧 Host 不返回时按 0。 */
+    restartCount?: number
+    /** 从头开始的新作业指向来源作业。 */
+    restartedFrom?: string | null
   }
   definition?: JobDefinition
   tasks?: TaskSummary[]
   canRetryDelivery?: boolean
+  /** 重启入口：可用性与不可用原因由服务端判定，客户端只按它渲染。 */
+  restart?: JobRestartOptions
   /** 派生可用性：缺执行者 / 助理时作业页标注「不可用」。 */
   availability?: WorkerAvailability
 }
+
+/** 一个重启选项。 */
+export interface JobRestartOption {
+  available?: boolean
+  /** 不可用原因代码（`job-not-failed`、`no-failed-tasks`、`workflow-retired` 等）。 */
+  reason?: string
+}
+
+/** 失败作业的两个重启选项。 */
+export interface JobRestartOptions {
+  failed?: JobRestartOption
+  scratch?: JobRestartOption
+}
+
+/** 重启方式：从失败位置 / 从头开始。 */
+export type JobRestartMode = 'failed' | 'scratch'
 
 /** 作业详情页的视图页签。 */
 export type JobView = 'overview' | 'flow' | 'board' | 'outputs'
@@ -433,6 +458,13 @@ export interface NewJobState {
   submitting: boolean
 }
 
+/** 重启失败作业对话框的草稿。 */
+export interface JobRestartState {
+  open: boolean
+  submitting: false | JobRestartMode
+  error: string | null
+}
+
 /** 附件预览抽屉的状态。`data` 是 Host preview 响应的 `attachment` 对象。 */
 export interface AttachmentViewState {
   id: string
@@ -472,6 +504,7 @@ export interface PageState {
   task: Loadable<TaskDetail>
   taskForm: TaskFormState
   newJob: NewJobState
+  restart: JobRestartState
   attachment: AttachmentViewState | null
   busy: string | null
   notice: Notice | null

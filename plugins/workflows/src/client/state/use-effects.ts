@@ -89,6 +89,7 @@ function applyHashRoute(current: PageState, next: Route): PageState {
     attachments: idle<AttachmentMeta[]>(),
     finalTask: idle<TaskDetail>(),
     newJob: { open: false, content: {}, delivery: 'starter', error: null, submitting: false },
+    restart: { open: false, submitting: false, error: null },
   }
   if (next.kind === 'workflows') {
     return {

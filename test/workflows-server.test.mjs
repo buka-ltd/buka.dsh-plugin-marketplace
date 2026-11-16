@@ -1504,6 +1504,506 @@ test('engine: a task session that ends without completing fails the task, and re
 })
 
 // ---------------------------------------------------------------------------
+// 失败作业重启（ADR 0023）
+// ---------------------------------------------------------------------------
+
+/** 读作业事件时间线。 */
+async function jobEvents(store, jobId) {
+  const text = await fs.readFile(store.paths(jobId).events, 'utf8')
+  return text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line))
+}
+
+/** 审批（人 + 助理）+ 研发 + 测试三条并行分支：用来验证重启恢复各自的处理。 */
+function restartBranchesDefinition() {
+  const definition = assistantWithParallelDefinition()
+  definition.positions.push({
+    id: 'qa',
+    label: '测试',
+    executor: { kind: 'worker', id: '质量保障工程师' },
+    taskTypes: [
+      {
+        id: 'qa.verify',
+        label: '验证',
+        content: {
+          type: 'object',
+          properties: { focus: { type: 'string' } },
+          required: ['focus'],
+        },
+      },
+    ],
+  })
+  definition.channels.push({ id: 'start.qa', label: '开始验证', from: 'start', to: 'qa' })
+  definition.channels.push({ id: 'qa.end', label: '验证交付', from: 'qa', to: 'end' })
+  definition.start.next.push({ channel: 'start.qa', type: 'qa.verify', content: { focus: 'x' } })
+  return definition
+}
+
+test('engine: restarting from the failure re-dispatches failed tasks and re-queues cancelled ones', async () => {
+  const env = await setup(restartBranchesDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
+    await waitFor(() => env.workers.dispatched.length === 3)
+    const qa = taskAt(env.store, job.id, 'qa')
+    // 人主动取消一条任务：重启时不得复活。
+    await env.engine.cancelTask(job.id, qa.id)
+
+    const assistantDispatch = env.workers.dispatched.find(
+      (dispatch) => dispatch.request.worker === '沟通助理',
+    )
+    assistantDispatch.handle.endTurn()
+    await waitFor(() => env.store.getJob(job.id).status === 'failed')
+
+    const approve = taskAt(env.store, job.id, 'approve')
+    const dev = taskAt(env.store, job.id, 'dev')
+    assert.equal(approve.status, 'failed')
+    assert.equal(dev.status, 'cancelled')
+    assert.match(dev.error, /delegated task/u, 'the cancellation carries the termination reason')
+    assert.equal(env.store.getTask(qa.id).status, 'cancelled')
+    assert.equal(env.store.getTask(qa.id).error, null, 'a person cancellation has no error')
+    const startBefore = env.store.getTask(START_TASK_ID)
+
+    const outcome = await env.engine.restartJob(job.id, 'failed')
+    assert.equal(outcome.mode, 'failed')
+    assert.equal(outcome.job.id, job.id, 'resuming keeps the same job')
+    assert.equal(outcome.source.id, job.id)
+
+    const restarted = env.store.getJob(job.id)
+    assert.equal(restarted.status, 'running')
+    assert.equal(restarted.error, null)
+    assert.equal(restarted.finishedAt, null)
+    assert.equal(restarted.restartCount, 1)
+    assert.equal(typeof restarted.budgetStartedAt, 'string')
+
+    await waitFor(
+      () =>
+        env.workers.dispatched.filter((entry) => entry.request.worker === '沟通助理').length === 2,
+    )
+    await waitFor(
+      () =>
+        env.workers.dispatched.filter((entry) => entry.request.worker === '软件工程师').length ===
+        2,
+    )
+    assert.equal(
+      env.workers.dispatched.filter((entry) => entry.request.worker === '质量保障工程师').length,
+      1,
+      'the person-cancelled task is not revived',
+    )
+
+    const resumedApprove = env.store.getTask(approve.id)
+    const resumedDev = env.store.getTask(dev.id)
+    assert.equal(resumedApprove.status, 'running', 'the failed task is dispatched again')
+    assert.equal(resumedDev.status, 'running', 'the termination-cancelled task is queued again')
+    assert.equal(resumedApprove.error, null)
+    assert.equal(resumedDev.error, null)
+    assert.equal(resumedApprove.attemptIds.length, 2, 'a new attempt is appended')
+    assert.equal(resumedDev.attemptIds.length, 2)
+    assert.deepEqual(
+      env.store.listAttempts(approve.id).map((attempt) => attempt.status),
+      ['failed', 'running'],
+    )
+    assert.deepEqual(
+      env.store.listAttempts(dev.id).map((attempt) => attempt.status),
+      ['cancelled', 'running'],
+    )
+
+    assert.equal(env.store.getTask(qa.id).status, 'cancelled')
+    const startAfter = env.store.getTask(START_TASK_ID)
+    assert.equal(startAfter.status, 'completed', 'completed tasks are untouched')
+    assert.deepEqual(startAfter.result, startBefore.result)
+    assert.equal(startAfter.attemptIds.length, startBefore.attemptIds.length)
+
+    const restartedEvents = (await jobEvents(env.store, job.id)).filter(
+      (event) => event.type === 'job/restarted',
+    )
+    assert.equal(restartedEvents.length, 1)
+    assert.equal(restartedEvents[0].data.mode, 'failed')
+    assert.equal(restartedEvents[0].data.restartCount, 1)
+    assert.equal(restartedEvents[0].data.readyTasks, 1)
+    assert.equal(restartedEvents[0].data.queuedTasks, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a task a person cancelled from failed stays cancelled after restarting', async () => {
+  const env = await setup(assistantWithParallelDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
+    await waitFor(() => env.workers.dispatched.length === 2)
+    const devDispatch = env.workers.dispatched.find(
+      (dispatch) => dispatch.request.worker === '软件工程师',
+    )
+    const assistantDispatch = env.workers.dispatched.find(
+      (dispatch) => dispatch.request.worker === '沟通助理',
+    )
+
+    devDispatch.handle.endTurn()
+    const dev = taskAt(env.store, job.id, 'dev')
+    await waitFor(() => env.store.getTask(dev.id).status === 'failed')
+    // 人放弃一条失败任务：取消后 error 置空，重启时不能被当成作业终止的取消。
+    await env.engine.cancelTask(job.id, dev.id)
+    const cancelled = env.store.getTask(dev.id)
+    assert.equal(cancelled.status, 'cancelled')
+    assert.equal(cancelled.error, null)
+
+    assistantDispatch.handle.endTurn()
+    await waitFor(() => env.store.getJob(job.id).status === 'failed')
+    await env.engine.restartJob(job.id, 'failed')
+    await waitFor(
+      () =>
+        env.workers.dispatched.filter((entry) => entry.request.worker === '沟通助理').length === 2,
+    )
+    assert.equal(
+      env.store.getTask(dev.id).status,
+      'cancelled',
+      'a person cancellation is not revived',
+    )
+    assert.equal(env.store.getTask(dev.id).error, null)
+    assert.equal(
+      env.workers.dispatched.filter((entry) => entry.request.worker === '软件工程师').length,
+      1,
+      'the person-cancelled task is not dispatched again',
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: giving up a failed task still ends the job as failed', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const now = new Date().toISOString()
+    const job = await insertJobWithTasks(env.store, {
+      id: 'job-abandoned',
+      seq: 62,
+      workflowId: env.workflowId,
+      definition: simpleDevDefinition(),
+      tasks: [
+        {
+          id: 'task-failed',
+          jobId: 'job-abandoned',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'x' },
+          assignee: { kind: 'worker', id: '软件工程师', driver: 'agent' },
+          status: 'failed',
+          error: 'the session ended',
+          finishedAt: now,
+        },
+        {
+          id: 'task-end',
+          jobId: 'job-abandoned',
+          position: 'end',
+          type: 'end',
+          content: { summary: 'done' },
+          assignee: { kind: 'human' },
+          deps: ['task-failed'],
+          status: 'completed',
+          result: { text: 'done', textBytes: 4, textFile: null, attachmentIds: [] },
+          finishedAt: now,
+        },
+      ],
+    })
+    await env.store.insertAttempt({
+      id: 'attempt-failed',
+      jobId: job.id,
+      taskId: 'task-failed',
+      sessionId: null,
+      startSeq: null,
+      status: 'failed',
+      stopReason: null,
+      error: 'the session ended',
+      promptFile: null,
+      startedAt: now,
+      finishedAt: now,
+    })
+
+    // 人放弃失败任务：任务被取消且 error 置空，但执行记录里的失败尝试让作业
+    // 仍然结算为 failed，而不是悄悄变成 completed。
+    await env.engine.cancelTask(job.id, 'task-failed')
+    assert.equal(env.store.getTask('task-failed').status, 'cancelled')
+    assert.equal(env.store.getTask('task-failed').error, null)
+    assert.equal(env.store.getJob(job.id).status, 'failed')
+    assert.match(env.store.getJob(job.id).error, /failed or was blocked/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: restarting resets the duration budget start so an old failed job is not failed again at once', async () => {
+  const env = await setup(assistantDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
+    await waitFor(() => env.store.getJob(job.id).status === 'failed')
+
+    // 模拟一条旧记录：按 createdAt 起算早已超时，且没有 budgetStartedAt。
+    await env.store.updateJob(job.id, (current) => {
+      const next = { ...current, createdAt: '2020-01-01T00:00:00.000Z' }
+      delete next.budgetStartedAt
+      return next
+    })
+
+    const outcome = await env.engine.restartJob(job.id, 'failed')
+    assert.equal(outcome.job.status, 'running')
+    assert.equal(outcome.job.restartCount, 1)
+    assert.equal(typeof outcome.job.budgetStartedAt, 'string')
+    await waitFor(() => env.workers.dispatched.length === 2)
+    assert.equal(env.store.getJob(job.id).status, 'running', 'the budget counts from the restart')
+    assert.equal(env.store.getJob(job.id).error, null)
+    assert.equal(taskAt(env.store, job.id, 'approve').status, 'running')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: starting over creates a new job from the same input on the currently enabled version', async () => {
+  const env = await setup(assistantDefinition())
+  try {
+    const source = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: {},
+      delivery: { kind: 'assistant', id: '沟通助理' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
+    await waitFor(() => env.store.getJob(source.id).status === 'failed')
+
+    // 原作业钉住 v1；重启前保存 v2，从头开始要用当前启用的版本。
+    const changed = assistantDefinition()
+    changed.name = '发布审批（改）'
+    const workflow = await env.engine.saveWorkflow({
+      workflowId: env.workflowId,
+      definition: changed,
+    })
+    assert.equal(workflow.latestVersion, 2)
+
+    const outcome = await env.engine.restartJob(source.id, 'scratch')
+    assert.equal(outcome.mode, 'scratch')
+    assert.notEqual(outcome.job.id, source.id, 'starting over creates a second job')
+    const created = env.store.getJob(outcome.job.id)
+    assert.equal(created.status, 'running')
+    assert.equal(created.seq, source.seq + 1)
+    assert.deepEqual(created.input, source.input)
+    assert.equal(created.workflowId, env.workflowId)
+    assert.equal(created.workflowVersion, 2, 'the new job pins the current version')
+    assert.equal(created.definition.name, '发布审批（改）')
+    assert.deepEqual(created.starter, { kind: 'human' })
+    assert.deepEqual(created.delivery, { kind: 'assistant', id: '沟通助理' })
+    assert.equal(created.restartedFrom, source.id)
+    assert.equal(created.restartCount, 0)
+
+    const original = env.store.getJob(source.id)
+    assert.equal(original.status, 'failed', 'the failed job stays as the scene')
+    assert.equal(original.restartedFrom, undefined)
+    const restartedEvents = (await jobEvents(env.store, source.id)).filter(
+      (event) => event.type === 'job/restarted',
+    )
+    assert.equal(restartedEvents.length, 1)
+    assert.equal(restartedEvents[0].data.mode, 'scratch')
+    assert.equal(restartedEvents[0].data.newJobId, created.id)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: starting over hands the report back to the new human starter when the source used starter delivery', async () => {
+  const env = await setup(assistantDefinition())
+  try {
+    const source = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: {},
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
+    await waitFor(() => env.store.getJob(source.id).status === 'failed')
+
+    const outcome = await env.engine.restartJob(source.id, 'scratch')
+    assert.deepEqual(outcome.job.starter, { kind: 'human' })
+    assert.deepEqual(outcome.job.delivery, { kind: 'starter' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: restarting unblocks blocked tasks once their dependencies recover, but keeps person cancellations', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const failedAt = new Date().toISOString()
+    const worker = { kind: 'worker', id: '软件工程师', driver: 'agent' }
+    const job = await insertJobWithTasks(env.store, {
+      id: 'job-blocked',
+      seq: 60,
+      workflowId: env.workflowId,
+      definition: simpleDevDefinition(),
+      tasks: [
+        {
+          id: 'task-failed',
+          jobId: 'job-blocked',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'x' },
+          assignee: worker,
+          status: 'failed',
+          error: 'boom',
+          finishedAt: failedAt,
+        },
+        {
+          id: 'task-blocked',
+          jobId: 'job-blocked',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'y' },
+          assignee: worker,
+          deps: ['task-failed'],
+          status: 'blocked',
+          finishedAt: failedAt,
+        },
+        {
+          id: 'task-blocked-chain',
+          jobId: 'job-blocked',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'z' },
+          assignee: worker,
+          deps: ['task-blocked'],
+          status: 'blocked',
+          finishedAt: failedAt,
+        },
+        {
+          id: 'task-person-cancelled',
+          jobId: 'job-blocked',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'w' },
+          assignee: worker,
+          deps: ['task-failed'],
+          status: 'cancelled',
+          error: null,
+          finishedAt: failedAt,
+        },
+        {
+          id: 'task-still-blocked',
+          jobId: 'job-blocked',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'v' },
+          assignee: worker,
+          deps: ['task-person-cancelled'],
+          status: 'blocked',
+          finishedAt: failedAt,
+        },
+      ],
+    })
+    await env.store.updateJob(job.id, (current) => ({
+      ...current,
+      status: 'failed',
+      error: 'a task failed',
+      finishedAt: current.updatedAt,
+    }))
+
+    const detail = await env.engine.jobDetail(job.id)
+    assert.equal(detail.restart.failed.available, true)
+    assert.equal(detail.restart.scratch.available, true)
+
+    const outcome = await env.engine.restartJob(job.id, 'failed')
+    assert.equal(outcome.job.status, 'running')
+    assert.equal(outcome.job.restartCount, 1)
+
+    await waitFor(() => env.store.getTask('task-failed').status === 'running')
+    assert.equal(env.store.getTask('task-blocked').status, 'pending')
+    assert.equal(
+      env.store.getTask('task-blocked-chain').status,
+      'pending',
+      'blocked tasks recover iteratively with their dependencies',
+    )
+    assert.equal(env.store.getTask('task-person-cancelled').status, 'cancelled')
+    assert.equal(env.store.getTask('task-person-cancelled').error, null)
+    assert.equal(
+      env.store.getTask('task-still-blocked').status,
+      'blocked',
+      'a task depending on a person cancellation stays blocked',
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: restart options are unavailable for non-failed jobs and when no failed task exists', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const running = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    let detail = await env.engine.jobDetail(running.id)
+    assert.deepEqual(detail.restart.failed, { available: false, reason: 'job-not-failed' })
+    assert.deepEqual(detail.restart.scratch, { available: false, reason: 'job-not-failed' })
+    await assert.rejects(() => env.engine.restartJob(running.id, 'failed'), /only failed jobs/u)
+
+    const failed = await insertJobWithTasks(env.store, {
+      id: 'job-no-failed-task',
+      seq: 61,
+      workflowId: env.workflowId,
+      definition: simpleDevDefinition(),
+      tasks: [
+        {
+          id: 'task-done',
+          jobId: 'job-no-failed-task',
+          position: 'dev',
+          type: 'dev.implement',
+          content: { requirement: 'x' },
+          assignee: { kind: 'worker', id: '软件工程师', driver: 'agent' },
+          deps: [START_TASK_ID],
+          status: 'completed',
+          result: { text: 'done', textBytes: 4, textFile: null, attachmentIds: [] },
+          finishedAt: new Date().toISOString(),
+        },
+      ],
+    })
+    await env.store.updateJob(failed.id, (current) => ({
+      ...current,
+      status: 'failed',
+      error: 'never reached the end',
+      finishedAt: current.updatedAt,
+    }))
+    detail = await env.engine.jobDetail(failed.id)
+    assert.deepEqual(detail.restart.failed, { available: false, reason: 'no-failed-tasks' })
+    assert.equal(detail.restart.scratch.available, true, 'starting over is still possible')
+    await assert.rejects(() => env.engine.restartJob(failed.id, 'failed'), /has no failed task/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: starting over is unavailable while the workflow is disabled', async () => {
+  const env = await setup(assistantDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    env.workers.dispatched[0].handle.endTurn()
+    await waitFor(() => env.store.getJob(job.id).status === 'failed')
+
+    await env.engine.setWorkflowActive(env.workflowId, false)
+    const detail = await env.engine.jobDetail(job.id)
+    assert.equal(
+      detail.restart.failed.available,
+      true,
+      'resuming still works on the pinned version',
+    )
+    assert.deepEqual(detail.restart.scratch, { available: false, reason: 'workflow-retired' })
+    await assert.rejects(() => env.engine.restartJob(job.id, 'scratch'), /not enabled/u)
+    assert.equal(env.store.getJob(job.id).status, 'failed', 'the failed job is unchanged')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // 重启恢复
 // ---------------------------------------------------------------------------
 
@@ -1829,6 +2329,7 @@ test('routes: registers the contract paths and answers the workflow list', async
       '/buka-workflows/job/start',
       '/buka-workflows/job',
       '/buka-workflows/job/action',
+      '/buka-workflows/job/restart',
       '/buka-workflows/task',
       '/buka-workflows/task/action',
       '/buka-workflows/attachments',
@@ -1859,6 +2360,79 @@ test('routes: registers the contract paths and answers the workflow list', async
     assert.equal(payload.ok, true)
     assert.equal(payload.workflows.length, 1)
     assert.equal(payload.workflows[0].status, 'active')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('routes: POST job/restart validates the mode and returns a stable error code', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const registered = []
+    const webCtx = {
+      webServer: {
+        register(route) {
+          registered.push(route)
+          return () => {}
+        },
+      },
+      connection: { requestRejection: () => undefined },
+      effect: (fn) => fn(),
+      logger: undefined,
+    }
+    registerWorkflowRoutes({
+      ctx: {
+        inject(_names, callback) {
+          callback(webCtx)
+        },
+      },
+      ready: async () => env.engine,
+    })
+
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    const restartRoute = registered.find((entry) => entry.path === '/buka-workflows/job/restart')
+    assert.ok(restartRoute, 'the restart route is registered')
+
+    /** 发一个 JSON POST。 */
+    const post = async (body) => {
+      const text = JSON.stringify(body)
+      const req = {
+        method: 'POST',
+        url: '/buka-workflows/job/restart',
+        headers: { 'content-type': 'application/json' },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(text)
+        },
+        resume() {},
+      }
+      const res = {
+        statusCode: 200,
+        headers: {},
+        setHeader(name, value) {
+          this.headers[name] = value
+        },
+        end(value) {
+          this.body = value
+        },
+      }
+      await restartRoute.handler(req, res)
+      return { status: res.statusCode, payload: JSON.parse(res.body) }
+    }
+
+    let response = await post({ jobId: job.id, mode: 'failed' })
+    assert.equal(response.status, 409)
+    assert.equal(response.payload.code, 'job-not-failed')
+
+    response = await post({ jobId: job.id, mode: 'bogus' })
+    assert.equal(response.status, 400)
+    assert.equal(response.payload.code, 'invalid-mode')
+
+    response = await post({ mode: 'failed' })
+    assert.equal(response.status, 400)
+    assert.equal(response.payload.code, 'invalid-id')
   } finally {
     await env.cleanup()
   }
@@ -1901,12 +2475,15 @@ function parallelBranchesDefinition() {
 }
 
 /** 插一个带指定任务的 running 作业（任务直接构建，不经过调度）。 */
-async function insertJobWithTasks(store, { id, seq, definition, tasks }) {
+async function insertJobWithTasks(
+  store,
+  { id, seq, definition, tasks, workflowId = 'wf-availability' },
+) {
   const timestamp = new Date().toISOString()
   const job = {
     id,
     seq,
-    workflowId: 'wf-availability',
+    workflowId,
     workflowVersion: 1,
     workflowName: definition.name,
     workflowDescription: '',

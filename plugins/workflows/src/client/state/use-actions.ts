@@ -22,6 +22,7 @@ import type {
   DefinitionSelection,
   JobDetail,
   JobFilter,
+  JobRestartMode,
   JobView,
   Loadable,
   PageState,
@@ -34,6 +35,7 @@ import type {
 import {
   isRecord,
   JOB_ACTION_ROUTE,
+  JOB_RESTART_ROUTE,
   JOB_START_ROUTE,
   TASK_ACTION_ROUTE,
   WORKFLOW_ACTIVATE_ROUTE,
@@ -74,6 +76,9 @@ export interface AppActions extends ActionDeps {
   submitNewJob: () => Promise<void>
   cancelJob: () => Promise<void>
   retryDelivery: () => Promise<void>
+  openRestart: () => void
+  closeRestart: () => void
+  restartJob: (mode: JobRestartMode) => Promise<void>
   openTask: (taskId: string) => void
   closeTask: () => void
   setTaskField: (name: string, value: string) => void
@@ -458,6 +463,70 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
       } catch (failure) {
         setState((current) => ({ ...current, busy: null }))
         flash('error', `${t('taskActionFailed')} ${messageOf(failure)}`)
+      }
+    },
+
+    openRestart() {
+      setState((current) => ({
+        ...current,
+        restart: { open: true, submitting: false, error: null },
+      }))
+    },
+
+    closeRestart() {
+      setState((current) => ({
+        ...current,
+        restart: { open: false, submitting: false, error: null },
+      }))
+    },
+
+    async restartJob(mode) {
+      const current = state
+      const jobId = jobIdOf(current)
+      if (jobId === '') return
+      const workflowId = workflowIdOf(current)
+      setState((now) => ({ ...now, restart: { ...now.restart, submitting: mode, error: null } }))
+      try {
+        const body = await postJson<{ jobId?: string }>(JOB_RESTART_ROUTE, { jobId, mode })
+        const nextJobId = typeof body.jobId === 'string' && body.jobId !== '' ? body.jobId : jobId
+        if (mode === 'scratch') {
+          writeRouteHash({ kind: 'job', workflowId, jobId: nextJobId, view: 'overview' })
+        }
+        setState((now) => {
+          const base: PageState = {
+            ...now,
+            restart: { open: false, submitting: false, error: null },
+            job:
+              mode === 'scratch'
+                ? { status: 'loading', data: null, error: null }
+                : { ...now.job, status: 'loading' },
+            finalTask: idle<TaskDetail>(),
+            attachments: idle<AttachmentMeta[]>(),
+            taskId: null,
+            task: idle<TaskDetail>(),
+            attachment: null,
+            tick: now.tick + 1,
+          }
+          return mode === 'scratch'
+            ? {
+                ...base,
+                route: { kind: 'job', workflowId, jobId: nextJobId, view: 'overview' },
+              }
+            : base
+        })
+        flash(
+          'success',
+          t(mode === 'scratch' ? 'restartScratchStarted' : 'restartFromFailedStarted'),
+        )
+      } catch (failure) {
+        setState((now) => ({
+          ...now,
+          restart: {
+            ...now.restart,
+            submitting: false,
+            error: `${t('restartFailed')} ${messageOf(failure)}`,
+          },
+        }))
       }
     },
 

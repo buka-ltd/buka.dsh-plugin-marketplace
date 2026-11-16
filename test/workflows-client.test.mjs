@@ -928,6 +928,103 @@ test('作业概览：需求、结构化输入、最终交付物与启动信息',
   assert.doesNotMatch(text, /原始需求|原始结构化输入/u, 'readable sections replace raw JSON')
 })
 
+test('重启作业：失败作业显示入口、重启次数与来源作业，非失败作业没有入口', async () => {
+  const client = await loadClient()
+  const restartedJob = {
+    ...JOB_DETAIL,
+    job: {
+      ...JOB_DETAIL.job,
+      status: 'failed',
+      error: 'delegated task failed',
+      restartCount: 2,
+      restartedFrom: 'job-0',
+    },
+    restart: { failed: { available: true }, scratch: { available: true } },
+  }
+  const workflow = {
+    ...WORKFLOW_DETAIL,
+    jobs: [
+      ...WORKFLOW_DETAIL.jobs,
+      { id: 'job-0', seq: 3, status: 'failed', inputSummary: '最早的作业' },
+    ],
+  }
+  const { tree, texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: workflow, error: null },
+    job: { status: 'ready', data: restartedJob, error: null },
+    finalTask: { status: 'ready', data: FINAL_TASK.task, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /重启作业/u)
+  assert.match(text, /重启次数/u)
+  assert.match(text, /来源作业/u)
+  assert.match(text, /作业 #3/u, 'the source job is shown by its sequence')
+
+  clickButton(tree, '重启作业')
+  assert.equal(harness.updates[0].restart.open, true, 'the entry opens the restart dialog')
+
+  clickButton(tree, '打开来源作业')
+  assert.equal(harness.updates.at(-1).route.jobId, 'job-0', 'the source job is reachable')
+
+  const completed = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: {
+      status: 'ready',
+      data: { ...JOB_DETAIL, job: { ...JOB_DETAIL.job, status: 'completed' } },
+      error: null,
+    },
+  })
+  assert.doesNotMatch(
+    completed.texts.join(' '),
+    /重启作业/u,
+    'completed jobs have no restart entry',
+  )
+})
+
+test('重启作业：两个选项按服务端可用性置灰并显示原因', async () => {
+  const client = await loadClient()
+  const failedJob = {
+    ...JOB_DETAIL,
+    job: { ...JOB_DETAIL.job, status: 'failed', error: 'delegated task failed' },
+    tasks: [
+      { ...JOB_DETAIL.tasks[1], status: 'failed' },
+      { ...JOB_DETAIL.tasks[2], status: 'cancelled' },
+      ...JOB_DETAIL.tasks,
+    ],
+    restart: {
+      failed: { available: false, reason: 'no-failed-tasks' },
+      scratch: { available: true },
+    },
+  }
+  const { tree, texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: failedJob, error: null },
+    restart: { open: true, submitting: false, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /从失败位置开始/u)
+  assert.match(text, /从头开始/u)
+  assert.match(
+    text,
+    /会重新派发的失败任务/u,
+    'the dialog names the task that will be re-dispatched',
+  )
+  assert.match(text, /这个作业没有失败任务/u, 'the server reason is shown')
+
+  const fromFailed = findBy(
+    tree,
+    (node) => node.type === 'button' && textOf(node) === '从失败位置开始',
+  )
+  assert.ok(fromFailed !== null, 'the resume option renders')
+  assert.equal(fromFailed.props.disabled, true, 'an unavailable option is disabled')
+
+  const scratch = findBy(tree, (node) => node.type === 'button' && textOf(node) === '从头开始')
+  assert.ok(scratch !== null, 'the start-over option renders')
+  assert.equal(scratch.props.disabled, false, 'an available option stays clickable')
+})
+
 test('实时流程：节点聚合、待认领徽标、已走过的通道与点节点开任务', async () => {
   const client = await loadClient()
   const { tree, texts, classes } = render(client, {

@@ -413,8 +413,10 @@ const EXPECTED_TASK_TRANSITIONS = {
   running: ['completed', 'failed', 'cancelled'],
   completed: [],
   failed: ['ready', 'cancelled'],
-  blocked: ['cancelled'],
-  cancelled: [],
+  // 引擎重启失败作业时用 blocked / cancelled -> pending；人主动取消的
+  // 任务在重启时保持 cancelled（靠终止时写入的 error 区分）。
+  blocked: ['cancelled', 'pending'],
+  cancelled: ['pending'],
 }
 
 test('domain: task status transitions match the state machine', () => {
@@ -447,11 +449,15 @@ test('domain: terminal helpers', () => {
   assert.equal(isTerminalJobStatus('running'), false)
   for (const from of JOB_STATUSES) {
     for (const to of JOB_STATUSES) {
-      assert.equal(canTransitionJob(from, to), from === 'running' && to !== 'running')
+      // 唯一新增的转换：失败作业由人显式重启（ADR 0023）。
+      const expected =
+        (from === 'running' && to !== 'running') || (from === 'failed' && to === 'running')
+      assert.equal(canTransitionJob(from, to), expected)
     }
   }
   assert.doesNotThrow(() => assertJobTransition('job-1', 'running', 'completed'))
-  assert.throws(() => assertJobTransition('job-1', 'failed', 'running'))
+  assert.doesNotThrow(() => assertJobTransition('job-1', 'failed', 'running'))
+  assert.throws(() => assertJobTransition('job-1', 'completed', 'running'))
 })
 
 // ---------------------------------------------------------------------------

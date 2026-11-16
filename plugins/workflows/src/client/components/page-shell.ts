@@ -24,6 +24,7 @@ import { renderJobDetail } from './job-detail.ts'
 import { renderNewJobDialog } from './new-job-dialog.ts'
 import { renderNodeTasksDrawer } from './node-tasks-drawer.ts'
 import { ConfirmButton, renderAvailabilityNotice, renderStatusTag } from './parts.ts'
+import { renderRestartDialog } from './restart-dialog.ts'
 import { renderTaskDrawer } from './task-drawer.ts'
 import { renderWorkflowDefinition } from './workflow-definition.ts'
 import { renderWorkflowJobs } from './workflow-jobs.ts'
@@ -307,6 +308,7 @@ export function renderPage(page: AppContext): React.ReactElement {
       body,
     ),
     renderNewJobDialog(page),
+    renderRestartDialog(page),
     renderDefinitionDrawer(page),
     renderNodeTasksDrawer(page),
     renderTaskDrawer(page),

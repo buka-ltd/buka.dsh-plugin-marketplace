@@ -30,6 +30,9 @@ export type WorkflowStatus = 'draft' | 'active' | 'retired'
 /** 作业状态；没有「等待人工」。 */
 export type JobStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
+/** 失败作业的重启方式（ADR 0023）：就地恢复失败位置，或按原输入新建作业。 */
+export type JobRestartMode = 'failed' | 'scratch'
+
 /** 任务状态。 */
 export type TaskStatus =
   | 'pending'
@@ -352,6 +355,12 @@ export interface JobRecord {
   /** 列表用的一句话输入摘要。 */
   readonly inputSummary: string
   readonly error: string | null
+  /** 人显式重启的次数；旧记录没有该字段，按 0 处理。 */
+  readonly restartCount?: number | undefined
+  /** 预算计时起点；缺省按 `createdAt`（ADR 0023：重启后从重启时刻重新计时）。 */
+  readonly budgetStartedAt?: string | undefined
+  /** 从头开始的新作业指向来源作业；旧记录与被动创建时缺省。 */
+  readonly restartedFrom?: string | null | undefined
   readonly createdAt: IsoTime
   readonly updatedAt: IsoTime
   readonly finishedAt: IsoTime | null

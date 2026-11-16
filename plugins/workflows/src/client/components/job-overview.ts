@@ -10,12 +10,14 @@ import type React from 'react'
 
 import { h } from '../element.ts'
 import { errorTextOf, formatBytes, formatTime } from '../format.ts'
+import { fill } from '../i18n.ts'
 import {
   currentDefinition,
   currentJobDefinition,
   deliveryIdentity,
   endTaskSummary,
   isWorkerMissing,
+  jobSummary,
   jobTasks,
   mergedDefinition,
   workerIdentity,
@@ -47,6 +49,55 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
   const finalTask = state.finalTask
   const endSchema = isRecord(definition?.end?.content) ? definition?.end?.content : null
   const startSchema = isRecord(definition?.start?.content) ? definition?.start?.content : null
+  const restartedFrom =
+    typeof job.restartedFrom === 'string' && job.restartedFrom !== '' ? job.restartedFrom : null
+  const sourceJob = jobSummary(state.workflow.data, restartedFrom)
+  const restartCount = typeof job.restartCount === 'number' ? job.restartCount : 0
+  const workflowId =
+    typeof job.workflowId === 'string' && job.workflowId !== ''
+      ? job.workflowId
+      : state.route.kind === 'job'
+        ? state.route.workflowId
+        : ''
+
+  const starterRows: Array<[string, string]> = [
+    [
+      t('overviewWorkflow'),
+      `${job.workflowName ?? job.workflowId ?? ''}${
+        typeof job.workflowVersion === 'number' ? ` · v${job.workflowVersion}` : ''
+      }`,
+    ],
+    [
+      t('starter'),
+      starter === null
+        ? t('taskTypeUnset')
+        : starter.kind === 'session'
+          ? t('starterSession')
+          : t('starterHuman'),
+    ],
+    [
+      t('overviewDelivery'),
+      job.delivery?.kind === 'assistant'
+        ? `${t('newJobDeliveryAssistant')} · ${workerIdentityText(deliveryIdentity(job.delivery))}${
+            job.delivery.missing === true ||
+            isWorkerMissing(state, workerIdentity(deliveryIdentity(job.delivery)).id)
+              ? ` · ${t('workerDeleted')}`
+              : ''
+          }`
+        : t('newJobDeliveryStarter'),
+    ],
+    [t('jobCreatedAt'), formatTime(job.createdAt)],
+    [t('jobUpdatedAt'), formatTime(job.updatedAt)],
+  ]
+  if (restartCount > 0) starterRows.push([t('restartCount'), String(restartCount)])
+  if (restartedFrom !== null) {
+    starterRows.push([
+      t('restartSource'),
+      typeof sourceJob?.seq === 'number'
+        ? fill(t, 'restartSourceJob', { seq: sourceJob.seq })
+        : restartedFrom,
+    ])
+  }
 
   return h(
     'div',
@@ -91,35 +142,19 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
       h(
         'div',
         { className: 'buka-workflows-overviewCard' },
-        renderKv([
-          [
-            t('overviewWorkflow'),
-            `${job.workflowName ?? job.workflowId ?? ''}${
-              typeof job.workflowVersion === 'number' ? ` · v${job.workflowVersion}` : ''
-            }`,
-          ],
-          [
-            t('starter'),
-            starter === null
-              ? t('taskTypeUnset')
-              : starter.kind === 'session'
-                ? t('starterSession')
-                : t('starterHuman'),
-          ],
-          [
-            t('overviewDelivery'),
-            job.delivery?.kind === 'assistant'
-              ? `${t('newJobDeliveryAssistant')} · ${workerIdentityText(deliveryIdentity(job.delivery))}${
-                  job.delivery.missing === true ||
-                  isWorkerMissing(state, workerIdentity(deliveryIdentity(job.delivery)).id)
-                    ? ` · ${t('workerDeleted')}`
-                    : ''
-                }`
-              : t('newJobDeliveryStarter'),
-          ],
-          [t('jobCreatedAt'), formatTime(job.createdAt)],
-          [t('jobUpdatedAt'), formatTime(job.updatedAt)],
-        ]),
+        renderKv(starterRows),
+        restartedFrom !== null && workflowId !== ''
+          ? h(
+              Button,
+              {
+                variant: 'outline',
+                size: 'sm',
+                className: 'buka-workflows-smallButton',
+                onClick: () => actions.openJob(workflowId, restartedFrom),
+              },
+              t('restartSourceOpen'),
+            )
+          : null,
         starter !== null &&
           starter.kind === 'session' &&
           typeof starter.sessionId === 'string' &&

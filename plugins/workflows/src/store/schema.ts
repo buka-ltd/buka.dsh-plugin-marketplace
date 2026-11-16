@@ -137,6 +137,10 @@ const jobRecordSchema = z
     delivery: z.unknown().optional(),
     inputSummary: z.string(),
     error: z.string().nullable(),
+    // v8 重启（ADR 0023）：都是可选的，旧作业记录读取时不要求这些字段。
+    restartCount: z.number().int().nonnegative().optional(),
+    budgetStartedAt: z.string().optional(),
+    restartedFrom: z.string().nullable().optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
     finishedAt: z.string().nullable(),

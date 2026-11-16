@@ -2691,6 +2691,9 @@ function jobReferencesWorker(job, id) {
 * - 技术失败进 `failed`，重试把同一个任务退回 `ready`（新增执行记录，历史保留）；
 - 代办失败的作业直接 `failed`，任务不退回 `ready`（ADR 0022）；
 * - 失败任务被用户放弃（取消）后，依赖它的任务 `blocked`；
+* - 失败作业可以重启（ADR 0023）：作业 `failed → running`；失败任务回到 `ready`，
+*   因作业终止被取消的任务回到 `pending`，被阻塞的任务等依赖恢复后再 `pending`；
+*   人主动取消的任务不复活。
 * - 业务「不通过」不是状态：结果里写 `result: "fail"`，由执行者再派新任务。
 *
 * 纯函数，不依赖任何服务，便于单测。
@@ -2739,8 +2742,8 @@ const TASK_TRANSITIONS = Object.freeze({
 	],
 	completed: [],
 	failed: ["ready", "cancelled"],
-	blocked: ["cancelled"],
-	cancelled: []
+	blocked: ["cancelled", "pending"],
+	cancelled: ["pending"]
 });
 Object.freeze([
 	"running",
@@ -2754,7 +2757,7 @@ const TERMINAL_JOB_STATUSES = Object.freeze([
 	"failed",
 	"cancelled"
 ]);
-/** 合法作业状态转换矩阵。 */
+/** 合法作业状态转换矩阵；`failed -> running` 是人的显式重启（ADR 0023）。 */
 const JOB_TRANSITIONS = Object.freeze({
 	running: [
 		"completed",
@@ -2762,7 +2765,7 @@ const JOB_TRANSITIONS = Object.freeze({
 		"cancelled"
 	],
 	completed: [],
-	failed: [],
+	failed: ["running"],
 	cancelled: []
 });
 /**
@@ -4012,7 +4015,8 @@ var WorkflowEngine = class {
 			definition,
 			starter,
 			content: input.content,
-			delivery: input.delivery
+			delivery: input.delivery,
+			...input.restartedFrom === void 0 ? {} : { restartedFrom: input.restartedFrom }
 		});
 		try {
 			await this.store.runExclusive(job.id, async () => {
@@ -4151,6 +4155,9 @@ var WorkflowEngine = class {
 			delivery: input.delivery,
 			inputSummary: summarizeInput(input.content),
 			error: null,
+			restartCount: 0,
+			budgetStartedAt: now,
+			...input.restartedFrom === void 0 ? {} : { restartedFrom: input.restartedFrom },
 			createdAt: now,
 			updatedAt: now,
 			finishedAt: null
@@ -4186,13 +4193,57 @@ var WorkflowEngine = class {
 				delivery: deliveryView(job.delivery, workers),
 				createdAt: job.createdAt,
 				updatedAt: job.updatedAt,
-				error: job.error
+				error: job.error,
+				restartCount: job.restartCount ?? 0,
+				restartedFrom: job.restartedFrom ?? null
 			},
 			definition: jobDefinition(job.definition, workers),
 			tasks: tasks.map((task) => taskSummary(task, job.definition)),
 			canRetryDelivery: canRetryDelivery(tasks),
+			restart: this.restartView(job, tasks),
 			availability: jobAvailability(job, workers)
 		};
+	}
+	/**
+	* 重启选项的可用性投影。
+	*
+	* 只有 `failed` 作业能重启；没有失败任务时只能从头开始；工作流不能按当前
+	* 定义启动时（不存在 / 停用 / 不是当前格式）只能从失败位置继续。
+	*
+	* @param job 作业
+	* @param tasks 作业任务
+	* @returns 两个选项的可用性与不可用原因代码
+	*/
+	restartView(job, tasks) {
+		if (job.status !== "failed") return {
+			failed: {
+				available: false,
+				reason: "job-not-failed"
+			},
+			scratch: {
+				available: false,
+				reason: "job-not-failed"
+			}
+		};
+		const scratchProblem = this.scratchRestartProblem(job);
+		return {
+			failed: tasks.some((task) => task.status === "failed") ? { available: true } : {
+				available: false,
+				reason: "no-failed-tasks"
+			},
+			scratch: scratchProblem === null ? { available: true } : {
+				available: false,
+				reason: scratchProblem
+			}
+		};
+	}
+	/** 当前工作流能否作为「从头开始」的定义来源；返回原因代码，可用时为 null。 */
+	scratchRestartProblem(job) {
+		const found = this.store.readWorkflowVersion(job.workflowId);
+		if (found === null) return "workflow-not-found";
+		if (found.record.status !== "active") return "workflow-retired";
+		if (found.versionRecord.definition.version !== 8) return "definition-outdated";
+		return null;
 	}
 	/**
 	* 作业列表（某个工作流下）。
@@ -4760,6 +4811,7 @@ var WorkflowEngine = class {
 			const updated = await this.store.updateTask(taskId, (current) => ({
 				...current,
 				status: "cancelled",
+				error: null,
 				finishedAt: now,
 				updatedAt: now
 			}));
@@ -4816,6 +4868,7 @@ var WorkflowEngine = class {
 				await this.store.updateTask(task.id, (current) => ({
 					...current,
 					status: "cancelled",
+					error: null,
 					finishedAt: now,
 					updatedAt: now
 				}));
@@ -4849,6 +4902,162 @@ var WorkflowEngine = class {
 			await this.recomputeLocked(job.id);
 			return this.store.getJob(job.id) ?? job;
 		});
+	}
+	/**
+	* 重启一个失败作业。
+	*
+	* - `failed`：同一作业就地恢复——失败任务回 `ready`，因作业终止被取消的任务
+	*   回 `pending`，被阻塞的任务等依赖恢复后回 `pending`；人主动取消的任务与
+	*   已完成的任务不动；作业回 `running`，预算从重启时刻重新计时。
+	* - `scratch`：按原作业输入、用工作流当前启用版本新建一个作业；原作业留在
+	*   `failed` 作为现场，新作业记录来源作业 id 与人的发起人。
+	*
+	* 只有 `failed` 作业能重启；其它状态抛稳定错误码 `job-not-failed`。
+	*
+	* @param jobId 原作业 id
+	* @param mode 重启方式
+	* @returns 继续运行的作业与被重启的原作业
+	*/
+	async restartJob(jobId, mode) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0) throw new WorkflowError("not-found", `job not found: ${jobId}`);
+		if (job.status !== "failed") throw new WorkflowError("job-not-failed", `job ${jobId} is ${job.status}; only failed jobs can be restarted`);
+		if (mode === "scratch") return await this.restartJobFromScratch(job);
+		return await this.restartJobInPlace(job);
+	}
+	/** 从失败位置恢复：同一个作业回到 running。 */
+	async restartJobInPlace(source) {
+		return await this.store.runExclusive(source.id, async () => {
+			const job = this.store.getJob(source.id);
+			if (job === void 0) throw new WorkflowError("not-found", `job not found: ${source.id}`);
+			if (job.status !== "failed") throw new WorkflowError("job-not-failed", `job ${job.id} is ${job.status}; only failed jobs can be restarted`);
+			const tasks = this.store.listTasks(job.id);
+			if (!tasks.some((task) => task.status === "failed")) throw new WorkflowError("no-failed-tasks", `job ${job.id} has no failed task to resume; start a new job from scratch instead`);
+			const now = nowIso();
+			for (const task of tasks) this.deliveryBlocked.delete(task.id);
+			let ready = 0;
+			let queued = 0;
+			for (const task of tasks) {
+				if (task.status === "failed") {
+					assertTaskTransition(task.id, "failed", "ready");
+					await this.store.updateTask(task.id, (current) => ({
+						...current,
+						status: "ready",
+						error: null,
+						claimant: null,
+						finishedAt: null,
+						updatedAt: now
+					}));
+					await this.appendEvent(job.id, "task/restarted", {
+						taskId: task.id,
+						from: "failed",
+						to: "ready"
+					});
+					ready += 1;
+					continue;
+				}
+				if (task.status === "cancelled" && task.error !== null) {
+					assertTaskTransition(task.id, "cancelled", "pending");
+					await this.store.updateTask(task.id, (current) => ({
+						...current,
+						status: "pending",
+						error: null,
+						claimant: null,
+						finishedAt: null,
+						updatedAt: now
+					}));
+					await this.appendEvent(job.id, "task/restarted", {
+						taskId: task.id,
+						from: "cancelled",
+						to: "pending"
+					});
+					queued += 1;
+				}
+			}
+			let unblocked = 0;
+			let changed = true;
+			while (changed) {
+				changed = false;
+				const byId = new Map(this.store.listTasks(job.id).map((task) => [task.id, task]));
+				for (const task of byId.values()) {
+					if (task.status !== "blocked") continue;
+					if (task.deps.some((dependencyId) => {
+						const dependency = byId.get(dependencyId);
+						if (dependency === void 0) return false;
+						if (dependency.status === "failed" || dependency.status === "blocked") return true;
+						return dependency.status === "cancelled" && dependency.error === null;
+					})) continue;
+					assertTaskTransition(task.id, "blocked", "pending");
+					await this.store.updateTask(task.id, (current) => ({
+						...current,
+						status: "pending",
+						error: null,
+						claimant: null,
+						finishedAt: null,
+						updatedAt: now
+					}));
+					await this.appendEvent(job.id, "task/restarted", {
+						taskId: task.id,
+						from: "blocked",
+						to: "pending"
+					});
+					unblocked += 1;
+					changed = true;
+					break;
+				}
+			}
+			assertJobTransition(job.id, job.status, "running");
+			const updated = await this.store.updateJob(job.id, (current) => ({
+				...current,
+				status: "running",
+				error: null,
+				finishedAt: null,
+				restartCount: (current.restartCount ?? 0) + 1,
+				budgetStartedAt: now,
+				updatedAt: now
+			}));
+			await this.appendEvent(job.id, "job/restarted", {
+				mode: "failed",
+				restartCount: updated.restartCount ?? 1,
+				readyTasks: ready,
+				queuedTasks: queued,
+				unblockedTasks: unblocked
+			});
+			await this.recomputeLocked(job.id);
+			return {
+				mode: "failed",
+				job: this.store.getJob(job.id) ?? updated,
+				source: job
+			};
+		});
+	}
+	/** 从头开始：按原作业输入、用当前启用版本新建一个作业，原作业留在 failed。 */
+	async restartJobFromScratch(source) {
+		const { workflow, definition } = this.requireStartableWorkflow(source.workflowId);
+		const workers = await this.refreshWorkers(true);
+		this.assertDefinitionAvailable(definition, workers, workflow.name);
+		const delivery = this.resolveDelivery(definition, source.delivery, { kind: "human" }, workers);
+		const job = await this.startJob({
+			workflow,
+			definition,
+			workers,
+			starter: { kind: "human" },
+			content: source.input,
+			delivery,
+			restartedFrom: source.id
+		});
+		await this.store.runExclusive(source.id, async () => {
+			await this.appendEvent(source.id, "job/restarted", {
+				mode: "scratch",
+				newJobId: job.id,
+				newJobSeq: job.seq
+			});
+		});
+		return {
+			mode: "scratch",
+			job,
+			source: this.store.getJob(source.id) ?? source
+		};
 	}
 	/** 重启恢复：重建调度、续接 running 任务、补算 clock、重试交付。 */
 	async recover() {
@@ -5685,7 +5894,7 @@ var WorkflowEngine = class {
 		if (tasks.some((task) => task.status === "failed")) return;
 		if (tasks.some((task) => isOpenTaskStatus(task.status))) return;
 		const hasEndCompleted = tasks.some((task) => task.position === "end" && task.status === "completed");
-		const hasFailure = tasks.some((task) => task.status === "blocked" || task.status === "failed" || task.status === "cancelled" && task.error !== null);
+		const hasFailure = tasks.some((task) => task.status === "blocked" || task.status === "failed" || task.status === "cancelled" && (task.error !== null || this.store.listAttempts(task.id).some((attempt) => attempt.status === "failed")));
 		const now = nowIso();
 		if (hasEndCompleted && !hasFailure) {
 			assertJobTransition(jobId, job.status, "completed");
@@ -5710,9 +5919,10 @@ var WorkflowEngine = class {
 		}));
 		await this.appendEvent(jobId, "job/failed", { error: reason });
 	}
-	/** 是否超过最长时长预算。 */
+	/** 是否超过最长时长预算；计时起点缺省按作业创建时间（重启后重置）。 */
 	overDurationBudget(job) {
-		return Date.now() - Date.parse(job.createdAt) > job.definition.budgets.maxDurationHours * 3600 * 1e3;
+		const startedAt = job.budgetStartedAt ?? job.createdAt;
+		return Date.now() - Date.parse(startedAt) > job.definition.budgets.maxDurationHours * 3600 * 1e3;
 	}
 	/** 超预算：取消非终态任务，作业 failed。 */
 	async failJobForBudget(job) {
@@ -6162,6 +6372,7 @@ const ROUTES = {
 	jobStart: "/buka-workflows/job/start",
 	job: "/buka-workflows/job",
 	jobAction: "/buka-workflows/job/action",
+	jobRestart: "/buka-workflows/job/restart",
 	task: "/buka-workflows/task",
 	taskAction: "/buka-workflows/task/action",
 	attachments: "/buka-workflows/attachments",
@@ -6179,7 +6390,10 @@ function statusForError(error) {
 		case "invalid-status":
 		case "not-ready":
 		case "not-failed":
-		case "no-pending-delivery": return 409;
+		case "no-pending-delivery":
+		case "job-not-failed":
+		case "no-failed-tasks":
+		case "definition-outdated": return 409;
 		default: return 400;
 	}
 	return 500;
@@ -6340,6 +6554,25 @@ function registerWorkflowRoutes({ ctx, ready }) {
 				return;
 			}
 			sendError(res, 400, "invalid-action", "action must be cancel or retry-delivery");
+		});
+		route(ROUTES.jobRestart, async (req, res) => {
+			if (req.method !== "POST") return sendMethodNotAllowed(res, "POST");
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const record = body;
+			const jobId = typeof record.jobId === "string" ? record.jobId.trim() : "";
+			if (jobId === "") return sendError(res, 400, "invalid-id", "jobId is required");
+			const mode = record.mode;
+			if (mode !== "failed" && mode !== "scratch") return sendError(res, 400, "invalid-mode", "mode must be failed or scratch");
+			const outcome = await (await ready()).restartJob(jobId, mode);
+			sendJson(res, 200, {
+				ok: true,
+				mode: outcome.mode,
+				jobId: outcome.job.id,
+				seq: outcome.job.seq,
+				sourceJobId: outcome.source.id,
+				sourceSeq: outcome.source.seq
+			});
 		});
 		route(ROUTES.task, async (req, res) => {
 			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
@@ -11022,6 +11255,9 @@ const jobRecordSchema = object({
 	delivery: unknown().optional(),
 	inputSummary: string(),
 	error: string().nullable(),
+	restartCount: number().int().nonnegative().optional(),
+	budgetStartedAt: string().optional(),
+	restartedFrom: string().nullable().optional(),
 	createdAt: string(),
 	updatedAt: string(),
 	finishedAt: string().nullable()

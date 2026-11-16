@@ -46,6 +46,7 @@ import type {
   CreationDefinition,
   DeliveryRule,
   JobRecord,
+  JobRestartMode,
   JsonValue,
   Starter,
   TaskRecord,
@@ -148,6 +149,16 @@ type Launch =
 
 /** 引擎构造参数。 */
 export interface WorkflowEngineOptions extends EngineDeps {}
+
+/** 重启一个失败作业的结果。 */
+export interface JobRestartOutcome {
+  /** 用了哪种重启方式。 */
+  readonly mode: JobRestartMode
+  /** 继续运行的作业：从失败位置是原作业，从头开始是新作业。 */
+  readonly job: JobRecord
+  /** 被重启的原作业；从头开始时它保持 `failed`。 */
+  readonly source: JobRecord
+}
 
 /** 从 workers 服务读登记表，转成本插件关心的形状。 */
 function parseWorkerCatalog(raw: unknown): Map<string, WorkerInfo> {
@@ -492,6 +503,8 @@ export class WorkflowEngine {
     readonly starter: Starter
     readonly content: JsonValue
     readonly delivery: DeliveryRule
+    /** 从头开始重启时指向来源作业。 */
+    readonly restartedFrom?: string | undefined
   }): Promise<JobRecord> {
     const { definition, workers, starter } = input
     this.checkStartContent(definition, input.content)
@@ -501,6 +514,7 @@ export class WorkflowEngine {
       starter,
       content: input.content,
       delivery: input.delivery,
+      ...(input.restartedFrom === undefined ? {} : { restartedFrom: input.restartedFrom }),
     })
     try {
       await this.store.runExclusive(job.id, async () => {
@@ -654,6 +668,7 @@ export class WorkflowEngine {
     readonly starter: Starter
     readonly content: JsonValue
     readonly delivery: DeliveryRule
+    readonly restartedFrom?: string | undefined
   }): Promise<JobRecord> {
     const seq = await this.store.allocateJobSeq(input.workflow.id)
     const now = nowIso()
@@ -673,6 +688,9 @@ export class WorkflowEngine {
       delivery: input.delivery,
       inputSummary: summarizeInput(input.content),
       error: null,
+      restartCount: 0,
+      budgetStartedAt: now,
+      ...(input.restartedFrom === undefined ? {} : { restartedFrom: input.restartedFrom }),
       createdAt: now,
       updatedAt: now,
       finishedAt: null,
@@ -715,12 +733,57 @@ export class WorkflowEngine {
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
         error: job.error,
+        restartCount: job.restartCount ?? 0,
+        restartedFrom: job.restartedFrom ?? null,
       },
       definition: jobDefinition(job.definition, workers),
       tasks: tasks.map((task) => taskSummary(task, job.definition)),
       canRetryDelivery: canRetryDelivery(tasks),
+      // 重启入口完全由服务端判定：客户端只按 available / reason 渲染。
+      restart: this.restartView(job, tasks),
       availability: jobAvailability(job, workers),
     }
+  }
+
+  /**
+   * 重启选项的可用性投影。
+   *
+   * 只有 `failed` 作业能重启；没有失败任务时只能从头开始；工作流不能按当前
+   * 定义启动时（不存在 / 停用 / 不是当前格式）只能从失败位置继续。
+   *
+   * @param job 作业
+   * @param tasks 作业任务
+   * @returns 两个选项的可用性与不可用原因代码
+   */
+  private restartView(
+    job: JobRecord,
+    tasks: readonly TaskRecord[],
+  ): Record<string, Record<string, unknown>> {
+    if (job.status !== 'failed') {
+      return {
+        failed: { available: false, reason: 'job-not-failed' },
+        scratch: { available: false, reason: 'job-not-failed' },
+      }
+    }
+    const scratchProblem = this.scratchRestartProblem(job)
+    return {
+      failed: tasks.some((task) => task.status === 'failed')
+        ? { available: true }
+        : { available: false, reason: 'no-failed-tasks' },
+      scratch:
+        scratchProblem === null
+          ? { available: true }
+          : { available: false, reason: scratchProblem },
+    }
+  }
+
+  /** 当前工作流能否作为「从头开始」的定义来源；返回原因代码，可用时为 null。 */
+  private scratchRestartProblem(job: JobRecord): string | null {
+    const found = this.store.readWorkflowVersion(job.workflowId)
+    if (found === null) return 'workflow-not-found'
+    if (found.record.status !== 'active') return 'workflow-retired'
+    if (found.versionRecord.definition.version !== DEFINITION_VERSION) return 'definition-outdated'
+    return null
   }
 
   /**
@@ -1433,6 +1496,8 @@ export class WorkflowEngine {
       const updated = await this.store.updateTask(taskId, (current) => ({
         ...current,
         status: 'cancelled',
+        // 人主动取消：错误置空，重启时据此与「因作业终止被取消」的任务区分。
+        error: null,
         finishedAt: now,
         updatedAt: now,
       }))
@@ -1496,6 +1561,8 @@ export class WorkflowEngine {
         await this.store.updateTask(task.id, (current) => ({
           ...current,
           status: 'cancelled',
+          // 人主动取消整个作业：同样把错误置空。
+          error: null,
           finishedAt: now,
           updatedAt: now,
         }))
@@ -1536,6 +1603,187 @@ export class WorkflowEngine {
       await this.recomputeLocked(job.id)
       return this.store.getJob(job.id) ?? job
     })
+  }
+
+  // ---------------------------------------------------------------------
+  // 失败作业重启（ADR 0023）
+  // ---------------------------------------------------------------------
+
+  /**
+   * 重启一个失败作业。
+   *
+   * - `failed`：同一作业就地恢复——失败任务回 `ready`，因作业终止被取消的任务
+   *   回 `pending`，被阻塞的任务等依赖恢复后回 `pending`；人主动取消的任务与
+   *   已完成的任务不动；作业回 `running`，预算从重启时刻重新计时。
+   * - `scratch`：按原作业输入、用工作流当前启用版本新建一个作业；原作业留在
+   *   `failed` 作为现场，新作业记录来源作业 id 与人的发起人。
+   *
+   * 只有 `failed` 作业能重启；其它状态抛稳定错误码 `job-not-failed`。
+   *
+   * @param jobId 原作业 id
+   * @param mode 重启方式
+   * @returns 继续运行的作业与被重启的原作业
+   */
+  async restartJob(jobId: string, mode: JobRestartMode): Promise<JobRestartOutcome> {
+    const job = this.store.getJob(jobId)
+    if (job === undefined) throw new WorkflowError('not-found', `job not found: ${jobId}`)
+    if (job.status !== 'failed') {
+      throw new WorkflowError(
+        'job-not-failed',
+        `job ${jobId} is ${job.status}; only failed jobs can be restarted`,
+      )
+    }
+    if (mode === 'scratch') return await this.restartJobFromScratch(job)
+    return await this.restartJobInPlace(job)
+  }
+
+  /** 从失败位置恢复：同一个作业回到 running。 */
+  private async restartJobInPlace(source: JobRecord): Promise<JobRestartOutcome> {
+    return await this.store.runExclusive(source.id, async () => {
+      const job = this.store.getJob(source.id)
+      if (job === undefined) throw new WorkflowError('not-found', `job not found: ${source.id}`)
+      if (job.status !== 'failed') {
+        throw new WorkflowError(
+          'job-not-failed',
+          `job ${job.id} is ${job.status}; only failed jobs can be restarted`,
+        )
+      }
+      const tasks = this.store.listTasks(job.id)
+      if (!tasks.some((task) => task.status === 'failed')) {
+        throw new WorkflowError(
+          'no-failed-tasks',
+          `job ${job.id} has no failed task to resume; start a new job from scratch instead`,
+        )
+      }
+      const now = nowIso()
+      // 交付失败留下的阻塞标记属于上一次运行：重启后重新尝试投递。
+      for (const task of tasks) this.deliveryBlocked.delete(task.id)
+      let ready = 0
+      let queued = 0
+      for (const task of tasks) {
+        if (task.status === 'failed') {
+          assertTaskTransition(task.id, 'failed', 'ready')
+          await this.store.updateTask(task.id, (current) => ({
+            ...current,
+            status: 'ready',
+            error: null,
+            claimant: null,
+            finishedAt: null,
+            updatedAt: now,
+          }))
+          await this.appendEvent(job.id, 'task/restarted', {
+            taskId: task.id,
+            from: 'failed',
+            to: 'ready',
+          })
+          ready += 1
+          continue
+        }
+        // 因作业终止被取消的任务：failJobLocked 把终止原因写进 error；人主动
+        // 取消的 error 为 null，重启时不复活。
+        if (task.status === 'cancelled' && task.error !== null) {
+          assertTaskTransition(task.id, 'cancelled', 'pending')
+          await this.store.updateTask(task.id, (current) => ({
+            ...current,
+            status: 'pending',
+            error: null,
+            claimant: null,
+            finishedAt: null,
+            updatedAt: now,
+          }))
+          await this.appendEvent(job.id, 'task/restarted', {
+            taskId: task.id,
+            from: 'cancelled',
+            to: 'pending',
+          })
+          queued += 1
+        }
+      }
+      // blocked：依赖里不再有 failed / blocked / 人主动取消的 cancelled 时回
+      // pending；依赖图可以成链，按迭代推进到不动点。
+      let unblocked = 0
+      let changed = true
+      while (changed) {
+        changed = false
+        const byId = new Map(this.store.listTasks(job.id).map((task) => [task.id, task]))
+        for (const task of byId.values()) {
+          if (task.status !== 'blocked') continue
+          const stillBlocked = task.deps.some((dependencyId) => {
+            const dependency = byId.get(dependencyId)
+            if (dependency === undefined) return false
+            if (dependency.status === 'failed' || dependency.status === 'blocked') return true
+            // 人主动取消的任务不复活，依赖它的任务继续 blocked。
+            return dependency.status === 'cancelled' && dependency.error === null
+          })
+          if (stillBlocked) continue
+          assertTaskTransition(task.id, 'blocked', 'pending')
+          await this.store.updateTask(task.id, (current) => ({
+            ...current,
+            status: 'pending',
+            error: null,
+            claimant: null,
+            finishedAt: null,
+            updatedAt: now,
+          }))
+          await this.appendEvent(job.id, 'task/restarted', {
+            taskId: task.id,
+            from: 'blocked',
+            to: 'pending',
+          })
+          unblocked += 1
+          changed = true
+          break
+        }
+      }
+      assertJobTransition(job.id, job.status, 'running')
+      const updated = await this.store.updateJob(job.id, (current) => ({
+        ...current,
+        status: 'running',
+        error: null,
+        finishedAt: null,
+        restartCount: (current.restartCount ?? 0) + 1,
+        budgetStartedAt: now,
+        updatedAt: now,
+      }))
+      await this.appendEvent(job.id, 'job/restarted', {
+        mode: 'failed',
+        restartCount: updated.restartCount ?? 1,
+        readyTasks: ready,
+        queuedTasks: queued,
+        unblockedTasks: unblocked,
+      })
+      // 重新调度：失败任务重新派给原执行者（新的执行记录），终止时被取消的
+      // 任务按依赖重新排队；已完成任务与其执行记录保持原样。
+      await this.recomputeLocked(job.id)
+      return { mode: 'failed', job: this.store.getJob(job.id) ?? updated, source: job }
+    })
+  }
+
+  /** 从头开始：按原作业输入、用当前启用版本新建一个作业，原作业留在 failed。 */
+  private async restartJobFromScratch(source: JobRecord): Promise<JobRestartOutcome> {
+    // 与页面启动作业同一套语义：工作流必须存在、未停用、且是当前定义格式。
+    const { workflow, definition } = this.requireStartableWorkflow(source.workflowId)
+    const workers = await this.refreshWorkers(true)
+    this.assertDefinitionAvailable(definition, workers, workflow.name)
+    // 交回方式沿用原作业；交给助理的用标识符重新校验，交回发起人的改为新发起人。
+    const delivery = this.resolveDelivery(definition, source.delivery, { kind: 'human' }, workers)
+    const job = await this.startJob({
+      workflow,
+      definition,
+      workers,
+      starter: { kind: 'human' },
+      content: source.input,
+      delivery,
+      restartedFrom: source.id,
+    })
+    await this.store.runExclusive(source.id, async () => {
+      await this.appendEvent(source.id, 'job/restarted', {
+        mode: 'scratch',
+        newJobId: job.id,
+        newJobSeq: job.seq,
+      })
+    })
+    return { mode: 'scratch', job, source: this.store.getJob(source.id) ?? source }
   }
 
   // ---------------------------------------------------------------------
@@ -2620,12 +2868,15 @@ export class WorkflowEngine {
     const hasEndCompleted = tasks.some(
       (task) => task.position === 'end' && task.status === 'completed',
     )
-    // 放弃（failed -> cancelled）也是失败分支：结果 / 错误记录仍留在任务上。
+    // 放弃（failed -> cancelled）也是失败分支：人主动取消会把任务的 error 置空，
+    // 但执行记录里仍留着失败的那次尝试。
     const hasFailure = tasks.some(
       (task) =>
         task.status === 'blocked' ||
         task.status === 'failed' ||
-        (task.status === 'cancelled' && task.error !== null),
+        (task.status === 'cancelled' &&
+          (task.error !== null ||
+            this.store.listAttempts(task.id).some((attempt) => attempt.status === 'failed'))),
     )
     const now = nowIso()
     if (hasEndCompleted && !hasFailure) {
@@ -2654,9 +2905,10 @@ export class WorkflowEngine {
     await this.appendEvent(jobId, 'job/failed', { error: reason })
   }
 
-  /** 是否超过最长时长预算。 */
+  /** 是否超过最长时长预算；计时起点缺省按作业创建时间（重启后重置）。 */
   private overDurationBudget(job: JobRecord): boolean {
-    const elapsedMs = Date.now() - Date.parse(job.createdAt)
+    const startedAt = job.budgetStartedAt ?? job.createdAt
+    const elapsedMs = Date.now() - Date.parse(startedAt)
     return elapsedMs > job.definition.budgets.maxDurationHours * 3600 * 1000
   }
 
