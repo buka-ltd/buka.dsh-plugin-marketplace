@@ -12,11 +12,14 @@ import type { FormEvent, ReactElement } from 'react'
 import React from 'react'
 import type { createDetailActions } from '../actions/detail.ts'
 import type { createWorkerActions } from '../actions/workers.ts'
+import { workerIdentityLabel } from '../api.ts'
 import {
   AVATAR_FORM_ID,
   CREATE_FORM_ID,
+  isValidWorkerId,
   RENAME_FORM_ID,
   WORKER_DESCRIPTION_MAX_LENGTH,
+  WORKER_NAME_MAX_LENGTH,
 } from '../constants.ts'
 import { h } from '../h.ts'
 import type { WorkersPageState } from '../state.ts'
@@ -42,8 +45,11 @@ export function CreateWorkerDialog({
   const {
     dialogOpen,
     creating,
-    name,
-    setName,
+    createId,
+    setCreateId,
+    createName,
+    setCreateName,
+    workers,
     draftDescription,
     setDraftDescription,
     draftAvatar,
@@ -51,9 +57,12 @@ export function CreateWorkerDialog({
     createError,
   } = state
   const { createWorker, closeCreateDialog } = actions
+  const idValue = createId.trim()
+  const idTaken = workers.some((worker) => worker.id === idValue)
+  const canCreate = isValidWorkerId(idValue) && !idTaken
   return (
-    // 「创建打工人」对话框：名称必填、回车可提交；创建失败留在框里提示，
-    // 提交中不响应关闭（遮罩点击 / Esc / 右上角都走 onClose）。
+    // 「创建打工人」对话框：标识符必填且创建后不可改，展示名可选；回车可提交。
+    // 创建失败留在框里提示，提交中不响应关闭（遮罩点击 / Esc / 右上角都走 onClose）。
     h(
       Modal,
       {
@@ -75,7 +84,7 @@ export function CreateWorkerDialog({
               variant: 'primary',
               type: 'submit',
               form: CREATE_FORM_ID,
-              disabled: creating || name.trim() === '',
+              disabled: creating || !canCreate,
             },
             creating ? t('creating') : t('create'),
           ),
@@ -98,19 +107,41 @@ export function CreateWorkerDialog({
         h(
           'label',
           { className: 'buka-workers-field' },
-          h('span', { className: 'buka-workers-fieldLabel' }, t('createFieldName')),
+          h('span', { className: 'buka-workers-fieldLabel' }, t('createFieldId')),
           h(Input, {
             className: 'buka-workers-fieldInput',
             type: 'text',
-            value: name,
-            placeholder: t('createPlaceholder'),
+            value: createId,
+            placeholder: t('createIdPlaceholder'),
             autoComplete: 'off',
             spellCheck: false,
             maxLength: 64,
             disabled: creating,
             'data-modal-autofocus': '',
-            onChange: (event: { target: { value: string } }) => setName(event.target.value),
+            onChange: (event: { target: { value: string } }) => setCreateId(event.target.value),
           }),
+          idValue !== '' && !isValidWorkerId(idValue)
+            ? h('span', { className: 'buka-workers-formError' }, t('errInvalidId'))
+            : idTaken
+              ? h('span', { className: 'buka-workers-formError' }, t('errIdTaken'))
+              : h('span', { className: 'buka-workers-fieldHint' }, t('createIdHint')),
+        ),
+        h(
+          'label',
+          { className: 'buka-workers-field' },
+          h('span', { className: 'buka-workers-fieldLabel' }, t('createFieldName')),
+          h(Input, {
+            className: 'buka-workers-fieldInput',
+            type: 'text',
+            value: createName,
+            placeholder: t('createNamePlaceholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            maxLength: WORKER_NAME_MAX_LENGTH,
+            disabled: creating,
+            onChange: (event: { target: { value: string } }) => setCreateName(event.target.value),
+          }),
+          h('span', { className: 'buka-workers-fieldHint' }, t('createNameHint')),
         ),
         h(
           'label',
@@ -149,7 +180,15 @@ export function AvatarDialog({
   state: WorkersPageState
   detail: DetailActions
 }): ReactElement {
-  const { avatarOpen, avatarSaving, avatarTarget, draftAvatar, setDraftAvatar, avatarError } = state
+  const {
+    avatarOpen,
+    avatarSaving,
+    avatarTarget,
+    draftAvatar,
+    setDraftAvatar,
+    avatarError,
+    selectedWorker,
+  } = state
   const { closeAvatarDialog, saveAvatar } = detail
   return (
     // 「更换头像」对话框：从预设里选一个，保存后只更新登记表里的 avatar。
@@ -158,7 +197,10 @@ export function AvatarDialog({
       {
         open: avatarOpen,
         onClose: closeAvatarDialog,
-        title: avatarTarget === null ? t('changeAvatar') : `${t('changeAvatar')} · ${avatarTarget}`,
+        title:
+          avatarTarget === null || selectedWorker === null
+            ? t('changeAvatar')
+            : `${t('changeAvatar')} · ${workerIdentityLabel(selectedWorker)}`,
         closeLabel: t('close'),
         footer: h(
           React.Fragment,
@@ -226,14 +268,17 @@ export function RenameDialog({
     state
   const { closeRenameDialog, renameWorker } = detail
   return (
-    // 「重命名打工人」对话框：输入新名称后提交，Host 改目录并重建工作区。
-    // 失败提示留在框里；保存中不响应关闭（遮罩点击 / Esc / 右上角都走 onClose）。
+    // 「重命名打工人」对话框：只改展示名；输入为空表示清空（之后显示标识符）。
+    // 目录不移动、工作区不重建。失败提示留在框里；保存中不响应关闭。
     h(
       Modal,
       {
         open: renameOpen,
         onClose: closeRenameDialog,
-        title: t('rename'),
+        title:
+          selectedWorker === null
+            ? t('rename')
+            : `${t('rename')} · ${workerIdentityLabel(selectedWorker)}`,
         closeLabel: t('close'),
         footer: h(
           React.Fragment,
@@ -252,7 +297,6 @@ export function RenameDialog({
               disabled:
                 renameSaving ||
                 selectedWorker === null ||
-                renameDraft.trim() === '' ||
                 renameDraft.trim() === selectedWorker.name,
             },
             renameSaving ? t('saving') : t('save'),
@@ -271,10 +315,10 @@ export function RenameDialog({
                 className: 'buka-workers-fieldInput',
                 type: 'text',
                 value: renameDraft,
-                placeholder: String(selectedWorker.name ?? ''),
+                placeholder: String(selectedWorker.name ?? selectedWorker.id ?? ''),
                 autoComplete: 'off',
                 spellCheck: false,
-                maxLength: 64,
+                maxLength: WORKER_NAME_MAX_LENGTH,
                 disabled: renameSaving,
                 'data-modal-autofocus': '',
                 onChange: (event: { target: { value: string } }) =>

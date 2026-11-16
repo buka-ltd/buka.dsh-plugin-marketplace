@@ -6,7 +6,7 @@
  *
  * 机器人没有目录：不扫描 skills / AGENTS.md，`exists` 为 false，
  * 页面按 `driver` 只读展示。内建机器人在视图里补上，即使登记表还没
- * 落盘也能看到。
+ * 落盘也能看到。目录、头像与引用一律按不可变标识符 `id` 解析。
  *
  * @module @buka/dsh-plugin-workers/store/list
  */
@@ -77,7 +77,7 @@ export async function listWorkers({
 function programEntry(entry: WorkerRecord): WorkerListEntry {
   return {
     ...entry,
-    avatar: resolveAvatar(entry.avatar, entry.name),
+    avatar: resolveAvatar(entry.avatar, entry.id),
     exists: false,
     mounted: false,
     workspaceId: null,
@@ -121,7 +121,7 @@ async function agentEntry(
 
   return {
     ...entry,
-    avatar: resolveAvatar(entry.avatar, entry.name),
+    avatar: resolveAvatar(entry.avatar, entry.id),
     exists,
     mounted: workspace !== undefined,
     workspaceId: workspace === undefined ? null : String(workspace.id),

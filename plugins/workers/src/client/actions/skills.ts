@@ -112,7 +112,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(AVAILABLE_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: selectedWorker.name, source: value }),
+        body: JSON.stringify({ id: selectedWorker.id, source: value }),
       })
       const skills = (Array.isArray(body?.skills) ? body.skills : []).filter(
         (skill) =>
@@ -186,12 +186,12 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
       const body = await requestJson(INSTALL_ROUTE, {
         method: 'POST',
         body: JSON.stringify({
-          name: selectedWorker.name,
+          id: selectedWorker.id,
           source: installSource.trim(),
           skills: installSelected,
         }),
       })
-      patchWorker(selectedWorker.name, {
+      patchWorker(selectedWorker.id, {
         skills: Array.isArray(body.skills) ? body.skills : [],
         claude:
           body.claude !== null && typeof body.claude === 'object'
@@ -222,9 +222,9 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(SKILL_REMOVE_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: worker.name, skill: skill.name }),
+        body: JSON.stringify({ id: worker.id, skill: skill.name }),
       })
-      patchWorker(worker.name, { skills: Array.isArray(body.skills) ? body.skills : [] })
+      patchWorker(worker.id, { skills: Array.isArray(body.skills) ? body.skills : [] })
       setConfirmingSkill(null)
       flash('success', `${t('skillRemoved')} ${skill.name}`)
     } catch (failure) {

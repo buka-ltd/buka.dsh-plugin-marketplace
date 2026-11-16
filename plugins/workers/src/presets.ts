@@ -3,7 +3,7 @@
  *
  * 预设打工人只是「初始默认值」，本身与用户在页面上创建的打工人没有区别：
  * 它们会正常登记进 `workers.json`、挂载成 DSH 工作区，用户可以像对待任何打工人
- * 一样重命名、改头像、改职责、编辑 AGENTS.md、装 skills 或删除。插件**不会**在
+ * 一样改展示名、改头像、改职责、编辑 AGENTS.md、装 skills 或删除。插件**不会**在
  * 每次启动时强行补回被删掉的预设——只有登记表里一个打工人都没有（全新安装 /
  * 清空）时才会做一次种子初始化。
  *
@@ -56,12 +56,14 @@ const QA_ENGINEER_AGENTS = `# AGENTS.md
  *
  */
 export const PRESET_WORKERS: ReadonlyArray<{
+  id: string
   name: string
   avatar: string
   description: string
   agents: string
 }> = Object.freeze([
   {
+    id: 'software-engineer',
     name: '软件工程师',
     avatar: 'rocket',
     description:
@@ -69,6 +71,7 @@ export const PRESET_WORKERS: ReadonlyArray<{
     agents: SOFTWARE_ENGINEER_AGENTS,
   },
   {
+    id: 'qa-engineer',
     name: '质量保障工程师',
     avatar: 'owl',
     description:
@@ -94,8 +97,13 @@ export async function seedPresetWorkers({
   file?: string | undefined
   workspaceRegistry?:
     | {
-        list?: () => Array<{ id?: unknown; path?: unknown }>
-        create?: (directory: string) => Promise<{ id?: unknown }>
+        list?: () => Array<{
+          id?: unknown
+          path?: unknown
+          title?: unknown
+          setTitle?: (title: string) => Promise<void> | void
+        }>
+        create?: (directory: string, title?: string) => Promise<{ id?: unknown }>
       }
     | null
     | undefined
@@ -112,13 +120,14 @@ export async function seedPresetWorkers({
     const result = await buildWorker({
       workersDir,
       file,
+      id: preset.id,
       name: preset.name,
       avatar: preset.avatar,
       description: preset.description,
       agents: preset.agents,
       workspaceRegistry,
     })
-    if (result.created) seeded.push(result.worker.name)
+    if (result.created) seeded.push(result.worker.id)
   }
   return { corrupt: false, seeded }
 }

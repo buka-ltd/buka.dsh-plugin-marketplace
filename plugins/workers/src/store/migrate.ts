@@ -8,7 +8,8 @@
  * 1. 默认布局下，把 `~/.cache/dsh-plugin-robots` 整个搬到
  *    `~/.cache/dsh-plugin-workers`；目标已存在时不覆盖；
  * 2. 目录里旧的 `robots/` 与 `robots.json` 改成 `workers/` 与 `workers.json`；
- * 3. 登记表是 version 1 / 2 时重写成 version 3（`driver: "program"` → `"robot"`）。
+ * 3. 登记表是 version 1 / 2 / 3 时重写成 version 4（`id` 取旧 `name`、`name`
+ *    置空；`driver: "program"` → `"robot"`）。
  *
  * 自定义 `workersDir` 时只做第 3 步：插件不知道用户的旧目录在哪，也不该猜。
  *
@@ -118,6 +119,7 @@ async function readStoredVersion(file: string): Promise<number | null> {
 
 /**
  * 把旧格式登记表重写成当前版本，并把落在旧根目录里的 `path` 平移到新根目录。
+ * 旧条目迁移后的 `id` 就是它原来的 `name`，所以路径平移按同一段相对路径计算；
  * 已经是最新且路径无需平移、或文件损坏时什么都不做（损坏的文件绝不能被覆盖）。
  */
 async function upgradeRegistry(

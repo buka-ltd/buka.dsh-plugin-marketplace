@@ -147,7 +147,7 @@ async function applyWorkerModel(
   })
   ctx.logger?.info?.(
     'buka-workers: 已为打工人 %s 的新会话选择模型 %s/%s',
-    target.name,
+    target.id,
     target.model.provider,
     target.model.model,
   )

@@ -9,6 +9,8 @@
  * - 本模块负责「一次构建」的语义：参数规范化、已存在打工人必须显式
  *   `update: true` 才允许覆盖、写 AGENTS.md 后补 CLAUDE.md 链接、按规范路径
  *   判断是否已挂载并只在需要时创建 DSH 工作区；
+ * - 改名（`update: true` 且传了 `name`）只改展示名：目录不移动、工作区注册
+ *   不重建，只把已挂载工作区的标题同步成新的展示名；
  * - 挂载失败不让整个构建失败：打工人已经建好了，返回 `mounted: false` 与
  *   `mountError`，由调用方告诉用户去页面点「挂载」。
  *
@@ -22,23 +24,30 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { AVATAR_IDS, isAvatarId } from './avatar.ts'
+import { ensureWorkerDirectory } from './store/agents.ts'
+import type { WorkerRecord } from './store/types.ts'
+import { workerDisplayName } from './store/types.ts'
 import {
   AGENTS_MAX_WRITE_BYTES,
   addWorker,
   ensureClaudeLink,
-  isBuiltinWorkerName,
+  isBuiltinWorkerId,
+  isResolvableWorkerId,
+  isValidWorkerId,
   isValidWorkerName,
   normalizeWorkerDescription,
+  normalizeWorkerName,
   readWorkerRegistry,
-  renameWorker as renameWorkerStore,
   setWorkerAvatar,
   setWorkerDescription,
+  setWorkerName,
   WORKER_DESCRIPTION_MAX_LENGTH,
   writeAgentsFile,
 } from './worker-store.ts'
 
 /** 构建请求的错误码；工具层按这些码给出可读提示。 */
 export const BUILD_ERROR_CODES = Object.freeze({
+  invalidId: 'invalid-id',
   invalidName: 'invalid-name',
   invalidAvatar: 'invalid-avatar',
   invalidDescription: 'invalid-description',
@@ -50,9 +59,7 @@ export const BUILD_ERROR_CODES = Object.freeze({
   builtinWorker: 'builtin-worker',
   robotWorker: 'robot-worker',
   unknownWorker: 'unknown-worker',
-  nameTaken: 'name-taken',
-  missingDirectory: 'missing-directory',
-  pathOutsideRoot: 'path-outside-root',
+  idTaken: 'id-taken',
 })
 
 /**
@@ -66,39 +73,53 @@ function buildError(code: string, message: string): Error & { code: string } {
 /**
  * 规范化一次构建请求；不合法时抛带错误码的 `Error`。
  *
- * - `name` 先 trim 再按打工人名称规则校验；
+ * - `id` 必填且不可修改：创建时必须是新标识符字符集，更新时也接受迁移来的
+ *   旧标识符（由 `buildWorker` 按「是否已登记」区分）；
+ * - `name` 是可选展示名：缺省 / null 表示「不改」（新建时为空）；给了就必须
+ *   是单行文本，空白会折叠；空串表示清空，展示时回退到标识符；
  * - `avatar` 缺省 / 空串表示「不指定」（新建时自动分配）；给了就必须是预设 id；
  * - `description` 是一行摘要，空白会折叠；缺省 / 空串表示「不改」（新建时为空）；
  * - `agents` 是完整 AGENTS.md 文本，只有全空白时视为「不写」，避免误清空；
- * - `update` 必须是布尔值，缺省按 `false` 处理；
- * - `newName` 是可选的新名字：给了就必须合法，且必须 `update: true`（改名只针对
- *   已存在的打工人）；与 `name` 相同时按「不改名」处理。
+ * - `update` 必须是布尔值，缺省按 `false` 处理。
  *
  */
 export function normalizeBuildRequest(
   input: {
+    id?: unknown
     name?: unknown
     avatar?: unknown
     description?: unknown
     agents?: unknown
     update?: unknown
-    newName?: unknown
   } = {},
 ): {
+  id: string
   name: string
+  nameProvided: boolean
   avatar: string
   description: string
   agents: string
   agentsBytes: number
   update: boolean
-  newName: string
 } {
-  const name = typeof input.name === 'string' ? input.name.trim() : ''
-  if (!isValidWorkerName(name)) {
+  const rawId = typeof input.id === 'string' ? input.id.trim() : ''
+  if (rawId === '' || !isResolvableWorkerId(rawId)) {
     throw buildError(
-      BUILD_ERROR_CODES.invalidName,
-      'invalid worker name: use 1-64 characters, do not start with a dot, and allow only letters, digits, Chinese, ".", "_" and "-".',
+      BUILD_ERROR_CODES.invalidId,
+      'invalid worker identifier: pass the immutable id of the worker; a new id must match ^[a-z][a-z0-9_-]{0,63}$.',
     )
+  }
+
+  const nameProvided = input.name !== undefined && input.name !== null
+  let name = ''
+  if (nameProvided) {
+    if (!isValidWorkerName(input.name)) {
+      throw buildError(
+        BUILD_ERROR_CODES.invalidName,
+        'invalid worker name: use a single line of at most 64 characters, or leave it empty to show the identifier.',
+      )
+    }
+    name = normalizeWorkerName(input.name)
   }
 
   let avatar = ''
@@ -154,27 +175,7 @@ export function normalizeBuildRequest(
   }
   const update = input.update === true
 
-  let newName = ''
-  if (input.newName !== undefined && input.newName !== null && typeof input.newName !== 'string') {
-    throw buildError(BUILD_ERROR_CODES.invalidName, 'newName must be a string.')
-  }
-  if (typeof input.newName === 'string' && input.newName.trim() !== '') {
-    newName = input.newName.trim()
-    if (!isValidWorkerName(newName)) {
-      throw buildError(
-        BUILD_ERROR_CODES.invalidName,
-        'invalid new worker name: use 1-64 characters, do not start with a dot, and allow only letters, digits, Chinese, ".", "_" and "-".',
-      )
-    }
-    if (!update) {
-      throw buildError(
-        BUILD_ERROR_CODES.invalidUpdate,
-        'renaming an existing worker requires update: true; pass it only when the user asked to rename that worker.',
-      )
-    }
-  }
-
-  return { name, avatar, description, agents, agentsBytes, update, newName }
+  return { id: rawId, name, nameProvided, avatar, description, agents, agentsBytes, update }
 }
 
 /**
@@ -189,6 +190,20 @@ async function canonicalPath(target: string): Promise<string> {
   }
 }
 
+/** 工作区记录里本模块用到的字段：标题用于改名同步。 */
+export interface WorkspaceMountLike {
+  id?: unknown
+  path?: unknown
+  title?: unknown
+  setTitle?: (title: string) => Promise<void> | void
+}
+
+/** 工作区注册表里本模块用到的方法。 */
+export interface WorkspaceRegistryForBuild {
+  list?: () => WorkspaceMountLike[]
+  create?: (directory: string, title?: string) => Promise<{ id?: unknown }>
+}
+
 /**
  * 找打工人目录对应的已注册工作区。
  *
@@ -200,14 +215,14 @@ export async function currentMount({
   workspaceRegistry,
   workerPath,
 }: {
-  workspaceRegistry?: { list?: () => Array<{ id?: unknown; path?: unknown }> } | null | undefined
+  workspaceRegistry?: WorkspaceRegistryForBuild | null | undefined
   workerPath?: string | undefined
-} = {}): Promise<{ id?: unknown; path?: unknown } | null> {
+} = {}): Promise<WorkspaceMountLike | null> {
   if (typeof workspaceRegistry?.list !== 'function') return null
   // 调用方必须传 workerPath；缺省时保持原来的 TypeError（`path.resolve(undefined)`），
   // 这里用断言只是为了让已通过校验的调用方拿到 string 类型。
   const target = await canonicalPath(workerPath as string)
-  let workspaces: Array<{ id?: unknown; path?: unknown }>
+  let workspaces: WorkspaceMountLike[]
   try {
     workspaces = workspaceRegistry.list()
   } catch {
@@ -221,28 +236,48 @@ export async function currentMount({
 }
 
 /**
+ * 把已挂载工作区的标题同步成打工人当前展示名。
+ *
+ * 标题只是展示：同步失败（工作区记录不提供 `setTitle`、写入失败）不影响构建
+ * 结果，目录、登记表与引用都不受影响。
+ *
+ */
+async function syncWorkspaceTitle(
+  workspace: WorkspaceMountLike | null,
+  title: string | undefined,
+): Promise<void> {
+  if (workspace === null || typeof workspace?.setTitle !== 'function') return
+  const text = typeof title === 'string' ? title.trim() : ''
+  if (text === '') return
+  if (typeof workspace.title === 'string' && workspace.title === text) return
+  try {
+    await workspace.setTitle(text)
+  } catch {
+    // 标题同步是锦上添花：失败不回滚改名。
+  }
+}
+
+/**
  * 确保打工人目录已挂成 DSH 工作区。
  *
- * 已挂载时不动它（不重命名、不重排）；未挂载时用 `workspaceRegistry.create()`
- * 注册，标题交给注册表按目录名生成。挂载失败（注册表不可用、目录冲突等）不抛错，
- * 而是返回失败原因，让打工人本身仍然可用。
+ * 已挂载时不动它（不重命名、不重排），只按需同步工作区标题；未挂载时用
+ * `workspaceRegistry.create(path, title)` 注册，标题用打工人展示名（空名时传
+ * 标识符）。挂载失败（注册表不可用、目录冲突等）不抛错，而是返回失败原因，
+ * 让打工人本身仍然可用。
  *
  */
 export async function mountWorker({
   workspaceRegistry,
   workerPath,
+  title,
 }: {
-  workspaceRegistry?:
-    | {
-        list?: () => Array<{ id?: unknown; path?: unknown }>
-        create?: (directory: string) => Promise<{ id?: unknown }>
-      }
-    | null
-    | undefined
+  workspaceRegistry?: WorkspaceRegistryForBuild | null | undefined
   workerPath?: string | undefined
+  title?: string | undefined
 } = {}): Promise<{ mounted: boolean; workspaceId: unknown; mountError: string | null }> {
   const existing = await currentMount({ workspaceRegistry, workerPath })
   if (existing !== null) {
+    await syncWorkspaceTitle(existing, title)
     return { mounted: true, workspaceId: existing.id ?? null, mountError: null }
   }
   if (typeof workspaceRegistry?.create !== 'function') {
@@ -253,7 +288,7 @@ export async function mountWorker({
     }
   }
   try {
-    const workspace = await workspaceRegistry.create(workerPath as string)
+    const workspace = await workspaceRegistry.create(workerPath as string, title)
     return { mounted: true, workspaceId: workspace?.id ?? null, mountError: null }
   } catch (error) {
     return { mounted: false, workspaceId: null, mountError: describeError(error) }
@@ -261,48 +296,42 @@ export async function mountWorker({
 }
 
 /**
- * 创建、修改或重命名一个打工人，并确保它已挂到工作区。
+ * 创建或更新一个打工人，并确保它已挂到工作区。
  *
- * - 名字已存在且没有传 `update: true`：拒绝，避免模型顺手覆盖用户的打工人；
- * - 已存在且 `update: true`：只改传了的字段（头像 / 描述 / AGENTS.md），目录与
- *   `createdAt` 不变；描述为空串表示保留原描述；
- * - 传了 `newName` 且与 `name` 不同：先把打工人目录改名、就地更新登记表，再
- *   应用其它字段；改名前已挂载时删除旧工作区注册，最后按新路径重挂
- *   （新工作区 id / 标题 = 新名；旧会话日志保留，但不再挂在这个打工人下）；
- *   `newName` 必须配 `update: true`，且 `name` 必须已存在；
- * - 新建：建目录、写默认模板（没给 `agents` 时）、登记、按需写 AGENTS.md；
- * - 所有情况都补 `CLAUDE.md` 链接，再确保工作区挂载。
+ * - `id` 必填且不可修改；已登记的标识符没有 `update: true` 时拒绝，避免模型
+ *   顺手覆盖用户的打工人；新建时 `id` 必须匹配新标识符字符集；
+ * - 已存在且 `update: true`：只改传了的字段（名称 / 头像 / 描述 / AGENTS.md），
+ *   目录与 `createdAt` 不变；描述为空串表示保留原描述；
+ * - 传了 `name` 且与当前展示名不同：只改展示名（`renamed: true`），目录不动、
+ *   工作区注册不重建，只同步已挂载工作区的标题；
+ * - 新建：按标识符建目录、写默认模板（没给 `agents` 时）、登记、按需写
+ *   AGENTS.md；
+ * - 所有情况都补 `CLAUDE.md` 链接（新建时），再确保工作区挂载。
  *
  */
 export async function buildWorker({
   workersDir,
   file,
+  id,
   name,
   avatar,
   description,
   agents,
   update,
-  newName,
   workspaceRegistry,
 }: {
   workersDir?: string | undefined
   file?: string | undefined
+  id?: unknown
   name?: unknown
   avatar?: unknown
   description?: unknown
   agents?: unknown
   update?: unknown
-  newName?: unknown
-  workspaceRegistry?:
-    | {
-        list?: () => Array<{ id?: unknown; path?: unknown }>
-        create?: (directory: string) => Promise<{ id?: unknown }>
-        delete?: (id: unknown) => unknown
-      }
-    | null
-    | undefined
+  workspaceRegistry?: WorkspaceRegistryForBuild | null | undefined
 } = {}): Promise<{
   worker: {
+    id: string
     name: string
     driver: 'agent'
     path: string
@@ -320,20 +349,14 @@ export async function buildWorker({
   workspaceId: unknown
   mountError: string | null
 }> {
-  const request = normalizeBuildRequest({ name, avatar, description, agents, update, newName })
+  const request = normalizeBuildRequest({ id, name, avatar, description, agents, update })
 
-  // v1 的机器人只有内建 clock：不可创建、不可当改名目标。
-  // 构建工具只创建 / 修改智能体。
-  if (isBuiltinWorkerName(request.name)) {
+  // v1 的机器人只有内建 clock：不可创建、不可修改。展示名可以是 clock，
+  // 但标识符 clock 固定属于内建机器人。
+  if (isBuiltinWorkerId(request.id)) {
     throw buildError(
       BUILD_ERROR_CODES.builtinWorker,
-      `"${request.name}" is a built-in robot and cannot be created, changed or removed; robots are registered by the plugin.`,
-    )
-  }
-  if (request.newName !== '' && isBuiltinWorkerName(request.newName)) {
-    throw buildError(
-      BUILD_ERROR_CODES.builtinWorker,
-      `"${request.newName}" is a built-in robot name and cannot be used as a new worker name.`,
+      `"${request.id}" is a built-in robot identifier and cannot be created, changed or removed; robots are registered by the plugin.`,
     )
   }
 
@@ -345,89 +368,92 @@ export async function buildWorker({
     )
   }
 
-  const existing = registry.workers.find((worker) => worker.name === request.name)
-  if (existing !== undefined && existing.driver !== 'agent') {
-    throw buildError(
-      BUILD_ERROR_CODES.robotWorker,
-      `"${request.name}" is a robot: robots are read-only and cannot be changed by this tool.`,
-    )
-  }
-  if (existing !== undefined && !request.update) {
-    throw buildError(
-      BUILD_ERROR_CODES.workerExists,
-      `worker "${request.name}" already exists; pass update: true only when the user asked to change that worker.`,
-    )
-  }
+  const existing = registry.workers.find((worker) => worker.id === request.id)
 
-  // 改名先落盘：目录与登记表的更新由 worker-store 负责，工作区在这里重建。
-  // 改名后沿用新名字继续走下面的字段更新，返回的 name / path 都是新值。
-  let activeName = request.name
+  let worker: WorkerRecord
+  let created = false
+  let updated = false
   let renamed = false
-  let previousName = null
-  if (request.newName !== '' && request.newName !== request.name) {
-    if (existing === undefined) {
+  let previousName: string | null = null
+
+  if (existing === undefined) {
+    // 新建才要求新标识符字符集；更新已有条目时允许迁移来的旧标识符。
+    if (!isValidWorkerId(request.id)) {
       throw buildError(
-        BUILD_ERROR_CODES.unknownWorker,
-        `cannot rename "${request.name}": no worker with that name exists.`,
+        BUILD_ERROR_CODES.invalidId,
+        `invalid new worker identifier "${request.id}": use ^[a-z][a-z0-9_-]{0,63}$.`,
+      )
+    }
+    const added = await addWorker({
+      workersDir,
+      file,
+      id: request.id,
+      name: request.nameProvided ? request.name : '',
+      avatar: request.avatar,
+      description: request.description,
+    })
+    worker = added.worker
+    created = true
+    if (request.agents !== '') await writeAgentsFile(worker.path, request.agents)
+  } else {
+    if (existing.driver !== 'agent') {
+      throw buildError(
+        BUILD_ERROR_CODES.robotWorker,
+        `"${request.id}" is a robot: robots are read-only and cannot be changed by this tool.`,
+      )
+    }
+    if (!request.update) {
+      throw buildError(
+        BUILD_ERROR_CODES.workerExists,
+        `worker "${request.id}" already exists; pass update: true only when the user asked to change that worker.`,
       )
     }
 
-    // 改名前记下挂载的工作区：改名后旧路径不再对应任何注册，需要摘掉它，
-    // 再由最后的 mountWorker 按新路径重建（DSH 的工作区路径创建后不可改）。
-    const mountBefore = await currentMount({ workspaceRegistry, workerPath: existing.path })
-    const moved = await renameWorkerStore({
-      workersDir,
-      file,
-      name: request.name,
-      newName: request.newName,
-    })
-    renamed = moved.renamed
-    previousName = moved.renamed ? moved.previousName : null
-    activeName = moved.worker.name
-    if (renamed && mountBefore !== null && typeof workspaceRegistry?.delete === 'function') {
+    worker = existing
+    if (request.nameProvided && request.name !== existing.name) {
+      const result = await setWorkerName({ file, id: request.id, name: request.name })
+      worker = result.worker
+      renamed = result.renamed
+      previousName = result.renamed ? result.previousName : null
+      updated = updated || result.renamed
+    }
+
+    if (request.avatar !== '' && request.avatar !== worker.avatar) {
+      worker = (await setWorkerAvatar({ file, id: request.id, avatar: request.avatar })).worker
+      updated = true
+    }
+
+    if (request.description !== '' && request.description !== worker.description) {
+      worker = (
+        await setWorkerDescription({ file, id: request.id, description: request.description })
+      ).worker
+      updated = true
+    }
+
+    if (request.agents !== '') {
+      // 已登记但目录被外部删掉时，写入 AGENTS.md 前按登记的标识符重建目录。
+      await ensureWorkerDirectory(worker.path, workerDisplayName(worker))
+      await writeAgentsFile(worker.path, request.agents)
+      updated = true
+    }
+    if (request.agents === '' && (await pathIsDirectory(worker.path))) {
+      // 旧打工人（创建时还没有 CLAUDE.md 链接）在构建时顺手补上。
       try {
-        await workspaceRegistry.delete(mountBefore.id)
+        await ensureClaudeLink(worker.path)
       } catch {
-        // 旧注册没删掉时最后的 mountWorker 仍会按新路径建工作区；旧行留在
-        // 侧边栏由用户删除，不因此让改名失败。
+        // 链接修复失败不影响构建结果。
       }
     }
   }
 
-  // 两种情况都走 addWorker：新建时建目录并登记；已存在时它会确保目录还在、
-  // 补 AGENTS.md 模板（不覆盖已有文件）并复用条目，目录被外部删掉后也能重建。
-  const added = await addWorker({
-    workersDir,
-    file,
-    name: activeName,
-    avatar: request.avatar,
-    description: request.description,
+  const mount = await mountWorker({
+    workspaceRegistry,
+    workerPath: worker.path,
+    title: workerDisplayName(worker),
   })
-  let worker = added.worker
-  const created = added.created
-  let updated = renamed
-
-  if (!created && request.avatar !== '' && request.avatar !== worker.avatar) {
-    worker = (await setWorkerAvatar({ file, name: activeName, avatar: request.avatar })).worker
-    updated = true
-  }
-
-  if (!created && request.description !== '' && request.description !== worker.description) {
-    worker = (
-      await setWorkerDescription({ file, name: activeName, description: request.description })
-    ).worker
-    updated = true
-  }
-
-  if (request.agents !== '') {
-    await writeAgentsFile(worker.path, request.agents)
-    updated = updated || !created
-  }
-  await ensureClaudeLink(worker.path)
-
-  const mount = await mountWorker({ workspaceRegistry, workerPath: worker.path })
   return {
     worker: {
+      id: worker.id,
       name: worker.name,
       driver: 'agent',
       path: worker.path,
@@ -442,6 +468,15 @@ export async function buildWorker({
     previousName,
     agentsBytes: request.agents === '' ? 0 : request.agentsBytes,
     ...mount,
+  }
+}
+
+/** 路径是否存在且是目录；用于决定要不要补 CLAUDE.md 链接。 */
+async function pathIsDirectory(target: string): Promise<boolean> {
+  try {
+    return (await fs.stat(target)).isDirectory()
+  } catch {
+    return false
   }
 }
 

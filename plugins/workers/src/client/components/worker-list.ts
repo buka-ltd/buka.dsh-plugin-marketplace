@@ -21,7 +21,13 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactElement } from 'react'
 import type { createWorkerActions } from '../actions/workers.ts'
-import { countBadge, isRobotWorker, skillsOf } from '../api.ts'
+import {
+  countBadge,
+  isRobotWorker,
+  skillsOf,
+  workerDisplayName,
+  workerIdentityLabel,
+} from '../api.ts'
 import { renderAvatar } from '../avatar.ts'
 import { h } from '../h.ts'
 import type { WorkersPageState } from '../state.ts'
@@ -51,7 +57,7 @@ export function WorkerCard({
   const { openWorker, mountWorker, removeWorker, toggleAssistant } = workerActions
   const skills = skillsOf(worker)
   const robot = isRobotWorker(worker)
-  const confirmingThis = confirming === worker.name
+  const confirmingThis = confirming === worker.id
   const missing = !robot && worker.exists === false
   const mounted = worker.mounted === true
   const anyBusy = mutating || corrupt
@@ -97,7 +103,7 @@ export function WorkerCard({
               size: 'sm',
               icon: h(IconNewChatOutlineRegular, { size: 13 }),
               disabled: mutating,
-              'aria-label': `${t('newSession')} ${worker.name}`,
+              'aria-label': `${t('newSession')} ${workerDisplayName(worker)}`,
               onClick: () => openWorker(worker),
             },
             t('newSession'),
@@ -111,14 +117,14 @@ export function WorkerCard({
                   variant: 'outline',
                   size: 'sm',
                   icon:
-                    busy === `mount:${worker.name}`
+                    busy === `mount:${worker.id}`
                       ? h(StateDot, { state: 'ongoing', size: 13 })
                       : h(IconPlusOutlineRegular, { size: 13 }),
                   disabled: anyBusy,
-                  'aria-label': `${t('mount')} ${worker.name}`,
+                  'aria-label': `${t('mount')} ${workerDisplayName(worker)}`,
                   onClick: () => mountWorker(worker),
                 },
-                busy === `mount:${worker.name}` ? t('mounting') : t('mount'),
+                busy === `mount:${worker.id}` ? t('mounting') : t('mount'),
               ),
           h(
             Button,
@@ -126,11 +132,11 @@ export function WorkerCard({
               key: 'assistant',
               variant: 'outline',
               size: 'sm',
-              disabled: anyBusy || busy === `assistant:${worker.name}`,
-              'aria-label': `${worker.assistant === true ? t('clearAssistant') : t('setAssistant')} ${worker.name}`,
+              disabled: anyBusy || busy === `assistant:${worker.id}`,
+              'aria-label': `${worker.assistant === true ? t('clearAssistant') : t('setAssistant')} ${workerDisplayName(worker)}`,
               onClick: () => toggleAssistant(worker),
             },
-            busy === `assistant:${worker.name}`
+            busy === `assistant:${worker.id}`
               ? t('saving')
               : worker.assistant === true
                 ? t('clearAssistant')
@@ -147,8 +153,8 @@ export function WorkerCard({
               className: 'buka-workers-danger',
               icon: h(IconTrashOutlineRegular, { size: 13 }),
               disabled: anyBusy,
-              'aria-label': `${t('delete')} ${worker.name}`,
-              onClick: () => setConfirming(worker.name),
+              'aria-label': `${t('delete')} ${workerDisplayName(worker)}`,
+              onClick: () => setConfirming(worker.id),
             },
             t('delete'),
           ),
@@ -158,7 +164,7 @@ export function WorkerCard({
     'li',
     {
       className: `buka-workers-card${canOpen ? ' is-clickable' : ''}${robot ? ' is-robot' : ''}`,
-      key: worker.name,
+      key: worker.id,
       'aria-busy': busy !== null ? true : undefined,
       // 整行可点进详情；行内动作区自己挡住冒泡，点按钮不会误触。
       onClick: () => {
@@ -182,15 +188,15 @@ export function WorkerCard({
             {
               type: 'button',
               className: 'buka-workers-cardTitle',
-              title: worker.name,
-              'aria-label': `${t('openDetail')} ${worker.name}`,
+              title: workerIdentityLabel(worker),
+              'aria-label': `${t('openDetail')} ${workerDisplayName(worker)}`,
               disabled: !canOpen,
               onClick: (event: { stopPropagation(): void }) => {
                 event.stopPropagation()
                 if (canOpen) openDetail(worker)
               },
             },
-            String(worker.name ?? ''),
+            workerIdentityLabel(worker),
           ),
           h(Tag, { tone: robot ? 'info' : 'neutral' }, robot ? t('driverRobot') : t('driverAgent')),
           worker.assistant === true ? h(Tag, { tone: 'success' }, t('assistantBadge')) : null,
@@ -277,7 +283,7 @@ export function WorkerList({
             'ul',
             { className: 'buka-workers-cards' },
             ...visible.map((worker) =>
-              h(WorkerCard, { t, worker, state, actions, key: worker.name }),
+              h(WorkerCard, { t, worker, state, actions, key: worker.id }),
             ),
           ),
   )

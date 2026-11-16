@@ -2,20 +2,21 @@
  * 侧边栏「打工人」页面的 Host 一半。
  *
  * 打工人是**插件自己创建并登记**的对象，不是 DSH 的全部工作区：新建
- * 打工人时在插件全局目录下的 `workers/` 里建同名目录并写进 `workers.json`，
- * 再由浏览器一半把它挂到 DSH 工作区列表。Host 负责所有磁盘操作，提供一组
- * 包内 HTTP 路由给页面，除工作区 / 设置外都按打工人 **name** 操作：
+ * 打工人时在插件全局目录下的 `workers/` 里按不可变标识符建目录并写进
+ * `workers.json`，再由浏览器一半把它挂到 DSH 工作区列表。Host 负责所有磁盘
+ * 操作，提供一组包内 HTTP 路由给页面；打工人一律按 **id**（标识符）寻址，
+ * `name` 只是可选展示名，改名不移动目录：
  *
  * | 路由 | 作用 |
  * | --- | --- |
  * | `GET /buka-workers/list` | 列出登记表里的打工人、挂载状态、skills 与 AGENTS.md |
- * | `POST /buka-workers/create` | 建目录 + AGENTS.md 模板，并把打工人（含可选描述）插到登记表最前 |
+ * | `POST /buka-workers/create` | 按标识符建目录 + AGENTS.md 模板，并把打工人（含可选展示名 / 描述）插到登记表最前 |
  * | `POST /buka-workers/avatar` | 只改登记表里的头像 id |
  * | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选打工人） |
  * | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
  * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
  * | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
- * | `POST /buka-workers/rename` | 改打工人目录名 + 更新登记表 + 按新路径重建 DSH 工作区 |
+ * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
  * | `POST /buka-workers/remove` | 从登记表移除（目录、文件与会话保留） |
  * | `POST /buka-workers/agents` | 写入某打工人的 AGENTS.md，并补 CLAUDE.md 链接 |
  * | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
@@ -27,14 +28,15 @@
  * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`
  * 让模型回答「有哪些打工人、挂没挂载、是否写了 AGENTS.md、装了什么技能」
  * （见 `lib/list-tool.js`；工作流编排 preset 固定看不到技能清单）；写工具
- * `buka_worker_build`（见 `lib/builder.js`、`lib/build-tool.js`）负责创建 /
- * 修改 / 重命名打工人、写 AGENTS.md 并挂到工作区，但**只对随包发布的
- * 「打工人」preset 的根会话可见**（Config.builderPresets，判定见
+ * `buka_worker_build`（见 `lib/builder.js`、`lib/build-tool.js`）按标识符
+ * 创建 / 修改打工人（改名只改展示名）、写 AGENTS.md 并挂到工作区，但**只对
+ * 随包发布的「打工人」preset 的根会话可见**（Config.builderPresets，判定见
  * `lib/access.js`）。删除打工人、安装 skills、页面上的编辑仍然只留给用户。
  *
  * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
- * `lib/service.js`）：`list()` 列出打工人（含内建机器人 clock 的
- * `driver` / `assistant` / `program`），`avatarMap()` 给出打工人头像，
+ * `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建
+ * 机器人 clock 的 `driver` / `assistant` / `program`），`avatarMap()` 按标识符
+ * 给出打工人头像，
  * `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
  * 会话（不压缩）。工作流插件用它把每个任务交给一个打工人、并在节点图上画出
  * 打工人头像；注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面

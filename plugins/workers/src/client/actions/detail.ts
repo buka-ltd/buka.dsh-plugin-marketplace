@@ -1,15 +1,15 @@
 /**
- * 「打工人」详情页的动作：更换头像、重命名、保存职责描述。
+ * 「打工人」详情页的动作：更换头像、改展示名、保存职责描述。
  *
  * @module @buka/dsh-plugin-workers/client/actions/detail
  */
 
 import type { FormEvent } from 'react'
-import { agentsOf, failureText, requestJson } from '../api.ts'
+import { failureText, requestJson } from '../api.ts'
 import { avatarPreset } from '../avatar.ts'
 import { AVATAR_ROUTE, DESCRIPTION_ROUTE, MODEL_ROUTE, RENAME_ROUTE } from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
-import type { Translate, Worker, WorkerAgents, WorkerModelSelection } from '../types.ts'
+import type { Translate, Worker, WorkerModelSelection } from '../types.ts'
 
 /**
  * 构造详情页动作。
@@ -33,10 +33,7 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     renameSaving,
     renameDraft,
     setRenameSaving,
-    agentsDraft,
-    setAgentsDraft,
-    selectedName,
-    setSelectedName,
+    selectedId,
     descriptionDraft,
     setDescriptionDraft,
     descriptionSaving,
@@ -59,7 +56,7 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
    */
   function openAvatarDialog(worker: Worker) {
     if (mutating) return
-    setAvatarTarget(worker.name)
+    setAvatarTarget(worker.id)
     setDraftAvatar(avatarPreset(worker.avatar).id)
     setAvatarError(null)
     setAvatarOpen(true)
@@ -81,7 +78,7 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(AVATAR_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: avatarTarget, avatar: draftAvatar }),
+        body: JSON.stringify({ id: avatarTarget, avatar: draftAvatar }),
       })
       const saved = body?.worker?.avatar
       patchWorker(avatarTarget, { avatar: typeof saved === 'string' ? saved : draftAvatar })
@@ -96,11 +93,12 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
-   * 打开「重命名打工人」对话框：草稿从当前名称开始，用户直接改成新名。
-   * 登记文件损坏、目录缺失或写操作进行中时不打开（入口按钮也会禁用）。
+   * 打开「重命名打工人」对话框：草稿从当前展示名开始，用户直接改成新名称。
+   * 登记文件损坏或写操作进行中时不打开（入口按钮也会禁用）；目录缺失不影响
+   * 改展示名。
    */
   function openRenameDialog() {
-    if (selectedWorker === null || mutating || corrupt || selectedWorker.exists === false) return
+    if (selectedWorker === null || mutating || corrupt) return
     setRenameDraft(selectedWorker.name)
     setRenameError(null)
     setRenameOpen(true)
@@ -114,24 +112,16 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
-   * 重命名打工人：Host 会把目录改到新名并重建 DSH 工作区。
-   *
-   * 成功后只局部更新列表里的这一条（name / path / mounted / workspaceId /
-   * agents），没被用户改过的 AGENTS.md 草稿跟着 Host 同步后的内容走，再把
-   * `selectedName` 切到新名让配置视图留在同一个打工人上，最后用 `reload()`
-   * 对账；标题是旧名的详情页会因此自然刷新。失败留在对话框里提示。
+   * 改展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
+   * 工作区的标题同步成新名称。成功后只局部更新列表里的这一条，`selectedId`
+   * 不变，详情页留在同一个打工人上；失败留在对话框里提示。
    *
    */
   async function renameWorker(event: FormEvent) {
     event.preventDefault()
     if (selectedWorker === null || renameSaving) return
     const previousName = selectedWorker.name
-    const previousAgents = agentsOf(selectedWorker)
     const nextName = renameDraft.trim()
-    if (nextName === '') {
-      setRenameError(t('renameEmpty'))
-      return
-    }
     if (nextName === previousName) {
       setRenameError(t('renameSame'))
       return
@@ -141,34 +131,15 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(RENAME_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: previousName, newName: nextName }),
+        body: JSON.stringify({ id: selectedWorker.id, name: nextName }),
       })
-      const renamed = body?.worker
-      const savedName =
-        typeof renamed?.name === 'string' && renamed.name !== '' ? renamed.name : nextName
-      const patch: Partial<Worker> = {
-        name: savedName,
-        mounted: body?.mounted === true,
-        workspaceId: typeof body?.workspaceId === 'string' ? body.workspaceId : null,
-      }
-      if (typeof renamed?.path === 'string' && renamed.path !== '') patch.path = renamed.path
-      const savedAgents = body?.agents
-      if (savedAgents !== null && typeof savedAgents === 'object')
-        patch.agents = savedAgents as WorkerAgents
-      patchWorker(previousName, patch)
-      // Host 会把未改过的 AGENTS.md 模板同步成新名 / 新路径；用户没有改过草稿
-      // 时跟着换，否则 AGENTS 页签会显示旧模板，点「保存」还会把它写回去。
-      if (
-        typeof savedAgents?.content === 'string' &&
-        agentsDraft === previousAgents.content &&
-        savedAgents.content !== agentsDraft
-      ) {
-        setAgentsDraft(savedAgents.content)
-      }
+      const saved = body?.worker
+      const savedName = typeof saved?.name === 'string' ? saved.name : nextName
+      patchWorker(selectedWorker.id, { name: savedName })
       setRenameOpen(false)
       setRenameDraft('')
-      setSelectedName(savedName)
-      flash('success', `${t('renamed')} ${savedName}`)
+      const display = savedName === '' ? selectedWorker.id : savedName
+      flash('success', `${t('renamed')} ${display}`)
       reload()
     } catch (failure) {
       setRenameError(`${t('renameSaveFailed')} ${failureText(t, failure)}`)
@@ -190,17 +161,17 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
    * 工具读它，决定是否把节点交给这个打工人；保存成功后只局部更新列表。
    */
   async function saveDescription() {
-    if (selectedName === null || descriptionSaving) return
+    if (selectedId === null || descriptionSaving) return
     setDescriptionSaving(true)
     setDescriptionError(null)
     try {
       const body = await requestJson(DESCRIPTION_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: selectedName, description: descriptionDraft }),
+        body: JSON.stringify({ id: selectedId, description: descriptionDraft }),
       })
       const saved = body?.worker?.description
       const next = typeof saved === 'string' ? saved : normalizedDescription(descriptionDraft)
-      patchWorker(selectedName, { description: next })
+      patchWorker(selectedId, { description: next })
       setDescriptionDraft(next)
       flash('success', t('descriptionSaved'))
     } catch (failure) {
@@ -215,16 +186,16 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
    *
    */
   async function saveWorkerModel() {
-    if (selectedName === null || modelSaving) return
+    if (selectedId === null || modelSaving) return
     setModelSaving(true)
     setModelError(null)
     try {
       const body = await requestJson(MODEL_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: selectedName, model: modelDraft }),
+        body: JSON.stringify({ id: selectedId, model: modelDraft }),
       })
       const saved = (body?.worker?.model ?? null) as WorkerModelSelection | null
-      patchWorker(selectedName, { model: saved })
+      patchWorker(selectedId, { model: saved })
       setModelDraft(saved)
       flash('success', t('modelSaved'))
     } catch (failure) {

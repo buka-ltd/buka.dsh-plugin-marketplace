@@ -80,16 +80,30 @@ function fakeWorkspaceRegistry(options = {}) {
   const created = []
   /** @type {string[]} */
   const deleted = []
-  let workspaces = [...(options.workspaces ?? [])]
+  /** @type {Array<{ id: string, path: string, title: string, setTitle: (title: string) => Promise<void> }>} */
+  let workspaces = (options.workspaces ?? []).map((workspace) => ({
+    title: path.basename(workspace.path),
+    setTitle: async (title) => {
+      workspace.title = title
+    },
+    ...workspace,
+  }))
   return {
     created,
     deleted,
     list: () => workspaces,
     create:
       options.create ??
-      (async (directory) => {
+      (async (directory, title) => {
         created.push(directory)
-        const workspace = { id: `workspace-${created.length}`, path: directory }
+        const workspace = {
+          id: `workspace-${created.length}`,
+          path: directory,
+          title: typeof title === 'string' && title !== '' ? title : path.basename(directory),
+          setTitle: async (next) => {
+            workspace.title = next
+          },
+        }
         workspaces = [workspace, ...workspaces]
         return workspace
       }),
@@ -102,79 +116,84 @@ function fakeWorkspaceRegistry(options = {}) {
   }
 }
 
-test('normalizeBuildRequest：名称、头像、AGENTS.md 与 update 的边界', () => {
-  assert.deepEqual(normalizeBuildRequest({ name: '  writer  ' }), {
-    name: 'writer',
+test('normalizeBuildRequest：标识符、展示名、头像、AGENTS.md 与 update 的边界', () => {
+  assert.deepEqual(normalizeBuildRequest({ id: '  writer  ' }), {
+    id: 'writer',
+    name: '',
+    nameProvided: false,
     avatar: '',
     description: '',
     agents: '',
     agentsBytes: 0,
     update: false,
-    newName: '',
   })
   assert.deepEqual(
     normalizeBuildRequest({
-      name: '新闻-打工人',
+      id: 'news-brief',
+      name: '  新闻 打工人 ',
       avatar: 'owl',
       description: '  把新闻\n整理成简报  ',
       agents: '# 角色\n',
       update: true,
     }),
     {
-      name: '新闻-打工人',
+      id: 'news-brief',
+      name: '新闻 打工人',
+      nameProvided: true,
       avatar: 'owl',
       description: '把新闻 整理成简报',
       agents: '# 角色\n',
       agentsBytes: Buffer.byteLength('# 角色\n', 'utf8'),
       update: true,
-      newName: '',
     },
   )
   // 全空白的 AGENTS.md 视为「不写」，避免模型误清空。
-  assert.equal(normalizeBuildRequest({ name: 'writer', agents: ' \n\t ' }).agents, '')
+  assert.equal(normalizeBuildRequest({ id: 'writer', agents: ' \n\t ' }).agents, '')
 
+  // 标识符里的路径分隔符 / 非法字符直接拒绝；展示名可以是空串或单行文本。
   assert.throws(
-    () => normalizeBuildRequest({ name: '../escape' }),
+    () => normalizeBuildRequest({ id: '../escape' }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidId,
+  )
+  assert.throws(
+    () => normalizeBuildRequest({}),
+    (error) => error.code === BUILD_ERROR_CODES.invalidId,
+  )
+  assert.throws(
+    () => normalizeBuildRequest({ id: 'writer', name: 'x'.repeat(65) }),
     (error) => error.code === BUILD_ERROR_CODES.invalidName,
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', avatar: 'dragon' }),
+    () => normalizeBuildRequest({ id: 'writer', name: 42 }),
+    (error) => error.code === BUILD_ERROR_CODES.invalidName,
+  )
+  // 迁移来的旧标识符允许出现在更新请求里（创建时由 buildWorker 再收紧）。
+  assert.equal(normalizeBuildRequest({ id: '软件工程师' }).id, '软件工程师')
+  assert.throws(
+    () => normalizeBuildRequest({ id: 'writer', avatar: 'dragon' }),
     (error) =>
       error.code === BUILD_ERROR_CODES.invalidAvatar &&
       error.message.includes('sprout') &&
       error.message.includes(DEFAULT_AVATAR_ID),
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', description: 42 }),
+    () => normalizeBuildRequest({ id: 'writer', description: 42 }),
     (error) => error.code === BUILD_ERROR_CODES.invalidDescription,
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', description: 'x'.repeat(501) }),
+    () => normalizeBuildRequest({ id: 'writer', description: 'x'.repeat(501) }),
     (error) => error.code === BUILD_ERROR_CODES.invalidDescription,
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', agents: 42 }),
+    () => normalizeBuildRequest({ id: 'writer', agents: 42 }),
     (error) => error.code === BUILD_ERROR_CODES.invalidAgents,
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', update: 'yes' }),
-    (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
-  )
-  // 改名：newName 必须合法，且必须配 update: true。
-  assert.equal(
-    normalizeBuildRequest({ name: 'writer', newName: '  author ', update: true }).newName,
-    'author',
-  )
-  assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', newName: '../escape', update: true }),
-    (error) => error.code === BUILD_ERROR_CODES.invalidName,
-  )
-  assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', newName: 'author' }),
+    () => normalizeBuildRequest({ id: 'writer', update: 'yes' }),
     (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
   )
   assert.throws(
-    () => normalizeBuildRequest({ name: 'writer', agents: 'x'.repeat(512 * 1024 + 1) }),
+    () => normalizeBuildRequest({ id: 'writer', agents: 'x'.repeat(512 * 1024 + 1) }),
     (error) => error.code === BUILD_ERROR_CODES.agentsTooLarge,
   )
 })
@@ -279,6 +298,7 @@ test('buildWorker：新建打工人写目录、登记、AGENTS.md、CLAUDE.md �
     const agents = '# 新闻简报打工人\n\n## 角色\n\n每天把行业新闻整理成三条结论。\n'
     const result = await buildWorker({
       ...store,
+      id: 'brief',
       name: '简报',
       avatar: 'owl',
       agents,
@@ -323,6 +343,7 @@ test('buildWorker：不传头像时自动分配，不传 AGENTS.md 时用模板'
     const store = storeOf(root)
     const result = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       workspaceRegistry: fakeWorkspaceRegistry(),
     })
@@ -345,6 +366,7 @@ test('buildWorker：同名打工人没有 update 时拒绝且不覆盖现有文�
     const registry = fakeWorkspaceRegistry()
     const first = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       agents: '# 原稿\n',
       workspaceRegistry: registry,
@@ -352,7 +374,13 @@ test('buildWorker：同名打工人没有 update 时拒绝且不覆盖现有文�
 
     await assert.rejects(
       () =>
-        buildWorker({ ...store, name: 'writer', agents: '# 覆盖\n', workspaceRegistry: registry }),
+        buildWorker({
+          ...store,
+          id: 'writer',
+          name: 'writer',
+          agents: '# 覆盖\n',
+          workspaceRegistry: registry,
+        }),
       (error) => error.code === BUILD_ERROR_CODES.workerExists,
     )
     assert.equal(await fs.readFile(path.join(first.worker.path, 'AGENTS.md'), 'utf8'), '# 原稿\n')
@@ -370,6 +398,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
     const registry = fakeWorkspaceRegistry()
     const first = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       avatar: 'owl',
       agents: '# 第一版\n',
@@ -378,6 +407,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
 
     const second = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       agents: '# 第二版\n',
       update: true,
@@ -393,6 +423,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
 
     const third = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       avatar: 'panda',
       update: true,
@@ -411,6 +442,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
     // 空更新：什么都不写，也不报错。
     const fourth = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       update: true,
       workspaceRegistry: registry,
@@ -422,6 +454,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
     // update 用于不存在的名字时按新建处理。
     const created = await buildWorker({
       ...store,
+      id: 'fresh',
       name: 'fresh',
       update: true,
       agents: '# fresh\n',
@@ -440,6 +473,7 @@ test('buildWorker：已登记但目录被外部删掉时，update 会重建目�
     const registry = fakeWorkspaceRegistry()
     const first = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       agents: '# 原稿\n',
       workspaceRegistry: registry,
@@ -448,6 +482,7 @@ test('buildWorker：已登记但目录被外部删掉时，update 会重建目�
 
     const again = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       agents: '# 重建版\n',
       update: true,
@@ -469,6 +504,7 @@ test('mountWorker / currentMount：按规范路径判断是否已挂载，失败
     const store = storeOf(root)
     const first = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       workspaceRegistry: fakeWorkspaceRegistry(),
     })
@@ -478,10 +514,11 @@ test('mountWorker / currentMount：按规范路径判断是否已挂载，失败
     const reused = fakeWorkspaceRegistry({
       workspaces: [{ id: 'workspace-existing', path: workerPath }],
     })
-    assert.deepEqual(await currentMount({ workspaceRegistry: reused, workerPath }), {
-      id: 'workspace-existing',
-      path: workerPath,
-    })
+    const mount = await currentMount({ workspaceRegistry: reused, workerPath })
+    assert.equal(mount.id, 'workspace-existing')
+    assert.equal(mount.path, workerPath)
+    assert.equal(mount.title, 'writer')
+    assert.equal(typeof mount.setTitle, 'function')
     assert.deepEqual(await mountWorker({ workspaceRegistry: reused, workerPath }), {
       mounted: true,
       workspaceId: 'workspace-existing',
@@ -506,6 +543,7 @@ test('mountWorker / currentMount：按规范路径判断是否已挂载，失败
     })
     const mounted = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       update: true,
       workspaceRegistry: failing,
@@ -523,7 +561,13 @@ test('buildWorker：登记表损坏时拒绝写入，错误码明确', async () 
     const store = storeOf(root)
     await fs.writeFile(store.file, '{broken')
     await assert.rejects(
-      () => buildWorker({ ...store, name: 'writer', workspaceRegistry: fakeWorkspaceRegistry() }),
+      () =>
+        buildWorker({
+          ...store,
+          id: 'writer',
+          name: 'writer',
+          workspaceRegistry: fakeWorkspaceRegistry(),
+        }),
       (error) => error.code === BUILD_ERROR_CODES.registryUnreadable,
     )
     assert.equal(await fs.readFile(store.file, 'utf8'), '{broken', '不覆盖损坏的登记表')
@@ -540,6 +584,7 @@ test('buildWorker：登记表损坏时拒绝写入，错误码明确', async () 
  */
 function toolOutput(overrides = {}) {
   return {
+    id: 'writer',
     name: 'writer',
     path: '/tmp/workers/writer',
     avatar: 'owl',
@@ -566,6 +611,7 @@ function toolOutput(overrides = {}) {
 function buildResult(overrides = {}) {
   return {
     worker: {
+      id: 'writer',
       name: 'writer',
       driver: 'agent',
       path: '/tmp/workers/writer',
@@ -603,13 +649,16 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
 
   assert.equal(tool.name, WORKER_BUILD_TOOL_NAME)
   assert.equal(tool.name, 'buka_worker_build')
-  assert.equal(tool.parameters.name.required, true)
+  assert.equal(tool.parameters.id.required, true)
+  assert.equal(tool.parameters.name.required, undefined, '展示名可选')
+  assert.equal(tool.parameters.name.type, 'string')
   assert.equal(tool.parameters.description.required, true)
   assert.equal(tool.parameters.update.type, 'boolean')
-  assert.equal(tool.parameters.newName.type, 'string')
+  assert.equal(tool.parameters.newName, undefined, '不再有独立的 newName 参数')
   assert.ok(tool.description.includes('sprout'), '描述里列出可选头像 id')
   assert.ok(tool.description.includes('update: true'), '描述里说明覆盖要先 update')
-  assert.ok(tool.description.includes('newName'), '描述里说明改名入口')
+  assert.ok(tool.description.includes('immutable identifier'), '描述里说明标识符不可变')
+  assert.ok(tool.description.includes('display name'), '描述里说明展示名')
   assert.equal(tool.output.schema.properties.workspaceId.oneOf.length, 2)
   assert.equal(tool.output.schema.properties.renamed.type, 'boolean')
   assert.equal(tool.output.schema.properties.previousName.oneOf.length, 2)
@@ -617,10 +666,11 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
   assert.equal(tool.output.schema.properties.assistant.type, 'boolean')
 
   const agent = { id: 'root' }
-  const output = await tool.execute({ name: 'writer', agents: '# x' }, { agent })
+  const output = await tool.execute({ id: 'writer', name: 'writer', agents: '# x' }, { agent })
   assert.deepEqual(asserted, [{ agent }])
-  assert.deepEqual(runs, [{ name: 'writer', agents: '# x' }])
+  assert.deepEqual(runs, [{ id: 'writer', name: 'writer', agents: '# x' }])
   assert.deepEqual(output, {
+    id: 'writer',
     name: 'writer',
     path: '/tmp/workers/writer',
     avatar: 'owl',
@@ -651,6 +701,7 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
       }),
   }).execute({}, { agent })
   assert.deepEqual(await unmounted, {
+    id: 'writer',
     name: 'writer',
     path: '/tmp/workers/writer',
     avatar: 'owl',
@@ -677,18 +728,22 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
     /^Updated worker: writer/,
   )
   assert.match(render(toolOutput({ mountError: 'boom', mounted: false })), /Not mounted: boom/)
-  // 改名：第一行给出旧名 → 新名，并说明旧会话不再挂在该打工人下。
+  // 改展示名：第一行给出旧名 → 新名，并说明目录与工作区注册都保留。
   const renamedRender = render(
     toolOutput({
       created: false,
       updated: true,
       renamed: true,
-      previousName: 'writer',
-      name: 'author',
+      previousName: '写作助手',
+      id: 'writer',
+      name: '发布说明作者',
     }),
   )
-  assert.match(renamedRender, /^Renamed worker: writer → author/)
-  assert.match(renamedRender, /no longer listed under the worker/)
+  assert.match(renamedRender, /^Renamed worker: 写作助手 → 发布说明作者 \(id writer\)/)
+  assert.match(renamedRender, /directory and the workspace registration were kept/)
+
+  // 展示名不同时，创建 / 更新摘要同时给出名称与标识符。
+  assert.match(render(toolOutput({ name: '写作助手' })), /^Created worker: 写作助手 \(writer\)/)
 })
 
 test('createWorkerBuildTool：assertAccess 抛错时不执行构建', async () => {
@@ -705,7 +760,7 @@ test('createWorkerBuildTool：assertAccess 抛错时不执行构建', async () =
     },
   })
   await assert.rejects(
-    () => tool.execute({ name: 'writer' }, { agent: { id: 'other' } }),
+    () => tool.execute({ id: 'writer' }, { agent: { id: 'other' } }),
     /worker-builder/,
   )
   assert.equal(ran, false)
@@ -762,6 +817,7 @@ test('buildWorker：description 随创建写入，update 可改、空串保留�
 
     const first = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       description: '  写发布说明  ',
       workspaceRegistry: registry,
@@ -775,6 +831,7 @@ test('buildWorker：description 随创建写入，update 可改、空串保留�
 
     const second = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       description: '写发布说明与测试报告',
       update: true,
@@ -790,6 +847,7 @@ test('buildWorker：description 随创建写入，update 可改、空串保留�
     // 不传 / 传空串都保留原描述，避免 update 顺手清空。
     const third = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       update: true,
       workspaceRegistry: registry,
@@ -797,6 +855,7 @@ test('buildWorker：description 随创建写入，update 可改、空串保留�
     assert.equal(third.worker.description, '写发布说明与测试报告')
     const fourth = await buildWorker({
       ...store,
+      id: 'writer',
       name: 'writer',
       description: '   ',
       update: true,
@@ -809,127 +868,142 @@ test('buildWorker：description 随创建写入，update 可改、空串保留�
   }
 })
 
-test('buildWorker：newName 改目录与登记表，并按新路径重建工作区', async () => {
+test('buildWorker：update 只改展示名，目录与工作区注册不变', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
     const registry = fakeWorkspaceRegistry()
     const first = await buildWorker({
       ...store,
-      name: 'writer',
+      id: 'writer',
+      name: '写作助手',
       avatar: 'owl',
       description: '写发布说明',
       agents: '# 原稿\n',
       workspaceRegistry: registry,
     })
-    assert.deepEqual(registry.created, [first.worker.path], '创建时挂到旧路径')
+    assert.deepEqual(registry.created, [first.worker.path], '创建时挂到目录')
+    assert.equal(registry.list()[0].title, '写作助手', '新建工作区标题用展示名')
 
     const renamed = await buildWorker({
       ...store,
-      name: 'writer',
-      newName: 'author',
+      id: 'writer',
+      name: '发布说明作者',
       update: true,
       workspaceRegistry: registry,
     })
     assert.equal(renamed.created, false)
     assert.equal(renamed.updated, true)
     assert.equal(renamed.renamed, true)
-    assert.equal(renamed.previousName, 'writer')
-    assert.equal(renamed.worker.name, 'author')
-    assert.equal(renamed.worker.path, path.join(path.dirname(first.worker.path), 'author'))
+    assert.equal(renamed.previousName, '写作助手')
+    assert.equal(renamed.worker.id, 'writer', '标识符不可变')
+    assert.equal(renamed.worker.name, '发布说明作者')
+    assert.equal(renamed.worker.path, first.worker.path, '目录不移动')
     assert.equal(renamed.worker.avatar, 'owl', '头像保留')
     assert.equal(renamed.worker.description, '写发布说明', '职责保留')
     assert.equal(renamed.worker.createdAt, first.worker.createdAt, '创建时间保留')
-    assert.equal(
-      await fs.stat(first.worker.path).then(
-        () => true,
-        () => false,
-      ),
-      false,
-      '旧目录已不存在',
-    )
     assert.equal(await fs.readFile(path.join(renamed.worker.path, 'AGENTS.md'), 'utf8'), '# 原稿\n')
 
     const registered = await readWorkerRegistry({ file: store.file })
     assert.deepEqual(
-      registered.workers.map((worker) => worker.name),
-      ['author'],
+      registered.workers.map((worker) => [worker.id, worker.name]),
+      [['writer', '发布说明作者']],
     )
     assert.equal(registered.workers[0].path, renamed.worker.path)
 
-    // 旧工作区注册被摘掉，新路径重建一个新工作区（新 id）。
-    assert.deepEqual(registry.deleted, [first.workspaceId])
-    assert.equal(registry.created.length, 2)
-    assert.equal(registry.created[1], renamed.worker.path)
+    // 工作区注册不重建：只同步标题。
+    assert.deepEqual(registry.deleted, [])
+    assert.equal(registry.created.length, 1)
+    assert.equal(registry.list()[0].id, first.workspaceId)
+    assert.equal(registry.list()[0].title, '发布说明作者')
     assert.equal(renamed.mounted, true)
-    assert.notEqual(renamed.workspaceId, first.workspaceId)
-    assert.equal(renamed.mountError, null)
+    assert.equal(renamed.workspaceId, first.workspaceId)
 
-    // 目录改名后 CLAUDE.md 的相对软链接仍然有效。
+    // CLAUDE.md 的相对软链接仍然有效。
     const claude = await readClaudeLink(renamed.worker.path)
     assert.equal(claude.exists, true)
+
+    // 清空展示名：之后显示标识符，仍然不碰目录。
+    const cleared = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: '',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(cleared.renamed, true)
+    assert.equal(cleared.worker.name, '')
+    assert.equal(cleared.worker.path, first.worker.path)
+    assert.equal(registry.list()[0].title, 'writer')
   } finally {
     await removeRoot(root)
   }
 })
 
-test('buildWorker：newName 必须配 update，目标名/目录被占用时拒绝，同名视为不改名', async () => {
+test('buildWorker：update 必须显式；展示名可重复；标识符冲突与内建标识符被拒绝', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
     const registry = fakeWorkspaceRegistry()
-    const writer = await buildWorker({ ...store, name: 'writer', workspaceRegistry: registry })
-    await buildWorker({ ...store, name: 'painter', workspaceRegistry: registry })
+    const writer = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: '写作助手',
+      workspaceRegistry: registry,
+    })
+    await buildWorker({ ...store, id: 'painter', name: '绘画助手', workspaceRegistry: registry })
 
-    // 没有 update：不允许改已存在打工人的名字。
-    await assert.rejects(
-      () =>
-        buildWorker({ ...store, name: 'writer', newName: 'author', workspaceRegistry: registry }),
-      (error) => error.code === BUILD_ERROR_CODES.invalidUpdate,
-    )
-    // 新名与登记表里的打工人重名。
+    // 没有 update：拒绝覆盖已有标识符。
     await assert.rejects(
       () =>
         buildWorker({
           ...store,
-          name: 'writer',
-          newName: 'painter',
-          update: true,
+          id: 'writer',
+          name: '作者',
           workspaceRegistry: registry,
         }),
-      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
+      (error) => error.code === BUILD_ERROR_CODES.workerExists,
     )
-    // 新名与 workersDir 下已存在的目录重名（没有登记条目也不能占）。
-    await fs.mkdir(path.join(store.workersDir, 'ghost'))
+    // 展示名不要求唯一：与另一个打工人同名是允许的，id 仍是定位键。
+    const sameDisplay = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: '绘画助手',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(sameDisplay.renamed, true)
+    assert.equal(sameDisplay.worker.id, 'writer')
+    assert.equal(sameDisplay.worker.name, '绘画助手')
+
+    // 新建时标识符必须符合新字符集（旧标识符只用于更新已有条目）。
     await assert.rejects(
       () =>
         buildWorker({
           ...store,
-          name: 'writer',
-          newName: 'ghost',
-          update: true,
+          id: 'Writer',
           workspaceRegistry: registry,
         }),
-      (error) => error.code === BUILD_ERROR_CODES.nameTaken,
+      (error) => error.code === BUILD_ERROR_CODES.invalidId,
     )
-    // 不能把不存在的打工人「改名」出来。
+    // 展示名不合法（超长）。
     await assert.rejects(
       () =>
         buildWorker({
           ...store,
-          name: 'nobody',
-          newName: 'author',
+          id: 'writer',
+          name: 'x'.repeat(65),
           update: true,
           workspaceRegistry: registry,
         }),
-      (error) => error.code === BUILD_ERROR_CODES.unknownWorker,
+      (error) => error.code === BUILD_ERROR_CODES.invalidName,
     )
 
     // 同名：no-op，不碰目录与登记表。
     const same = await buildWorker({
       ...store,
-      name: 'writer',
-      newName: 'writer',
+      id: 'writer',
+      name: '绘画助手',
       update: true,
       workspaceRegistry: registry,
     })
@@ -939,25 +1013,40 @@ test('buildWorker：newName 必须配 update，目标名/目录被占用时拒�
     assert.equal(same.worker.path, writer.worker.path)
     assert.equal((await fs.stat(writer.worker.path)).isDirectory(), true)
     assert.deepEqual(
-      (await readWorkerRegistry({ file: store.file })).workers.map((worker) => worker.name),
+      (await readWorkerRegistry({ file: store.file })).workers.map((worker) => worker.id),
       ['painter', 'writer'],
     )
+    // update 用于不存在的标识符时按新建处理（调用方明确给了 update 也可创建）。
+    const created = await buildWorker({
+      ...store,
+      id: 'fresh',
+      name: '新打工人',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(created.created, true)
+    assert.equal(created.renamed, false)
   } finally {
     await removeRoot(root)
   }
 })
 
-test('buildWorker：改名与头像 / 职责 / AGENTS.md 同一次调用；未挂载的打工人改名后重新挂载', async () => {
+test('buildWorker：改展示名与头像 / 职责 / AGENTS.md 同一次调用；未挂载的打工人更新后挂载', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
     const registry = fakeWorkspaceRegistry()
-    const first = await buildWorker({ ...store, name: 'writer', workspaceRegistry: registry })
+    const first = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: '写作助手',
+      workspaceRegistry: registry,
+    })
 
     const renamed = await buildWorker({
       ...store,
-      name: 'writer',
-      newName: 'author',
+      id: 'writer',
+      name: '发布说明作者',
       update: true,
       avatar: 'panda',
       description: '写发布说明与测试报告',
@@ -965,6 +1054,7 @@ test('buildWorker：改名与头像 / 职责 / AGENTS.md 同一次调用；未�
       workspaceRegistry: registry,
     })
     assert.equal(renamed.renamed, true)
+    assert.equal(renamed.worker.path, first.worker.path)
     assert.equal(renamed.worker.avatar, 'panda')
     assert.equal(renamed.worker.description, '写发布说明与测试报告')
     assert.equal(
@@ -973,13 +1063,13 @@ test('buildWorker：改名与头像 / 职责 / AGENTS.md 同一次调用；未�
     )
     assert.equal(renamed.worker.createdAt, first.worker.createdAt)
 
-    // 未挂载的打工人在改名后会按新路径重新挂载。
-    const loose = await buildWorker({ ...store, name: 'loose' })
+    // 未挂载的打工人在 update 后会按原目录重新挂载，标题用新的展示名。
+    const loose = await buildWorker({ ...store, id: 'loose', name: '散工' })
     assert.equal(loose.mounted, false)
     const mountAfterRename = await buildWorker({
       ...store,
-      name: 'loose',
-      newName: 'loose-next',
+      id: 'loose',
+      name: '散工二号',
       update: true,
       workspaceRegistry: fakeWorkspaceRegistry(),
     })
@@ -991,24 +1081,41 @@ test('buildWorker：改名与头像 / 职责 / AGENTS.md 同一次调用；未�
   }
 })
 
-test('buildWorker：内建 clock 不可创建，也不可作为改名目标', async () => {
+test('buildWorker：内建 clock 标识符不可创建 / 修改，展示名可以叫 clock', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
     const registry = fakeWorkspaceRegistry()
 
     await assert.rejects(
-      () => buildWorker({ ...store, name: 'clock', workspaceRegistry: registry }),
+      () => buildWorker({ ...store, id: 'clock', name: 'clock', workspaceRegistry: registry }),
       (error) => error.code === BUILD_ERROR_CODES.builtinWorker,
     )
 
-    const writer = await buildWorker({ ...store, name: 'writer', workspaceRegistry: registry })
+    const writer = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: '写作助手',
+      workspaceRegistry: registry,
+    })
+    // 名称只是展示名：可以和内建 clock 同名。
+    const sameDisplayName = await buildWorker({
+      ...store,
+      id: 'writer',
+      name: 'clock',
+      update: true,
+      workspaceRegistry: registry,
+    })
+    assert.equal(sameDisplayName.worker.id, 'writer')
+    assert.equal(sameDisplayName.worker.name, 'clock')
+
+    // 内建标识符本身不可作为更新目标。
     await assert.rejects(
       () =>
         buildWorker({
           ...store,
-          name: 'writer',
-          newName: 'clock',
+          id: 'clock',
+          name: 'timer',
           update: true,
           workspaceRegistry: registry,
         }),
@@ -1016,7 +1123,7 @@ test('buildWorker：内建 clock 不可创建，也不可作为改名目标', as
     )
     // 失败的调用没有动登记表与目录。
     assert.deepEqual(
-      (await readWorkerRegistry({ file: store.file })).workers.map((worker) => worker.name),
+      (await readWorkerRegistry({ file: store.file })).workers.map((worker) => worker.id),
       ['writer'],
     )
     assert.equal((await fs.stat(writer.worker.path)).isDirectory(), true)
@@ -1033,6 +1140,7 @@ test('buildWorker：机器人只读，构建工具不能修改它', async () => 
       file: store.file,
       workers: [
         {
+          id: 'timer',
           name: 'timer',
           driver: 'robot',
           program: 'clock',
@@ -1047,6 +1155,7 @@ test('buildWorker：机器人只读，构建工具不能修改它', async () => 
       () =>
         buildWorker({
           ...store,
+          id: 'timer',
           name: 'timer',
           description: '改描述',
           update: true,
@@ -1060,7 +1169,13 @@ test('buildWorker：机器人只读，构建工具不能修改它', async () => 
 
     // 新建时看到同名 program 条目也不能覆盖。
     await assert.rejects(
-      () => buildWorker({ ...store, name: 'timer', workspaceRegistry: fakeWorkspaceRegistry() }),
+      () =>
+        buildWorker({
+          ...store,
+          id: 'timer',
+          name: 'timer',
+          workspaceRegistry: fakeWorkspaceRegistry(),
+        }),
       (error) => error.code === BUILD_ERROR_CODES.robotWorker,
     )
   } finally {

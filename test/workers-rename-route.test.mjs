@@ -187,54 +187,61 @@ async function callRoute(routes, routePath, { method = 'POST', body } = {}) {
   return { status: res.statusCode, body: res.text === '' ? null : JSON.parse(res.text) }
 }
 
-test('POST /buka-workers/rename：改名成功并重建工作区，返回新的 AGENTS.md 摘要', async () => {
+test('POST /buka-workers/rename：只改展示名，目录与工作区注册不变', async () => {
   const harness = await makeHarness()
   try {
     const agent = { agent: { id: 'builder' } }
-    // 用构建工具新建（不传 agents，AGENTS.md 是插件模板），后面改名应把模板同步成新名。
-    const created = await harness.tool.execute({ name: 'writer', avatar: 'owl' }, agent)
+    // 用构建工具新建：id 是 writer，展示名先为空。
+    const created = await harness.tool.execute({ id: 'writer', avatar: 'owl' }, agent)
     assert.equal(created.created, true)
     assert.equal(harness.workspaces.length, 1)
-    const oldWorkspaceId = created.workspaceId
-    const oldPath = created.path
+    const workspaceId = created.workspaceId
+    const workerPath = created.path
 
     const result = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'writer', newName: 'author' },
+      body: { id: 'writer', name: '写作助手' },
     })
     assert.equal(result.status, 200)
     assert.equal(result.body.ok, true)
+    assert.equal(result.body.id, 'writer')
+    assert.equal(result.body.name, '写作助手')
     assert.equal(result.body.renamed, true)
-    assert.equal(result.body.previousName, 'writer')
-    assert.equal(result.body.worker.name, 'author')
-    assert.notEqual(result.body.worker.path, oldPath)
+    assert.equal(result.body.previousName, '')
+    assert.equal(result.body.worker.id, 'writer')
+    assert.equal(result.body.worker.name, '写作助手')
+    assert.equal(result.body.worker.path, workerPath, '目录不移动')
     assert.equal(result.body.mounted, true)
-    assert.notEqual(result.body.workspaceId, oldWorkspaceId)
+    assert.equal(result.body.workspaceId, workspaceId, '工作区注册不重建')
 
-    // AGENTS.md 模板同步成新名 / 新路径，并随响应带回给页面重设草稿。
-    assert.equal(typeof result.body.agents.content, 'string')
-    assert.ok(result.body.agents.content.includes('这是「author」打工人的协作说明'))
-    assert.ok(result.body.agents.content.includes(`- 路径：\`${result.body.worker.path}\``))
-
-    // 登记表：条目原位更新，旧目录不存在；内建 clock 仍在表里。
+    // 登记表：id 不变、name 更新；版本落成 4；内建 clock 仍在表里。
     const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
-      ['author', 'clock'],
+      registry.workers.map((worker) => worker.id),
+      ['writer', 'clock'],
     )
-    assert.equal(registry.version, 3)
-    assert.equal(registry.workers[0].path, result.body.worker.path)
+    assert.equal(registry.version, 4)
+    assert.equal(registry.workers[0].name, '写作助手')
+    assert.equal(registry.workers[0].path, workerPath)
     assert.equal(
       await fs.stat(path.join(harness.workersDir, 'writer')).then(
         () => true,
         () => false,
       ),
-      false,
+      true,
+      '原目录仍在',
     )
 
-    // 旧工作区注册被删，新路径上有一个新工作区。
-    assert.deepEqual(harness.deleted, [oldWorkspaceId])
+    // 工作区没有删除 / 新建；只同步标题（假注册表没有 setTitle 时静默跳过）。
+    assert.deepEqual(harness.deleted, [])
     assert.equal(harness.workspaces.length, 1)
-    assert.equal(harness.workspaces[0].path, result.body.worker.path)
+    assert.equal(harness.workspaces[0].path, workerPath)
+
+    // 再改一次同名：no-op，200 且 renamed=false。
+    const same = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: 'writer', name: '写作助手' },
+    })
+    assert.equal(same.status, 200)
+    assert.equal(same.body.renamed, false)
   } finally {
     await harness.cleanup()
   }
@@ -244,34 +251,48 @@ test('POST /buka-workers/rename：错误码映射（内置名 409、非法名 40
   const harness = await makeHarness()
   try {
     const agent = { agent: { id: 'builder' } }
-    await harness.tool.execute({ name: 'writer' }, agent)
-    await harness.tool.execute({ name: 'painter' }, agent)
+    await harness.tool.execute({ id: 'writer' }, agent)
+    await harness.tool.execute({ id: 'painter' }, agent)
 
-    // 新名与另一个打工人重名。
-    const taken = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'writer', newName: 'painter' },
+    // 展示名不要求唯一：与另一个打工人同名是允许的。
+    const sameDisplayName = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: 'writer', name: 'painter' },
     })
-    assert.equal(taken.status, 409)
-    assert.equal(taken.body.code, 'name-taken')
+    assert.equal(sameDisplayName.status, 200)
+    assert.equal(sameDisplayName.body.name, 'painter')
 
-    // 非法新名 / 与旧名相同。
-    const invalid = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'writer', newName: '../escape' },
+    // 展示名类型不对 / 超长。
+    const invalidType = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: 'writer', name: 42 },
     })
-    assert.equal(invalid.status, 400)
-    assert.equal(invalid.body.code, 'invalid-name')
-    const same = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'writer', newName: 'writer' },
+    assert.equal(invalidType.status, 400)
+    assert.equal(invalidType.body.code, 'invalid-name')
+    const tooLong = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: 'writer', name: 'x'.repeat(65) },
     })
-    assert.equal(same.status, 400)
-    assert.equal(same.body.code, 'invalid-name')
+    assert.equal(tooLong.status, 400)
+    assert.equal(tooLong.body.code, 'invalid-name')
+
+    // 空名称表示清空（之后显示标识符）。
+    const cleared = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: 'writer', name: '' },
+    })
+    assert.equal(cleared.status, 200)
+    assert.equal(cleared.body.name, '')
 
     // 未知打工人。
     const unknown = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'nobody', newName: 'author' },
+      body: { id: 'nobody', name: 'author' },
     })
     assert.equal(unknown.status, 404)
     assert.equal(unknown.body.code, 'unknown-worker')
+
+    // 非法标识符。
+    const invalidId = await callRoute(harness.routes, '/buka-workers/rename', {
+      body: { id: '../escape', name: 'author' },
+    })
+    assert.equal(invalidId.status, 400)
+    assert.equal(invalidId.body.code, 'invalid-id')
 
     // 方法不允许。
     const get = await callRoute(harness.routes, '/buka-workers/rename', { method: 'GET' })
@@ -281,7 +302,7 @@ test('POST /buka-workers/rename：错误码映射（内置名 409、非法名 40
     // 以上失败都没有动目录与登记表。
     assert.deepEqual(
       JSON.parse(await fs.readFile(harness.registryFile, 'utf8')).workers.map(
-        (worker) => worker.name,
+        (worker) => worker.id,
       ),
       ['painter', 'writer', 'clock'],
     )
@@ -294,46 +315,46 @@ test.after(async () => {
   await fs.rm(stubRoot, { recursive: true, force: true })
 })
 
-test('POST /buka-workers/assistant：智能体可设 / 取消助理，机器人与内建名字只读', async () => {
+test('POST /buka-workers/assistant：智能体可设 / 取消助理，机器人与内建标识符只读', async () => {
   const harness = await makeHarness()
   try {
     const agent = { agent: { id: 'builder' } }
-    await harness.tool.execute({ name: 'writer' }, agent)
+    await harness.tool.execute({ id: 'writer' }, agent)
 
     // 设为助理：响应带回完整条目，登记表落到 version 3。
     const marked = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { name: 'writer', assistant: true },
+      body: { id: 'writer', assistant: true },
     })
     assert.equal(marked.status, 200)
     assert.equal(marked.body.ok, true)
     assert.equal(marked.body.worker.assistant, true)
     assert.equal(marked.body.worker.driver, 'agent')
     const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
-    const writer = registry.workers.find((worker) => worker.name === 'writer')
+    const writer = registry.workers.find((worker) => worker.id === 'writer')
     assert.equal(writer.assistant, true)
 
     // 取消助理。
     const cleared = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { name: 'writer', assistant: false },
+      body: { id: 'writer', assistant: false },
     })
     assert.equal(cleared.status, 200)
     assert.equal(cleared.body.worker.assistant, false)
 
     // 非布尔值 / 未知打工人。
     const invalid = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { name: 'writer', assistant: 'yes' },
+      body: { id: 'writer', assistant: 'yes' },
     })
     assert.equal(invalid.status, 400)
     assert.equal(invalid.body.code, 'invalid-assistant')
     const unknown = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { name: 'nobody', assistant: true },
+      body: { id: 'nobody', assistant: true },
     })
     assert.equal(unknown.status, 404)
     assert.equal(unknown.body.code, 'unknown-worker')
 
     // 内建机器人不能是助理。
     const clock = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { name: 'clock', assistant: true },
+      body: { id: 'clock', assistant: true },
     })
     assert.equal(clock.status, 409)
     assert.equal(clock.body.code, 'robot-worker')
@@ -349,35 +370,35 @@ test('打工人路由：内建 clock 不可创建 / 删除 / 改名 / 改头像�
 
     // 构建工具不能创建 clock。
     await assert.rejects(
-      () => harness.tool.execute({ name: 'clock' }, agent),
+      () => harness.tool.execute({ id: 'clock' }, agent),
       (error) => error.code === 'builtin-worker',
     )
 
-    // 页面新建同样拒绝（内建名字 / program driver）。
+    // 页面新建同样拒绝（内建标识符 / program driver）。
     const created = await callRoute(harness.routes, '/buka-workers/create', {
-      body: { name: 'clock' },
+      body: { id: 'clock' },
     })
     assert.equal(created.status, 409)
     assert.equal(created.body.code, 'builtin-worker')
     const invalidDriver = await callRoute(harness.routes, '/buka-workers/create', {
-      body: { name: 'timer', driver: 'robot' },
+      body: { id: 'timer', driver: 'robot' },
     })
     assert.equal(invalidDriver.status, 400)
     assert.equal(invalidDriver.body.code, 'invalid-driver')
 
     // 删除 / 改名 / 改头像都拒绝内建机器人。
     const removed = await callRoute(harness.routes, '/buka-workers/remove', {
-      body: { name: 'clock' },
+      body: { id: 'clock' },
     })
     assert.equal(removed.status, 409)
     assert.equal(removed.body.code, 'builtin-worker')
     const renamed = await callRoute(harness.routes, '/buka-workers/rename', {
-      body: { name: 'clock', newName: 'timer' },
+      body: { id: 'clock', name: 'timer' },
     })
     assert.equal(renamed.status, 409)
     assert.equal(renamed.body.code, 'builtin-worker')
     const avatar = await callRoute(harness.routes, '/buka-workers/avatar', {
-      body: { name: 'clock', avatar: 'owl' },
+      body: { id: 'clock', avatar: 'owl' },
     })
     assert.equal(avatar.status, 409)
     assert.equal(avatar.body.code, 'robot-worker')
@@ -385,7 +406,7 @@ test('打工人路由：内建 clock 不可创建 / 删除 / 改名 / 改头像�
     // 列表包含 clock，带 driver / assistant，且没有目录状态。
     const listed = await callRoute(harness.routes, '/buka-workers/list', { method: 'GET' })
     assert.equal(listed.status, 200)
-    const clock = listed.body.workers.find((worker) => worker.name === 'clock')
+    const clock = listed.body.workers.find((worker) => worker.id === 'clock')
     assert.ok(clock, '列表里应有内建 clock')
     assert.equal(clock.driver, 'robot')
     assert.equal(clock.program, 'clock')
@@ -401,11 +422,11 @@ test('POST /buka-workers/model：保存 / 清除智能体的模型，机器人�
   const harness = await makeHarness()
   try {
     const agent = { agent: { id: 'builder' } }
-    await harness.tool.execute({ name: 'writer' }, agent)
+    await harness.tool.execute({ id: 'writer' }, agent)
 
     const saved = await callRoute(harness.routes, '/buka-workers/model', {
       body: {
-        name: 'writer',
+        id: 'writer',
         model: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' },
       },
     })
@@ -416,7 +437,7 @@ test('POST /buka-workers/model：保存 / 清除智能体的模型，机器人�
       reasoningEffort: 'high',
     })
     const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
-    const stored = registry.workers.find((worker) => worker.name === 'writer')
+    const stored = registry.workers.find((worker) => worker.id === 'writer')
     assert.deepEqual(stored.model, {
       provider: 'deepseek',
       model: 'deepseek-chat',
@@ -425,24 +446,24 @@ test('POST /buka-workers/model：保存 / 清除智能体的模型，机器人�
 
     // null 表示清除配置，跟随宿主默认模型。
     const cleared = await callRoute(harness.routes, '/buka-workers/model', {
-      body: { name: 'writer', model: null },
+      body: { id: 'writer', model: null },
     })
     assert.equal(cleared.status, 200)
     assert.equal('model' in cleared.body.worker, false)
 
     // 非法模型（空 provider）400。
     const invalid = await callRoute(harness.routes, '/buka-workers/model', {
-      body: { name: 'writer', model: { provider: '', model: 'm' } },
+      body: { id: 'writer', model: { provider: '', model: 'm' } },
     })
     assert.equal(invalid.status, 400)
     assert.equal(invalid.body.code, 'invalid-model')
 
     // 内建机器人只读。
     await callRoute(harness.routes, '/buka-workers/create', {
-      body: { name: 'temp' },
+      body: { id: 'temp' },
     })
     const clock = await callRoute(harness.routes, '/buka-workers/model', {
-      body: { name: 'clock', model: { provider: 'deepseek', model: 'deepseek-chat' } },
+      body: { id: 'clock', model: { provider: 'deepseek', model: 'deepseek-chat' } },
     })
     assert.equal(clock.status, 409)
     assert.equal(clock.body.code, 'robot-worker')

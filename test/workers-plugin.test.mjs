@@ -33,13 +33,15 @@ import {
   addWorker,
   BUILTIN_WORKERS,
   CLAUDE_FILE,
-  CLOCK_WORKER_NAME,
+  CLOCK_WORKER_ID,
   defaultWorkersRoot,
   emptyAgentsFile,
   ensureBuiltinWorkers,
   ensureClaudeLink,
+  isLegacyWorkerId,
+  isResolvableWorkerId,
   isValidWorkerDescription,
-  isValidWorkerName,
+  isValidWorkerId,
   legacyPluginCacheDir,
   listWorkers,
   migrateWorkerStore,
@@ -120,9 +122,36 @@ async function removeRoot(root) {
   await fs.rm(root, { recursive: true, force: true })
 }
 
-test('打工人名称校验与目录拼接', () => {
-  for (const good of ['writer', 'a', 'A1', '写作-bot', 'bot_1.2', 'x'.repeat(64)]) {
-    assert.equal(isValidWorkerName(good), true, good)
+test('打工人标识符校验与目录拼接：新格式严格、旧格式兼容', () => {
+  // 新标识符：小写字母开头，后面可跟小写字母、数字、_ 与 -。
+  for (const good of ['writer', 'a', 'a1', 'bot_1-2', 'x'.repeat(64)]) {
+    assert.equal(isValidWorkerId(good), true, good)
+    assert.equal(isResolvableWorkerId(good), true, good)
+  }
+  for (const bad of [
+    '',
+    '   ',
+    'Writer',
+    'A1',
+    '1writer',
+    '_writer',
+    '写作-bot',
+    'bot_1.2',
+    'a b',
+    'a/b',
+    'a\b',
+    'a\u0000b',
+    'x'.repeat(65),
+  ]) {
+    assert.equal(isValidWorkerId(bad), false, JSON.stringify(bad))
+  }
+  assert.equal(isValidWorkerId(null), false)
+  assert.equal(isValidWorkerId('  writer  '), true, '首尾空白先 trim')
+
+  // 迁移来的旧标识符（旧登记表里的 name）不受新字符集约束，但仍必须能当目录名。
+  for (const legacy of ['A1', '写作-bot', 'bot_1.2', 'x'.repeat(64), '  writer  ']) {
+    assert.equal(isLegacyWorkerId(legacy), true, legacy)
+    assert.equal(isResolvableWorkerId(legacy), true, legacy)
   }
   for (const bad of [
     '',
@@ -136,15 +165,16 @@ test('打工人名称校验与目录拼接', () => {
     'a\u0000b',
     'x'.repeat(65),
   ]) {
-    assert.equal(isValidWorkerName(bad), false, JSON.stringify(bad))
+    assert.equal(isLegacyWorkerId(bad), false, JSON.stringify(bad))
+    assert.equal(isResolvableWorkerId(bad), false, JSON.stringify(bad))
   }
-  assert.equal(isValidWorkerName(null), false)
-  // 首尾空白会先 trim，再校验。
-  assert.equal(isValidWorkerName('  writer  '), true)
+  assert.equal(isLegacyWorkerId(null), false)
 
   const root = path.resolve(path.join(tmpdir(), 'workers-root'))
   assert.equal(workerDirectory(root, 'writer'), path.join(root, 'writer'))
   assert.equal(workerDirectory(root, '  writer  '), path.join(root, 'writer'))
+  // 更新 / 改名 / 删除已有打工人时仍接受旧标识符。
+  assert.equal(workerDirectory(root, '写作-bot'), path.join(root, '写作-bot'))
   assert.equal(workerDirectory(root, '.'), null)
   assert.equal(workerDirectory(root, '..'), null)
   assert.equal(workerDirectory(root, '../escape'), null)
@@ -350,16 +380,18 @@ test('打工人登记表：缺失按空表、原子写 0600', async () => {
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    assert.deepEqual(await readWorkerRegistry({ file }), { version: 3, workers: [], file })
+    assert.deepEqual(await readWorkerRegistry({ file }), { version: 4, workers: [], file })
 
     const entries = [
       {
-        name: 'writer',
+        id: 'writer',
+        name: '写作助手',
         path: path.join(workersDir, 'writer'),
         createdAt: '2026-01-02T03:04:05.000Z',
       },
       {
-        name: 'painter',
+        id: 'painter',
+        name: '',
         path: path.join(workersDir, 'painter'),
         createdAt: '2026-02-03T04:05:06.000Z',
       },
@@ -370,11 +402,11 @@ test('打工人登记表：缺失按空表、原子写 0600', async () => {
       ...entry,
       driver: 'agent',
       program: '',
-      avatar: defaultAvatarFor(entry.name),
+      avatar: defaultAvatarFor(entry.id),
       description: '',
       assistant: false,
     }))
-    assert.deepEqual(await readWorkerRegistry({ file }), { version: 3, workers: written, file })
+    assert.deepEqual(await readWorkerRegistry({ file }), { version: 4, workers: written, file })
 
     if (process.platform !== 'win32') {
       assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
@@ -383,7 +415,7 @@ test('打工人登记表：缺失按空表、原子写 0600', async () => {
     // 覆盖写之后权限仍然收紧，且不残留临时文件。
     await writeWorkerRegistry({ file, workers: entries.slice(0, 1) })
     assert.deepEqual(await readWorkerRegistry({ file }), {
-      version: 3,
+      version: 4,
       workers: written.slice(0, 1),
       file,
     })
@@ -407,7 +439,7 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
       '{not json',
       'null',
       '[]',
-      JSON.stringify({ version: 4, workers: [] }),
+      JSON.stringify({ version: 5, workers: [] }),
       JSON.stringify({ version: 1, workers: 'nope' }),
     ]
     for (const bad of cases) {
@@ -416,12 +448,12 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
       assert.equal(registry.corrupt, true, bad)
       assert.deepEqual(registry.workers, [], bad)
       await assert.rejects(
-        () => addWorker({ workersDir, file, name: 'writer' }),
+        () => addWorker({ workersDir, file, id: 'writer' }),
         (error) => error.code === 'registry-unreadable',
         bad,
       )
       await assert.rejects(
-        () => removeWorker({ file, name: 'writer' }),
+        () => removeWorker({ file, id: 'writer' }),
         (error) => error.code === 'registry-unreadable',
         bad,
       )
@@ -449,7 +481,8 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
     assert.equal(filtered.corrupt, undefined)
     assert.deepEqual(filtered.workers, [
       {
-        name: 'ok',
+        id: 'ok',
+        name: '',
         driver: 'agent',
         program: '',
         path: '/abs/ok',
@@ -464,23 +497,24 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
   }
 })
 
-test('addWorker / removeWorker：目录、模板、插到最前、同名复用、只删登记', async () => {
+test('addWorker / removeWorker：按标识符建目录、id 冲突拒绝、只删登记', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
+    const writer = await addWorker({ workersDir, file, id: 'writer', name: '写作助手' })
     assert.equal(writer.created, true)
-    assert.equal(writer.worker.name, 'writer')
+    assert.equal(writer.worker.id, 'writer')
+    assert.equal(writer.worker.name, '写作助手')
     assert.equal(writer.worker.path, await realpathOr(path.join(workersDir, 'writer')))
     assert.ok(!Number.isNaN(Date.parse(writer.worker.createdAt)))
     assert.equal((await fs.stat(writer.worker.path)).isDirectory(), true)
 
     const template = await fs.readFile(path.join(writer.worker.path, 'AGENTS.md'), 'utf8')
     assert.ok(template.startsWith('# AGENTS.md\n'))
-    assert.ok(template.includes('这是「writer」打工人的协作说明'))
+    assert.ok(template.includes('这是「写作助手」打工人的协作说明'))
     assert.ok(template.includes(`- 路径：\`${writer.worker.path}\``))
 
     // 创建打工人时自动把 CLAUDE.md 做成指向 AGENTS.md 的软链接。
@@ -498,21 +532,22 @@ test('addWorker / removeWorker：目录、模板、插到最前、同名复用�
     })
 
     // 新打工人插到数组最前（页面最新在上）。
-    const painter = await addWorker({ workersDir, file, name: 'painter' })
+    const painter = await addWorker({ workersDir, file, id: 'painter' })
+    assert.equal(painter.worker.name, '', '展示名可留空')
     let registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
+      registry.workers.map((worker) => worker.id),
       ['painter', 'writer'],
     )
 
-    // 同名复用：created=false，条目与 createdAt 不变，已有 AGENTS.md 不被覆盖。
-    // 用户自己的 CLAUDE.md 也不能被覆盖。
+    // 标识符冲突必须拒绝（不会静默复用已有条目），且不覆盖用户文件。
     await fs.rm(claudeLink)
     await fs.writeFile(claudeLink, 'my own notes\n')
     await fs.writeFile(path.join(writer.worker.path, 'AGENTS.md'), '# custom\n')
-    const again = await addWorker({ workersDir, file, name: 'writer' })
-    assert.equal(again.created, false)
-    assert.deepEqual(again.worker, writer.worker)
+    await assert.rejects(
+      () => addWorker({ workersDir, file, id: 'writer', name: '另一个名字' }),
+      (error) => error.code === 'id-taken',
+    )
     assert.equal(
       await fs.readFile(path.join(writer.worker.path, 'AGENTS.md'), 'utf8'),
       '# custom\n',
@@ -520,38 +555,35 @@ test('addWorker / removeWorker：目录、模板、插到最前、同名复用�
     assert.equal(await fs.readFile(claudeLink, 'utf8'), 'my own notes\n')
     registry = await readWorkerRegistry({ file })
     assert.equal(registry.workers.length, 2)
+    assert.equal(registry.workers.find((worker) => worker.id === 'writer').name, '写作助手')
 
-    // 目录被外部删掉后，同名再登记会重新建目录与模板，但沿用原条目。
-    await fs.rm(painter.worker.path, { recursive: true, force: true })
-    const restored = await addWorker({ workersDir, file, name: 'painter' })
-    assert.equal(restored.created, false)
-    assert.deepEqual(restored.worker, painter.worker)
-    assert.equal((await fs.stat(restored.worker.path)).isDirectory(), true)
-    assert.ok(
-      (await fs.readFile(path.join(restored.worker.path, 'AGENTS.md'), 'utf8')).startsWith(
-        '# AGENTS.md',
-      ),
-    )
-
-    // 非法名字：抛 code=invalid-name。
+    // 非法标识符：抛 code=invalid-id；内建 clock 的标识符不可创建。
     await assert.rejects(
-      () => addWorker({ workersDir, file, name: '../escape' }),
-      (error) => error.code === 'invalid-name',
+      () => addWorker({ workersDir, file, id: '../escape' }),
+      (error) => error.code === 'invalid-id',
+    )
+    await assert.rejects(
+      () => addWorker({ workersDir, file, id: 'Writer' }),
+      (error) => error.code === 'invalid-id',
+    )
+    await assert.rejects(
+      () => addWorker({ workersDir, file, id: 'clock' }),
+      (error) => error.code === 'builtin-worker',
     )
 
     // 移除只删登记，目录保留。
-    const removed = await removeWorker({ file, name: 'writer' })
+    const removed = await removeWorker({ file, id: 'writer' })
     assert.deepEqual(removed, { removed: true })
     assert.equal((await fs.stat(writer.worker.path)).isDirectory(), true)
     registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
+      registry.workers.map((worker) => worker.id),
       ['painter'],
     )
-    // 未知名字：不写文件，removed=false。
-    assert.deepEqual(await removeWorker({ file, name: 'nobody' }), { removed: false })
+    // 未知标识符：不写文件，removed=false。
+    assert.deepEqual(await removeWorker({ file, id: 'nobody' }), { removed: false })
     assert.deepEqual(
-      (await readWorkerRegistry({ file })).workers.map((worker) => worker.name),
+      (await readWorkerRegistry({ file })).workers.map((worker) => worker.id),
       ['painter'],
     )
   } finally {
@@ -572,7 +604,7 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     assert.equal(empty.registry, file)
     assert.equal(empty.corrupt, false)
     assert.deepEqual(
-      empty.workers.map((worker) => worker.name),
+      empty.workers.map((worker) => worker.id),
       ['clock'],
     )
     assert.equal(empty.workers[0].driver, 'robot')
@@ -580,9 +612,9 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     assert.equal(empty.workers[0].exists, false)
     assert.deepEqual(empty.workers[0].skills, [])
 
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
-    const painter = await addWorker({ workersDir, file, name: 'painter' })
-    const _ghost = await addWorker({ workersDir, file, name: 'ghost' })
+    const writer = await addWorker({ workersDir, file, id: 'writer' })
+    const painter = await addWorker({ workersDir, file, id: 'painter' })
+    const _ghost = await addWorker({ workersDir, file, id: 'ghost' })
 
     // writer 里装一个项目级 skill，并写一份 lockfile。
     await writeSkill(
@@ -611,11 +643,11 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     assert.equal(snapshot.registry, file)
     assert.equal(snapshot.corrupt, false)
     assert.deepEqual(
-      snapshot.workers.map((worker) => worker.name),
+      snapshot.workers.map((worker) => worker.id),
       ['ghost', 'painter', 'writer', 'clock'],
     )
 
-    const byName = new Map(snapshot.workers.map((worker) => [worker.name, worker]))
+    const byName = new Map(snapshot.workers.map((worker) => [worker.id, worker]))
 
     assert.equal(byName.get('writer').driver, 'agent')
     assert.equal(byName.get('writer').assistant, false)
@@ -802,22 +834,22 @@ test('预设头像：id 唯一、确定性默认分配与新打工人一定带�
     const file = path.join(pluginDir, 'workers.json')
 
     // 不指定头像：Host 自动分配并写进登记表。
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
+    const writer = await addWorker({ workersDir, file, id: 'writer' })
     assert.ok(AVATAR_IDS.includes(writer.worker.avatar))
-    const painter = await addWorker({ workersDir, file, name: 'painter' })
+    const painter = await addWorker({ workersDir, file, id: 'painter' })
     assert.ok(AVATAR_IDS.includes(painter.worker.avatar))
     assert.notEqual(painter.worker.avatar, writer.worker.avatar, '新建时优先挑没被占用的头像')
 
     // 指定头像：按传入 id 落盘；非法 id 退回默认分配。
-    const panda = await addWorker({ workersDir, file, name: 'panda', avatar: 'panda' })
+    const panda = await addWorker({ workersDir, file, id: 'panda', avatar: 'panda' })
     assert.equal(panda.worker.avatar, 'panda')
-    const invalid = await addWorker({ workersDir, file, name: 'invalid', avatar: 'dragon' })
+    const invalid = await addWorker({ workersDir, file, id: 'invalid', avatar: 'dragon' })
     assert.ok(AVATAR_IDS.includes(invalid.worker.avatar))
     assert.notEqual(invalid.worker.avatar, 'dragon')
 
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => [worker.name, worker.avatar]),
+      registry.workers.map((worker) => [worker.id, worker.avatar]),
       [
         ['invalid', invalid.worker.avatar],
         ['panda', 'panda'],
@@ -828,7 +860,7 @@ test('预设头像：id 唯一、确定性默认分配与新打工人一定带�
 
     // listWorkers 带出头像；同名复用时返回值也带头像。
     const listed = await listWorkers({ file, workersDir })
-    assert.equal(listed.workers.find((worker) => worker.name === 'panda').avatar, 'panda')
+    assert.equal(listed.workers.find((worker) => worker.id === 'panda').avatar, 'panda')
   } finally {
     await removeRoot(root)
   }
@@ -841,8 +873,8 @@ test('setWorkerAvatar：只改登记表、旧登记表兜底、错误码明确',
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
-    const changed = await setWorkerAvatar({ file, name: 'writer', avatar: 'owl' })
+    const writer = await addWorker({ workersDir, file, id: 'writer' })
+    const changed = await setWorkerAvatar({ file, id: 'writer', avatar: 'owl' })
     assert.equal(changed.worker.avatar, 'owl')
     assert.equal(changed.worker.path, writer.worker.path, '目录不变')
     assert.equal(changed.worker.createdAt, writer.worker.createdAt, '创建时间不变')
@@ -857,11 +889,11 @@ test('setWorkerAvatar：只改登记表、旧登记表兜底、错误码明确',
     )
 
     await assert.rejects(
-      () => setWorkerAvatar({ file, name: 'writer', avatar: 'dragon' }),
+      () => setWorkerAvatar({ file, id: 'writer', avatar: 'dragon' }),
       (error) => error.code === 'invalid-avatar',
     )
     await assert.rejects(
-      () => setWorkerAvatar({ file, name: 'nobody', avatar: 'owl' }),
+      () => setWorkerAvatar({ file, id: 'nobody', avatar: 'owl' }),
       (error) => error.code === 'unknown-worker',
     )
 
@@ -880,16 +912,18 @@ test('setWorkerAvatar：只改登记表、旧登记表兜底、错误码明确',
       }),
     )
     const legacy = await readWorkerRegistry({ file })
+    assert.equal(legacy.workers[0].id, 'legacy')
+    assert.equal(legacy.workers[0].name, '')
     assert.equal(legacy.workers[0].avatar, '')
     const listed = await listWorkers({ file, workersDir: workersDir })
     assert.equal(listed.workers[0].avatar, defaultAvatarFor('legacy'))
-    await setWorkerAvatar({ file, name: 'legacy', avatar: 'whale' })
+    await setWorkerAvatar({ file, id: 'legacy', avatar: 'whale' })
     assert.equal((await readWorkerRegistry({ file })).workers[0].avatar, 'whale')
 
     // 登记表损坏：拒绝写入，错误码 registry-unreadable。
     await fs.writeFile(file, '{broken')
     await assert.rejects(
-      () => setWorkerAvatar({ file, name: 'legacy', avatar: 'owl' }),
+      () => setWorkerAvatar({ file, id: 'legacy', avatar: 'owl' }),
       (error) => error.code === 'registry-unreadable',
     )
   } finally {
@@ -934,7 +968,7 @@ test('打工人描述：空白折叠、上限、登记表与列表读写', async
     const writer = await addWorker({
       workersDir,
       file,
-      name: 'writer',
+      id: 'writer',
       description: '  把会议记录\n整理成三点结论  ',
     })
     assert.equal(writer.worker.description, '把会议记录 整理成三点结论')
@@ -948,13 +982,13 @@ test('打工人描述：空白折叠、上限、登记表与列表读写', async
     assert.equal(listed.workers[0].description, '把会议记录 整理成三点结论')
 
     // 改描述；换头像不影响描述。
-    const changed = await setWorkerDescription({ file, name: 'writer', description: '写发布说明' })
+    const changed = await setWorkerDescription({ file, id: 'writer', description: '写发布说明' })
     assert.equal(changed.worker.description, '写发布说明')
-    await setWorkerAvatar({ file, name: 'writer', avatar: 'owl' })
+    await setWorkerAvatar({ file, id: 'writer', avatar: 'owl' })
     assert.equal((await readWorkerRegistry({ file })).workers[0].description, '写发布说明')
 
     // 空串 / 纯空白表示清空。
-    await setWorkerDescription({ file, name: 'writer', description: '   ' })
+    await setWorkerDescription({ file, id: 'writer', description: '   ' })
     assert.equal((await readWorkerRegistry({ file })).workers[0].description, '')
 
     // 上限与非字符串都拒绝，未知打工人 404 语义。
@@ -962,27 +996,28 @@ test('打工人描述：空白折叠、上限、登记表与列表读写', async
       () =>
         setWorkerDescription({
           file,
-          name: 'writer',
+          id: 'writer',
           description: 'x'.repeat(WORKER_DESCRIPTION_MAX_LENGTH + 1),
         }),
       (error) => error.code === 'invalid-description',
     )
     await assert.rejects(
-      () => setWorkerDescription({ file, name: 'writer', description: 42 }),
+      () => setWorkerDescription({ file, id: 'writer', description: 42 }),
       (error) => error.code === 'invalid-description',
     )
     await assert.rejects(
-      () => setWorkerDescription({ file, name: 'nobody', description: 'x' }),
+      () => setWorkerDescription({ file, id: 'nobody', description: 'x' }),
       (error) => error.code === 'unknown-worker',
     )
 
     // 新建时不传描述：空串；旧登记表缺字段读出来也是空串。
-    const plain = await addWorker({ workersDir, file, name: 'plain' })
+    const plain = await addWorker({ workersDir, file, id: 'plain' })
     assert.equal(plain.worker.description, '')
     await writeWorkerRegistry({
       file,
       workers: [
         {
+          id: 'legacy',
           name: 'legacy',
           path: path.join(workersDir, 'legacy'),
           createdAt: '2026-01-01T00:00:00.000Z',
@@ -1022,177 +1057,161 @@ test('打工人描述：空白折叠、上限、登记表与列表读写', async
   }
 })
 
-test('renameWorker：改目录与登记表、保留条目字段、模板只在未改动时同步', async () => {
+test('renameWorker：只改展示名，保留标识符、目录、头像与条目字段', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    const writer = await addWorker({ workersDir, file, name: 'writer', description: '写发布说明' })
-    await addWorker({ workersDir, file, name: 'painter' })
+    const writer = await addWorker({
+      workersDir,
+      file,
+      id: 'writer',
+      name: '写作助手',
+      description: '写发布说明',
+    })
+    await addWorker({ workersDir, file, id: 'painter' })
     const before = (await readWorkerRegistry({ file })).workers.find(
-      (worker) => worker.name === 'writer',
+      (worker) => worker.id === 'writer',
     )
 
-    const moved = await renameWorker({ workersDir, file, name: 'writer', newName: 'author' })
-    assert.equal(moved.renamed, true)
-    assert.equal(moved.previousName, 'writer')
-    assert.equal(moved.agentsRewritten, true)
-    assert.equal(moved.worker.name, 'author')
-    assert.equal(moved.worker.path, await realpathOr(path.join(workersDir, 'author')))
-    assert.equal(moved.worker.avatar, before.avatar, '头像不随名字漂移')
-    assert.equal(moved.worker.description, '写发布说明')
-    assert.equal(moved.worker.createdAt, before.createdAt)
-    assert.equal(
-      await fs.stat(writer.worker.path).then(
-        () => true,
-        () => false,
-      ),
-      false,
-      '旧目录已不存在',
-    )
-    assert.equal((await fs.stat(moved.worker.path)).isDirectory(), true)
+    const renamed = await renameWorker({ file, id: 'writer', name: '发布说明作者' })
+    assert.equal(renamed.renamed, true)
+    assert.equal(renamed.previousName, '写作助手')
+    assert.equal(renamed.worker.id, 'writer', '标识符不可变')
+    assert.equal(renamed.worker.name, '发布说明作者')
+    assert.equal(renamed.worker.path, writer.worker.path, '目录不移动')
+    assert.equal(renamed.worker.avatar, before.avatar, '头像按标识符稳定')
+    assert.equal(renamed.worker.description, '写发布说明')
+    assert.equal(renamed.worker.createdAt, before.createdAt)
+    assert.equal((await fs.stat(writer.worker.path)).isDirectory(), true)
 
-    // 登记表：条目在原位置更新 name / path，其它条目不受影响。
+    // 登记表：条目在原位置更新 name，其它条目不受影响。
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
-      ['painter', 'author'],
+      registry.workers.map((worker) => [worker.id, worker.name]),
+      [
+        ['painter', ''],
+        ['writer', '发布说明作者'],
+      ],
     )
-    assert.equal(registry.workers[1].path, moved.worker.path)
+    assert.equal(registry.workers[1].path, writer.worker.path)
     assert.equal(registry.workers[1].createdAt, before.createdAt)
     assert.equal(registry.workers[1].description, '写发布说明')
 
-    // 未改过的 AGENTS.md 模板同步成新名字与新路径。
-    const template = await fs.readFile(path.join(moved.worker.path, 'AGENTS.md'), 'utf8')
-    assert.ok(template.includes('这是「author」打工人的协作说明'))
-    assert.ok(template.includes(`- 路径：\`${moved.worker.path}\``))
-    assert.ok(!template.includes('writer'), '旧名字不再留在模板里')
-
-    // CLAUDE.md 的相对软链接继续有效。
-    assert.deepEqual(await readClaudeLink(moved.worker.path), {
+    // AGENTS.md 与 CLAUDE.md 不因改展示名而改动。
+    const template = await fs.readFile(path.join(writer.worker.path, 'AGENTS.md'), 'utf8')
+    assert.ok(template.includes('这是「写作助手」打工人的协作说明'))
+    assert.deepEqual(await readClaudeLink(writer.worker.path), {
       exists: true,
       symlink: true,
       mode: 'symlink',
       target: 'AGENTS.md',
     })
 
-    // 用户改过的 AGENTS.md 不动。
-    const edited = await addWorker({ workersDir, file, name: 'edited' })
-    await fs.writeFile(path.join(edited.worker.path, 'AGENTS.md'), '# 我自己的说明\n')
-    const editedMoved = await renameWorker({
-      workersDir,
-      file,
-      name: 'edited',
-      newName: 'edited-next',
-    })
-    assert.equal(editedMoved.agentsRewritten, false)
-    assert.equal(
-      await fs.readFile(path.join(editedMoved.worker.path, 'AGENTS.md'), 'utf8'),
-      '# 我自己的说明\n',
-    )
+    // 清空展示名：id 不变，展示时回退到标识符。
+    const cleared = await renameWorker({ file, id: 'writer', name: '' })
+    assert.equal(cleared.renamed, true)
+    assert.equal(cleared.worker.name, '')
+    assert.equal(cleared.worker.id, 'writer')
 
-    // 旧登记表缺头像：按旧名字兜底后写回，改名不会让头像换一个。
-    const legacyPath = await realpathOr(path.join(workersDir, 'legacy'))
-    await fs.mkdir(legacyPath, { recursive: true })
+    // 旧标识符（旧登记表里的 name）仍可用于改名。
     await fs.writeFile(
       file,
       JSON.stringify({
-        version: 1,
+        version: 3,
         workers: [
-          { name: 'legacy', path: legacyPath, createdAt: '2026-01-01T00:00:00.000Z' },
-          ...(await readWorkerRegistry({ file })).workers,
+          {
+            name: '软件工程师',
+            driver: 'agent',
+            path: await realpathOr(path.join(workersDir, '软件工程师')),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            avatar: 'rocket',
+            description: '写代码',
+            assistant: false,
+          },
         ],
       }),
     )
-    const legacyMoved = await renameWorker({
-      workersDir,
-      file,
-      name: 'legacy',
-      newName: 'legacy-next',
-    })
-    assert.equal(legacyMoved.worker.avatar, resolveAvatar('', 'legacy'))
+    const legacy = await renameWorker({ file, id: '软件工程师', name: '工程师' })
+    assert.equal(legacy.renamed, true)
+    assert.equal(legacy.worker.id, '软件工程师')
+    assert.equal(legacy.worker.name, '工程师')
   } finally {
     await removeRoot(root)
   }
 })
 
-test('renameWorker：同名 no-op、名称/目录冲突、未知与缺失目录、越界路径与损坏登记表', async () => {
+test('renameWorker：同名 no-op、展示名可重复、旧标识符兼容、未知与损坏登记表', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
-    await addWorker({ workersDir, file, name: 'painter' })
+    const writer = await addWorker({ workersDir, file, id: 'writer', name: '写手' })
+    await addWorker({ workersDir, file, id: 'painter', name: '画家' })
 
-    // 同名：不落盘、不改目录，返回 renamed=false。
-    const same = await renameWorker({ workersDir, file, name: 'writer', newName: 'writer' })
+    // 同名：不落盘、不碰目录，返回 renamed=false。
+    const same = await renameWorker({ file, id: 'writer', name: '写手' })
     assert.equal(same.renamed, false)
-    assert.equal(same.previousName, 'writer')
+    assert.equal(same.previousName, '写手')
     assert.equal(same.worker.path, writer.worker.path)
 
-    // 新名与登记表里的打工人重名。
+    // 展示名不要求唯一。
+    const duplicate = await renameWorker({ file, id: 'writer', name: '画家' })
+    assert.equal(duplicate.renamed, true)
+    assert.equal(duplicate.worker.name, '画家')
+
+    // 非法展示名 / 未知标识符。
     await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'writer', newName: 'painter' }),
-      (error) => error.code === 'name-taken',
-    )
-    // 新名与 workersDir 下已存在的目录重名。
-    await fs.mkdir(path.join(workersDir, 'ghost'))
-    await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'writer', newName: 'ghost' }),
-      (error) => error.code === 'name-taken',
-    )
-    // 非法名字 / 未知打工人 / 目录被外部删掉。
-    await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'writer', newName: '../escape' }),
+      () => renameWorker({ file, id: 'writer', name: 'x'.repeat(65) }),
       (error) => error.code === 'invalid-name',
     )
     await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'nobody', newName: 'author' }),
+      () => renameWorker({ file, id: 'writer', name: 42 }),
+      (error) => error.code === 'invalid-name',
+    )
+    await assert.rejects(
+      () => renameWorker({ file, id: 'nobody', name: '作者' }),
       (error) => error.code === 'unknown-worker',
     )
-    await fs.rm(writer.worker.path, { recursive: true, force: true })
-    await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'writer', newName: 'author' }),
-      (error) => error.code === 'missing-directory',
-    )
 
-    // 登记表被手改到 workersDir 之外：拒绝移动用户目录。
-    const outside = path.join(root, 'elsewhere', 'worker')
-    await fs.mkdir(outside, { recursive: true })
+    // 目录被外部删掉不影响改展示名。
+    await fs.rm(writer.worker.path, { recursive: true, force: true })
+    const noDirectory = await renameWorker({ file, id: 'writer', name: '作者' })
+    assert.equal(noDirectory.renamed, true)
+    assert.equal(noDirectory.worker.name, '作者')
+
+    // 机器人只读；内建 clock 不可改。
     await writeWorkerRegistry({
       file,
-      workers: [{ name: 'outside', path: outside, createdAt: '2026-01-01T00:00:00.000Z' }],
+      workers: [
+        {
+          id: 'timer',
+          name: '定时器',
+          driver: 'robot',
+          program: 'clock',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          description: '',
+          assistant: false,
+        },
+      ],
     })
     await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'outside', newName: 'inside' }),
-      (error) => error.code === 'path-outside-root',
+      () => renameWorker({ file, id: 'timer', name: '新定时器' }),
+      (error) => error.code === 'robot-worker',
     )
-    assert.equal((await fs.stat(outside)).isDirectory(), true)
-
-    // 只改大小写：macOS 默认大小写不敏感，目标「已存在」其实是同一个目录，
-    // 不能被误判成 name-taken；Linux 上本来就是普通改名。
-    await addWorker({ workersDir, file, name: 'writer-case' })
-    const cased = await renameWorker({
-      workersDir,
-      file,
-      name: 'writer-case',
-      newName: 'Writer-Case',
-    })
-    assert.equal(cased.renamed, true)
-    assert.equal(cased.worker.name, 'Writer-Case')
-    assert.ok(
-      (await readWorkerRegistry({ file })).workers.some((worker) => worker.name === 'Writer-Case'),
-      '登记表里是新名字',
+    await assert.rejects(
+      () => renameWorker({ file, id: 'clock', name: '时钟' }),
+      (error) => error.code === 'builtin-worker' || error.code === 'unknown-worker',
     )
 
     // 登记表损坏：拒绝改名，不覆盖文件。
     await fs.writeFile(file, '{broken')
     await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'painter', newName: 'author' }),
+      () => renameWorker({ file, id: 'painter', name: '作者' }),
       (error) => error.code === 'registry-unreadable',
     )
     assert.equal(await fs.readFile(file, 'utf8'), '{broken')
@@ -1201,38 +1220,31 @@ test('renameWorker：同名 no-op、名称/目录冲突、未知与缺失目录�
   }
 })
 
-test('renameWorker：登记表写失败时把目录改回旧名（失败后两侧仍一致）', async () => {
+test('renameWorker：登记表写失败时展示名保持原值，目录不受影响', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
-    const writer = await addWorker({ workersDir, file, name: 'writer' })
+    const writer = await addWorker({ workersDir, file, id: 'writer', name: '写作助手' })
 
     // 收掉登记文件所在目录的写权限：原子写的临时文件创建失败。
     await fs.chmod(pluginDir, 0o500)
     try {
       await assert.rejects(
-        () => renameWorker({ workersDir, file, name: 'writer', newName: 'author' }),
+        () => renameWorker({ file, id: 'writer', name: '发布说明作者' }),
         (error) => error.code === 'EACCES' || error.code === 'EPERM',
       )
     } finally {
       await fs.chmod(pluginDir, 0o700)
     }
 
-    // 目录改回旧名，登记表依旧指向 writer（没有半个新名字的条目）。
+    // 目录仍在原位，登记表仍是旧展示名。
     assert.equal((await fs.stat(path.join(workersDir, 'writer'))).isDirectory(), true)
-    assert.equal(
-      await fs.stat(path.join(workersDir, 'author')).then(
-        () => true,
-        () => false,
-      ),
-      false,
-    )
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
-      ['writer'],
+      registry.workers.map((worker) => [worker.id, worker.name]),
+      [['writer', '写作助手']],
     )
     assert.equal(registry.workers[0].path, writer.worker.path)
   } finally {
@@ -1251,19 +1263,19 @@ test('预设打工人：只在登记表为空时种子一次，非空 / 损坏�
     // 空登记表：补上两个预设，每个都有目录、AGENTS.md 与登记条目。
     const seeded = await seedPresetWorkers({ workersDir, file })
     assert.equal(seeded.corrupt, false)
-    assert.deepEqual(seeded.seeded.sort(), PRESET_WORKERS.map((preset) => preset.name).sort())
+    assert.deepEqual(seeded.seeded.sort(), PRESET_WORKERS.map((preset) => preset.id).sort())
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name).sort(),
-      PRESET_WORKERS.map((preset) => preset.name).sort(),
+      registry.workers.map((worker) => [worker.id, worker.name]).sort(),
+      PRESET_WORKERS.map((preset) => [preset.id, preset.name]).sort(),
     )
     for (const preset of PRESET_WORKERS) {
-      const entry = registry.workers.find((worker) => worker.name === preset.name)
-      assert.ok(entry, `预设 ${preset.name} 应已登记`)
+      const entry = registry.workers.find((worker) => worker.id === preset.id)
+      assert.ok(entry, `预设 ${preset.id} 应已登记`)
       assert.equal(entry.avatar, preset.avatar)
       assert.ok((await fs.stat(entry.path)).isDirectory())
       const agents = await fs.readFile(path.join(entry.path, 'AGENTS.md'), 'utf8')
-      assert.ok(agents.includes(preset.name), 'AGENTS.md 模板里带上打工人名')
+      assert.ok(agents.includes(preset.name), 'AGENTS.md 模板里带上展示名')
     }
 
     // 再次种子：登记表非空，不再新增。
@@ -1281,7 +1293,7 @@ test('预设打工人：只在登记表为空时种子一次，非空 / 损坏�
   }
 })
 
-test('登记表 version 1 → 3：读时迁移 driver/assistant，写时落盘新格式', async () => {
+test('登记表 version 1 → 4：读时迁移 driver/assistant 与 id/name，写时落盘新格式', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
@@ -1305,10 +1317,11 @@ test('登记表 version 1 → 3：读时迁移 driver/assistant，写时落盘�
       }),
     )
     const migrated = await readWorkerRegistry({ file })
-    assert.equal(migrated.version, 3)
+    assert.equal(migrated.version, 4)
     assert.deepEqual(migrated.workers, [
       {
-        name: 'writer',
+        id: 'writer',
+        name: '',
         driver: 'agent',
         program: '',
         path: path.join(workersDir, 'writer'),
@@ -1319,12 +1332,13 @@ test('登记表 version 1 → 3：读时迁移 driver/assistant，写时落盘�
       },
     ])
 
-    // 任何一次写入都把迁移结果落盘：文件升 version 3，条目带新字段。
-    await setWorkerAvatar({ file, name: 'writer', avatar: 'owl' })
+    // 任何一次写入都把迁移结果落盘：文件升 version 4，旧名字成为标识符。
+    await setWorkerAvatar({ file, id: 'writer', avatar: 'owl' })
     const raw = JSON.parse(await fs.readFile(file, 'utf8'))
-    assert.equal(raw.version, 3)
+    assert.equal(raw.version, 4)
     assert.deepEqual(raw.workers[0], {
-      name: 'writer',
+      id: 'writer',
+      name: '',
       driver: 'agent',
       path: path.join(workersDir, 'writer'),
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -1338,7 +1352,7 @@ test('登记表 version 1 → 3：读时迁移 driver/assistant，写时落盘�
       file,
       workers: [
         {
-          name: 'painter',
+          id: 'painter',
           path: path.join(workersDir, 'painter'),
           createdAt: '2026-01-01T00:00:00.000Z',
         },
@@ -1361,18 +1375,19 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    // 首次补写：clock 进表，文件升到 version 3，条目没有 path。
+    // 首次补写：clock 进表，文件升到 version 4，条目没有 path。
     const first = await ensureBuiltinWorkers({ file })
-    assert.deepEqual(first, { added: [CLOCK_WORKER_NAME] })
+    assert.deepEqual(first, { added: [CLOCK_WORKER_ID] })
     const raw = JSON.parse(await fs.readFile(file, 'utf8'))
-    assert.equal(raw.version, 3)
+    assert.equal(raw.version, 4)
     assert.deepEqual(raw.workers, [
       {
+        id: 'clock',
         name: 'clock',
         driver: 'robot',
         program: 'clock',
         createdAt: BUILTIN_WORKERS[0].createdAt,
-        avatar: defaultAvatarFor(CLOCK_WORKER_NAME),
+        avatar: defaultAvatarFor(CLOCK_WORKER_ID),
         description: BUILTIN_WORKERS[0].description,
         assistant: false,
       },
@@ -1383,36 +1398,35 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
 
     // 不可创建、不可删除、不可改名、不可改头像 / 描述 / 助理标记。
     await assert.rejects(
-      () => addWorker({ workersDir, file, name: 'clock' }),
+      () => addWorker({ workersDir, file, id: 'clock' }),
       (error) => error.code === 'builtin-worker',
     )
     await assert.rejects(
-      () => removeWorker({ file, name: 'clock' }),
+      () => removeWorker({ file, id: 'clock' }),
       (error) => error.code === 'builtin-worker',
     )
     await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'clock', newName: 'timer' }),
+      () => renameWorker({ file, id: 'clock', name: 'timer' }),
+      (error) => error.code === 'builtin-worker',
+    )
+    await assert.rejects(
+      () => setWorkerAvatar({ file, id: 'clock', avatar: 'owl' }),
       (error) => error.code === 'robot-worker',
     )
     await assert.rejects(
-      () => setWorkerAvatar({ file, name: 'clock', avatar: 'owl' }),
+      () => setWorkerDescription({ file, id: 'clock', description: 'x' }),
       (error) => error.code === 'robot-worker',
     )
     await assert.rejects(
-      () => setWorkerDescription({ file, name: 'clock', description: 'x' }),
-      (error) => error.code === 'robot-worker',
-    )
-    await assert.rejects(
-      () => setWorkerAssistant({ file, name: 'clock', assistant: true }),
+      () => setWorkerAssistant({ file, id: 'clock', assistant: true }),
       (error) => error.code === 'robot-worker',
     )
 
-    // 改名到内建名字也被拒绝（不能占用 clock）。
-    await addWorker({ workersDir, file, name: 'writer' })
-    await assert.rejects(
-      () => renameWorker({ workersDir, file, name: 'writer', newName: 'clock' }),
-      (error) => error.code === 'builtin-worker',
-    )
+    // 展示名可以叫 clock；标识符不能变成 clock。
+    await addWorker({ workersDir, file, id: 'writer' })
+    const sameDisplayName = await renameWorker({ file, id: 'writer', name: 'clock' })
+    assert.equal(sameDisplayName.worker.id, 'writer')
+    assert.equal(sameDisplayName.worker.name, 'clock')
 
     // 损坏的登记表：补写拒绝、不覆盖原文件。
     await writeFile(file, '{broken')
@@ -1430,28 +1444,28 @@ test('setWorkerAssistant：只有智能体可以标记 / 取消助理', async ()
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    await addWorker({ workersDir, file, name: 'writer' })
-    const marked = await setWorkerAssistant({ file, name: 'writer', assistant: true })
+    await addWorker({ workersDir, file, id: 'writer' })
+    const marked = await setWorkerAssistant({ file, id: 'writer', assistant: true })
     assert.equal(marked.worker.assistant, true)
     assert.equal(marked.worker.driver, 'agent')
     assert.equal((await readWorkerRegistry({ file })).workers[0].assistant, true)
 
-    const cleared = await setWorkerAssistant({ file, name: 'writer', assistant: false })
+    const cleared = await setWorkerAssistant({ file, id: 'writer', assistant: false })
     assert.equal(cleared.worker.assistant, false)
 
     await assert.rejects(
-      () => setWorkerAssistant({ file, name: 'writer', assistant: 'yes' }),
+      () => setWorkerAssistant({ file, id: 'writer', assistant: 'yes' }),
       (error) => error.code === 'invalid-assistant',
     )
     await assert.rejects(
-      () => setWorkerAssistant({ file, name: 'nobody', assistant: true }),
+      () => setWorkerAssistant({ file, id: 'nobody', assistant: true }),
       (error) => error.code === 'unknown-worker',
     )
 
     // 机器人不是 agent，不能是助理。
     await ensureBuiltinWorkers({ file })
     await assert.rejects(
-      () => setWorkerAssistant({ file, name: 'clock', assistant: true }),
+      () => setWorkerAssistant({ file, id: 'clock', assistant: true }),
       (error) => error.code === 'robot-worker',
     )
     // 手工写坏的 program 条目即使带 assistant: true，读回来也归一成 false。
@@ -1487,11 +1501,11 @@ test('预设打工人：已有内建 clock 时仍然补两个 agent 起点打工
     await ensureBuiltinWorkers({ file })
     const seeded = await seedPresetWorkers({ workersDir, file })
     assert.equal(seeded.corrupt, false)
-    assert.deepEqual(seeded.seeded.sort(), PRESET_WORKERS.map((preset) => preset.name).sort())
+    assert.deepEqual(seeded.seeded.sort(), PRESET_WORKERS.map((preset) => preset.id).sort())
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => [worker.name, worker.driver]).sort(),
-      [...PRESET_WORKERS.map((preset) => [preset.name, 'agent']), ['clock', 'robot']].sort(),
+      registry.workers.map((worker) => [worker.id, worker.driver]).sort(),
+      [...PRESET_WORKERS.map((preset) => [preset.id, 'agent']), ['clock', 'robot']].sort(),
     )
 
     // 再种一次：已经有智能体，不再新增。
@@ -1501,7 +1515,7 @@ test('预设打工人：已有内建 clock 时仍然补两个 agent 起点打工
   }
 })
 
-test('登记表 version 2 → 3：driver "program" 读成 "robot"，写回落盘新版本', async () => {
+test('登记表 version 2 → 4：driver "program" 读成 "robot"，写回落盘新版本', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
@@ -1525,14 +1539,80 @@ test('登记表 version 2 → 3：driver "program" 读成 "robot"，写回落盘
     )
 
     const migrated = await readWorkerRegistry({ file })
-    assert.equal(migrated.version, 3)
+    assert.equal(migrated.version, 4)
     assert.equal(migrated.workers[0].driver, 'robot')
     assert.equal(migrated.workers[0].program, 'clock')
 
     await writeWorkerRegistry({ file, workers: migrated.workers })
     const raw = JSON.parse(await fs.readFile(file, 'utf8'))
-    assert.equal(raw.version, 3)
+    assert.equal(raw.version, 4)
     assert.equal(raw.workers[0].driver, 'robot')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('登记表 version 3 → 4：旧 name 变成 id，name 置空，旧 id 仍可定位', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
+    const workersDir = path.join(pluginDir, 'workers')
+    const file = path.join(pluginDir, 'workers.json')
+
+    // v3 条目只有 name；迁移后 id = 旧 name，展示名清空。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 3,
+        workers: [
+          {
+            name: '软件工程师',
+            driver: 'agent',
+            path: path.join(workersDir, '软件工程师'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            avatar: 'rocket',
+            description: '写代码',
+            assistant: false,
+          },
+          {
+            name: 'clock',
+            driver: 'robot',
+            program: 'clock',
+            createdAt: '2026-11-12T00:00:00.000Z',
+            avatar: 'bee',
+            description: '',
+            assistant: false,
+          },
+        ],
+      }),
+    )
+
+    const migrated = await readWorkerRegistry({ file })
+    assert.equal(migrated.version, 4)
+    assert.deepEqual(
+      migrated.workers.map((worker) => [worker.id, worker.name, worker.driver]),
+      [
+        ['软件工程师', '', 'agent'],
+        ['clock', '', 'robot'],
+      ],
+    )
+
+    // 旧标识符（含汉字）仍可用于更新 / 改名 / 删除。
+    const renamed = await renameWorker({ file, id: '软件工程师', name: '工程师' })
+    assert.equal(renamed.renamed, true)
+    assert.equal(renamed.worker.id, '软件工程师')
+    assert.equal(renamed.worker.name, '工程师')
+
+    // 写入后落盘 version 4：id 保留旧标识符、name 是新的展示名。
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'))
+    assert.equal(raw.version, 4)
+    assert.deepEqual(
+      raw.workers.map((worker) => [worker.id, worker.name]),
+      [
+        ['软件工程师', '工程师'],
+        ['clock', ''],
+      ],
+    )
   } finally {
     await removeRoot(root)
   }
@@ -1595,9 +1675,9 @@ test('旧插件缓存迁移：目录、文件名、登记格式与路径一次�
       true,
     )
     const raw = JSON.parse(await fs.readFile(registryFile, 'utf8'))
-    assert.equal(raw.version, 3)
+    assert.equal(raw.version, 4)
     assert.deepEqual(
-      raw.workers.map((worker) => [worker.name, worker.driver]),
+      raw.workers.map((worker) => [worker.id, worker.driver]),
       [
         ['writer', 'agent'],
         ['clock', 'robot'],
@@ -1662,7 +1742,7 @@ test('自定义 workersDir：同级 robots 目录与登记文件一起改名并�
       true,
     )
     const raw = JSON.parse(await fs.readFile(path.join(custom, 'workers.json'), 'utf8'))
-    assert.equal(raw.version, 3)
+    assert.equal(raw.version, 4)
     assert.equal(raw.workers[0].path, path.join(workersDir, 'writer'))
   } finally {
     await removeRoot(root)
@@ -1675,12 +1755,12 @@ test('智能体模型：setWorkerModel 保存 / 清除、形状校验与机器�
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
-    await addWorker({ workersDir, file, name: 'writer' })
+    await addWorker({ workersDir, file, id: 'writer' })
     await ensureBuiltinWorkers({ file })
 
     const saved = await setWorkerModel({
       file,
-      name: 'writer',
+      id: 'writer',
       model: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' },
     })
     assert.deepEqual(saved.worker.model, {
@@ -1697,26 +1777,26 @@ test('智能体模型：setWorkerModel 保存 / 清除、形状校验与机器�
     // 只动 model：其它字段与顺序不变。
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
-      registry.workers.map((worker) => worker.name),
+      registry.workers.map((worker) => worker.id),
       ['writer', 'clock'],
     )
 
     // null 清除配置；读回来没有 model 字段。
-    const cleared = await setWorkerModel({ file, name: 'writer', model: null })
+    const cleared = await setWorkerModel({ file, id: 'writer', model: null })
     assert.equal('model' in cleared.worker, false)
     assert.equal('model' in (await readWorkerRegistry({ file })).workers[0], false)
 
     // 形状不对 / 未知 / 机器人。
     await assert.rejects(
-      () => setWorkerModel({ file, name: 'writer', model: { provider: '', model: 'm' } }),
+      () => setWorkerModel({ file, id: 'writer', model: { provider: '', model: 'm' } }),
       (error) => error.code === 'invalid-model',
     )
     await assert.rejects(
-      () => setWorkerModel({ file, name: 'nobody', model: { provider: 'p', model: 'm' } }),
+      () => setWorkerModel({ file, id: 'nobody', model: { provider: 'p', model: 'm' } }),
       (error) => error.code === 'unknown-worker',
     )
     await assert.rejects(
-      () => setWorkerModel({ file, name: 'clock', model: { provider: 'p', model: 'm' } }),
+      () => setWorkerModel({ file, id: 'clock', model: { provider: 'p', model: 'm' } }),
       (error) => error.code === 'robot-worker',
     )
 
@@ -1738,7 +1818,7 @@ test('智能体模型：setWorkerModel 保存 / 清除、形状校验与机器�
     )
     const broken = await readWorkerRegistry({ file })
     assert.equal(broken.corrupt, undefined)
-    assert.equal(broken.workers[0].name, 'writer')
+    assert.equal(broken.workers[0].id, 'writer')
     assert.equal('model' in broken.workers[0], false)
   } finally {
     await removeRoot(root)

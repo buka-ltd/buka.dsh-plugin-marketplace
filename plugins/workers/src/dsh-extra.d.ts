@@ -7,7 +7,7 @@
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** 工作区注册表：打工人挂载、列表与改名时用它判断打工人目录是否已挂载。 */
+    /** 工作区注册表：打工人挂载、列表与改展示名时用它同步工作区标题。 */
     workspaceRegistry: WorkspaceRegistry
   }
 
@@ -23,18 +23,25 @@ export interface WorkspaceRegistry {
   list(): Array<{
     id?: unknown
     path?: unknown
+    /** 工作区展示标题；改打工人展示名时同步它。 */
+    title?: unknown
+    setTitle?(title: string): Promise<void> | void
     attachSession?(sessionId: string): Promise<unknown>
   }>
   /** 按目录路径找一个已注册工作区；没有时返回 undefined。 */
-  resolveByPath?(
-    directory: string,
-  ): Promise<
-    | { id?: unknown; path?: unknown; attachSession?(sessionId: string): Promise<unknown> }
+  resolveByPath?(directory: string): Promise<
+    | {
+        id?: unknown
+        path?: unknown
+        title?: unknown
+        setTitle?(title: string): Promise<void> | void
+        attachSession?(sessionId: string): Promise<unknown>
+      }
     | null
     | undefined
   >
-  /** 把一个目录注册成 DSH 工作区，返回带 id 的工作区记录。 */
-  create(directory: string): Promise<{ id?: unknown }>
+  /** 把一个目录注册成 DSH 工作区，返回带 id 的工作区记录；`title` 只用于新建。 */
+  create(directory: string, title?: string): Promise<{ id?: unknown }>
   /** 删除一个工作区注册；`id` 是 `list()` / `create()` 返回的 id。 */
   delete(id: unknown): boolean
 }

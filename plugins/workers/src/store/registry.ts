@@ -4,10 +4,11 @@
  * 登记文件是插件唯一的打工人清单；写操作遇到损坏的登记文件必须拒绝，绝不覆盖
  * 用户文件。新建的打工人目录由 `agents.ts` 的 `ensureWorkerDirectory` 补模板。
  *
- * 格式为 version 3（`driver` / `assistant`）；读 version 1 / 2 旧表时在内存里
- * 迁移，下一次写入落盘成新格式。version 2 的 `driver: "program"` 读成
- * `"robot"`。内建机器人（clock）由 `BUILTIN_WORKERS` 提供：读旧表时补到视图
- * 里，写回前由 `ensureBuiltinWorkers` 落盘一次。
+ * 格式为 version 4：每条打工人有不可变标识符 `id`、可选展示名 `name`、
+ * `driver` / `assistant`。读 version 1 / 2 / 3 旧表时在内存里迁移：`id` 取
+ * 旧条目的 `name`，`name` 置空；下一次写入落盘成 version 4。version 2 的
+ * `driver: "program"` 读成 `"robot"`。内建机器人（clock）由 `BUILTIN_WORKERS`
+ * 提供：读旧表时补到视图里，写回前由 `ensureBuiltinWorkers` 落盘一次。
  *
  * @module @buka/dsh-plugin-workers/store/registry
  */
@@ -16,9 +17,11 @@ import { promises as fs } from 'node:fs'
 import { writeJsonAtomic } from '@buka/plugin-kit'
 import { isAvatarId, pickDefaultAvatar, resolveAvatar } from '../avatar.ts'
 import { ensureWorkerDirectory } from './agents.ts'
-import { BUILTIN_WORKERS, builtinWorkerError, isBuiltinWorkerName } from './builtin.ts'
+import { BUILTIN_WORKERS, builtinWorkerError, isBuiltinWorkerId } from './builtin.ts'
 import {
-  isValidWorkerName,
+  isLegacyWorkerId,
+  isResolvableWorkerId,
+  isValidWorkerId,
   requireRegistryFile,
   WORKER_DESCRIPTION_MAX_LENGTH,
   WORKER_MODEL_PART_MAX_LENGTH,
@@ -32,6 +35,9 @@ import type {
   WorkerRecord,
   WorkerRecordInput,
 } from './types.ts'
+
+/** 展示名上限（UTF-16 长度）；名称只用于展示，不参与目录与引用。 */
+export const WORKER_NAME_MAX_LENGTH = 64
 
 /** 登记表里能读到的版本：当前版本 + 仍需要迁移的旧版本。 */
 const READABLE_VERSIONS = new Set<number>([
@@ -72,16 +78,57 @@ export function normalizeWorkerModel(value: unknown): WorkerModelSelection | und
 }
 
 /**
+ * 规范化展示名：折叠连续空白并 trim；非字符串按空串处理。
+ *
+ * 名称只用于展示，不要求唯一；空串表示「未设置」，展示时回退到标识符。
+ *
+ */
+export function normalizeWorkerName(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * 展示名是否合法：字符串且规范化后不超过上限。
+ *
+ */
+export function isValidWorkerName(value: unknown): value is string {
+  return typeof value === 'string' && normalizeWorkerName(value).length <= WORKER_NAME_MAX_LENGTH
+}
+
+/**
+ * 写入口用的展示名规范化：缺省 / null 表示「未设置」；类型不对或超长抛
+ * `code = 'invalid-name'`。
+ *
+ */
+export function normalizeWorkerNameInput(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  if (!isValidWorkerName(value)) throw invalidNameError(value)
+  return normalizeWorkerName(value)
+}
+
+/**
  * 读登记表里的一个条目并迁移成当前形状；不合法时返回 undefined。
  *
+ * - version 1 / 2 / 3 条目没有 `id`：`id` 取旧 `name`（旧标识符，可能含汉字 /
+ *   大写 / `._`），`name` 置空；
+ * - version 4 条目必须同时有能定位的 `id`；`name` 是可选展示名；
  * - `driver` 缺失（version 1 旧条目）或取值写坏时按 `agent` 处理；
  *   version 2 的 `program` 取值迁移成 `robot`；
  * - 机器人条目必须有非空 `program` id，智能体条目必须有非空 `path`；
  * - `assistant` 只对智能体生效：机器人不能被标记成助理。
  */
-function readEntry(entry: Record<string, unknown>): WorkerRecord | undefined {
-  if (!isValidWorkerName(entry.name)) return undefined
-  const name = entry.name.trim()
+function readEntry(entry: Record<string, unknown>, version: number): WorkerRecord | undefined {
+  const legacy = version < WORKER_REGISTRY_VERSION
+  let id: string
+  if (legacy) {
+    if (!isLegacyWorkerId(entry.name)) return undefined
+    id = entry.name.trim()
+  } else {
+    if (!isResolvableWorkerId(entry.id)) return undefined
+    id = entry.id.trim()
+  }
+  const name = legacy ? '' : normalizeWorkerName(entry.name).slice(0, WORKER_NAME_MAX_LENGTH)
 
   // version 2 把固定程序驱动的打工人写成 driver: "program"；version 3 起叫 robot。
   const rawDriver = entry.driver
@@ -95,6 +142,7 @@ function readEntry(entry: Record<string, unknown>): WorkerRecord | undefined {
   const model = driver === 'agent' ? normalizeWorkerModel(entry.model) : undefined
 
   return {
+    id,
     name,
     driver,
     path: workerPath,
@@ -114,20 +162,23 @@ function readEntry(entry: Record<string, unknown>): WorkerRecord | undefined {
  * 把一条待写入记录规范化成完整记录；缺省字段按当前格式补齐。
  *
  * - `driver` 缺省按 `agent`；
- * - agent 记录补 `path`、清空 `program`；program 记录补 `program`、清空 `path`；
- * - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐）；
+ * - agent 记录补 `path`、清空 `program`；robot 记录补 `program`、清空 `path`；
+ * - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐），默认头像按
+ *   标识符哈希，改名不会让头像漂移；
  * - 描述折叠空白并截断；`assistant` 只对 agent 生效。
  */
 function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
   const driver: WorkerDriver = worker.driver === 'robot' ? 'robot' : 'agent'
   const model = driver === 'agent' ? normalizeWorkerModel(worker.model) : undefined
+  const id = typeof worker.id === 'string' ? worker.id.trim() : ''
   return {
-    name: worker.name,
+    id,
+    name: normalizeWorkerName(worker.name).slice(0, WORKER_NAME_MAX_LENGTH),
     driver,
     path: driver === 'agent' && typeof worker.path === 'string' ? worker.path : '',
     program: driver === 'robot' && typeof worker.program === 'string' ? worker.program.trim() : '',
     createdAt: worker.createdAt,
-    avatar: resolveAvatar(worker.avatar, worker.name),
+    avatar: resolveAvatar(worker.avatar, id),
     description: normalizeWorkerDescription(worker.description).slice(
       0,
       WORKER_DESCRIPTION_MAX_LENGTH,
@@ -140,15 +191,16 @@ function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
 /**
  * 读打工人登记表。
  *
- * - 文件不存在：`{ version: 3, workers: [], file }`（内建打工人由调用方合并）；
+ * - 文件不存在：`{ version: 4, workers: [], file }`（内建打工人由调用方合并）；
  * - 读不了 / 不是合法 JSON / 版本不可读 / `workers` 不是数组：`corrupt: true`
  *   且 `workers: []`（写操作必须据此拒绝，绝不覆盖原文件）；
  * - version 1 旧表按 `driver: "agent"`、`assistant: false` 迁移；
  *   version 2 的 `driver: "program"` 读成 `"robot"`；
- * - 条目必须同时有合法 `name`（智能体还要有非空 `path`，机器人要有 `program`），
- *   否则过滤掉；同名条目只保留第一个。
+ *   version 1 / 2 / 3 的旧名字迁移成 `id`，`name` 置空；
+ * - 条目必须有能定位的 `id`（智能体还要有非空 `path`，机器人要有 `program`），
+ *   否则过滤掉；重复标识符只保留第一个。
  * - `avatar` 是预设头像 id；旧登记表没有这个字段（或在别处被改坏）时留空，
- *   展示 / 写入时由 `resolveAvatar` 按名字兜底成一个确定的预设。
+ *   展示 / 写入时由 `resolveAvatar` 按标识符兜底成一个确定的预设。
  *
  */
 export async function readWorkerRegistry({ file }: { file?: string | undefined } = {}): Promise<{
@@ -183,9 +235,7 @@ export async function readWorkerRegistry({ file }: { file?: string | undefined }
   // 旧 `@buka/dsh-plugin-robots` 的 v1 / v2 登记表用 `robots` 作为键；迁移要先能
   // 读出旧表，否则整条迁移链（格式升级 + 目录路径平移）都会被当成损坏跳过。
   const entries =
-    parsed.version < WORKER_REGISTRY_VERSION && Array.isArray(parsed.robots)
-      ? parsed.robots
-      : parsed.workers
+    parsed.version <= 2 && Array.isArray(parsed.robots) ? parsed.robots : parsed.workers
   if (!Array.isArray(entries)) {
     return { version: WORKER_REGISTRY_VERSION, workers: [], corrupt: true, file: target }
   }
@@ -194,9 +244,9 @@ export async function readWorkerRegistry({ file }: { file?: string | undefined }
   const seen = new Set<string>()
   for (const entry of entries) {
     if (!isRecord(entry)) continue
-    const worker = readEntry(entry)
-    if (worker === undefined || seen.has(worker.name)) continue
-    seen.add(worker.name)
+    const worker = readEntry(entry, parsed.version)
+    if (worker === undefined || seen.has(worker.id)) continue
+    seen.add(worker.id)
     workers.push(worker)
   }
   return { version: WORKER_REGISTRY_VERSION, workers, file: target }
@@ -206,7 +256,8 @@ export async function readWorkerRegistry({ file }: { file?: string | undefined }
  * 原子写打工人登记表（临时文件 + rename，权限 0600）。
  *
  * 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。写入总是
- * 落成当前版本（version 3），旧记录缺的 `driver` / `assistant` 在这里补齐。
+ * 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` / `assistant`
+ * 在这里补齐。
  *
  */
 export async function writeWorkerRegistry({
@@ -226,6 +277,7 @@ export async function writeWorkerRegistry({
       // 智能体条目写目录，机器人条目写程序 id；另一个字段不落盘。
       if (worker.driver === 'robot') {
         return {
+          id: worker.id,
           name: worker.name,
           driver: worker.driver,
           program: worker.program,
@@ -236,6 +288,7 @@ export async function writeWorkerRegistry({
         }
       }
       return {
+        id: worker.id,
         name: worker.name,
         driver: worker.driver,
         path: worker.path,
@@ -265,23 +318,45 @@ export async function ensureBuiltinWorkers({ file }: { file?: string | undefined
   const registry = await readWorkerRegistry({ file: target })
   if (registry.corrupt) return { added: [], corrupt: true }
 
-  const names = new Set(registry.workers.map((worker) => worker.name))
-  const missing = BUILTIN_WORKERS.filter((worker) => !names.has(worker.name))
+  const ids = new Set(registry.workers.map((worker) => worker.id))
+  const missing = BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))
   if (missing.length === 0) return { added: [] }
 
   await writeWorkerRegistry({ file: target, workers: [...registry.workers, ...missing] })
-  return { added: missing.map((worker) => worker.name) }
+  return { added: missing.map((worker) => worker.id) }
 }
 
 // ---- 登记表的增删 --------------------------------------------------------
 
 /**
- * 生成「名称不合法」错误。
+ * 生成「标识符不合法」错误。
+ *
+ */
+export function invalidIdError(id: unknown): Error & { code: string } {
+  const error = new Error(
+    `打工人标识符不合法：${String(id)}（新标识符需匹配 ^[a-z][a-z0-9_-]{0,63}$）`,
+  )
+  return Object.assign(error, { code: 'invalid-id' })
+}
+
+/**
+ * 生成「展示名不合法」错误。
  *
  */
 export function invalidNameError(name: unknown): Error & { code: string } {
-  const error = new Error(`打工人名称不合法：${String(name)}`)
+  const error = new Error(
+    `打工人名称不合法：需要不超过 ${WORKER_NAME_MAX_LENGTH} 个字符的单行文本（收到 ${String(name)}）`,
+  )
   return Object.assign(error, { code: 'invalid-name' })
+}
+
+/**
+ * 生成「标识符已被占用」错误。
+ *
+ */
+export function idTakenError(id: string): Error & { code: string } {
+  const error = new Error(`打工人标识符已被占用：${id}`)
+  return Object.assign(error, { code: 'id-taken' })
 }
 
 /**
@@ -308,8 +383,8 @@ export function invalidAssistantError(assistant: unknown): Error & { code: strin
  * 生成「机器人只读」错误。
  *
  */
-export function robotWorkerError(name: unknown): Error & { code: string } {
-  const error = new Error(`机器人只读，不能修改或打开会话：${String(name)}`)
+export function robotWorkerError(id: unknown): Error & { code: string } {
+  const error = new Error(`机器人只读，不能修改或打开会话：${String(id)}`)
   return Object.assign(error, { code: 'robot-worker' })
 }
 
@@ -368,21 +443,22 @@ export function invalidAvatarError(avatar: unknown): Error & { code: string } {
  * 生成「打工人不在登记表里」错误。
  *
  */
-export function unknownWorkerError(name: string): Error & { code: string } {
-  const error = new Error(`打工人不在登记表里：${name}`)
+export function unknownWorkerError(id: string): Error & { code: string } {
+  const error = new Error(`打工人不在登记表里：${id}`)
   return Object.assign(error, { code: 'unknown-worker' })
 }
 
 /**
- * 新建（或复用）一个智能体：建目录、补 AGENTS.md 模板、把条目插到
- * 登记表最前。
+ * 新建一个智能体：按标识符建目录、补 AGENTS.md 模板、把条目插到登记表最前。
  *
- * - 内建机器人（clock）不可创建，program 条目不可被同名复用；
- * - 头像：传入合法 id 就用它，否则按名字挑一个还被占用的预设；新建的打工人
- *   一定带头像；
- * - 描述可选，存成一行摘要（空白折叠）；新建时写进条目，同名已登记时保留原描述；
- * - 同名已登记：不重复建条目，`created: false`；目录被外部删掉时重新建目录；
- * - 名称不合法抛 `code = 'invalid-name'`；内建名抛 `code = 'builtin-worker'`；
+ * - `id` 必填，必须匹配新标识符字符集；标识符已登记时抛 `id-taken`（id 冲突
+ *   必须拒绝，不会静默复用已有条目）；
+ * - 内建机器人（clock）的标识符不可创建；
+ * - 头像：传入合法 id 就用它，否则按标识符挑一个还没被占用的预设；新建的
+ *   打工人一定带头像；
+ * - 描述可选，存成一行摘要（空白折叠）；
+ * - 展示名可选，空串表示未设置；
+ * - 标识符不合法抛 `code = 'invalid-id'`；内建 id 抛 `code = 'builtin-worker'`；
  *   登记文件损坏抛 `code = 'registry-unreadable'`（不覆盖原文件）；
  * - 新条目的 `path` 是创建后的规范绝对路径（`fs.realpath`，失败回退解析值），
  *   这样和工作区注册表里的路径能直接对齐。
@@ -391,19 +467,23 @@ export function unknownWorkerError(name: string): Error & { code: string } {
 export async function addWorker({
   workersDir,
   file,
+  id,
   name,
   avatar,
   description,
 }: {
   workersDir?: string | undefined
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
+  name?: unknown
   avatar?: string | undefined
   description?: string | undefined
 } = {}): Promise<{ worker: WorkerRecord; created: boolean }> {
   const registryFile = requireRegistryFile(file)
-  if (!isValidWorkerName(name)) throw invalidNameError(name)
-  if (isBuiltinWorkerName(name)) throw builtinWorkerError(name)
+  if (!isValidWorkerId(id)) throw invalidIdError(id)
+  const workerId = id.trim()
+  if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId)
+  const workerName = normalizeWorkerNameInput(name)
 
   const rawDescription = description === undefined || description === null ? '' : description
   if (typeof rawDescription !== 'string') throw invalidDescriptionError(rawDescription)
@@ -414,73 +494,116 @@ export async function addWorker({
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = name.trim()
-  const existing = registry.workers.find((worker) => worker.name === trimmed)
-  if (existing !== undefined) {
-    if (existing.driver !== 'agent') throw robotWorkerError(trimmed)
-    await ensureWorkerDirectory(existing.path, trimmed)
-    return {
-      worker: { ...existing, avatar: resolveAvatar(existing.avatar, existing.name) },
-      created: false,
-    }
-  }
+  const existing = registry.workers.find((worker) => worker.id === workerId)
+  if (existing !== undefined) throw idTakenError(workerId)
 
-  const target = workerDirectory(workersDir, trimmed)
-  if (target === null) throw invalidNameError(trimmed)
-  const canonical = await ensureWorkerDirectory(target, trimmed)
+  const target = workerDirectory(workersDir, workerId)
+  if (target === null) throw invalidIdError(workerId)
+  const label = workerName === '' ? workerId : workerName
+  const canonical = await ensureWorkerDirectory(target, label)
 
-  const used = registry.workers.map((worker) => resolveAvatar(worker.avatar, worker.name))
+  const used = registry.workers.map((worker) => resolveAvatar(worker.avatar, worker.id))
   const worker: WorkerRecord = {
-    name: trimmed,
+    id: workerId,
+    name: workerName,
     driver: 'agent',
     path: canonical,
     program: '',
     createdAt: new Date().toISOString(),
-    avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(trimmed, used),
+    avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(workerId, used),
     description: cleanDescription,
     assistant: false,
   }
+  await writeWorkerRegistry({ file: registryFile, workers: [worker, ...registry.workers] })
+  return { worker, created: true }
+}
+
+/**
+ * 定位一个已有打工人：接受新标识符与迁移来的旧标识符。
+ *
+ */
+function findWorker(registry: { workers: WorkerRecord[] }, id: string): WorkerRecord | undefined {
+  return registry.workers.find((worker) => worker.id === id)
+}
+
+/**
+ * 改一个智能体的展示名：只动登记表里的 `name` 字段，不碰目录与工作区。
+ *
+ * - `id` 是标识符（新格式或迁移来的旧标识符都接受），不可修改；
+ * - 展示名可随时改、不要求唯一；空串表示清空（之后显示标识符）；
+ * - 名称没变时返回 `renamed: false`，不写文件；
+ * - 标识符不合法抛 `code = 'invalid-id'`；展示名不合法抛
+ *   `code = 'invalid-name'`；id 不在登记表里抛 `code = 'unknown-worker'`；
+ *   机器人只读，抛 `code = 'robot-worker'`。
+ *
+ */
+export async function setWorkerName({
+  file,
+  id,
+  name,
+}: {
+  file?: string | undefined
+  id?: string | undefined
+  name?: string | undefined
+} = {}): Promise<{ worker: WorkerRecord; previousName: string; renamed: boolean }> {
+  const registryFile = requireRegistryFile(file)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
+  const workerId = id.trim()
+  const nextName = normalizeWorkerNameInput(name)
+
+  const registry = await readWorkerRegistry({ file: registryFile })
+  if (registry.corrupt) throw registryUnreadableError(registryFile)
+
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
+
+  if (current.name === nextName) {
+    return { worker: current, previousName: current.name, renamed: false }
+  }
+  const worker = { ...current, name: nextName }
   await writeWorkerRegistry({
     file: registryFile,
-    workers: [worker, ...registry.workers.filter((entry) => entry.name !== trimmed)],
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
   })
-  return { worker, created: true }
+  return { worker, previousName: current.name, renamed: true }
 }
 
 /**
  * 改一个智能体的头像：只动登记表里的 `avatar` 字段，不碰目录与工作区。
  *
  * - 头像 id 不属于预设集合抛 `code = 'invalid-avatar'`；
- * - 名字不在登记表里抛 `code = 'unknown-worker'`；
+ * - 标识符不在登记表里抛 `code = 'unknown-worker'`；
  * - 机器人只读，抛 `code = 'robot-worker'`；
  * - 登记文件损坏抛 `code = 'registry-unreadable'`。
  *
  */
 export async function setWorkerAvatar({
   file,
-  name,
+  id,
   avatar,
 }: {
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
   avatar?: string | undefined
 } = {}): Promise<{ worker: WorkerRecord }> {
   const registryFile = requireRegistryFile(file)
-  if (!isValidWorkerName(name)) throw invalidNameError(name)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
   if (!isAvatarId(avatar)) throw invalidAvatarError(avatar)
 
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = name.trim()
-  const current = registry.workers.find((worker) => worker.name === trimmed)
-  if (current === undefined) throw unknownWorkerError(trimmed)
-  if (current.driver !== 'agent') throw robotWorkerError(trimmed)
+  const workerId = id.trim()
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
   const worker = { ...current, avatar }
   await writeWorkerRegistry({
     file: registryFile,
-    workers: registry.workers.map((entry) => (entry.name === trimmed ? worker : entry)),
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
   })
   return { worker }
 }
@@ -490,31 +613,31 @@ export async function setWorkerAvatar({
  *
  * - `model: null` 表示清除配置、跟随宿主默认模型；
  * - provider / model 必须是非空字符串，超长或类型不对抛 `code = 'invalid-model'`；
- * - 名字不在登记表里抛 `code = 'unknown-worker'`；
+ * - 标识符不在登记表里抛 `code = 'unknown-worker'`；
  * - 机器人只读，抛 `code = 'robot-worker'`；
  * - 登记文件损坏抛 `code = 'registry-unreadable'`。
  */
 export async function setWorkerModel({
   file,
-  name,
+  id,
   model,
 }: {
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
   model?: WorkerModelSelection | null | undefined
 } = {}): Promise<{ worker: WorkerRecord }> {
   const registryFile = requireRegistryFile(file)
-  if (!isValidWorkerName(name)) throw invalidNameError(name)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
   const next = model === null || model === undefined ? undefined : normalizeWorkerModel(model)
   if (model !== null && model !== undefined && next === undefined) throw invalidModelError(model)
 
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = name.trim()
-  const current = registry.workers.find((worker) => worker.name === trimmed)
-  if (current === undefined) throw unknownWorkerError(trimmed)
-  if (current.driver !== 'agent') throw robotWorkerError(trimmed)
+  const workerId = id.trim()
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
   const worker: WorkerRecord = { ...current }
   if (next === undefined) {
@@ -524,7 +647,7 @@ export async function setWorkerModel({
   }
   await writeWorkerRegistry({
     file: registryFile,
-    workers: registry.workers.map((entry) => (entry.name === trimmed ? worker : entry)),
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
   })
   return { worker }
 }
@@ -539,15 +662,15 @@ export async function setWorkerModel({
  */
 export async function setWorkerDescription({
   file,
-  name,
+  id,
   description,
 }: {
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
   description?: string | undefined
 } = {}): Promise<{ worker: WorkerRecord }> {
   const registryFile = requireRegistryFile(file)
-  if (!isValidWorkerName(name)) throw invalidNameError(name)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
   if (typeof description !== 'string') throw invalidDescriptionError(description)
   const clean = normalizeWorkerDescription(description)
   if (clean.length > WORKER_DESCRIPTION_MAX_LENGTH) throw invalidDescriptionError(description)
@@ -555,15 +678,15 @@ export async function setWorkerDescription({
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = name.trim()
-  const current = registry.workers.find((worker) => worker.name === trimmed)
-  if (current === undefined) throw unknownWorkerError(trimmed)
-  if (current.driver !== 'agent') throw robotWorkerError(trimmed)
+  const workerId = id.trim()
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
   const worker = { ...current, description: clean }
   await writeWorkerRegistry({
     file: registryFile,
-    workers: registry.workers.map((entry) => (entry.name === trimmed ? worker : entry)),
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
   })
   return { worker }
 }
@@ -578,29 +701,29 @@ export async function setWorkerDescription({
  */
 export async function setWorkerAssistant({
   file,
-  name,
+  id,
   assistant,
 }: {
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
   assistant?: unknown
 } = {}): Promise<{ worker: WorkerRecord }> {
   const registryFile = requireRegistryFile(file)
-  if (!isValidWorkerName(name)) throw invalidNameError(name)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
   if (typeof assistant !== 'boolean') throw invalidAssistantError(assistant)
 
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = name.trim()
-  const current = registry.workers.find((worker) => worker.name === trimmed)
-  if (current === undefined) throw unknownWorkerError(trimmed)
-  if (current.driver !== 'agent') throw robotWorkerError(trimmed)
+  const workerId = id.trim()
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
   const worker = { ...current, assistant }
   await writeWorkerRegistry({
     file: registryFile,
-    workers: registry.workers.map((entry) => (entry.name === trimmed ? worker : entry)),
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
   })
   return { worker }
 }
@@ -609,28 +732,28 @@ export async function setWorkerAssistant({
  * 从登记表移除一个智能体：**目录不删**（目录、文件与会话都保留）。
  *
  * - 内建机器人（clock）与其它机器人只读，拒绝移除；
- * - 登记文件损坏抛 `code = 'registry-unreadable'`；未知名字返回
+ * - 登记文件损坏抛 `code = 'registry-unreadable'`；未知标识符返回
  *   `{ removed: false }`，不写文件。
  *
  */
 export async function removeWorker({
   file,
-  name,
+  id,
 }: {
   file?: string | undefined
-  name?: string | undefined
+  id?: string | undefined
 } = {}): Promise<{ removed: boolean }> {
   const registryFile = requireRegistryFile(file)
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) throw registryUnreadableError(registryFile)
 
-  const trimmed = typeof name === 'string' ? name.trim() : ''
-  const current = registry.workers.find((worker) => worker.name === trimmed)
+  const workerId = typeof id === 'string' ? id.trim() : ''
+  const current = findWorker(registry, workerId)
   if (current === undefined) return { removed: false }
-  if (isBuiltinWorkerName(trimmed)) throw builtinWorkerError(trimmed)
-  if (current.driver !== 'agent') throw robotWorkerError(trimmed)
+  if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
-  const remaining = registry.workers.filter((worker) => worker.name !== trimmed)
+  const remaining = registry.workers.filter((worker) => worker.id !== workerId)
   await writeWorkerRegistry({ file: registryFile, workers: remaining })
   return { removed: true }
 }

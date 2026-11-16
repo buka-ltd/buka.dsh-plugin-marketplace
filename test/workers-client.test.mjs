@@ -389,11 +389,21 @@ const zh = {
   save: '保存',
   saving: '保存中…',
   cancel: '取消',
+  createFieldId: '标识符',
+  createIdPlaceholder: '标识符，如 writer',
+  createIdHint:
+    '必填，创建后不可修改；它同时是打工人目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
+  createFieldName: '名称（可选）',
+  createNamePlaceholder: '展示名，如 写作助手',
+  createNameHint: '只用于展示，可随时修改；留空时显示标识符。',
+  createEmptyId: '先填一个打工人标识符。',
+  errInvalidId:
+    '标识符不合法：需匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -），且创建后不可修改。',
+  errIdTaken: '这个标识符已被占用，请换一个。',
   rename: '重命名打工人',
   renameLabel: '重命名',
-  renameFieldLabel: '新名称',
-  renameHint: '重命名会改打工人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个打工人下。',
-  renameEmpty: '先填一个新名称。',
+  renameFieldLabel: '名称',
+  renameHint: '只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。',
   renameSame: '新名称与当前名称相同。',
   renameSaveFailed: '重命名失败：',
   renamed: '已重命名为：',
@@ -407,19 +417,20 @@ const zh = {
 /**
  * 一条打工人记录。
  *
- * @param {string} name
+ * @param {string} id
  * @param {string} avatar
  * @param {string} [description]
  * @param {Record<string, any>} [overrides]
  * @returns {Record<string, any>}
  */
-function worker(name, avatar, description = '', overrides = {}) {
+function worker(id, avatar, description = '', overrides = {}) {
   return {
-    name,
+    id,
+    name: '',
     driver: 'agent',
     program: '',
     assistant: false,
-    path: `/Users/x/.cache/dsh-plugin-workers/workers/${name}`,
+    path: `/Users/x/.cache/dsh-plugin-workers/workers/${id}`,
     avatar,
     description,
     createdAt: '2026-11-06T00:00:00.000Z',
@@ -484,7 +495,7 @@ function listData() {
  */
 function states({
   data = listData(),
-  selectedName = null,
+  selectedId = null,
   dialogOpen = false,
   draftDescription = '',
   descriptionDraft = '',
@@ -502,7 +513,8 @@ function states({
   return [
     { data, error: null, loading: false }, // list
     0, // reloadKey
-    '', // name
+    '', // createId
+    '', // createName
     draftDescription, // draftDescription
     dialogOpen, // dialogOpen
     null, // createError
@@ -525,7 +537,7 @@ function states({
     modelDraft, // modelDraft
     modelSaving, // modelSaving
     modelError, // modelError
-    selectedName, // selectedName
+    selectedId, // selectedId
     tab, // tab
     '', // agentsDraft
     false, // agentsSaving
@@ -555,7 +567,7 @@ test('打工人页：卡片与职责页签展示职责，创建对话框带职�
   // 职责是详情页的独立页签：说明 + textarea + 保存按钮。
   const tabStates = {
     data: listData(),
-    selectedName: 'writer',
+    selectedId: 'writer',
     descriptionDraft: description,
     tab: 'description',
   }
@@ -578,7 +590,7 @@ test('打工人页：卡片与职责页签展示职责，创建对话框带职�
   assert.ok(draftField)
 
   // 默认 AGENTS.md 页签不显示职责编辑器。
-  const agentsTab = client.render(states({ data: listData(), selectedName: 'writer' }))
+  const agentsTab = client.render(states({ data: listData(), selectedId: 'writer' }))
   assert.equal(
     findNode(
       agentsTab,
@@ -596,38 +608,90 @@ test('打工人页：卡片与职责页签展示职责，创建对话框带职�
   assert.ok(createField)
 })
 
+test('打工人页：创建对话框有必填标识符与可选名称，列表 / 详情显示「名称 · id」', async () => {
+  const client = await loadClient()
+  const data = listData()
+  data.workers = [worker('writer', 'panda', '写发布说明与测试报告', { name: '写作助手' })]
+
+  // 列表标题同时给出展示名与标识符，避免同名打工人无法区分。
+  const list = collect(client.render(states({ data })))
+  assert.ok(list.texts.includes('写作助手 · writer'))
+
+  // 详情标题同样显示「名称 · id」。
+  const detail = collect(client.render(states({ data, selectedId: 'writer' })))
+  assert.ok(detail.texts.includes('写作助手 · writer'))
+
+  // 创建对话框：标识符必填且创建后不可改，名称可选。
+  const dialog = client.render(states({ data, dialogOpen: true }))
+  const idField = findNode(
+    dialog,
+    (node) => node.type === 'input' && node.props?.placeholder === '标识符，如 writer',
+  )
+  assert.ok(idField, '创建对话框有标识符输入框')
+  assert.equal(idField.props?.maxLength, 64)
+  assert.equal(idField.props?.['data-modal-autofocus'], '')
+  const nameField = findNode(
+    dialog,
+    (node) => node.type === 'input' && node.props?.placeholder === '展示名，如 写作助手',
+  )
+  assert.ok(nameField, '创建对话框有可选名称输入框')
+  const dialogTexts = collect(dialog).texts
+  assert.ok(dialogTexts.includes('标识符'))
+  assert.ok(dialogTexts.includes('名称（可选）'))
+  assert.ok(
+    dialogTexts.includes(
+      '必填，创建后不可修改；它同时是打工人目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
+    ),
+  )
+
+  // 标识符非法 / 已被占用时创建按钮禁用。
+  const createButton = (state) =>
+    collect(client.render(state)).nodes.find(
+      (node) => node.type === 'button' && node.props?.type === 'submit',
+    )
+  const invalidStates = states({ data, dialogOpen: true })
+  invalidStates[2] = 'Writer'
+  assert.equal(createButton(invalidStates)?.props?.disabled, true, '非法标识符不能创建')
+  const takenStates = states({ data, dialogOpen: true })
+  takenStates[2] = 'writer'
+  assert.equal(createButton(takenStates)?.props?.disabled, true, '已有标识符不能创建')
+  const validStates = states({ data, dialogOpen: true })
+  validStates[2] = 'author'
+  assert.equal(createButton(validStates)?.props?.disabled, false, '合法新标识符可以创建')
+})
+
 test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名对话框', async () => {
   const client = await loadClient()
 
-  // 配置视图标题行：打工人名旁有铅笔按钮（tooltip / aria-label 带打工人名）。
-  const detail = client.render(states({ data: listData(), selectedName: 'writer' }))
+  // 配置视图标题行：打工人标题旁有铅笔按钮（tooltip / aria-label 带展示名）。
+  const detail = client.render(states({ data: listData(), selectedId: 'writer' }))
   const renameButton = findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer')
   assert.ok(renameButton, '配置视图标题行应有重命名按钮')
   assert.equal(renameButton.props?.disabled, false)
 
-  // 目录缺失时入口禁用。
+  // 目录缺失不影响改展示名（目录本来就按标识符固定，改名不碰磁盘）。
   const missingData = listData()
   missingData.workers[0].exists = false
   const missingButton = findNode(
-    client.render(states({ data: missingData, selectedName: 'writer' })),
+    client.render(states({ data: missingData, selectedId: 'writer' })),
     (node) => node.props?.['aria-label'] === '重命名 writer',
   )
-  assert.equal(missingButton?.props?.disabled, true, '目录缺失时重命名按钮禁用')
+  assert.equal(missingButton?.props?.disabled, false, '目录缺失时仍可改展示名')
 
-  // renameOpen 时对话框要有标题、新名称字段、后果提示与保存 / 取消。
+  // renameOpen 时对话框要有标题、名称字段、语义提示与保存 / 取消。
+  const renameData = listData()
+  renameData.workers[0].name = 'writer'
   const dialogStates = {
-    data: listData(),
-    selectedName: 'writer',
+    data: renameData,
+    selectedId: 'writer',
     renameOpen: true,
     renameDraft: 'writer',
   }
   const dialog = collect(client.render(states(dialogStates)))
-  assert.ok(dialog.texts.includes('重命名打工人'))
-  assert.ok(dialog.texts.includes('新名称'))
+  assert.ok(dialog.texts.some((text) => text.includes('重命名打工人')))
+  assert.ok(dialog.texts.includes('名称'))
   assert.ok(
-    dialog.texts.includes(
-      '重命名会改打工人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个打工人下。',
-    ),
+    dialog.texts.includes('只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。'),
   )
   assert.ok(dialog.texts.includes('保存'))
   assert.ok(dialog.texts.includes('取消'))
@@ -635,7 +699,7 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
     client.render(states(dialogStates)),
     (node) => node.type === 'input' && node.props?.value === 'writer',
   )
-  assert.ok(field, '对话框应有新名称输入框，并带出当前名称')
+  assert.ok(field, '对话框应有名称输入框，并带出当前名称')
   assert.equal(field.props?.maxLength, 64)
 
   // 保存按钮：草稿与当前名相同 / 为空 / 保存中都禁用；改成新名字才可用。
@@ -656,8 +720,8 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
   )
   const emptyButtons = saveButtons({ ...dialogStates, renameDraft: '   ' })
   assert.ok(
-    emptyButtons.every((node) => node.props?.disabled === true),
-    '新名称为空时保存禁用',
+    emptyButtons.some((node) => node.props?.disabled === false),
+    '名称留空表示清空，保存可用',
   )
   const savingButtons = saveButtons({ ...dialogStates, renameDraft: 'author', renameSaving: true })
   assert.ok(
@@ -675,7 +739,7 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
   const corruptData = listData()
   corruptData.corrupt = true
   const corruptButton = findNode(
-    client.render(states({ data: corruptData, selectedName: 'writer' })),
+    client.render(states({ data: corruptData, selectedId: 'writer' })),
     (node) => node.props?.['aria-label'] === '重命名 writer',
   )
   assert.equal(corruptButton?.props?.disabled, true, '登记文件损坏时重命名按钮禁用')
@@ -736,7 +800,7 @@ test('打工人页：列表整行点击进详情，行内动作统一为 outline
 
   // 写操作进行中（busy）时整行不进入详情，标题按钮也禁用。
   const busyStates = states({ data: listData() })
-  busyStates[8] = 'delete:writer' // busy
+  busyStates[9] = 'delete:writer' // busy
   const busyTree = client.render(busyStates)
   const busyCard = findNode(
     busyTree,
@@ -836,7 +900,7 @@ test('打工人页：模型页签展示可选模型与当前选择', async () =>
   const tree = client.render(
     states({
       data,
-      selectedName: 'writer',
+      selectedId: 'writer',
       tab: 'model',
       modelDraft: { provider: 'p1', model: 'm1' },
       modelCatalog: {
@@ -878,7 +942,7 @@ test('打工人页：模型页签跟随默认模型时只渲染提供方选择',
     client.render(
       states({
         data: listData(),
-        selectedName: 'writer',
+        selectedId: 'writer',
         tab: 'model',
         modelCatalog: {
           status: 'ready',
@@ -898,7 +962,7 @@ test('打工人页：模型页签跟随默认模型时只渲染提供方选择',
     client.render(
       states({
         data: listData(),
-        selectedName: 'writer',
+        selectedId: 'writer',
         tab: 'model',
         modelCatalog: {
           status: 'ready',
@@ -922,7 +986,7 @@ test('打工人页：模型目录不可用时说明原因', async () => {
     client.render(
       states({
         data: listData(),
-        selectedName: 'writer',
+        selectedId: 'writer',
         tab: 'model',
         modelCatalog: {
           status: 'ready',

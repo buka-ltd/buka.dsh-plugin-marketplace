@@ -3,7 +3,8 @@
  *
  * 机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
  * 项目 skills；v1 只有内建 `clock`，由 workflows 插件执行驱动。它们登记在
- * workers 插件里、在页面上只读展示，用户不能创建或删除。
+ * workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的标识符
+ * 固定为 `clock`；展示名可以是 `clock`，也可以为空。
  *
  * 本模块只依赖类型与常量，可被 `node --test` 直接 import。
  *
@@ -12,8 +13,8 @@
 
 import type { WorkerRecord } from './types.ts'
 
-/** 内建定时打工人的名字，也是它的 program id。 */
-export const CLOCK_WORKER_NAME = 'clock'
+/** 内建定时打工人的标识符，也是它的 program id。 */
+export const CLOCK_WORKER_ID = 'clock'
 
 /**
  * 内建机器人清单（按登记顺序）。
@@ -23,10 +24,11 @@ export const CLOCK_WORKER_NAME = 'clock'
  */
 export const BUILTIN_WORKERS: ReadonlyArray<WorkerRecord> = Object.freeze([
   {
-    name: CLOCK_WORKER_NAME,
+    id: CLOCK_WORKER_ID,
+    name: CLOCK_WORKER_ID,
     driver: 'robot',
     path: '',
-    program: CLOCK_WORKER_NAME,
+    program: CLOCK_WORKER_ID,
     createdAt: '2026-11-12T00:00:00.000Z',
     avatar: '',
     description: '到点完成任务的定时打工人：任务 payload 带 until，到点后自动完成。',
@@ -34,16 +36,16 @@ export const BUILTIN_WORKERS: ReadonlyArray<WorkerRecord> = Object.freeze([
   },
 ])
 
-/** 按名字取内建机器人；不是内建打工人时返回 undefined。 */
-export function builtinWorker(name: unknown): WorkerRecord | undefined {
-  if (typeof name !== 'string') return undefined
-  const trimmed = name.trim()
-  return BUILTIN_WORKERS.find((worker) => worker.name === trimmed)
+/** 按标识符取内建机器人；不是内建打工人时返回 undefined。 */
+export function builtinWorker(id: unknown): WorkerRecord | undefined {
+  if (typeof id !== 'string') return undefined
+  const trimmed = id.trim()
+  return BUILTIN_WORKERS.find((worker) => worker.id === trimmed)
 }
 
-/** 名字是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
-export function isBuiltinWorkerName(name: unknown): boolean {
-  return builtinWorker(name) !== undefined
+/** 标识符是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
+export function isBuiltinWorkerId(id: unknown): boolean {
+  return builtinWorker(id) !== undefined
 }
 
 /**
@@ -53,12 +55,12 @@ export function isBuiltinWorkerName(name: unknown): boolean {
  * `ensureBuiltinWorkers` 负责。
  */
 export function withBuiltinWorkers(workers: readonly WorkerRecord[]): WorkerRecord[] {
-  const names = new Set(workers.map((worker) => worker.name))
-  return [...workers, ...BUILTIN_WORKERS.filter((worker) => !names.has(worker.name))]
+  const ids = new Set(workers.map((worker) => worker.id))
+  return [...workers, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))]
 }
 
 /** 生成「内建打工人不可改动」错误。 */
-export function builtinWorkerError(name: unknown): Error & { code: string } {
-  const error = new Error(`内建打工人不可创建、修改或删除：${String(name)}`)
+export function builtinWorkerError(id: unknown): Error & { code: string } {
+  const error = new Error(`内建打工人不可创建、修改或删除：${String(id)}`)
   return Object.assign(error, { code: 'builtin-worker' })
 }

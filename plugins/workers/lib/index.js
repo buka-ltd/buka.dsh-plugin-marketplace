@@ -329,11 +329,12 @@ async function buildWorkerModelCatalog(ctx, signal) {
 }
 // .build/workers/store/paths.js
 /**
-* 打工人存储层的路径、名称与文件系统小工具。
+* 打工人存储层的路径、标识符与文件系统小工具。
 *
 * 插件全局目录固定在 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workers`，默认
 * 打工人根目录是它下面的 `workers`，登记文件是根目录同级的 `workers.json`。
-* 路径展开、名称校验与 realpath 兜底都集中在这里，便于用临时目录单测。
+* 路径展开、标识符校验（新格式 / 旧格式兼容）与 realpath 兜底都集中在这里，
+* 便于用临时目录单测。
 *
 * @module @buka/dsh-plugin-workers/store/paths
 */
@@ -351,14 +352,24 @@ const PLUGIN_CACHE_DIR = "dsh-plugin-workers";
 /** 登记文件名；固定放在打工人根目录的父目录里。 */
 const WORKER_REGISTRY_FILE = "workers.json";
 /** 仍可读取的旧版登记表版本；读入时迁移到当前版本。 */
-const WORKER_REGISTRY_LEGACY_VERSIONS = [1, 2];
+const WORKER_REGISTRY_LEGACY_VERSIONS = [
+	1,
+	2,
+	3
+];
 /** 旧插件的全局目录名；启动时一次性搬到 `PLUGIN_CACHE_DIR`。 */
 const LEGACY_PLUGIN_CACHE_DIR = "dsh-plugin-robots";
 /**
-* 打工人名称的合法字符集：字母、数字（含汉字等 Unicode 字母/数字）开头，
-* 后面可以跟 `._-`。点开头、路径分隔符与 NUL 都被这个正则排除。
+* 新标识符的合法字符集：小写字母开头，后面可以跟小写字母、数字、`_` 与 `-`，
+* 总长 1–64。标识符同时是目录名与引用键，所以只允许不需要转义的 ASCII。
 */
-const WORKER_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u;
+const WORKER_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+/**
+* 旧登记表里的名字（迁移后成为旧标识符）的合法字符集：字母、数字（含汉字等
+* Unicode 字母/数字）开头，后面可以跟 `._-`。点开头、路径分隔符与 NUL 都被
+* 这个正则排除。
+*/
+const LEGACY_WORKER_ID_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u;
 /**
 * 取用户 home 目录：优先用注入环境里的 `HOME`，否则用 `os.homedir()`。
 * 测试传临时 env 时不会碰真实 home。
@@ -432,28 +443,50 @@ function resolveWorkerRegistryFile(workersDir) {
 	return path.join(path.dirname(base), WORKER_REGISTRY_FILE);
 }
 /**
-* 判断一个名字能否直接当作打工人目录名。
+* 判断一个值是不是**新**打工人标识符。
 *
-* 规则（与页面后端的校验一致）：trim 后 1–64 个字符；不能是 `.` / `..`；
-* 不能以 `.` 开头；不能包含 `/`、`\`、NUL；只允许字母、数字、汉字与 `._-`。
+* 规则：trim 后匹配 `^[a-z][a-z0-9_-]{0,63}$`。只有创建新打工人时使用这条
+* 严格规则；读写已有条目时用 `isResolvableWorkerId`，它同时接受迁移来的旧
+* 标识符（旧登记表里的名字，可能含汉字、大写或 `._`）。
 *
 */
-function isValidWorkerName(name) {
-	if (typeof name !== "string") return false;
-	const text = name.trim();
-	if (text.length < 1 || text.length > 64) return false;
-	if (text === "." || text === "..") return false;
-	return WORKER_NAME_PATTERN.test(text);
+function isValidWorkerId(id) {
+	if (typeof id !== "string") return false;
+	return WORKER_ID_PATTERN.test(id.trim());
 }
 /**
-* 打工人名字对应的绝对目录；名字不合法或解析后跑出根目录时返回 null。
+* 判断一个值是不是迁移来的**旧**标识符（旧登记表里的 `name`）。
+*
+* 旧标识符不受新字符集约束：trim 后 1–64 个字符，不能是 `.` / `..`，不能以
+* `.` 开头，不能包含 `/`、`\`、NUL，允许 Unicode 字母、数字与 `._-`。
 *
 */
-function workerDirectory(workersDir, name) {
-	if (!isValidWorkerName(name)) return null;
+function isLegacyWorkerId(id) {
+	if (typeof id !== "string") return false;
+	const text = id.trim();
+	if (text.length < 1 || text.length > 64) return false;
+	if (text === "." || text === "..") return false;
+	return LEGACY_WORKER_ID_PATTERN.test(text);
+}
+/**
+* 判断一个标识符能否用来定位已有打工人：新标识符或迁移来的旧标识符都接受。
+*
+* 更新 / 改名 / 删除 / 解析路由都走这条判定；创建新打工人只走
+* `isValidWorkerId`，避免新记录再落一个旧格式的标识符。
+*
+*/
+function isResolvableWorkerId(id) {
+	return isValidWorkerId(id) || isLegacyWorkerId(id);
+}
+/**
+* 打工人标识符对应的绝对目录；标识符不合法或解析后跑出根目录时返回 null。
+*
+*/
+function workerDirectory(workersDir, id) {
+	if (!isResolvableWorkerId(id)) return null;
 	if (typeof workersDir !== "string" || workersDir.trim() === "") return null;
 	const base = path.resolve(workersDir);
-	const target = path.resolve(base, name.trim());
+	const target = path.resolve(base, id.trim());
 	const relative = path.relative(base, target);
 	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return null;
 	return target;
@@ -524,7 +557,7 @@ async function realpathOrNull(target) {
 * 登记进 `workers.json` 的路径、DSH 工作区记录里的路径保持一致。
 *
 */
-async function ensureWorkerDirectory(directory, name) {
+async function ensureWorkerDirectory(directory, label) {
 	await promises.mkdir(directory, { recursive: true });
 	if (!(await promises.stat(directory)).isDirectory()) {
 		const error = /* @__PURE__ */ new Error(`目标路径已存在且不是目录：${directory}`);
@@ -532,7 +565,7 @@ async function ensureWorkerDirectory(directory, name) {
 	}
 	const canonical = await realpathOr(directory, directory);
 	const agentsFile = path.join(canonical, AGENTS_FILE);
-	if (!await pathExists(agentsFile)) await promises.writeFile(agentsFile, workerAgentsTemplate(name, canonical), "utf8");
+	if (!await pathExists(agentsFile)) await promises.writeFile(agentsFile, workerAgentsTemplate(label, canonical), "utf8");
 	await ensureClaudeLink(canonical);
 	return canonical;
 }
@@ -717,13 +750,14 @@ async function writeAgentsFile(workspacePath, content) {
 	};
 }
 /**
-* 新打工人的 AGENTS.md 模板；路径与名字都是磁盘上的真实值。
+* 新打工人的 AGENTS.md 模板；路径是磁盘上的真实值，`label` 是展示名
+* （名称为空时用标识符）。
 *
 */
-function workerAgentsTemplate(name, workerPath) {
+function workerAgentsTemplate(label, workerPath) {
 	return `# AGENTS.md
 
-这是「${name}」打工人的协作说明。这个目录同时是一个 DSH 工作区。
+这是「${label}」打工人的协作说明。这个目录同时是一个 DSH 工作区。
 
 ## 项目
 
@@ -742,14 +776,15 @@ function workerAgentsTemplate(name, workerPath) {
 *
 * 机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
 * 项目 skills；v1 只有内建 `clock`，由 workflows 插件执行驱动。它们登记在
-* workers 插件里、在页面上只读展示，用户不能创建或删除。
+* workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的标识符
+* 固定为 `clock`；展示名可以是 `clock`，也可以为空。
 *
 * 本模块只依赖类型与常量，可被 `node --test` 直接 import。
 *
 * @module @buka/dsh-plugin-workers/store/builtin
 */
-/** 内建定时打工人的名字，也是它的 program id。 */
-const CLOCK_WORKER_NAME = "clock";
+/** 内建定时打工人的标识符，也是它的 program id。 */
+const CLOCK_WORKER_ID = "clock";
 /**
 * 内建机器人清单（按登记顺序）。
 *
@@ -757,24 +792,25 @@ const CLOCK_WORKER_NAME = "clock";
 * 让它看起来是新的。
 */
 const BUILTIN_WORKERS = Object.freeze([{
-	name: CLOCK_WORKER_NAME,
+	id: CLOCK_WORKER_ID,
+	name: CLOCK_WORKER_ID,
 	driver: "robot",
 	path: "",
-	program: CLOCK_WORKER_NAME,
+	program: CLOCK_WORKER_ID,
 	createdAt: "2026-11-12T00:00:00.000Z",
 	avatar: "",
 	description: "到点完成任务的定时打工人：任务 payload 带 until，到点后自动完成。",
 	assistant: false
 }]);
-/** 按名字取内建机器人；不是内建打工人时返回 undefined。 */
-function builtinWorker(name) {
-	if (typeof name !== "string") return void 0;
-	const trimmed = name.trim();
-	return BUILTIN_WORKERS.find((worker) => worker.name === trimmed);
+/** 按标识符取内建机器人；不是内建打工人时返回 undefined。 */
+function builtinWorker(id) {
+	if (typeof id !== "string") return void 0;
+	const trimmed = id.trim();
+	return BUILTIN_WORKERS.find((worker) => worker.id === trimmed);
 }
-/** 名字是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
-function isBuiltinWorkerName(name) {
-	return builtinWorker(name) !== void 0;
+/** 标识符是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
+function isBuiltinWorkerId(id) {
+	return builtinWorker(id) !== void 0;
 }
 /**
 * 把登记表里缺的内建打工人补到末尾。
@@ -783,12 +819,12 @@ function isBuiltinWorkerName(name) {
 * `ensureBuiltinWorkers` 负责。
 */
 function withBuiltinWorkers(workers) {
-	const names = new Set(workers.map((worker) => worker.name));
-	return [...workers, ...BUILTIN_WORKERS.filter((worker) => !names.has(worker.name))];
+	const ids = new Set(workers.map((worker) => worker.id));
+	return [...workers, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))];
 }
 /** 生成「内建打工人不可改动」错误。 */
-function builtinWorkerError(name) {
-	const error = /* @__PURE__ */ new Error(`内建打工人不可创建、修改或删除：${String(name)}`);
+function builtinWorkerError(id) {
+	const error = /* @__PURE__ */ new Error(`内建打工人不可创建、修改或删除：${String(id)}`);
 	return Object.assign(error, { code: "builtin-worker" });
 }
 // .build/workers/avatar.js
@@ -800,21 +836,21 @@ function builtinWorkerError(name) {
 * `plugins/workers/client.js` 的打工人页与 `plugins/workflows/client.js` 的工作流
 * 节点图。因此 **id 是跨插件的稳定契约**，增删预设时要同步两处客户端。
 *
-* 默认分配是确定性的：没有指定头像的打工人按名字哈希到一个预设，这样旧登记表
-* 里的打工人也有稳定头像；新建打工人优先挑一个还没被占用的预设，避免刚创建
-* 的一批打工人全是一个样子。
+* 默认分配是确定性的：没有指定头像的打工人按不可变标识符哈希到一个预设，这样
+* 旧登记表里的打工人也有稳定头像，改名不会让头像漂移；新建打工人优先挑一个还
+* 没被占用的预设，避免刚创建的一批打工人全是一个样子。
 *
 * 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
 *
 * @module @buka/dsh-plugin-workers/avatar
 */
 /**
-* 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是名字哈希
-* 的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
+* 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是标识符
+* 哈希的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
 *
 * 这里**没有** 🤖 打工人 emoji：那是历史遗留的「通用型打工人」专属头像，通用型
-* 打工人已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按名字
-* 哈希落回其它预设。
+* 打工人已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按
+* 标识符哈希落回其它预设。
 *
 */
 const AVATAR_IDS = Object.freeze([
@@ -846,42 +882,42 @@ function isAvatarId(value) {
 	return typeof value === "string" && AVATAR_ID_SET.has(value);
 }
 /**
-* 名字 → 稳定哈希（FNV-1a，按 Unicode 码点遍历，中文名也能均匀分布）。
+* 标识符 → 稳定哈希（FNV-1a，按 Unicode 码点遍历；迁移来的旧标识符可能含汉字）。
 *
 */
-function hashName(name) {
+function hashName(id) {
 	let hash = 2166136261;
-	for (const char of String(name ?? "")) {
+	for (const char of String(id ?? "")) {
 		hash ^= char.codePointAt(0) ?? 0;
 		hash = Math.imul(hash, 16777619);
 	}
 	return hash >>> 0;
 }
 /**
-* 名字对应的确定性头像：同一个名字永远得到同一个 id。
+* 标识符对应的确定性头像：同一个标识符永远得到同一个头像。
 *
 */
-function defaultAvatarFor(name) {
-	return AVATAR_IDS[hashName(name) % AVATAR_IDS.length] ?? DEFAULT_AVATAR_ID;
+function defaultAvatarFor(id) {
+	return AVATAR_IDS[hashName(id) % AVATAR_IDS.length] ?? DEFAULT_AVATAR_ID;
 }
 /**
-* 新建打工人时的默认头像：先按名字哈希，如果这个 id 已经被别的打工人用了，
-* 就按预设顺序挑第一个没被占用的；全被占用时回到名字哈希的结果。
+* 新建打工人时的默认头像：先按标识符哈希，如果这个 id 已经被别的打工人用了，
+* 就按预设顺序挑第一个没被占用的；全被占用时回到标识符哈希的结果。
 *
 */
-function pickDefaultAvatar(name, used = []) {
+function pickDefaultAvatar(id, used = []) {
 	const taken = new Set(used);
-	const preferred = defaultAvatarFor(name);
+	const preferred = defaultAvatarFor(id);
 	if (!taken.has(preferred)) return preferred;
 	for (const id of AVATAR_IDS) if (!taken.has(id)) return id;
 	return preferred;
 }
 /**
-* 读取登记表里的头像值并规范化：合法的 id 原样返回，缺省 / 非法值按名字兜底。
+* 读取登记表里的头像值并规范化：合法的 id 原样返回，缺省 / 非法值按打工人标识符兜底。
 *
 */
-function resolveAvatar(value, name) {
-	return isAvatarId(value) ? value : defaultAvatarFor(name);
+function resolveAvatar(value, workerId) {
+	return isAvatarId(value) ? value : defaultAvatarFor(workerId);
 }
 // .build/workers/store/project-skills.js
 /**
@@ -1442,22 +1478,8 @@ async function writeJsonAtomic(file, value, options = {}) {
 		throw error;
 	}
 }
-// .build/workers/store/registry.js
-/**
-* 打工人登记表：读写、迁移、原子写、条目增删与描述规范化。
-*
-* 登记文件是插件唯一的打工人清单；写操作遇到损坏的登记文件必须拒绝，绝不覆盖
-* 用户文件。新建的打工人目录由 `agents.ts` 的 `ensureWorkerDirectory` 补模板。
-*
-* 格式为 version 3（`driver` / `assistant`）；读 version 1 / 2 旧表时在内存里
-* 迁移，下一次写入落盘成新格式。version 2 的 `driver: "program"` 读成
-* `"robot"`。内建机器人（clock）由 `BUILTIN_WORKERS` 提供：读旧表时补到视图
-* 里，写回前由 `ensureBuiltinWorkers` 落盘一次。
-*
-* @module @buka/dsh-plugin-workers/store/registry
-*/
 /** 登记表里能读到的版本：当前版本 + 仍需要迁移的旧版本。 */
-const READABLE_VERSIONS = /* @__PURE__ */ new Set([3, ...WORKER_REGISTRY_LEGACY_VERSIONS]);
+const READABLE_VERSIONS = /* @__PURE__ */ new Set([4, ...WORKER_REGISTRY_LEGACY_VERSIONS]);
 /** 判断值是不是普通对象（不是数组 / null）。 */
 function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -1483,16 +1505,54 @@ function normalizeWorkerModel(value) {
 	};
 }
 /**
+* 规范化展示名：折叠连续空白并 trim；非字符串按空串处理。
+*
+* 名称只用于展示，不要求唯一；空串表示「未设置」，展示时回退到标识符。
+*
+*/
+function normalizeWorkerName(value) {
+	if (typeof value !== "string") return "";
+	return value.replace(/\s+/gu, " ").trim();
+}
+/**
+* 展示名是否合法：字符串且规范化后不超过上限。
+*
+*/
+function isValidWorkerName(value) {
+	return typeof value === "string" && normalizeWorkerName(value).length <= 64;
+}
+/**
+* 写入口用的展示名规范化：缺省 / null 表示「未设置」；类型不对或超长抛
+* `code = 'invalid-name'`。
+*
+*/
+function normalizeWorkerNameInput(value) {
+	if (value === void 0 || value === null) return "";
+	if (!isValidWorkerName(value)) throw invalidNameError(value);
+	return normalizeWorkerName(value);
+}
+/**
 * 读登记表里的一个条目并迁移成当前形状；不合法时返回 undefined。
 *
+* - version 1 / 2 / 3 条目没有 `id`：`id` 取旧 `name`（旧标识符，可能含汉字 /
+*   大写 / `._`），`name` 置空；
+* - version 4 条目必须同时有能定位的 `id`；`name` 是可选展示名；
 * - `driver` 缺失（version 1 旧条目）或取值写坏时按 `agent` 处理；
 *   version 2 的 `program` 取值迁移成 `robot`；
 * - 机器人条目必须有非空 `program` id，智能体条目必须有非空 `path`；
 * - `assistant` 只对智能体生效：机器人不能被标记成助理。
 */
-function readEntry(entry) {
-	if (!isValidWorkerName(entry.name)) return void 0;
-	const name = entry.name.trim();
+function readEntry(entry, version) {
+	const legacy = version < 4;
+	let id;
+	if (legacy) {
+		if (!isLegacyWorkerId(entry.name)) return void 0;
+		id = entry.name.trim();
+	} else {
+		if (!isResolvableWorkerId(entry.id)) return void 0;
+		id = entry.id.trim();
+	}
+	const name = legacy ? "" : normalizeWorkerName(entry.name).slice(0, 64);
 	const rawDriver = entry.driver;
 	const driver = rawDriver === "robot" || rawDriver === "program" ? "robot" : "agent";
 	const program = driver === "robot" && typeof entry.program === "string" ? entry.program.trim() : "";
@@ -1501,6 +1561,7 @@ function readEntry(entry) {
 	if (driver === "agent" && workerPath === "") return void 0;
 	const model = driver === "agent" ? normalizeWorkerModel(entry.model) : void 0;
 	return {
+		id,
 		name,
 		driver,
 		path: workerPath,
@@ -1516,20 +1577,23 @@ function readEntry(entry) {
 * 把一条待写入记录规范化成完整记录；缺省字段按当前格式补齐。
 *
 * - `driver` 缺省按 `agent`；
-* - agent 记录补 `path`、清空 `program`；program 记录补 `program`、清空 `path`；
-* - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐）；
+* - agent 记录补 `path`、清空 `program`；robot 记录补 `program`、清空 `path`；
+* - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐），默认头像按
+*   标识符哈希，改名不会让头像漂移；
 * - 描述折叠空白并截断；`assistant` 只对 agent 生效。
 */
 function normalizeRecord(worker) {
 	const driver = worker.driver === "robot" ? "robot" : "agent";
 	const model = driver === "agent" ? normalizeWorkerModel(worker.model) : void 0;
+	const id = typeof worker.id === "string" ? worker.id.trim() : "";
 	return {
-		name: worker.name,
+		id,
+		name: normalizeWorkerName(worker.name).slice(0, 64),
 		driver,
 		path: driver === "agent" && typeof worker.path === "string" ? worker.path : "",
 		program: driver === "robot" && typeof worker.program === "string" ? worker.program.trim() : "",
 		createdAt: worker.createdAt,
-		avatar: resolveAvatar(worker.avatar, worker.name),
+		avatar: resolveAvatar(worker.avatar, id),
 		description: normalizeWorkerDescription(worker.description).slice(0, 500),
 		assistant: driver === "agent" && worker.assistant === true,
 		...model === void 0 ? {} : { model }
@@ -1538,15 +1602,16 @@ function normalizeRecord(worker) {
 /**
 * 读打工人登记表。
 *
-* - 文件不存在：`{ version: 3, workers: [], file }`（内建打工人由调用方合并）；
+* - 文件不存在：`{ version: 4, workers: [], file }`（内建打工人由调用方合并）；
 * - 读不了 / 不是合法 JSON / 版本不可读 / `workers` 不是数组：`corrupt: true`
 *   且 `workers: []`（写操作必须据此拒绝，绝不覆盖原文件）；
 * - version 1 旧表按 `driver: "agent"`、`assistant: false` 迁移；
 *   version 2 的 `driver: "program"` 读成 `"robot"`；
-* - 条目必须同时有合法 `name`（智能体还要有非空 `path`，机器人要有 `program`），
-*   否则过滤掉；同名条目只保留第一个。
+*   version 1 / 2 / 3 的旧名字迁移成 `id`，`name` 置空；
+* - 条目必须有能定位的 `id`（智能体还要有非空 `path`，机器人要有 `program`），
+*   否则过滤掉；重复标识符只保留第一个。
 * - `avatar` 是预设头像 id；旧登记表没有这个字段（或在别处被改坏）时留空，
-*   展示 / 写入时由 `resolveAvatar` 按名字兜底成一个确定的预设。
+*   展示 / 写入时由 `resolveAvatar` 按标识符兜底成一个确定的预设。
 *
 */
 async function readWorkerRegistry({ file } = {}) {
@@ -1556,12 +1621,12 @@ async function readWorkerRegistry({ file } = {}) {
 		text = await promises.readFile(target, "utf8");
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return {
-			version: 3,
+			version: 4,
 			workers: [],
 			file: target
 		};
 		return {
-			version: 3,
+			version: 4,
 			workers: [],
 			corrupt: true,
 			file: target
@@ -1572,27 +1637,27 @@ async function readWorkerRegistry({ file } = {}) {
 		parsed = JSON.parse(text);
 	} catch {
 		return {
-			version: 3,
+			version: 4,
 			workers: [],
 			corrupt: true,
 			file: target
 		};
 	}
 	if (!isRecord(parsed)) return {
-		version: 3,
+		version: 4,
 		workers: [],
 		corrupt: true,
 		file: target
 	};
 	if (typeof parsed.version !== "number" || !READABLE_VERSIONS.has(parsed.version)) return {
-		version: 3,
+		version: 4,
 		workers: [],
 		corrupt: true,
 		file: target
 	};
-	const entries = parsed.version < 3 && Array.isArray(parsed.robots) ? parsed.robots : parsed.workers;
+	const entries = parsed.version <= 2 && Array.isArray(parsed.robots) ? parsed.robots : parsed.workers;
 	if (!Array.isArray(entries)) return {
-		version: 3,
+		version: 4,
 		workers: [],
 		corrupt: true,
 		file: target
@@ -1601,13 +1666,13 @@ async function readWorkerRegistry({ file } = {}) {
 	const seen = /* @__PURE__ */ new Set();
 	for (const entry of entries) {
 		if (!isRecord(entry)) continue;
-		const worker = readEntry(entry);
-		if (worker === void 0 || seen.has(worker.name)) continue;
-		seen.add(worker.name);
+		const worker = readEntry(entry, parsed.version);
+		if (worker === void 0 || seen.has(worker.id)) continue;
+		seen.add(worker.id);
 		workers.push(worker);
 	}
 	return {
-		version: 3,
+		version: 4,
 		workers,
 		file: target
 	};
@@ -1616,16 +1681,18 @@ async function readWorkerRegistry({ file } = {}) {
 * 原子写打工人登记表（临时文件 + rename，权限 0600）。
 *
 * 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。写入总是
-* 落成当前版本（version 3），旧记录缺的 `driver` / `assistant` 在这里补齐。
+* 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` / `assistant`
+* 在这里补齐。
 *
 */
 async function writeWorkerRegistry({ file, workers } = {}) {
 	const target = requireRegistryFile(file);
 	await writeJsonAtomic(target, {
-		version: 3,
+		version: 4,
 		workers: (Array.isArray(workers) ? workers : []).map((entry) => {
 			const worker = normalizeRecord(entry);
 			if (worker.driver === "robot") return {
+				id: worker.id,
 				name: worker.name,
 				driver: worker.driver,
 				program: worker.program,
@@ -1635,6 +1702,7 @@ async function writeWorkerRegistry({ file, workers } = {}) {
 				assistant: false
 			};
 			return {
+				id: worker.id,
 				name: worker.name,
 				driver: worker.driver,
 				path: worker.path,
@@ -1661,22 +1729,38 @@ async function ensureBuiltinWorkers({ file } = {}) {
 		added: [],
 		corrupt: true
 	};
-	const names = new Set(registry.workers.map((worker) => worker.name));
-	const missing = BUILTIN_WORKERS.filter((worker) => !names.has(worker.name));
+	const ids = new Set(registry.workers.map((worker) => worker.id));
+	const missing = BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id));
 	if (missing.length === 0) return { added: [] };
 	await writeWorkerRegistry({
 		file: target,
 		workers: [...registry.workers, ...missing]
 	});
-	return { added: missing.map((worker) => worker.name) };
+	return { added: missing.map((worker) => worker.id) };
 }
 /**
-* 生成「名称不合法」错误。
+* 生成「标识符不合法」错误。
+*
+*/
+function invalidIdError(id) {
+	const error = /* @__PURE__ */ new Error(`打工人标识符不合法：${String(id)}（新标识符需匹配 ^[a-z][a-z0-9_-]{0,63}$）`);
+	return Object.assign(error, { code: "invalid-id" });
+}
+/**
+* 生成「展示名不合法」错误。
 *
 */
 function invalidNameError(name) {
-	const error = /* @__PURE__ */ new Error(`打工人名称不合法：${String(name)}`);
+	const error = /* @__PURE__ */ new Error(`打工人名称不合法：需要不超过 64 个字符的单行文本（收到 ${String(name)}）`);
 	return Object.assign(error, { code: "invalid-name" });
+}
+/**
+* 生成「标识符已被占用」错误。
+*
+*/
+function idTakenError(id) {
+	const error = /* @__PURE__ */ new Error(`打工人标识符已被占用：${id}`);
+	return Object.assign(error, { code: "id-taken" });
 }
 /**
 * 生成「描述不合法」错误。
@@ -1698,8 +1782,8 @@ function invalidAssistantError(assistant) {
 * 生成「机器人只读」错误。
 *
 */
-function robotWorkerError(name) {
-	const error = /* @__PURE__ */ new Error(`机器人只读，不能修改或打开会话：${String(name)}`);
+function robotWorkerError(id) {
+	const error = /* @__PURE__ */ new Error(`机器人只读，不能修改或打开会话：${String(id)}`);
 	return Object.assign(error, { code: "robot-worker" });
 }
 /**
@@ -1740,65 +1824,57 @@ function invalidAvatarError(avatar) {
 * 生成「打工人不在登记表里」错误。
 *
 */
-function unknownWorkerError(name) {
-	const error = /* @__PURE__ */ new Error(`打工人不在登记表里：${name}`);
+function unknownWorkerError(id) {
+	const error = /* @__PURE__ */ new Error(`打工人不在登记表里：${id}`);
 	return Object.assign(error, { code: "unknown-worker" });
 }
 /**
-* 新建（或复用）一个智能体：建目录、补 AGENTS.md 模板、把条目插到
-* 登记表最前。
+* 新建一个智能体：按标识符建目录、补 AGENTS.md 模板、把条目插到登记表最前。
 *
-* - 内建机器人（clock）不可创建，program 条目不可被同名复用；
-* - 头像：传入合法 id 就用它，否则按名字挑一个还被占用的预设；新建的打工人
-*   一定带头像；
-* - 描述可选，存成一行摘要（空白折叠）；新建时写进条目，同名已登记时保留原描述；
-* - 同名已登记：不重复建条目，`created: false`；目录被外部删掉时重新建目录；
-* - 名称不合法抛 `code = 'invalid-name'`；内建名抛 `code = 'builtin-worker'`；
+* - `id` 必填，必须匹配新标识符字符集；标识符已登记时抛 `id-taken`（id 冲突
+*   必须拒绝，不会静默复用已有条目）；
+* - 内建机器人（clock）的标识符不可创建；
+* - 头像：传入合法 id 就用它，否则按标识符挑一个还没被占用的预设；新建的
+*   打工人一定带头像；
+* - 描述可选，存成一行摘要（空白折叠）；
+* - 展示名可选，空串表示未设置；
+* - 标识符不合法抛 `code = 'invalid-id'`；内建 id 抛 `code = 'builtin-worker'`；
 *   登记文件损坏抛 `code = 'registry-unreadable'`（不覆盖原文件）；
 * - 新条目的 `path` 是创建后的规范绝对路径（`fs.realpath`，失败回退解析值），
 *   这样和工作区注册表里的路径能直接对齐。
 *
 */
-async function addWorker({ workersDir, file, name, avatar, description } = {}) {
+async function addWorker({ workersDir, file, id, name, avatar, description } = {}) {
 	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
-	if (isBuiltinWorkerName(name)) throw builtinWorkerError(name);
+	if (!isValidWorkerId(id)) throw invalidIdError(id);
+	const workerId = id.trim();
+	if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId);
+	const workerName = normalizeWorkerNameInput(name);
 	const rawDescription = description === void 0 || description === null ? "" : description;
 	if (typeof rawDescription !== "string") throw invalidDescriptionError(rawDescription);
 	const cleanDescription = normalizeWorkerDescription(rawDescription);
 	if (cleanDescription.length > 500) throw invalidDescriptionError(rawDescription);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = name.trim();
-	const existing = registry.workers.find((worker) => worker.name === trimmed);
-	if (existing !== void 0) {
-		if (existing.driver !== "agent") throw robotWorkerError(trimmed);
-		await ensureWorkerDirectory(existing.path, trimmed);
-		return {
-			worker: {
-				...existing,
-				avatar: resolveAvatar(existing.avatar, existing.name)
-			},
-			created: false
-		};
-	}
-	const target = workerDirectory(workersDir, trimmed);
-	if (target === null) throw invalidNameError(trimmed);
-	const canonical = await ensureWorkerDirectory(target, trimmed);
-	const used = registry.workers.map((worker) => resolveAvatar(worker.avatar, worker.name));
+	if (registry.workers.find((worker) => worker.id === workerId) !== void 0) throw idTakenError(workerId);
+	const target = workerDirectory(workersDir, workerId);
+	if (target === null) throw invalidIdError(workerId);
+	const canonical = await ensureWorkerDirectory(target, workerName === "" ? workerId : workerName);
+	const used = registry.workers.map((worker) => resolveAvatar(worker.avatar, worker.id));
 	const worker = {
-		name: trimmed,
+		id: workerId,
+		name: workerName,
 		driver: "agent",
 		path: canonical,
 		program: "",
 		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-		avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(trimmed, used),
+		avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(workerId, used),
 		description: cleanDescription,
 		assistant: false
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: [worker, ...registry.workers.filter((entry) => entry.name !== trimmed)]
+		workers: [worker, ...registry.workers]
 	});
 	return {
 		worker,
@@ -1806,31 +1882,79 @@ async function addWorker({ workersDir, file, name, avatar, description } = {}) {
 	};
 }
 /**
+* 定位一个已有打工人：接受新标识符与迁移来的旧标识符。
+*
+*/
+function findWorker(registry, id) {
+	return registry.workers.find((worker) => worker.id === id);
+}
+/**
+* 改一个智能体的展示名：只动登记表里的 `name` 字段，不碰目录与工作区。
+*
+* - `id` 是标识符（新格式或迁移来的旧标识符都接受），不可修改；
+* - 展示名可随时改、不要求唯一；空串表示清空（之后显示标识符）；
+* - 名称没变时返回 `renamed: false`，不写文件；
+* - 标识符不合法抛 `code = 'invalid-id'`；展示名不合法抛
+*   `code = 'invalid-name'`；id 不在登记表里抛 `code = 'unknown-worker'`；
+*   机器人只读，抛 `code = 'robot-worker'`。
+*
+*/
+async function setWorkerName({ file, id, name } = {}) {
+	const registryFile = requireRegistryFile(file);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
+	const workerId = id.trim();
+	const nextName = normalizeWorkerNameInput(name);
+	const registry = await readWorkerRegistry({ file: registryFile });
+	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
+	const current = findWorker(registry, workerId);
+	if (current === void 0) throw unknownWorkerError(workerId);
+	if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
+	if (current.name === nextName) return {
+		worker: current,
+		previousName: current.name,
+		renamed: false
+	};
+	const worker = {
+		...current,
+		name: nextName
+	};
+	await writeWorkerRegistry({
+		file: registryFile,
+		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
+	});
+	return {
+		worker,
+		previousName: current.name,
+		renamed: true
+	};
+}
+/**
 * 改一个智能体的头像：只动登记表里的 `avatar` 字段，不碰目录与工作区。
 *
 * - 头像 id 不属于预设集合抛 `code = 'invalid-avatar'`；
-* - 名字不在登记表里抛 `code = 'unknown-worker'`；
+* - 标识符不在登记表里抛 `code = 'unknown-worker'`；
 * - 机器人只读，抛 `code = 'robot-worker'`；
 * - 登记文件损坏抛 `code = 'registry-unreadable'`。
 *
 */
-async function setWorkerAvatar({ file, name, avatar } = {}) {
+async function setWorkerAvatar({ file, id, avatar } = {}) {
 	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
 	if (!isAvatarId(avatar)) throw invalidAvatarError(avatar);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = name.trim();
-	const current = registry.workers.find((worker) => worker.name === trimmed);
-	if (current === void 0) throw unknownWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
+	const workerId = id.trim();
+	const current = findWorker(registry, workerId);
+	if (current === void 0) throw unknownWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
 	const worker = {
 		...current,
 		avatar
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: registry.workers.map((entry) => entry.name === trimmed ? worker : entry)
+		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
 	});
 	return { worker };
 }
@@ -1839,27 +1963,27 @@ async function setWorkerAvatar({ file, name, avatar } = {}) {
 *
 * - `model: null` 表示清除配置、跟随宿主默认模型；
 * - provider / model 必须是非空字符串，超长或类型不对抛 `code = 'invalid-model'`；
-* - 名字不在登记表里抛 `code = 'unknown-worker'`；
+* - 标识符不在登记表里抛 `code = 'unknown-worker'`；
 * - 机器人只读，抛 `code = 'robot-worker'`；
 * - 登记文件损坏抛 `code = 'registry-unreadable'`。
 */
-async function setWorkerModel({ file, name, model } = {}) {
+async function setWorkerModel({ file, id, model } = {}) {
 	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
 	const next = model === null || model === void 0 ? void 0 : normalizeWorkerModel(model);
 	if (model !== null && model !== void 0 && next === void 0) throw invalidModelError(model);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = name.trim();
-	const current = registry.workers.find((worker) => worker.name === trimmed);
-	if (current === void 0) throw unknownWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
+	const workerId = id.trim();
+	const current = findWorker(registry, workerId);
+	if (current === void 0) throw unknownWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
 	const worker = { ...current };
 	if (next === void 0) delete worker.model;
 	else worker.model = next;
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: registry.workers.map((entry) => entry.name === trimmed ? worker : entry)
+		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
 	});
 	return { worker };
 }
@@ -1871,25 +1995,25 @@ async function setWorkerModel({ file, name, model } = {}) {
 * 机器人只读，抛 `code = 'robot-worker'`。
 *
 */
-async function setWorkerDescription({ file, name, description } = {}) {
+async function setWorkerDescription({ file, id, description } = {}) {
 	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
 	if (typeof description !== "string") throw invalidDescriptionError(description);
 	const clean = normalizeWorkerDescription(description);
 	if (clean.length > 500) throw invalidDescriptionError(description);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = name.trim();
-	const current = registry.workers.find((worker) => worker.name === trimmed);
-	if (current === void 0) throw unknownWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
+	const workerId = id.trim();
+	const current = findWorker(registry, workerId);
+	if (current === void 0) throw unknownWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
 	const worker = {
 		...current,
 		description: clean
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: registry.workers.map((entry) => entry.name === trimmed ? worker : entry)
+		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
 	});
 	return { worker };
 }
@@ -1901,23 +2025,23 @@ async function setWorkerDescription({ file, name, description } = {}) {
 * `code = 'invalid-assistant'`。
 *
 */
-async function setWorkerAssistant({ file, name, assistant } = {}) {
+async function setWorkerAssistant({ file, id, assistant } = {}) {
 	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
 	if (typeof assistant !== "boolean") throw invalidAssistantError(assistant);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = name.trim();
-	const current = registry.workers.find((worker) => worker.name === trimmed);
-	if (current === void 0) throw unknownWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
+	const workerId = id.trim();
+	const current = findWorker(registry, workerId);
+	if (current === void 0) throw unknownWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
 	const worker = {
 		...current,
 		assistant
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: registry.workers.map((entry) => entry.name === trimmed ? worker : entry)
+		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
 	});
 	return { worker };
 }
@@ -1925,22 +2049,22 @@ async function setWorkerAssistant({ file, name, assistant } = {}) {
 * 从登记表移除一个智能体：**目录不删**（目录、文件与会话都保留）。
 *
 * - 内建机器人（clock）与其它机器人只读，拒绝移除；
-* - 登记文件损坏抛 `code = 'registry-unreadable'`；未知名字返回
+* - 登记文件损坏抛 `code = 'registry-unreadable'`；未知标识符返回
 *   `{ removed: false }`，不写文件。
 *
 */
-async function removeWorker({ file, name } = {}) {
+async function removeWorker({ file, id } = {}) {
 	const registryFile = requireRegistryFile(file);
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const trimmed = typeof name === "string" ? name.trim() : "";
-	const current = registry.workers.find((worker) => worker.name === trimmed);
+	const workerId = typeof id === "string" ? id.trim() : "";
+	const current = findWorker(registry, workerId);
 	if (current === void 0) return { removed: false };
-	if (isBuiltinWorkerName(trimmed)) throw builtinWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
+	if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId);
+	if (current.driver !== "agent") throw robotWorkerError(workerId);
 	await writeWorkerRegistry({
 		file: registryFile,
-		workers: registry.workers.filter((worker) => worker.name !== trimmed)
+		workers: registry.workers.filter((worker) => worker.id !== workerId)
 	});
 	return { removed: true };
 }
@@ -1953,7 +2077,7 @@ async function removeWorker({ file, name } = {}) {
 *
 * 机器人没有目录：不扫描 skills / AGENTS.md，`exists` 为 false，
 * 页面按 `driver` 只读展示。内建机器人在视图里补上，即使登记表还没
-* 落盘也能看到。
+* 落盘也能看到。目录、头像与引用一律按不可变标识符 `id` 解析。
 *
 * @module @buka/dsh-plugin-workers/store/list
 */
@@ -2005,7 +2129,7 @@ async function listWorkers({ file, workspaceRegistry, workersDir } = {}) {
 function programEntry(entry) {
 	return {
 		...entry,
-		avatar: resolveAvatar(entry.avatar, entry.name),
+		avatar: resolveAvatar(entry.avatar, entry.id),
 		exists: false,
 		mounted: false,
 		workspaceId: null,
@@ -2039,7 +2163,7 @@ async function agentEntry(entry, workspaceByPath) {
 	}
 	return {
 		...entry,
-		avatar: resolveAvatar(entry.avatar, entry.name),
+		avatar: resolveAvatar(entry.avatar, entry.id),
 		exists,
 		mounted: workspace !== void 0,
 		workspaceId: workspace === void 0 ? null : String(workspace.id),
@@ -2084,7 +2208,8 @@ async function indexWorkspaces(workspaceRegistry) {
 * 1. 默认布局下，把 `~/.cache/dsh-plugin-robots` 整个搬到
 *    `~/.cache/dsh-plugin-workers`；目标已存在时不覆盖；
 * 2. 目录里旧的 `robots/` 与 `robots.json` 改成 `workers/` 与 `workers.json`；
-* 3. 登记表是 version 1 / 2 时重写成 version 3（`driver: "program"` → `"robot"`）。
+* 3. 登记表是 version 1 / 2 / 3 时重写成 version 4（`id` 取旧 `name`、`name`
+*    置空；`driver: "program"` → `"robot"`）。
 *
 * 自定义 `workersDir` 时只做第 3 步：插件不知道用户的旧目录在哪，也不该猜。
 *
@@ -2161,6 +2286,7 @@ async function readStoredVersion(file) {
 }
 /**
 * 把旧格式登记表重写成当前版本，并把落在旧根目录里的 `path` 平移到新根目录。
+* 旧条目迁移后的 `id` 就是它原来的 `name`，所以路径平移按同一段相对路径计算；
 * 已经是最新且路径无需平移、或文件损坏时什么都不做（损坏的文件绝不能被覆盖）。
 */
 async function upgradeRegistry(registryFile, legacyRoots, workersDir, logger) {
@@ -2171,7 +2297,7 @@ async function upgradeRegistry(registryFile, legacyRoots, workersDir, logger) {
 		logger?.warn?.("buka-workers: 登记文件无法读取，跳过格式迁移：%s", registryFile);
 		return false;
 	}
-	let changed = stored < 3;
+	let changed = stored < 4;
 	const workers = registry.workers.map((worker) => {
 		if (worker.driver !== "agent" || worker.path === "") return worker;
 		for (const legacyRoot of legacyRoots) {
@@ -2191,7 +2317,7 @@ async function upgradeRegistry(registryFile, legacyRoots, workersDir, logger) {
 		file: registryFile,
 		workers
 	});
-	if (stored < 3) logger?.info?.("buka-workers: 登记表已从 version %s 迁移到 version %s", stored, 3);
+	if (stored < 4) logger?.info?.("buka-workers: 登记表已从 version %s 迁移到 version %s", stored, 4);
 	else logger?.info?.("buka-workers: 已把登记表里的旧目录路径平移到新根目录");
 	return true;
 }
@@ -2220,121 +2346,50 @@ async function migrateWorkerStore(options) {
 }
 // .build/workers/store/rename.js
 /**
-* 打工人重命名：移动目录并就地更新登记表。
+* 打工人改名：只改展示名，不移动目录、不重建工作区。
 *
-* 工作区重建由 `builder.ts` 负责；本模块只动磁盘与登记表，失败时把目录改回
-* 旧名，保证磁盘与登记表仍然一致。
+* 标识符 `id` 是不可变引用键，也是智能体目录名；因此「改名」只更新登记表里的
+* `name`（可选展示名）。目录位置、工作区注册、AGENTS.md 与历史会话都保持原样，
+* 引用该打工人的工作流与作业也不会断链。工作区标题由构建 / 改名流程按展示名
+* 同步（见 `builder.ts`），本模块只碰登记表。
 *
 * @module @buka/dsh-plugin-workers/store/rename
 */
 /**
-* 重命名一个打工人：把打工人目录改名为新名字，并就地更新登记表里的
-* `name` 与 `path`。
+* 改一个打工人的展示名；`id` 定位打工人且不可修改。
 *
-* - 名称规则与新建一致；新名等于旧名时按 no-op 返回（`renamed: false`），
-*   不碰磁盘与登记表；
-* - 新名不能与登记表里其它打工人重名，也不能与 `workersDir` 下已存在的目录
-*   重名（抛 `code = 'name-taken'`），避免两个登记条目指向同一个目录；
-* - 大小写不敏感的文件系统（macOS 默认）上允许只改大小写：目标路径与旧目录
-*   是同一个目录时继续改名，而不是误判成「目标已存在」；
-* - 只移动 `workersDir` 的直接子目录：登记表被手改到别处时拒绝
-*   （`code = 'path-outside-root'`），不会把用户目录搬进打工人根目录；
-* - 条目里的 `createdAt` / `avatar` / `description` 不变，`avatar` 按**旧名**
-*   解析成具体 id 后写回，避免旧记录缺头像时改名让头像跟着名字哈希漂移；
-* - `AGENTS.md` 仍与旧名 / 旧路径生成的模板完全一致时改写为新模板，用户改过
-*   就保持原样（不覆盖用户内容）；
-* - 登记表写失败时把目录改回旧名再抛错，失败后磁盘与登记表仍然一致。
-*
-* 目录改名后 `CLAUDE.md` 的相对软链接自然继续有效；工作区重建由
-* `builder.js` 负责（本模块不 import DSH 包）。
+* - 名称规则与登记表一致：单行文本、不超过上限；空串表示清空（显示标识符）；
+* - 名称没变时 `renamed: false`，不写文件；
+* - 机器人只读；内建 clock 不可改；未知标识符抛 `code = 'unknown-worker'`；
+* - 目录不存在不影响改展示名——这里不碰磁盘。
 *
 */
-async function renameWorker({ workersDir, file, name, newName } = {}) {
-	const registryFile = requireRegistryFile(file);
-	if (!isValidWorkerName(name)) throw invalidNameError(name);
-	const trimmed = name.trim();
-	const nextName = typeof newName === "string" ? newName.trim() : "";
-	if (!isValidWorkerName(nextName)) throw invalidNameError(newName);
-	const registry = await readWorkerRegistry({ file: registryFile });
-	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const current = registry.workers.find((worker) => worker.name === trimmed);
-	if (current === void 0) throw unknownWorkerError(trimmed);
-	if (current.driver !== "agent") throw robotWorkerError(trimmed);
-	if (isBuiltinWorkerName(nextName)) throw builtinWorkerError(nextName);
-	if (nextName === current.name) return {
-		worker: {
-			...current,
-			avatar: resolveAvatar(current.avatar, current.name)
-		},
-		previousName: current.name,
-		renamed: false,
-		agentsRewritten: false
-	};
-	if (registry.workers.some((worker) => worker.name === nextName)) throw Object.assign(/* @__PURE__ */ new Error(`打工人名称已被占用：${nextName}`), { code: "name-taken" });
-	const configuredRoot = typeof workersDir === "string" && workersDir.trim() !== "" ? path.resolve(workersDir) : path.resolve(defaultWorkersRoot());
-	const root = await realpathOr(configuredRoot, configuredRoot);
-	const oldDirectory = path.resolve(current.path);
-	if (await realpathOr(path.dirname(oldDirectory), path.dirname(oldDirectory)) !== root) throw Object.assign(/* @__PURE__ */ new Error(`打工人目录不在打工人根目录下，拒绝重命名：${oldDirectory}`), { code: "path-outside-root" });
-	if (!await isDirectory(oldDirectory)) throw Object.assign(/* @__PURE__ */ new Error(`打工人目录不存在或不是目录：${oldDirectory}`), { code: "missing-directory" });
-	const target = path.join(root, nextName);
-	let targetExists = false;
-	try {
-		await promises.lstat(target);
-		targetExists = true;
-	} catch {
-		targetExists = false;
-	}
-	if (targetExists) {
-		const [targetReal, oldReal] = await Promise.all([realpathOrNull(target), realpathOrNull(oldDirectory)]);
-		if (targetReal === null || oldReal === null || targetReal !== oldReal) throw Object.assign(/* @__PURE__ */ new Error(`目标目录已存在，无法重命名为 ${nextName}：${target}`), { code: "name-taken" });
-	}
-	try {
-		await promises.rename(oldDirectory, target);
-	} catch (error) {
-		const reason = error instanceof Error ? error.message : String(error);
-		throw Object.assign(/* @__PURE__ */ new Error(`重命名打工人目录失败：${reason}`), {
-			code: "rename-failed",
-			cause: error
-		});
-	}
-	const canonical = await realpathOr(target, target);
-	const next = {
-		...current,
-		name: nextName,
-		path: canonical,
-		avatar: resolveAvatar(current.avatar, current.name)
-	};
-	try {
-		await writeWorkerRegistry({
-			file: registryFile,
-			workers: registry.workers.map((worker) => worker.name === current.name ? next : worker)
-		});
-	} catch (error) {
-		try {
-			await promises.rename(canonical, oldDirectory);
-		} catch {}
-		throw error;
-	}
-	let agentsRewritten = false;
-	try {
-		const agentsFile = path.join(canonical, AGENTS_FILE);
-		if (await promises.readFile(agentsFile, "utf8") === workerAgentsTemplate(current.name, oldDirectory)) {
-			await promises.writeFile(agentsFile, workerAgentsTemplate(nextName, canonical), "utf8");
-			agentsRewritten = true;
-		}
-	} catch {}
-	try {
-		await ensureClaudeLink(canonical);
-	} catch {}
-	return {
-		worker: {
-			...next,
-			avatar: resolveAvatar(next.avatar, next.name)
-		},
-		previousName: current.name,
-		renamed: true,
-		agentsRewritten
-	};
+async function renameWorker({ file, id, name } = {}) {
+	return await setWorkerName({
+		file,
+		id,
+		name
+	});
+}
+// .build/workers/store/types.js
+/**
+* 打工人存储层的数据结构。
+*
+* 登记表是 version 4：每个打工人有不可变标识符 `id`（目录名与引用键）、可选
+* 展示名 `name`（空串表示未设置、显示标识符）、`driver`（agent / robot）与
+* `assistant` 标记。智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，
+* 没有目录，只登记 `program` id（稳定契约，v1 只有 `clock`）。
+*
+* @module @buka/dsh-plugin-workers/store/types
+*/
+/**
+* 打工人的展示名：`name` 非空时用它，否则回退到标识符。
+*
+*/
+function workerDisplayName(worker) {
+	const name = typeof worker.name === "string" ? worker.name.trim() : "";
+	if (name !== "") return name;
+	return typeof worker.id === "string" ? worker.id : "";
 }
 // .build/workers/model-apply.js
 /**
@@ -2430,7 +2485,7 @@ async function applyWorkerModel(ctx, registryFile, payload) {
 		model: target.model.model,
 		...target.model.reasoningEffort === void 0 ? {} : { reasoningEffort: target.model.reasoningEffort }
 	});
-	ctx.logger?.info?.("buka-workers: 已为打工人 %s 的新会话选择模型 %s/%s", target.name, target.model.provider, target.model.model);
+	ctx.logger?.info?.("buka-workers: 已为打工人 %s 的新会话选择模型 %s/%s", target.id, target.model.provider, target.model.model);
 }
 /**
 * 注册 `agent/created` 监听；插件卸载时随 effect 一起撤销。
@@ -2555,10 +2610,11 @@ function sendMethodNotAllowed(res, allow) {
 }
 // .build/workers/routes/target.js
 /**
-* 按 name 解析打工人并确认目录仍在。
+* 按标识符解析打工人并确认目录仍在。
 *
-* 打工人路由与 skills 路由共用的前置步骤：登记表损坏、名称不合法、条目不存在
-* 与目录缺失各自映射成稳定的错误码，由调用方按 HTTP 状态码回给页面。
+* 打工人路由与 skills 路由共用的前置步骤：登记表损坏、标识符不合法、条目不存在
+* 与目录缺失各自映射成稳定的错误码，由调用方按 HTTP 状态码回给页面。标识符
+* 接受新格式与迁移来的旧格式（`isResolvableWorkerId`）。
 *
 * @module @buka/dsh-plugin-workers/routes/target
 */
@@ -2574,19 +2630,19 @@ function registryUnreadableError(registryFile) {
 	};
 }
 /**
-* 按 name 从登记表里取打工人，并确认它的目录还在。
+* 按标识符从登记表里取打工人，并确认它的目录还在。
 *
 */
-async function resolveWorker(registryFile, name) {
+async function resolveWorker(registryFile, id) {
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) return { error: registryUnreadableError(registryFile) };
-	const trimmed = typeof name === "string" ? name.trim() : "";
-	if (!isValidWorkerName(trimmed)) return { error: {
+	const trimmed = typeof id === "string" ? id.trim() : "";
+	if (!isResolvableWorkerId(trimmed)) return { error: {
 		status: 400,
-		code: "invalid-name",
-		message: `打工人名称不合法：${String(name)}`
+		code: "invalid-id",
+		message: `打工人标识符不合法：${String(id)}`
 	} };
-	const worker = registry.workers.find((entry) => entry.name === trimmed);
+	const worker = registry.workers.find((entry) => entry.id === trimmed);
 	if (worker === void 0) return { error: {
 		status: 404,
 		code: "unknown-worker",
@@ -2722,7 +2778,7 @@ function registerSkillRoutes(webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const resolved = await resolveWorker(registryFile, body?.name);
+			const resolved = await resolveWorker(registryFile, body?.id);
 			if (resolved.error !== void 0) {
 				sendWorkerError(res, resolved.error);
 				return;
@@ -2782,7 +2838,7 @@ function registerSkillRoutes(webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const resolved = await resolveWorker(registryFile, body?.name);
+			const resolved = await resolveWorker(registryFile, body?.id);
 			if (resolved.error !== void 0) {
 				sendWorkerError(res, resolved.error);
 				return;
@@ -2837,7 +2893,7 @@ function registerSkillRoutes(webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const resolved = await resolveWorker(registryFile, body?.name);
+			const resolved = await resolveWorker(registryFile, body?.id);
 			if (resolved.error !== void 0) {
 				sendWorkerError(res, resolved.error);
 				return;
@@ -2888,6 +2944,8 @@ function registerSkillRoutes(webCtx, deps) {
 * - 本模块负责「一次构建」的语义：参数规范化、已存在打工人必须显式
 *   `update: true` 才允许覆盖、写 AGENTS.md 后补 CLAUDE.md 链接、按规范路径
 *   判断是否已挂载并只在需要时创建 DSH 工作区；
+* - 改名（`update: true` 且传了 `name`）只改展示名：目录不移动、工作区注册
+*   不重建，只把已挂载工作区的标题同步成新的展示名；
 * - 挂载失败不让整个构建失败：打工人已经建好了，返回 `mounted: false` 与
 *   `mountError`，由调用方告诉用户去页面点「挂载」。
 *
@@ -2898,6 +2956,7 @@ function registerSkillRoutes(webCtx, deps) {
 */
 /** 构建请求的错误码；工具层按这些码给出可读提示。 */
 const BUILD_ERROR_CODES = Object.freeze({
+	invalidId: "invalid-id",
 	invalidName: "invalid-name",
 	invalidAvatar: "invalid-avatar",
 	invalidDescription: "invalid-description",
@@ -2909,9 +2968,7 @@ const BUILD_ERROR_CODES = Object.freeze({
 	builtinWorker: "builtin-worker",
 	robotWorker: "robot-worker",
 	unknownWorker: "unknown-worker",
-	nameTaken: "name-taken",
-	missingDirectory: "missing-directory",
-	pathOutsideRoot: "path-outside-root"
+	idTaken: "id-taken"
 });
 /**
 * 带错误码的构建错误。
@@ -2923,18 +2980,25 @@ function buildError(code, message) {
 /**
 * 规范化一次构建请求；不合法时抛带错误码的 `Error`。
 *
-* - `name` 先 trim 再按打工人名称规则校验；
+* - `id` 必填且不可修改：创建时必须是新标识符字符集，更新时也接受迁移来的
+*   旧标识符（由 `buildWorker` 按「是否已登记」区分）；
+* - `name` 是可选展示名：缺省 / null 表示「不改」（新建时为空）；给了就必须
+*   是单行文本，空白会折叠；空串表示清空，展示时回退到标识符；
 * - `avatar` 缺省 / 空串表示「不指定」（新建时自动分配）；给了就必须是预设 id；
 * - `description` 是一行摘要，空白会折叠；缺省 / 空串表示「不改」（新建时为空）；
 * - `agents` 是完整 AGENTS.md 文本，只有全空白时视为「不写」，避免误清空；
-* - `update` 必须是布尔值，缺省按 `false` 处理；
-* - `newName` 是可选的新名字：给了就必须合法，且必须 `update: true`（改名只针对
-*   已存在的打工人）；与 `name` 相同时按「不改名」处理。
+* - `update` 必须是布尔值，缺省按 `false` 处理。
 *
 */
 function normalizeBuildRequest(input = {}) {
-	const name = typeof input.name === "string" ? input.name.trim() : "";
-	if (!isValidWorkerName(name)) throw buildError(BUILD_ERROR_CODES.invalidName, "invalid worker name: use 1-64 characters, do not start with a dot, and allow only letters, digits, Chinese, \".\", \"_\" and \"-\".");
+	const rawId = typeof input.id === "string" ? input.id.trim() : "";
+	if (rawId === "" || !isResolvableWorkerId(rawId)) throw buildError(BUILD_ERROR_CODES.invalidId, "invalid worker identifier: pass the immutable id of the worker; a new id must match ^[a-z][a-z0-9_-]{0,63}$.");
+	const nameProvided = input.name !== void 0 && input.name !== null;
+	let name = "";
+	if (nameProvided) {
+		if (!isValidWorkerName(input.name)) throw buildError(BUILD_ERROR_CODES.invalidName, "invalid worker name: use a single line of at most 64 characters, or leave it empty to show the identifier.");
+		name = normalizeWorkerName(input.name);
+	}
 	let avatar = "";
 	if (input.avatar !== void 0 && input.avatar !== null && input.avatar !== "") {
 		if (!isAvatarId(input.avatar)) throw buildError(BUILD_ERROR_CODES.invalidAvatar, `unknown avatar id "${String(input.avatar)}"; use one of: ${AVATAR_IDS.join(", ")}.`);
@@ -2953,21 +3017,15 @@ function normalizeBuildRequest(input = {}) {
 	if (agentsBytes > 524288) throw buildError(BUILD_ERROR_CODES.agentsTooLarge, `AGENTS.md is ${agentsBytes} bytes; the limit is ${AGENTS_MAX_WRITE_BYTES} bytes. Shorten it or use the page editor.`);
 	if (input.update !== void 0 && typeof input.update !== "boolean") throw buildError(BUILD_ERROR_CODES.invalidUpdate, "update must be a boolean.");
 	const update = input.update === true;
-	let newName = "";
-	if (input.newName !== void 0 && input.newName !== null && typeof input.newName !== "string") throw buildError(BUILD_ERROR_CODES.invalidName, "newName must be a string.");
-	if (typeof input.newName === "string" && input.newName.trim() !== "") {
-		newName = input.newName.trim();
-		if (!isValidWorkerName(newName)) throw buildError(BUILD_ERROR_CODES.invalidName, "invalid new worker name: use 1-64 characters, do not start with a dot, and allow only letters, digits, Chinese, \".\", \"_\" and \"-\".");
-		if (!update) throw buildError(BUILD_ERROR_CODES.invalidUpdate, "renaming an existing worker requires update: true; pass it only when the user asked to rename that worker.");
-	}
 	return {
+		id: rawId,
 		name,
+		nameProvided,
 		avatar,
 		description,
 		agents,
 		agentsBytes,
-		update,
-		newName
+		update
 	};
 }
 /**
@@ -3004,23 +3062,43 @@ async function currentMount({ workspaceRegistry, workerPath } = {}) {
 	return null;
 }
 /**
-* 确保打工人目录已挂成 DSH 工作区。
+* 把已挂载工作区的标题同步成打工人当前展示名。
 *
-* 已挂载时不动它（不重命名、不重排）；未挂载时用 `workspaceRegistry.create()`
-* 注册，标题交给注册表按目录名生成。挂载失败（注册表不可用、目录冲突等）不抛错，
-* 而是返回失败原因，让打工人本身仍然可用。
+* 标题只是展示：同步失败（工作区记录不提供 `setTitle`、写入失败）不影响构建
+* 结果，目录、登记表与引用都不受影响。
 *
 */
-async function mountWorker({ workspaceRegistry, workerPath } = {}) {
+async function syncWorkspaceTitle(workspace, title) {
+	if (workspace === null || typeof workspace?.setTitle !== "function") return;
+	const text = typeof title === "string" ? title.trim() : "";
+	if (text === "") return;
+	if (typeof workspace.title === "string" && workspace.title === text) return;
+	try {
+		await workspace.setTitle(text);
+	} catch {}
+}
+/**
+* 确保打工人目录已挂成 DSH 工作区。
+*
+* 已挂载时不动它（不重命名、不重排），只按需同步工作区标题；未挂载时用
+* `workspaceRegistry.create(path, title)` 注册，标题用打工人展示名（空名时传
+* 标识符）。挂载失败（注册表不可用、目录冲突等）不抛错，而是返回失败原因，
+* 让打工人本身仍然可用。
+*
+*/
+async function mountWorker({ workspaceRegistry, workerPath, title } = {}) {
 	const existing = await currentMount({
 		workspaceRegistry,
 		workerPath
 	});
-	if (existing !== null) return {
-		mounted: true,
-		workspaceId: existing.id ?? null,
-		mountError: null
-	};
+	if (existing !== null) {
+		await syncWorkspaceTitle(existing, title);
+		return {
+			mounted: true,
+			workspaceId: existing.id ?? null,
+			mountError: null
+		};
+	}
 	if (typeof workspaceRegistry?.create !== "function") return {
 		mounted: false,
 		workspaceId: null,
@@ -3029,7 +3107,7 @@ async function mountWorker({ workspaceRegistry, workerPath } = {}) {
 	try {
 		return {
 			mounted: true,
-			workspaceId: (await workspaceRegistry.create(workerPath))?.id ?? null,
+			workspaceId: (await workspaceRegistry.create(workerPath, title))?.id ?? null,
 			mountError: null
 		};
 	} catch (error) {
@@ -3041,94 +3119,97 @@ async function mountWorker({ workspaceRegistry, workerPath } = {}) {
 	}
 }
 /**
-* 创建、修改或重命名一个打工人，并确保它已挂到工作区。
+* 创建或更新一个打工人，并确保它已挂到工作区。
 *
-* - 名字已存在且没有传 `update: true`：拒绝，避免模型顺手覆盖用户的打工人；
-* - 已存在且 `update: true`：只改传了的字段（头像 / 描述 / AGENTS.md），目录与
-*   `createdAt` 不变；描述为空串表示保留原描述；
-* - 传了 `newName` 且与 `name` 不同：先把打工人目录改名、就地更新登记表，再
-*   应用其它字段；改名前已挂载时删除旧工作区注册，最后按新路径重挂
-*   （新工作区 id / 标题 = 新名；旧会话日志保留，但不再挂在这个打工人下）；
-*   `newName` 必须配 `update: true`，且 `name` 必须已存在；
-* - 新建：建目录、写默认模板（没给 `agents` 时）、登记、按需写 AGENTS.md；
-* - 所有情况都补 `CLAUDE.md` 链接，再确保工作区挂载。
+* - `id` 必填且不可修改；已登记的标识符没有 `update: true` 时拒绝，避免模型
+*   顺手覆盖用户的打工人；新建时 `id` 必须匹配新标识符字符集；
+* - 已存在且 `update: true`：只改传了的字段（名称 / 头像 / 描述 / AGENTS.md），
+*   目录与 `createdAt` 不变；描述为空串表示保留原描述；
+* - 传了 `name` 且与当前展示名不同：只改展示名（`renamed: true`），目录不动、
+*   工作区注册不重建，只同步已挂载工作区的标题；
+* - 新建：按标识符建目录、写默认模板（没给 `agents` 时）、登记、按需写
+*   AGENTS.md；
+* - 所有情况都补 `CLAUDE.md` 链接（新建时），再确保工作区挂载。
 *
 */
-async function buildWorker({ workersDir, file, name, avatar, description, agents, update, newName, workspaceRegistry } = {}) {
+async function buildWorker({ workersDir, file, id, name, avatar, description, agents, update, workspaceRegistry } = {}) {
 	const request = normalizeBuildRequest({
+		id,
 		name,
 		avatar,
 		description,
 		agents,
-		update,
-		newName
+		update
 	});
-	if (isBuiltinWorkerName(request.name)) throw buildError(BUILD_ERROR_CODES.builtinWorker, `"${request.name}" is a built-in robot and cannot be created, changed or removed; robots are registered by the plugin.`);
-	if (request.newName !== "" && isBuiltinWorkerName(request.newName)) throw buildError(BUILD_ERROR_CODES.builtinWorker, `"${request.newName}" is a built-in robot name and cannot be used as a new worker name.`);
+	if (isBuiltinWorkerId(request.id)) throw buildError(BUILD_ERROR_CODES.builtinWorker, `"${request.id}" is a built-in robot identifier and cannot be created, changed or removed; robots are registered by the plugin.`);
 	const registry = await readWorkerRegistry({ file });
 	if (registry.corrupt) throw buildError(BUILD_ERROR_CODES.registryUnreadable, `the worker registry is unreadable: ${String(file)}. Fix or remove that file, then try again.`);
-	const existing = registry.workers.find((worker) => worker.name === request.name);
-	if (existing !== void 0 && existing.driver !== "agent") throw buildError(BUILD_ERROR_CODES.robotWorker, `"${request.name}" is a robot: robots are read-only and cannot be changed by this tool.`);
-	if (existing !== void 0 && !request.update) throw buildError(BUILD_ERROR_CODES.workerExists, `worker "${request.name}" already exists; pass update: true only when the user asked to change that worker.`);
-	let activeName = request.name;
+	const existing = registry.workers.find((worker) => worker.id === request.id);
+	let worker;
+	let created = false;
+	let updated = false;
 	let renamed = false;
 	let previousName = null;
-	if (request.newName !== "" && request.newName !== request.name) {
-		if (existing === void 0) throw buildError(BUILD_ERROR_CODES.unknownWorker, `cannot rename "${request.name}": no worker with that name exists.`);
-		const mountBefore = await currentMount({
-			workspaceRegistry,
-			workerPath: existing.path
-		});
-		const moved = await renameWorker({
+	if (existing === void 0) {
+		if (!isValidWorkerId(request.id)) throw buildError(BUILD_ERROR_CODES.invalidId, `invalid new worker identifier "${request.id}": use ^[a-z][a-z0-9_-]{0,63}$.`);
+		worker = (await addWorker({
 			workersDir,
 			file,
-			name: request.name,
-			newName: request.newName
-		});
-		renamed = moved.renamed;
-		previousName = moved.renamed ? moved.previousName : null;
-		activeName = moved.worker.name;
-		if (renamed && mountBefore !== null && typeof workspaceRegistry?.delete === "function") try {
-			await workspaceRegistry.delete(mountBefore.id);
-		} catch {}
-	}
-	const added = await addWorker({
-		workersDir,
-		file,
-		name: activeName,
-		avatar: request.avatar,
-		description: request.description
-	});
-	let worker = added.worker;
-	const created = added.created;
-	let updated = renamed;
-	if (!created && request.avatar !== "" && request.avatar !== worker.avatar) {
-		worker = (await setWorkerAvatar({
-			file,
-			name: activeName,
-			avatar: request.avatar
-		})).worker;
-		updated = true;
-	}
-	if (!created && request.description !== "" && request.description !== worker.description) {
-		worker = (await setWorkerDescription({
-			file,
-			name: activeName,
+			id: request.id,
+			name: request.nameProvided ? request.name : "",
+			avatar: request.avatar,
 			description: request.description
 		})).worker;
-		updated = true;
+		created = true;
+		if (request.agents !== "") await writeAgentsFile(worker.path, request.agents);
+	} else {
+		if (existing.driver !== "agent") throw buildError(BUILD_ERROR_CODES.robotWorker, `"${request.id}" is a robot: robots are read-only and cannot be changed by this tool.`);
+		if (!request.update) throw buildError(BUILD_ERROR_CODES.workerExists, `worker "${request.id}" already exists; pass update: true only when the user asked to change that worker.`);
+		worker = existing;
+		if (request.nameProvided && request.name !== existing.name) {
+			const result = await setWorkerName({
+				file,
+				id: request.id,
+				name: request.name
+			});
+			worker = result.worker;
+			renamed = result.renamed;
+			previousName = result.renamed ? result.previousName : null;
+			updated = updated || result.renamed;
+		}
+		if (request.avatar !== "" && request.avatar !== worker.avatar) {
+			worker = (await setWorkerAvatar({
+				file,
+				id: request.id,
+				avatar: request.avatar
+			})).worker;
+			updated = true;
+		}
+		if (request.description !== "" && request.description !== worker.description) {
+			worker = (await setWorkerDescription({
+				file,
+				id: request.id,
+				description: request.description
+			})).worker;
+			updated = true;
+		}
+		if (request.agents !== "") {
+			await ensureWorkerDirectory(worker.path, workerDisplayName(worker));
+			await writeAgentsFile(worker.path, request.agents);
+			updated = true;
+		}
+		if (request.agents === "" && await pathIsDirectory(worker.path)) try {
+			await ensureClaudeLink(worker.path);
+		} catch {}
 	}
-	if (request.agents !== "") {
-		await writeAgentsFile(worker.path, request.agents);
-		updated = updated || !created;
-	}
-	await ensureClaudeLink(worker.path);
 	const mount = await mountWorker({
 		workspaceRegistry,
-		workerPath: worker.path
+		workerPath: worker.path,
+		title: workerDisplayName(worker)
 	});
 	return {
 		worker: {
+			id: worker.id,
 			name: worker.name,
 			driver: "agent",
 			path: worker.path,
@@ -3144,6 +3225,14 @@ async function buildWorker({ workersDir, file, name, avatar, description, agents
 		agentsBytes: request.agents === "" ? 0 : request.agentsBytes,
 		...mount
 	};
+}
+/** 路径是否存在且是目录；用于决定要不要补 CLAUDE.md 链接。 */
+async function pathIsDirectory(target) {
+	try {
+		return (await promises.stat(target)).isDirectory();
+	} catch {
+		return false;
+	}
 }
 /**
 * 把任意错误转成可以展示的文本。
@@ -3217,11 +3306,12 @@ async function revealDirectory(target) {
 * 「打工人」页面的打工人相关 HTTP 路由。
 *
 * 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、助理标记、
-* 重命名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
-* 浏览器一半走 DSH Client Service，这里只处理磁盘事实。
+* 改展示名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 /
+* 打开会话）都由浏览器一半走 DSH Client Service，这里只处理磁盘事实。
 *
-* 机器人（内建 clock）只读：创建 / 删除 / 改名 / 改字段都会被拒绝，
-* 助理标记只对智能体开放。
+* 打工人按不可变标识符 `id` 寻址；`name` 只是可选展示名。创建时 `id` 必填，
+* 之后任何入口都不能改它。机器人（内建 clock）只读：创建 / 删除 / 改名 /
+* 改字段都会被拒绝，助理标记只对智能体开放。
 *
 * @module @buka/dsh-plugin-workers/routes/workers
 */
@@ -3239,7 +3329,7 @@ const MODELS_ROUTE = "/buka-workers/models";
 const MODEL_ROUTE = "/buka-workers/model";
 /** 页面标记 / 取消助理（只有智能体可设）用的路由。 */
 const ASSISTANT_ROUTE = "/buka-workers/assistant";
-/** 页面重命名打工人（改目录 + 重建工作区）用的路由。 */
+/** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = "/buka-workers/rename";
 /** 页面删除打工人（只删登记）用的路由。 */
 const REMOVE_ROUTE = "/buka-workers/remove";
@@ -3293,9 +3383,9 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", "打工人名称不合法：需要 1–64 个字符，不能以点开头，只能包含字母、数字、汉字与 ._-。");
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isValidWorkerId(id)) {
+				sendError(res, 400, "invalid-id", "打工人标识符不合法：需要匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -）。");
 				return;
 			}
 			if (body?.driver !== void 0 && body.driver !== "agent") {
@@ -3312,19 +3402,28 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 				const result = await serializeRegistry(() => addWorker({
 					workersDir,
 					file: registryFile,
-					name,
+					id,
+					name: body?.name,
 					avatar,
 					description
 				}));
-				webCtx.logger?.info?.("buka-workers: 已登记打工人 %s（%s）", result.worker.name, result.worker.path);
+				webCtx.logger?.info?.("buka-workers: 已登记打工人 %s（%s，%s）", result.worker.id, result.worker.name, result.worker.path);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker,
 					created: result.created
 				});
 			} catch (error) {
+				if (errorCode(error) === "invalid-id") {
+					sendError(res, 400, "invalid-id", describeError$1(error));
+					return;
+				}
 				if (errorCode(error) === "invalid-name") {
 					sendError(res, 400, "invalid-name", describeError$1(error));
+					return;
+				}
+				if (errorCode(error) === "id-taken") {
+					sendError(res, 409, "id-taken", describeError$1(error));
 					return;
 				}
 				if (errorCode(error) === "invalid-description") {
@@ -3355,19 +3454,19 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
 			const avatar = typeof body?.avatar === "string" ? body.avatar.trim() : "";
 			try {
 				const result = await serializeRegistry(() => setWorkerAvatar({
 					file: registryFile,
-					name,
+					id,
 					avatar
 				}));
-				webCtx.logger?.info?.("buka-workers: 打工人 %s 的头像改为 %s", name, avatar);
+				webCtx.logger?.info?.("buka-workers: 打工人 %s 的头像改为 %s", id, avatar);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -3377,8 +3476,8 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 400, "invalid-avatar", describeError$1(error));
 					return;
 				}
-				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+				if (errorCode(error) === "invalid-id") {
+					sendError(res, 400, "invalid-id", describeError$1(error));
 					return;
 				}
 				if (errorCode(error) === "unknown-worker") {
@@ -3409,9 +3508,9 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
 			const description = body?.description;
@@ -3422,10 +3521,10 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			try {
 				const result = await serializeRegistry(() => setWorkerDescription({
 					file: registryFile,
-					name,
+					id,
 					description
 				}));
-				webCtx.logger?.info?.("buka-workers: 已更新打工人 %s 的描述", name);
+				webCtx.logger?.info?.("buka-workers: 已更新打工人 %s 的描述", id);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -3435,8 +3534,8 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 400, "invalid-description", `描述需要不超过 500 个字符的单行文本。`);
 					return;
 				}
-				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+				if (errorCode(error) === "invalid-id") {
+					sendError(res, 400, "invalid-id", describeError$1(error));
 					return;
 				}
 				if (errorCode(error) === "unknown-worker") {
@@ -3490,9 +3589,9 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
 			const model = body?.model;
@@ -3503,10 +3602,10 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			try {
 				const result = await serializeRegistry(() => setWorkerModel({
 					file: registryFile,
-					name,
+					id,
 					model: model === null || model === void 0 ? null : model
 				}));
-				webCtx.logger?.info?.("buka-workers: 智能体 %s 的模型已更新", name);
+				webCtx.logger?.info?.("buka-workers: 智能体 %s 的模型已更新", id);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -3516,8 +3615,8 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 400, "invalid-model", describeError$1(error));
 					return;
 				}
-				if (errorCode(error) === "invalid-name") {
-					sendError(res, 400, "invalid-name", describeError$1(error));
+				if (errorCode(error) === "invalid-id") {
+					sendError(res, 400, "invalid-id", describeError$1(error));
 					return;
 				}
 				if (errorCode(error) === "unknown-worker") {
@@ -3548,9 +3647,9 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
 			const assistant = body?.assistant;
@@ -3561,17 +3660,17 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			try {
 				const result = await serializeRegistry(() => setWorkerAssistant({
 					file: registryFile,
-					name,
+					id,
 					assistant
 				}));
-				webCtx.logger?.info?.("buka-workers: 打工人 %s 的助理标记改为 %s", name, String(assistant));
+				webCtx.logger?.info?.("buka-workers: 打工人 %s 的助理标记改为 %s", id, String(assistant));
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
 				});
 			} catch (error) {
 				switch (errorCode(error)) {
-					case "invalid-name":
+					case "invalid-id":
 					case "invalid-assistant":
 						sendError(res, 400, String(errorCode(error)), describeError$1(error));
 						return;
@@ -3602,60 +3701,58 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			const newName = typeof body?.newName === "string" ? body.newName.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
-			if (!isValidWorkerName(newName)) {
-				sendError(res, 400, "invalid-name", `新打工人名称不合法：${String(body?.newName)}`);
+			const name = body?.name;
+			if (name !== void 0 && name !== null && typeof name !== "string") {
+				sendError(res, 400, "invalid-name", "name 必须是字符串");
 				return;
 			}
-			if (name === newName) {
-				sendError(res, 400, "invalid-name", "新名称与当前名称相同");
-				return;
-			}
+			const nextName = typeof name === "string" ? name : "";
 			try {
-				const result = await serializeRegistry(() => buildWorker({
-					workersDir,
-					file: registryFile,
-					name,
-					newName,
-					update: true,
-					workspaceRegistry: ctx.workspaceRegistry
-				}));
-				webCtx.logger?.info?.("buka-workers: 打工人 %s 已重命名为 %s（%s）", name, result.worker.name, result.worker.path);
-				const agents = await readAgentsFile(result.worker.path);
+				const result = await serializeRegistry(async () => {
+					const registry = await readWorkerRegistry({ file: registryFile });
+					if (registry.corrupt) throw Object.assign(/* @__PURE__ */ new Error("registry corrupt"), { code: "registry-unreadable" });
+					if (!registry.workers.some((worker) => worker.id === id)) throw Object.assign(/* @__PURE__ */ new Error(`no worker with id ${id}`), { code: "unknown-worker" });
+					const renamed = await renameWorker({
+						file: registryFile,
+						id,
+						name: nextName
+					});
+					const mount = await mountWorker({
+						workspaceRegistry: ctx.workspaceRegistry,
+						workerPath: renamed.worker.path,
+						title: workerDisplayName(renamed.worker)
+					});
+					return {
+						...renamed,
+						mount
+					};
+				});
+				webCtx.logger?.info?.("buka-workers: 打工人 %s 的展示名改为 %s", result.worker.id, result.worker.name);
 				sendJson(res, 200, {
 					ok: true,
+					id: result.worker.id,
+					name: result.worker.name,
 					previousName: result.previousName,
 					renamed: result.renamed,
 					worker: result.worker,
-					agents,
-					mounted: result.mounted,
-					workspaceId: typeof result.workspaceId === "string" ? result.workspaceId : null,
-					mountError: result.mountError
+					mounted: result.mount.mounted,
+					workspaceId: typeof result.mount.workspaceId === "string" ? result.mount.workspaceId : null,
+					mountError: result.mount.mountError
 				});
 			} catch (error) {
 				switch (errorCode(error)) {
+					case "invalid-id":
 					case "invalid-name":
-						sendError(res, 400, "invalid-name", describeError$1(error));
-						return;
 					case "invalid-update":
-						sendError(res, 400, "invalid-update", describeError$1(error));
+						sendError(res, 400, String(errorCode(error)), describeError$1(error));
 						return;
 					case "unknown-worker":
 						sendError(res, 404, "unknown-worker", describeError$1(error));
-						return;
-					case "name-taken":
-						sendError(res, 409, "name-taken", describeError$1(error));
-						return;
-					case "missing-directory":
-						sendError(res, 409, "missing-directory", describeError$1(error));
-						return;
-					case "path-outside-root":
-						sendError(res, 409, "path-outside-root", describeError$1(error));
 						return;
 					case "registry-unreadable":
 						sendError(res, 409, "registry-unreadable", describeError$1(error));
@@ -3667,8 +3764,8 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 						sendError(res, 409, "robot-worker", describeError$1(error));
 						return;
 					default:
-						webCtx.logger?.warn?.("buka-workers: 重命名打工人失败：%s", describeError$1(error));
-						sendError(res, 500, "rename-failed", `重命名打工人失败：${describeError$1(error)}`);
+						webCtx.logger?.warn?.("buka-workers: 改展示名失败：%s", describeError$1(error));
+						sendError(res, 500, "rename-failed", `改展示名失败：${describeError$1(error)}`);
 				}
 			}
 		}
@@ -3684,20 +3781,20 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const name = typeof body?.name === "string" ? body.name.trim() : "";
-			if (!isValidWorkerName(name)) {
-				sendError(res, 400, "invalid-name", `打工人名称不合法：${String(body?.name)}`);
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
 				return;
 			}
 			try {
 				const result = await serializeRegistry(() => removeWorker({
 					file: registryFile,
-					name
+					id
 				}));
-				if (result.removed) webCtx.logger?.info?.("buka-workers: 已移除打工人登记 %s", name);
+				if (result.removed) webCtx.logger?.info?.("buka-workers: 已移除打工人登记 %s", id);
 				sendJson(res, 200, {
 					ok: true,
-					name,
+					id,
 					removed: result.removed
 				});
 			} catch (error) {
@@ -3725,7 +3822,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const resolved = await resolveWorker(registryFile, body?.name);
+			const resolved = await resolveWorker(registryFile, body?.id);
 			if (resolved.error !== void 0) {
 				sendWorkerError(res, resolved.error);
 				return;
@@ -3764,7 +3861,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			const body = await readJsonBody(req, res);
 			if (body === void 0) return;
-			const resolved = await resolveWorker(registryFile, body?.name);
+			const resolved = await resolveWorker(registryFile, body?.id);
 			if (resolved.error !== void 0) {
 				sendWorkerError(res, resolved.error);
 				return;
@@ -3808,6 +3905,7 @@ function registerRoutes(ctx, deps) {
 *
 */
 const PRESET_WORKERS = Object.freeze([{
+	id: "software-engineer",
 	name: "软件工程师",
 	avatar: "rocket",
 	description: "负责软件功能的设计与实现：写代码、修 bug、重构、跑测试、整理提交；用于编码、实现需求、修缺陷等开发任务。",
@@ -3828,6 +3926,7 @@ const PRESET_WORKERS = Object.freeze([{
 - 交付时说明改了什么、为什么这样改、以及验证方式。
 `
 }, {
+	id: "qa-engineer",
 	name: "质量保障工程师",
 	avatar: "owl",
 	description: "负责质量保障：设计并执行测试、检查覆盖率、回归验证、审查变更是否引入风险；用于测试、验收、质量把关等任务。",
@@ -3871,13 +3970,14 @@ async function seedPresetWorkers({ workersDir, file, workspaceRegistry } = {}) {
 		const result = await buildWorker({
 			workersDir,
 			file,
+			id: preset.id,
 			name: preset.name,
 			avatar: preset.avatar,
 			description: preset.description,
 			agents: preset.agents,
 			workspaceRegistry
 		});
-		if (result.created) seeded.push(result.worker.name);
+		if (result.created) seeded.push(result.worker.id);
 	}
 	return {
 		corrupt: false,
@@ -4026,21 +4126,25 @@ function seqOf(agent) {
 /**
 * 打工人列表里的一行：去掉 AGENTS.md 正文等大字段，只保留编排需要的摘要。
 *
-* `driver` / `assistant` / `program` 是工作流的执行者契约：智能体可以开会话，
-* 机器人（clock）由工作流按 `program` 驱动、不建会话。机器人没有目录，
+* `id` 是不可变标识符（引用键），`name` 是可选展示名（空串表示未设置，展示时
+* 回退到 `id`）；两者都原样给出，让消费方自己决定显示哪个。`driver` /
+* `assistant` / `program` 是工作流的执行者契约：智能体可以开会话，机器人
+* （clock）由工作流按 `program` 驱动、不建会话。机器人没有目录，
 * `exists` / `mounted` 恒为 false，`skills` 为空。
 *
 */
 function summarizeWorker(worker) {
 	const agents = worker?.agents ?? {};
 	return {
-		name: worker?.name ?? "",
+		id: typeof worker?.id === "string" ? worker.id : "",
+		name: typeof worker?.name === "string" ? worker.name : "",
+		displayName: workerDisplayName(worker ?? {}),
 		driver: worker?.driver === "robot" ? "robot" : "agent",
 		program: typeof worker?.program === "string" ? worker.program : "",
 		assistant: worker?.assistant === true,
 		path: worker?.path ?? "",
 		createdAt: worker?.createdAt ?? null,
-		avatar: resolveAvatar(worker?.avatar, worker?.name),
+		avatar: resolveAvatar(worker?.avatar, worker?.id),
 		description: typeof worker?.description === "string" ? worker.description : "",
 		exists: worker?.exists === true,
 		mounted: worker?.mounted === true,
@@ -4064,7 +4168,7 @@ function summarizeWorker(worker) {
 *
 * - `list()`：打工人登记表 + 目录状态 + 挂载状态 + 已装 skills，摘要里带
 *   `driver`（agent / robot）/ `assistant` / `program`；
-* - `avatarMap()`：打工人名 → 预设头像 id（只读登记表，工作流节点图用它）；
+* - `avatarMap()`：打工人标识符 → 预设头像 id（只读登记表，工作流节点图用它）；
 * - `dispatchSession(request)`：在打工人目录下**新开**一条会话并投递一段提示词，
 *   立即返回观测句柄；不在服务里等待这一轮结束，也不设默认超时；
 * - `openSession(request)`：只续接（resume / attach）一条已有会话，不发 prompt；
@@ -4151,13 +4255,13 @@ var WorkerSessionService = class {
 	* 不扫描每个打工人目录里的 skills / AGENTS.md，所以可以频繁调用。
 	*
 	* 内建机器人（clock）也在这里，工作流把它画在节点上。旧登记表里
-	* 缺头像的打工人按名字兜底成一个确定的预设。登记表损坏时返回空表。
+	* 缺头像的打工人按标识符兜底成一个确定的预设。登记表损坏时返回空表。
 	*
 	*/
 	async avatarMap() {
 		const registry = await readWorkerRegistry({ file: this.registryFile });
 		const map = {};
-		if (!registry.corrupt) for (const worker of withBuiltinWorkers(registry.workers)) map[worker.name] = resolveAvatar(worker.avatar, worker.name);
+		if (!registry.corrupt) for (const worker of withBuiltinWorkers(registry.workers)) map[worker.id] = resolveAvatar(worker.avatar, worker.id);
 		return map;
 	}
 	/**
@@ -4229,7 +4333,7 @@ var WorkerSessionService = class {
 	*/
 	#creationError(worker, error, signal) {
 		if (signal?.aborted === true) return error instanceof Error ? error : new Error(describeError$2(error));
-		return new Error(`could not create a visible worker session for worker "${worker.name}": ${describeError$2(error)}; refusing to fall back to a hidden subagent or a replacement session`, { cause: error });
+		return new Error(`could not create a visible worker session for worker "${worker.id}": ${describeError$2(error)}; refusing to fall back to a hidden subagent or a replacement session`, { cause: error });
 	}
 	/**
 	* 用调用方给的 `title` 给打工人会话命名。
@@ -4332,7 +4436,7 @@ var WorkerSessionService = class {
 			});
 		} catch (error) {
 			if (signal?.aborted === true) throw new WorkerSessionStop("aborted", "worker session was cancelled");
-			throw new Error(`could not resume worker session "${sessionId}" for worker "${worker.name}": ${describeError$2(error)}; refusing to start a new worker session`, { cause: error });
+			throw new Error(`could not resume worker session "${sessionId}" for worker "${worker.id}": ${describeError$2(error)}; refusing to start a new worker session`, { cause: error });
 		}
 		const agent = handle.agent;
 		await this.#assertVisibleAgent(agent, handle);
@@ -4471,7 +4575,7 @@ var WorkerSessionService = class {
 		const observer = {
 			mode: "session",
 			sessionId: typeof agent?.id === "string" && agent.id !== "" ? agent.id : sessionId ?? "",
-			worker: worker.name,
+			worker: worker.id,
 			cwd: worker.path,
 			resumed,
 			startSeq,
@@ -4632,20 +4736,22 @@ var WorkerSessionService = class {
 		}
 	}
 	/**
-	* 解析打工人名称并在登记表 / 磁盘上确认。
+	* 按标识符解析打工人并在登记表 / 磁盘上确认。
 	*
-	* 机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
+	* 请求里的 `worker` 字段是打工人标识符；为兼容工作流插件还没升级到按
+	* 标识符引用的版本，标识符查不到时再按展示名兜底匹配一次（旧的「名字即
+	* 身份」调用）。机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
 	* 这里直接拒绝，让调用方知道该走 program 路径。
 	*
 	*/
-	async #resolveWorker(name) {
-		const trimmed = typeof name === "string" ? name.trim() : "";
-		if (!isValidWorkerName(trimmed)) throw new Error(`invalid worker name: ${String(name)}`);
+	async #resolveWorker(workerRef) {
+		const trimmed = typeof workerRef === "string" ? workerRef.trim() : "";
+		if (trimmed === "") throw new Error(`invalid worker identifier: ${String(workerRef)}`);
 		const registry = await readWorkerRegistry({ file: this.registryFile });
 		if (!registry.corrupt) {
-			const worker = registry.workers.find((entry) => entry.name === trimmed);
+			const worker = registry.workers.find((entry) => entry.id === trimmed) ?? registry.workers.find((entry) => entry.name === trimmed);
 			if (worker !== void 0) {
-				if (worker.driver === "robot") throw new Error(`worker "${worker.name}" is a robot and has no session; drive it by its "program" id instead of dispatching a session`);
+				if (worker.driver === "robot") throw new Error(`worker "${worker.id}" is a robot and has no session; drive it by its "program" id instead of dispatching a session`);
 				let stat;
 				try {
 					stat = await promises.stat(worker.path);
@@ -4654,13 +4760,15 @@ var WorkerSessionService = class {
 				}
 				if (stat === void 0 || !stat.isDirectory()) throw new Error(`worker directory does not exist: ${worker.path}`);
 				return {
-					name: worker.name,
+					id: worker.id,
+					name: workerDisplayName(worker),
 					path: worker.path,
 					model: worker.model ?? null
 				};
 			}
 		}
 		if (registry.corrupt) throw new Error(`worker registry is unreadable: ${this.registryFile}`);
+		if (!isResolvableWorkerId(trimmed)) throw new Error(`invalid worker identifier: ${String(workerRef)}`);
 		throw new Error(`unknown worker: ${trimmed}`);
 	}
 	/**
@@ -4716,12 +4824,16 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 	const avatars = Array.isArray(avatarIds) && avatarIds.length > 0 ? avatarIds.join(", ") : "";
 	return defineTool({
 		name: WORKER_BUILD_TOOL_NAME,
-		description: `Create, update or rename one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker is a directory the plugin manages (by default ~/.cache/dsh-plugin-workers/workers/<name>) whose AGENTS.md tells every session in it who the worker is and how it works. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing worker name is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To rename that existing worker, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the worker — confirm the new name with the user first. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents; the assistant flag starts false and can be turned on for an agent on the Workers page.`,
+		description: `Create or update one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents; the assistant flag starts false and can be turned on for an agent on the Workers page.`,
 		parameters: {
-			name: {
+			id: {
 				type: "string",
 				required: true,
-				description: "Worker name: 1-64 characters, letters, digits or Chinese plus \".\", \"_\" and \"-\"; it becomes the directory name and the mounted workspace title."
+				description: "Immutable worker identifier. New ids must match ^[a-z][a-z0-9_-]{0,63}$ (lowercase letters, digits, \"_\" and \"-\", starting with a letter). It becomes the directory workers/<id> and the reference key used by workflows; it cannot be changed after creation. Pass the current id to update an existing worker."
+			},
+			name: {
+				type: "string",
+				description: "Optional display name (a single line of at most 64 characters); it is only shown in the UI, need not be unique, and can be changed later. Empty means no display name, so the id is shown. On update, omit it to keep the current name, or pass an empty string to clear it."
 			},
 			avatar: {
 				type: "string",
@@ -4738,11 +4850,7 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 			},
 			update: {
 				type: "boolean",
-				description: "Set true only when the user asked to change a worker that already exists. Without it, an existing name is rejected."
-			},
-			newName: {
-				type: "string",
-				description: "Optional new name when the user asked to rename an existing worker: pass name as the current name, newName as the new one, and update: true. Renaming moves the worker directory and re-registers its DSH workspace; earlier conversations stay in history but are no longer listed under the worker, so confirm with the user first. Same rules as name: 1-64 characters, letters, digits or Chinese plus \".\", \"_\" and \"-\"."
+				description: "Set true only when the user asked to change a worker that already exists (including changing its display name). Without it, an existing id is rejected."
 			}
 		},
 		output: {
@@ -4750,10 +4858,15 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 				type: "object",
 				additionalProperties: false,
 				properties: {
+					id: {
+						type: "string",
+						required: true,
+						description: "Immutable worker identifier."
+					},
 					name: {
 						type: "string",
 						required: true,
-						description: "Worker name."
+						description: "Display name; empty when none is set (the id is shown instead)."
 					},
 					path: {
 						type: "string",
@@ -4788,11 +4901,11 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 					renamed: {
 						type: "boolean",
 						required: true,
-						description: "Whether this call renamed an existing worker (moved its directory and re-registered its workspace)."
+						description: "Whether this call changed the display name of an existing worker. The directory and workspace registration are unchanged."
 					},
 					previousName: {
 						required: true,
-						description: "Worker name before this call when it renamed the worker, otherwise null.",
+						description: "Display name before this call when it changed the display name, otherwise null.",
 						oneOf: [{ type: "string" }, { type: "null" }]
 					},
 					agentsBytes: {
@@ -4818,16 +4931,20 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 				}
 			},
 			render: (_args, value) => {
+				const id = String(value?.id ?? "");
+				const name = typeof value?.name === "string" ? value.name : "";
+				const display = name === "" ? id : name;
+				const identity = name === "" ? id : `${name} (${id})`;
 				const previousName = typeof value?.previousName === "string" && value.previousName !== "" ? value.previousName : null;
 				const renamed = value?.renamed === true && previousName !== null;
-				const action = value?.created === true ? "Created worker" : renamed ? `Renamed worker: ${previousName} → ${String(value?.name ?? "")}` : value?.updated === true ? "Updated worker" : "Worker ready";
+				const action = value?.created === true ? "Created worker" : renamed ? `Renamed worker: ${previousName === "" ? display : previousName} → ${display}` : value?.updated === true ? "Updated worker" : "Worker ready";
 				const description = String(value?.description ?? "");
-				const lines = [renamed ? `${action} (${String(value?.path ?? "")}) · avatar ${String(value?.avatar ?? "")}` : `${action}: ${String(value?.name ?? "")} (${String(value?.path ?? "")}) · avatar ${String(value?.avatar ?? "")}`, `Description: ${description === "" ? "(none)" : description}`];
-				if (renamed) lines.push("The workspace was re-registered at the new path; earlier conversations stay in history but are no longer listed under the worker.");
+				const lines = [renamed ? `${action} (id ${id}) · ${String(value?.path ?? "")} · avatar ${String(value?.avatar ?? "")}` : `${action}: ${identity} (${String(value?.path ?? "")}) · avatar ${String(value?.avatar ?? "")}`, `Description: ${description === "" ? "(none)" : description}`];
+				if (renamed) lines.push("Only the display name changed: the directory and the workspace registration were kept.");
 				if (typeof value?.agentsBytes === "number" && value.agentsBytes > 0) lines.push(`AGENTS.md written: ${value.agentsBytes} bytes.`);
 				if (value?.mounted === true) {
-					const id = typeof value?.workspaceId === "string" ? ` ${value.workspaceId}` : "";
-					lines.push(`Mounted as a workspace${id}.`);
+					const workspaceId = typeof value?.workspaceId === "string" ? ` ${value.workspaceId}` : "";
+					lines.push(`Mounted as a workspace${workspaceId}.`);
 				} else lines.push(`Not mounted: ${String(value?.mountError ?? "unknown error")}. The user can mount it from the Workers page.`);
 				return [{
 					type: "text",
@@ -4839,6 +4956,7 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 			assertAccess(exec?.agent);
 			const result = await runBuild(args ?? {});
 			return {
+				id: result.worker.id,
 				name: result.worker.name,
 				path: result.worker.path,
 				avatar: result.worker.avatar,
@@ -4860,8 +4978,12 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 /**
 * `buka_workers` 工具的定义与执行包装。
 *
-* 只读工具，列出插件登记表里的打工人：名字、目录、一句职责、挂载状态、
-* AGENTS.md 是否存在，以及（对允许的调用方）项目级 skills 清单。
+* 只读工具，列出插件登记表里的打工人：标识符、展示名、目录、一句职责、挂载
+* 状态、AGENTS.md 是否存在，以及（对允许的调用方）项目级 skills 清单。
+*
+* 打工人有不可变标识符 `id`（工作流的引用键、目录名）和可选展示名 `name`
+* （空串表示未设置，展示时回退到 `id`）。输出两个字段都给；文本摘要用
+* 「展示名（id）」帮调用方消歧。
 *
 * 技能清单按调用方的 agent preset 收窄：工作流编排者只按打工人的一句职责
 * 选人，不应该看到它们装了哪些 skill（见 `access.js` 的
@@ -4884,7 +5006,7 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 	if (typeof listWorkers !== "function") throw new TypeError("createWorkersListTool: listWorkers is required");
 	return defineTool({
 		name: WORKERS_LIST_TOOL_NAME,
-		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.",
+		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.",
 		parameters: {},
 		output: {
 			schema: {
@@ -4914,10 +5036,15 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 							type: "object",
 							additionalProperties: false,
 							properties: {
+								id: {
+									type: "string",
+									required: true,
+									description: "Immutable worker identifier: the reference key and the worker directory name."
+								},
 								name: {
 									type: "string",
 									required: true,
-									description: "Worker name."
+									description: "Display name; empty when none is set, in which case the id is shown."
 								},
 								path: {
 									type: "string",
@@ -4991,11 +5118,12 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 				return [{
 					type: "text",
 					text: workers.map((worker) => {
+						const id = String(worker.id ?? "");
+						const name = typeof worker.name === "string" ? worker.name : "";
+						const identity = name === "" ? id : `${name} (${id})`;
 						const agents = worker.agentsFile ? "AGENTS.md" : "no AGENTS.md";
 						const mounted = worker.mounted ? `mounted as ${String(worker.workspaceId)}` : "not mounted";
-						const description = typeof worker.description === "string" && worker.description !== "" ? worker.description : "(no description)";
-						const location = typeof worker.path === "string" && worker.path !== "" ? ` (${worker.path})` : "";
-						const parts = [`- ${worker.name} — ${description}${location}`];
+						const parts = [`- ${identity} — ${typeof worker.description === "string" && worker.description !== "" ? worker.description : "(no description)"}${typeof worker.path === "string" && worker.path !== "" ? ` (${worker.path})` : ""}`];
 						if (worker.driver === "robot") {
 							const program = typeof worker.program === "string" && worker.program !== "" ? `: ${worker.program}` : "";
 							parts.push(`program${program}`);
@@ -5020,7 +5148,8 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 			const showSkills = typeof isSkillsVisible === "function" ? isSkillsVisible(exec?.agent) === true : true;
 			const workers = snapshot.workers.map((worker) => {
 				const entry = {
-					name: worker.name,
+					id: worker.id,
+					name: typeof worker.name === "string" ? worker.name : "",
 					path: worker.path,
 					description: worker.description ?? "",
 					driver: worker.driver === "robot" ? "robot" : "agent",
@@ -5050,9 +5179,9 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 *
 * - 只读的 `buka_workers`：让模型回答「有哪些打工人、挂没挂载、是否写了
 *   AGENTS.md、装了什么技能」（工作流编排 preset 固定看不到技能清单）；
-* - 写工具 `buka_worker_build`：创建 / 修改 / 重命名打工人、写 AGENTS.md 并挂到
-*   工作区，但**只对随包发布的「打工人」preset 的根会话可见**
-*   （Config.builderPresets）。
+* - 写工具 `buka_worker_build`：按标识符创建 / 修改打工人（改名只改展示名）、
+*   写 AGENTS.md 并挂到工作区，但**只对随包发布的「打工人」preset 的根会话
+*   可见**（Config.builderPresets）。
 *
 * 可见性判定放在本模块，入口只负责传入 preset 名单与登记表写队列。
 *
@@ -5136,15 +5265,15 @@ function registerWorkerTools(ctx, deps) {
 				const result = await serializeRegistry(() => buildWorker({
 					workersDir,
 					file: registryFile,
+					id: args?.id,
 					name: args?.name,
 					avatar: args?.avatar,
 					description: args?.description,
 					agents: args?.agents,
 					update: args?.update,
-					newName: args?.newName,
 					workspaceRegistry: ctx.workspaceRegistry
 				}));
-				ctx.logger?.info?.("buka-workers: %s 打工人 %s（%s）", result.created ? "已创建" : result.renamed ? `已重命名（原 ${result.previousName}）` : "已更新", result.worker.name, result.worker.path);
+				ctx.logger?.info?.("buka-workers: %s 打工人 %s（%s，%s）", result.created ? "已创建" : result.renamed ? `已改展示名（原 ${result.previousName ?? ""}）` : "已更新", result.worker.id, result.worker.name, result.worker.path);
 				return result;
 			}
 		});
@@ -5156,20 +5285,21 @@ function registerWorkerTools(ctx, deps) {
 * 侧边栏「打工人」页面的 Host 一半。
 *
 * 打工人是**插件自己创建并登记**的对象，不是 DSH 的全部工作区：新建
-* 打工人时在插件全局目录下的 `workers/` 里建同名目录并写进 `workers.json`，
-* 再由浏览器一半把它挂到 DSH 工作区列表。Host 负责所有磁盘操作，提供一组
-* 包内 HTTP 路由给页面，除工作区 / 设置外都按打工人 **name** 操作：
+* 打工人时在插件全局目录下的 `workers/` 里按不可变标识符建目录并写进
+* `workers.json`，再由浏览器一半把它挂到 DSH 工作区列表。Host 负责所有磁盘
+* 操作，提供一组包内 HTTP 路由给页面；打工人一律按 **id**（标识符）寻址，
+* `name` 只是可选展示名，改名不移动目录：
 *
 * | 路由 | 作用 |
 * | --- | --- |
 * | `GET /buka-workers/list` | 列出登记表里的打工人、挂载状态、skills 与 AGENTS.md |
-* | `POST /buka-workers/create` | 建目录 + AGENTS.md 模板，并把打工人（含可选描述）插到登记表最前 |
+* | `POST /buka-workers/create` | 按标识符建目录 + AGENTS.md 模板，并把打工人（含可选展示名 / 描述）插到登记表最前 |
 * | `POST /buka-workers/avatar` | 只改登记表里的头像 id |
 * | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选打工人） |
 * | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
 * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
 * | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
-* | `POST /buka-workers/rename` | 改打工人目录名 + 更新登记表 + 按新路径重建 DSH 工作区 |
+* | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
 * | `POST /buka-workers/remove` | 从登记表移除（目录、文件与会话保留） |
 * | `POST /buka-workers/agents` | 写入某打工人的 AGENTS.md，并补 CLAUDE.md 链接 |
 * | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
@@ -5181,14 +5311,15 @@ function registerWorkerTools(ctx, deps) {
 * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`
 * 让模型回答「有哪些打工人、挂没挂载、是否写了 AGENTS.md、装了什么技能」
 * （见 `lib/list-tool.js`；工作流编排 preset 固定看不到技能清单）；写工具
-* `buka_worker_build`（见 `lib/builder.js`、`lib/build-tool.js`）负责创建 /
-* 修改 / 重命名打工人、写 AGENTS.md 并挂到工作区，但**只对随包发布的
-* 「打工人」preset 的根会话可见**（Config.builderPresets，判定见
+* `buka_worker_build`（见 `lib/builder.js`、`lib/build-tool.js`）按标识符
+* 创建 / 修改打工人（改名只改展示名）、写 AGENTS.md 并挂到工作区，但**只对
+* 随包发布的「打工人」preset 的根会话可见**（Config.builderPresets，判定见
 * `lib/access.js`）。删除打工人、安装 skills、页面上的编辑仍然只留给用户。
 *
 * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
-* `lib/service.js`）：`list()` 列出打工人（含内建机器人 clock 的
-* `driver` / `assistant` / `program`），`avatarMap()` 给出打工人头像，
+* `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建
+* 机器人 clock 的 `driver` / `assistant` / `program`），`avatarMap()` 按标识符
+* 给出打工人头像，
 * `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
 * 会话（不压缩）。工作流插件用它把每个任务交给一个打工人、并在节点图上画出
 * 打工人头像；注册在这里而不是拆成第二个插件，是因为本包入口需要同时保留页面

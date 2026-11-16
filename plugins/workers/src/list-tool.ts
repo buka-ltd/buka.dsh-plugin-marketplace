@@ -1,8 +1,12 @@
 /**
  * `buka_workers` 工具的定义与执行包装。
  *
- * 只读工具，列出插件登记表里的打工人：名字、目录、一句职责、挂载状态、
- * AGENTS.md 是否存在，以及（对允许的调用方）项目级 skills 清单。
+ * 只读工具，列出插件登记表里的打工人：标识符、展示名、目录、一句职责、挂载
+ * 状态、AGENTS.md 是否存在，以及（对允许的调用方）项目级 skills 清单。
+ *
+ * 打工人有不可变标识符 `id`（工作流的引用键、目录名）和可选展示名 `name`
+ * （空串表示未设置，展示时回退到 `id`）。输出两个字段都给；文本摘要用
+ * 「展示名（id）」帮调用方消歧。
  *
  * 技能清单按调用方的 agent preset 收窄：工作流编排者只按打工人的一句职责
  * 选人，不应该看到它们装了哪些 skill（见 `access.js` 的
@@ -48,7 +52,7 @@ export function createWorkersListTool({
   return defineTool({
     name: WORKERS_LIST_TOOL_NAME,
     description:
-      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.',
+      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.',
     parameters: {},
     output: {
       schema: {
@@ -74,7 +78,18 @@ export function createWorkersListTool({
               type: 'object',
               additionalProperties: false,
               properties: {
-                name: { type: 'string', required: true, description: 'Worker name.' },
+                id: {
+                  type: 'string',
+                  required: true,
+                  description:
+                    'Immutable worker identifier: the reference key and the worker directory name.',
+                },
+                name: {
+                  type: 'string',
+                  required: true,
+                  description:
+                    'Display name; empty when none is set, in which case the id is shown.',
+                },
                 path: { type: 'string', required: true, description: 'Absolute worker directory.' },
                 description: {
                   type: 'string',
@@ -151,6 +166,10 @@ export function createWorkersListTool({
             type: 'text',
             text: workers
               .map((worker) => {
+                const id = String(worker.id ?? '')
+                const name = typeof worker.name === 'string' ? worker.name : ''
+                // 「展示名（id）」；没设名称时只写一次 id，避免 `writer (writer)`。
+                const identity = name === '' ? id : `${name} (${id})`
                 const agents = worker.agentsFile ? 'AGENTS.md' : 'no AGENTS.md'
                 const mounted = worker.mounted
                   ? `mounted as ${String(worker.workspaceId)}`
@@ -161,7 +180,7 @@ export function createWorkersListTool({
                     : '(no description)'
                 const location =
                   typeof worker.path === 'string' && worker.path !== '' ? ` (${worker.path})` : ''
-                const parts = [`- ${worker.name} — ${description}${location}`]
+                const parts = [`- ${identity} — ${description}${location}`]
                 if (worker.driver === 'robot') {
                   const program =
                     typeof worker.program === 'string' && worker.program !== ''
@@ -193,6 +212,7 @@ export function createWorkersListTool({
         typeof isSkillsVisible === 'function' ? isSkillsVisible(exec?.agent) === true : true
       const workers = snapshot.workers.map((worker) => {
         const entry: {
+          id: string
           name: string
           path: string
           description: string
@@ -204,7 +224,8 @@ export function createWorkersListTool({
           agentsFile: boolean
           skills?: Array<{ name: string }>
         } = {
-          name: worker.name,
+          id: worker.id,
+          name: typeof worker.name === 'string' ? worker.name : '',
           path: worker.path,
           description: worker.description ?? '',
           driver: worker.driver === 'robot' ? 'robot' : 'agent',

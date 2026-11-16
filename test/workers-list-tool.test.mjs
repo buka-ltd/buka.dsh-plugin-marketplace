@@ -16,7 +16,8 @@ const SNAPSHOT = {
   corrupt: false,
   workers: [
     {
-      name: 'writer',
+      id: 'writer',
+      name: '',
       driver: 'agent',
       program: '',
       assistant: false,
@@ -28,7 +29,8 @@ const SNAPSHOT = {
       agents: { exists: true },
     },
     {
-      name: 'painter',
+      id: 'painter',
+      name: '画家',
       driver: 'agent',
       program: '',
       assistant: false,
@@ -40,6 +42,7 @@ const SNAPSHOT = {
       agents: { exists: false },
     },
     {
+      id: 'clock',
       name: 'clock',
       driver: 'robot',
       program: 'clock',
@@ -95,6 +98,7 @@ test('createWorkersListTool：工具名、输出 schema 与依赖校验', () => 
   const workerProps = tool.output.schema.properties.workers.items.properties
   // skills 是可选字段：编排 preset 拿到的输出里直接没有它。
   assert.equal(workerProps.skills.required, undefined)
+  assert.equal(workerProps.id.required, true)
   assert.equal(workerProps.name.required, true)
   assert.equal(workerProps.agentsFile.required, true)
   assert.equal(workerProps.driver.required, true)
@@ -118,8 +122,12 @@ test('createWorkersListTool：默认输出包含技能清单，并把调用参�
     { file: '/workers.json', workspaceRegistry: { mounted: true }, workersDir: '/workers' },
   ])
   assert.deepEqual(
-    result.workers.map((worker) => worker.name),
+    result.workers.map((worker) => worker.id),
     ['writer', 'painter', 'clock'],
+  )
+  assert.deepEqual(
+    result.workers.map((worker) => worker.name),
+    ['', '画家', 'clock'],
   )
   assert.deepEqual(result.workers[0].skills, [{ name: 'foo' }, { name: 'bar' }])
   assert.deepEqual(result.workers[1].skills, [])
@@ -147,6 +155,7 @@ test('createWorkersListTool：isSkillsVisible 为 false 时输出与渲染都不
   assert.deepEqual(seen, [{ id: 'orchestrator' }])
   for (const worker of result.workers) {
     assert.equal(Object.hasOwn(worker, 'skills'), false)
+    assert.equal(typeof worker.id, 'string')
     assert.equal(typeof worker.name, 'string')
   }
 
@@ -154,7 +163,7 @@ test('createWorkersListTool：isSkillsVisible 为 false 时输出与渲染都不
   assert.equal(rendered.includes('skill'), false)
   assert.match(rendered, /^- writer — 写代码 \(\/workers\/writer\)/u)
   assert.match(rendered, /AGENTS\.md · mounted as ws-1$/mu)
-  assert.match(rendered, /^- painter — \(no description\)/mu)
+  assert.match(rendered, /^- 画家 \(painter\) — \(no description\)/mu)
 })
 
 test('createWorkersListTool：可见时渲染技能数量，0 个也显示', async () => {
@@ -167,7 +176,7 @@ test('createWorkersListTool：可见时渲染技能数量，0 个也显示', asy
   )
   assert.match(
     rendered,
-    /^- painter — \(no description\) \(\/workers\/painter\) · 0 skills · no AGENTS\.md · not mounted$/mu,
+    /^- 画家 \(painter\) — \(no description\) \(\/workers\/painter\) · 0 skills · no AGENTS\.md · not mounted$/mu,
   )
 })
 

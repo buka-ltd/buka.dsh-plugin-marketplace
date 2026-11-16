@@ -25,6 +25,7 @@ export interface AgentOptions {
 
 /** 两个入口共用的会话请求字段；必填字段由入口在运行时校验。 */
 export interface WorkerSessionRequestBase {
+  /** 打工人标识符；兼容期也接受旧调用方传展示名。 */
   worker?: string
   /** 调用方 / 发起人所在的 agent；只用于挂 preset（`agentPreset` 缺失时）。 */
   agent?: { id: string; ctx?: Context }
@@ -71,6 +72,9 @@ export interface WorkerSessionObserver {
 
 /** 解析后的打工人目录；机器人不会走到这里（它们没有会话）。 */
 export interface WorkerTarget {
+  /** 不可变标识符：会话按它归属打工人。 */
+  id: string
+  /** 展示名（`name` 非空则用它，否则回退到标识符）。 */
   name: string
   path: string
   /** 新会话使用的模型；null 表示跟随宿主默认模型。 */

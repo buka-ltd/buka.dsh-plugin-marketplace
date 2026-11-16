@@ -324,13 +324,13 @@ window.__ModuleLoader__.load({
     */
     function failureText(t, failure) {
     	switch (errorCode(failure)) {
+    		case "invalid-id": return t("errInvalidId");
     		case "invalid-name": return t("errInvalidName");
+    		case "id-taken": return t("errIdTaken");
     		case "invalid-avatar": return t("errInvalidAvatar");
     		case "not-directory": return t("errNotDirectory");
     		case "unknown-worker": return t("errUnknownWorker");
-    		case "name-taken": return t("errNameTaken");
     		case "invalid-update": return t("errInvalidUpdate");
-    		case "path-outside-root": return t("errPathOutsideRoot");
     		case "missing-directory": return t("errMissingDirectory");
     		case "registry-unreadable": return t("errRegistryUnreadable");
     		case "robot-worker": return t("errRobotWorker");
@@ -354,6 +354,25 @@ window.__ModuleLoader__.load({
     */
     function countBadge(count, t) {
     	return String(t("skillsBadge")).replace("{n}", String(count));
+    }
+    /**
+    * 打工人展示名：`name` 非空时用它，否则回退到标识符。
+    *
+    */
+    function workerDisplayName(worker) {
+    	const name = typeof worker?.name === "string" ? worker.name.trim() : "";
+    	if (name !== "") return name;
+    	return typeof worker?.id === "string" ? worker.id : "";
+    }
+    /**
+    * 「展示名 · id」：列表、详情与对话框里用来消歧。没有设置展示名时只显示 id，
+    * 避免出现 `writer · writer`。
+    *
+    */
+    function workerIdentityLabel(worker) {
+    	const id = typeof worker?.id === "string" ? worker.id : "";
+    	const display = workerDisplayName(worker);
+    	return display === "" || display === id ? id : `${display} · ${id}`;
     }
     /** 是否机器人（只读、没有目录与会话）。 */
     function isRobotWorker(worker) {
@@ -472,9 +491,18 @@ window.__ModuleLoader__.load({
     const INSTALL_FORM_ID = "buka-workers-install-form";
     /** 「更换头像」对话框里表单的 id：页脚「保存」按钮通过 `form` 属性提交它。 */
     const AVATAR_FORM_ID = "buka-workers-avatar-form";
+    /**
+    * 新标识符的字符集（与 Host 的 `isValidWorkerId` 一致）：小写字母开头，
+    * 后面可以跟小写字母、数字、`_` 与 `-`，总长 1–64。
+    */
+    const WORKER_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+    /** 标识符是否是合法的新标识符（创建对话框用；已有旧标识符不受此约束）。 */
+    function isValidWorkerId(value) {
+    	return typeof value === "string" && WORKER_ID_PATTERN.test(value.trim());
+    }
     // .build/workers/client/actions/detail.js
     /**
-    * 「打工人」详情页的动作：更换头像、重命名、保存职责描述。
+    * 「打工人」详情页的动作：更换头像、改展示名、保存职责描述。
     *
     * @module @buka/dsh-plugin-workers/client/actions/detail
     */
@@ -483,14 +511,14 @@ window.__ModuleLoader__.load({
     *
     */
     function createDetailActions(state, t) {
-    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, selectedWorker, setRenameDraft, setRenameError, setRenameOpen, renameSaving, renameDraft, setRenameSaving, agentsDraft, setAgentsDraft, selectedName, setSelectedName, descriptionDraft, setDescriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, setModelDraft, modelSaving, setModelSaving, setModelError, patchWorker, flash, reload, corrupt } = state;
+    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, selectedWorker, setRenameDraft, setRenameError, setRenameOpen, renameSaving, renameDraft, setRenameSaving, selectedId, descriptionDraft, setDescriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, setModelDraft, modelSaving, setModelSaving, setModelError, patchWorker, flash, reload, corrupt } = state;
     	/**
     	* 打开「更换头像」对话框：草稿从打工人当前头像开始。
     	*
     	*/
     	function openAvatarDialog(worker) {
     		if (mutating) return;
-    		setAvatarTarget(worker.name);
+    		setAvatarTarget(worker.id);
     		setDraftAvatar(avatarPreset(worker.avatar).id);
     		setAvatarError(null);
     		setAvatarOpen(true);
@@ -511,7 +539,7 @@ window.__ModuleLoader__.load({
     			const saved = (await requestJson(AVATAR_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: avatarTarget,
+    					id: avatarTarget,
     					avatar: draftAvatar
     				})
     			}))?.worker?.avatar;
@@ -526,11 +554,12 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 打开「重命名打工人」对话框：草稿从当前名称开始，用户直接改成新名。
-    	* 登记文件损坏、目录缺失或写操作进行中时不打开（入口按钮也会禁用）。
+    	* 打开「重命名打工人」对话框：草稿从当前展示名开始，用户直接改成新名称。
+    	* 登记文件损坏或写操作进行中时不打开（入口按钮也会禁用）；目录缺失不影响
+    	* 改展示名。
     	*/
     	function openRenameDialog() {
-    		if (selectedWorker === null || mutating || corrupt || selectedWorker.exists === false) return;
+    		if (selectedWorker === null || mutating || corrupt) return;
     		setRenameDraft(selectedWorker.name);
     		setRenameError(null);
     		setRenameOpen(true);
@@ -542,24 +571,16 @@ window.__ModuleLoader__.load({
     		setRenameError(null);
     	}
     	/**
-    	* 重命名打工人：Host 会把目录改到新名并重建 DSH 工作区。
-    	*
-    	* 成功后只局部更新列表里的这一条（name / path / mounted / workspaceId /
-    	* agents），没被用户改过的 AGENTS.md 草稿跟着 Host 同步后的内容走，再把
-    	* `selectedName` 切到新名让配置视图留在同一个打工人上，最后用 `reload()`
-    	* 对账；标题是旧名的详情页会因此自然刷新。失败留在对话框里提示。
+    	* 改展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
+    	* 工作区的标题同步成新名称。成功后只局部更新列表里的这一条，`selectedId`
+    	* 不变，详情页留在同一个打工人上；失败留在对话框里提示。
     	*
     	*/
     	async function renameWorker(event) {
     		event.preventDefault();
     		if (selectedWorker === null || renameSaving) return;
     		const previousName = selectedWorker.name;
-    		const previousAgents = agentsOf(selectedWorker);
     		const nextName = renameDraft.trim();
-    		if (nextName === "") {
-    			setRenameError(t("renameEmpty"));
-    			return;
-    		}
     		if (nextName === previousName) {
     			setRenameError(t("renameSame"));
     			return;
@@ -567,29 +588,19 @@ window.__ModuleLoader__.load({
     		setRenameSaving(true);
     		setRenameError(null);
     		try {
-    			const body = await requestJson(RENAME_ROUTE, {
+    			const saved = (await requestJson(RENAME_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: previousName,
-    					newName: nextName
+    					id: selectedWorker.id,
+    					name: nextName
     				})
-    			});
-    			const renamed = body?.worker;
-    			const savedName = typeof renamed?.name === "string" && renamed.name !== "" ? renamed.name : nextName;
-    			const patch = {
-    				name: savedName,
-    				mounted: body?.mounted === true,
-    				workspaceId: typeof body?.workspaceId === "string" ? body.workspaceId : null
-    			};
-    			if (typeof renamed?.path === "string" && renamed.path !== "") patch.path = renamed.path;
-    			const savedAgents = body?.agents;
-    			if (savedAgents !== null && typeof savedAgents === "object") patch.agents = savedAgents;
-    			patchWorker(previousName, patch);
-    			if (typeof savedAgents?.content === "string" && agentsDraft === previousAgents.content && savedAgents.content !== agentsDraft) setAgentsDraft(savedAgents.content);
+    			}))?.worker;
+    			const savedName = typeof saved?.name === "string" ? saved.name : nextName;
+    			patchWorker(selectedWorker.id, { name: savedName });
     			setRenameOpen(false);
     			setRenameDraft("");
-    			setSelectedName(savedName);
-    			flash("success", `${t("renamed")} ${savedName}`);
+    			const display = savedName === "" ? selectedWorker.id : savedName;
+    			flash("success", `${t("renamed")} ${display}`);
     			reload();
     		} catch (failure) {
     			setRenameError(`${t("renameSaveFailed")} ${failureText(t, failure)}`);
@@ -609,19 +620,19 @@ window.__ModuleLoader__.load({
     	* 工具读它，决定是否把节点交给这个打工人；保存成功后只局部更新列表。
     	*/
     	async function saveDescription() {
-    		if (selectedName === null || descriptionSaving) return;
+    		if (selectedId === null || descriptionSaving) return;
     		setDescriptionSaving(true);
     		setDescriptionError(null);
     		try {
     			const saved = (await requestJson(DESCRIPTION_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: selectedName,
+    					id: selectedId,
     					description: descriptionDraft
     				})
     			}))?.worker?.description;
     			const next = typeof saved === "string" ? saved : normalizedDescription(descriptionDraft);
-    			patchWorker(selectedName, { description: next });
+    			patchWorker(selectedId, { description: next });
     			setDescriptionDraft(next);
     			flash("success", t("descriptionSaved"));
     		} catch (failure) {
@@ -635,18 +646,18 @@ window.__ModuleLoader__.load({
     	*
     	*/
     	async function saveWorkerModel() {
-    		if (selectedName === null || modelSaving) return;
+    		if (selectedId === null || modelSaving) return;
     		setModelSaving(true);
     		setModelError(null);
     		try {
     			const saved = (await requestJson("/buka-workers/model", {
     				method: "POST",
     				body: JSON.stringify({
-    					name: selectedName,
+    					id: selectedId,
     					model: modelDraft
     				})
     			}))?.worker?.model ?? null;
-    			patchWorker(selectedName, { model: saved });
+    			patchWorker(selectedId, { model: saved });
     			setModelDraft(saved);
     			flash("success", t("modelSaved"));
     		} catch (failure) {
@@ -757,7 +768,7 @@ window.__ModuleLoader__.load({
     			const body = await requestJson(AVAILABLE_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: selectedWorker.name,
+    					id: selectedWorker.id,
     					source: value
     				})
     			});
@@ -818,12 +829,12 @@ window.__ModuleLoader__.load({
     			const body = await requestJson(INSTALL_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: selectedWorker.name,
+    					id: selectedWorker.id,
     					source: installSource.trim(),
     					skills: installSelected
     				})
     			});
-    			patchWorker(selectedWorker.name, {
+    			patchWorker(selectedWorker.id, {
     				skills: Array.isArray(body.skills) ? body.skills : [],
     				claude: body.claude !== null && typeof body.claude === "object" ? body.claude : claudeOf(selectedWorker)
     			});
@@ -851,11 +862,11 @@ window.__ModuleLoader__.load({
     			const body = await requestJson(SKILL_REMOVE_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: worker.name,
+    					id: worker.id,
     					skill: skill.name
     				})
     			});
-    			patchWorker(worker.name, { skills: Array.isArray(body.skills) ? body.skills : [] });
+    			patchWorker(worker.id, { skills: Array.isArray(body.skills) ? body.skills : [] });
     			setConfirmingSkill(null);
     			flash("success", `${t("skillRemoved")} ${skill.name}`);
     		} catch (failure) {
@@ -892,7 +903,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createWorkerActions(state, t) {
-    	const { setBusy, flash, reload, patchWorker, service, mutating, creating, name, setName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, setConfirming, selectedName, setSelectedName, agentsDraft, agentsSaving, setAgentsSaving, corrupt, setDraftDescription, setDraftAvatar } = state;
+    	const { setBusy, flash, reload, patchWorker, service, mutating, creating, createId, setCreateId, createName, setCreateName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, setConfirming, selectedId, setSelectedId, agentsDraft, agentsSaving, setAgentsSaving, corrupt, setDraftDescription, setDraftAvatar } = state;
     	/**
     	* 打开打工人会话：只有已挂载（有 workspaceId）才能打开；否则提示先挂载。
     	* 打开走 DSH 的 `uiWorkspace.openWorkspace(workspaceId)`。
@@ -912,7 +923,7 @@ window.__ModuleLoader__.load({
     			flash("error", t("noUiWorkspace"));
     			return;
     		}
-    		setBusy(`open:${worker.name}`);
+    		setBusy(`open:${worker.id}`);
     		try {
     			await uiWorkspace.openWorkspace(worker.workspaceId);
     		} catch (failure) {
@@ -933,11 +944,11 @@ window.__ModuleLoader__.load({
     			flash("error", t("robotReadOnly"));
     			return;
     		}
-    		setBusy(`reveal:${worker.name}`);
+    		setBusy(`reveal:${worker.id}`);
     		try {
     			await requestJson(REVEAL_ROUTE, {
     				method: "POST",
-    				body: JSON.stringify({ name: worker.name })
+    				body: JSON.stringify({ id: worker.id })
     			});
     		} catch (failure) {
     			const extra = errorCode(failure) === "reveal-failed" ? "" : ` ${failureText(t, failure)}`;
@@ -961,10 +972,10 @@ window.__ModuleLoader__.load({
     			flash("error", t("noWorkspacesCreate"));
     			return;
     		}
-    		setBusy(`mount:${worker.name}`);
+    		setBusy(`mount:${worker.id}`);
     		try {
     			await workspaces.create({ path: worker.path });
-    			flash("success", `${t("mounted")} ${worker.name}`);
+    			flash("success", `${t("mounted")} ${workerDisplayName(worker)}`);
     			reload();
     		} catch (failure) {
     			flash("error", `${t("mountFailed")} ${messageOf(failure)}`);
@@ -975,7 +986,8 @@ window.__ModuleLoader__.load({
     	/** 打开「创建打工人」对话框：清掉上一次的输入，并按现有打工人挑一个新头像。 */
     	function openCreateDialog() {
     		if (creating || corrupt) return;
-    		setName("");
+    		setCreateId("");
+    		setCreateName("");
     		setDraftDescription("");
     		setDraftAvatar(nextAvatarId());
     		setCreateError(null);
@@ -996,9 +1008,10 @@ window.__ModuleLoader__.load({
     	async function createWorker(event) {
     		event.preventDefault();
     		if (creating || corrupt) return;
-    		const value = name.trim();
+    		const value = createId.trim();
+    		const displayName = createName.trim();
     		if (value === "") {
-    			setCreateError(t("createEmpty"));
+    			setCreateError(t("createEmptyId"));
     			return;
     		}
     		setCreating(true);
@@ -1007,12 +1020,14 @@ window.__ModuleLoader__.load({
     			const body = await requestJson(CREATE_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: value,
+    					id: value,
+    					name: displayName,
     					avatar: draftAvatar,
     					description: draftDescription
     				})
     			});
-    			setName("");
+    			setCreateId("");
+    			setCreateName("");
     			setDialogOpen(false);
     			const workerPath = body?.worker?.path;
     			if (typeof workerPath !== "string" || workerPath === "") {
@@ -1029,7 +1044,11 @@ window.__ModuleLoader__.load({
     			const created = body?.created !== false;
     			try {
     				await workspaces.create({ path: workerPath });
-    				flash("success", `${created ? t("created") : t("createExisting")} ${value}`);
+    				const createdLabel = workerIdentityLabel(body?.worker ?? {
+    					id: value,
+    					name: displayName
+    				});
+    				flash("success", `${created ? t("created") : t("createExisting")} ${createdLabel}`);
     			} catch (failure) {
     				flash("error", `${t("createMountFailed")} ${messageOf(failure)}`);
     			}
@@ -1050,7 +1069,7 @@ window.__ModuleLoader__.load({
     			flash("error", t("robotReadOnly"));
     			return;
     		}
-    		setBusy(`delete:${worker.name}`);
+    		setBusy(`delete:${worker.id}`);
     		try {
     			if (worker.mounted === true && typeof worker.workspaceId === "string" && worker.workspaceId !== "") {
     				const workspaces = service("workspaces");
@@ -1068,7 +1087,7 @@ window.__ModuleLoader__.load({
     			try {
     				await requestJson(REMOVE_ROUTE, {
     					method: "POST",
-    					body: JSON.stringify({ name: worker.name })
+    					body: JSON.stringify({ id: worker.id })
     				});
     			} catch (failure) {
     				flash("error", `${t("deleteFailed")} ${failureText(t, failure)}`);
@@ -1076,15 +1095,15 @@ window.__ModuleLoader__.load({
     				return;
     			}
     			setConfirming(null);
-    			if (selectedName === worker.name) setSelectedName(null);
+    			if (selectedId === worker.id) setSelectedId(null);
     			reload();
-    			flash("success", `${t("deleted")} ${worker.name}`);
+    			flash("success", `${t("deleted")} ${workerDisplayName(worker)}`);
     		} finally {
     			setBusy(null);
     		}
     	}
     	/**
-    	* 保存 AGENTS.md：Host 按打工人 name 解析目录并写文件，返回值里带字节数
+    	* 保存 AGENTS.md：Host 按打工人标识符解析目录并写文件，返回值里带字节数
     	* 与修改时间，用来更新本地摘要。
     	*
     	*/
@@ -1101,11 +1120,11 @@ window.__ModuleLoader__.load({
     			const body = await requestJson(AGENTS_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: worker.name,
+    					id: worker.id,
     					content
     				})
     			});
-    			patchWorker(worker.name, { agents: {
+    			patchWorker(worker.id, { agents: {
     				...agentsOf(worker),
     				exists: true,
     				bytes: typeof body.bytes === "number" ? body.bytes : agentsOf(worker).bytes,
@@ -1127,16 +1146,16 @@ window.__ModuleLoader__.load({
     	async function toggleAssistant(worker) {
     		if (mutating || isRobotWorker(worker)) return;
     		const next = worker.assistant !== true;
-    		setBusy(`assistant:${worker.name}`);
+    		setBusy(`assistant:${worker.id}`);
     		try {
     			const saved = (await requestJson(ASSISTANT_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					name: worker.name,
+    					id: worker.id,
     					assistant: next
     				})
     			}))?.worker?.assistant;
-    			patchWorker(worker.name, { assistant: typeof saved === "boolean" ? saved : next });
+    			patchWorker(worker.id, { assistant: typeof saved === "boolean" ? saved : next });
     			flash("success", next ? t("assistantSet") : t("assistantCleared"));
     		} catch (failure) {
     			flash("error", `${t("assistantSaveFailed")} ${failureText(t, failure)}`);
@@ -1178,9 +1197,10 @@ window.__ModuleLoader__.load({
     		loading: true
     	});
     	const [reloadKey, setReloadKey] = react.default.useState(0);
-    	/** 列表页状态。 */
-    	const [name, setName] = react.default.useState("");
-    	/** 创建对话框里的描述草稿；提交时随名字一起写入登记表。 */
+    	/** 创建对话框里的标识符草稿（必填、创建后不可改）与可选展示名。 */
+    	const [createId, setCreateId] = react.default.useState("");
+    	const [createName, setCreateName] = react.default.useState("");
+    	/** 创建对话框里的描述草稿；提交时随标识符一起写入登记表。 */
     	const [draftDescription, setDraftDescription] = react.default.useState("");
     	const [dialogOpen, setDialogOpen] = react.default.useState(false);
     	const [createError, setCreateError] = react.default.useState(null);
@@ -1189,7 +1209,7 @@ window.__ModuleLoader__.load({
     	const [busy, setBusy] = react.default.useState(null);
     	/**
     	* 头像状态：`draftAvatar` 是创建对话框 / 「更换头像」对话框里当前选中的
-    	* 预设；`avatarTarget` 非空时「更换头像」对话框打开，值是打工人名。
+    	* 预设；`avatarTarget` 非空时「更换头像」对话框打开，值是打工人标识符。
     	*/
     	const [draftAvatar, setDraftAvatar] = react.default.useState(DEFAULT_AVATAR_ID);
     	const [avatarOpen, setAvatarOpen] = react.default.useState(false);
@@ -1205,7 +1225,7 @@ window.__ModuleLoader__.load({
     	const [descriptionSaving, setDescriptionSaving] = react.default.useState(false);
     	const [descriptionError, setDescriptionError] = react.default.useState(null);
     	/**
-    	* 「重命名打工人」对话框：`renameDraft` 是新名称草稿，默认带出当前名称；
+    	* 「重命名打工人」对话框：`renameDraft` 是新展示名草稿，默认带出当前名称；
     	* 失败提示留在对话框里，提交中不响应关闭。
     	*/
     	const [renameOpen, setRenameOpen] = react.default.useState(false);
@@ -1224,8 +1244,8 @@ window.__ModuleLoader__.load({
     	const [modelDraft, setModelDraft] = react.default.useState(null);
     	const [modelSaving, setModelSaving] = react.default.useState(false);
     	const [modelError, setModelError] = react.default.useState(null);
-    	/** 详情页状态：`selectedName` 非空时显示配置视图，`tab` 是页签。 */
-    	const [selectedName, setSelectedName] = react.default.useState(null);
+    	/** 详情页状态：`selectedId` 非空时显示配置视图，`tab` 是页签。 */
+    	const [selectedId, setSelectedId] = react.default.useState(null);
     	const [tab, setTab] = react.default.useState("agents");
     	const [agentsDraft, setAgentsDraft] = react.default.useState("");
     	const [agentsSaving, setAgentsSaving] = react.default.useState(false);
@@ -1289,7 +1309,7 @@ window.__ModuleLoader__.load({
     	const workers = Array.isArray(data?.workers) ? data.workers : [];
     	const registry = typeof data?.registry === "string" ? data.registry : "";
     	const corrupt = data?.corrupt === true;
-    	const selectedWorker = selectedName === null ? null : workers.find((worker) => worker.name === selectedName) ?? null;
+    	const selectedWorker = selectedId === null ? null : workers.find((worker) => worker.id === selectedId) ?? null;
     	/** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
     	const mutating = creating || busy !== null || installing || removing !== null || agentsSaving || avatarSaving || descriptionSaving || renameSaving || modelSaving;
     	/**
@@ -1302,9 +1322,9 @@ window.__ModuleLoader__.load({
     		return (AVATARS.find((preset) => !used.has(preset.id)) ?? AVATARS[0]).id;
     	}
     	react.default.useEffect(() => {
-    		if (data === null || selectedName === null) return;
-    		if (!workers.some((worker) => worker.name === selectedName)) setSelectedName(null);
-    	}, [data, selectedName]);
+    		if (data === null || selectedId === null) return;
+    		if (!workers.some((worker) => worker.id === selectedId)) setSelectedId(null);
+    	}, [data, selectedId]);
     	/**
     	* 用 Toast 显示一次操作结果；同一时刻只保留最后一条。
     	*
@@ -1345,14 +1365,14 @@ window.__ModuleLoader__.load({
     	* 用 Host 的响应局部更新一个打工人，不整表刷新，避免详情页闪烁。
     	*
     	*/
-    	function patchWorker(workerName, patch) {
+    	function patchWorker(workerId, patch) {
     		setList((prev) => {
     			if (prev.data === null || !Array.isArray(prev.data.workers)) return prev;
     			return {
     				...prev,
     				data: {
     					...prev.data,
-    					workers: prev.data.workers.map((worker) => worker.name === workerName ? {
+    					workers: prev.data.workers.map((worker) => worker.id === workerId ? {
     						...worker,
     						...patch
     					} : worker)
@@ -1378,7 +1398,7 @@ window.__ModuleLoader__.load({
     	*/
     	function openDetail(worker) {
     		if (worker.driver === "robot") return;
-    		setSelectedName(worker.name);
+    		setSelectedId(worker.id);
     		setTab("agents");
     		setAgentsDraft(agentsOf(worker).content);
     		setDescriptionDraft(typeof worker.description === "string" ? worker.description : "");
@@ -1395,7 +1415,7 @@ window.__ModuleLoader__.load({
     	}
     	/** 返回列表页，并清掉详情页临时状态。 */
     	function backToList() {
-    		setSelectedName(null);
+    		setSelectedId(null);
     		setDescriptionError(null);
     		setSkillError(null);
     		setConfirmingSkill(null);
@@ -1421,8 +1441,10 @@ window.__ModuleLoader__.load({
     		setList,
     		reloadKey,
     		setReloadKey,
-    		name,
-    		setName,
+    		createId,
+    		setCreateId,
+    		createName,
+    		setCreateName,
     		draftDescription,
     		setDraftDescription,
     		dialogOpen,
@@ -1468,8 +1490,8 @@ window.__ModuleLoader__.load({
     		modelError,
     		setModelError,
     		loadModelCatalog,
-    		selectedName,
-    		setSelectedName,
+    		selectedId,
+    		setSelectedId,
     		tab,
     		setTab,
     		agentsDraft,
@@ -1727,19 +1749,19 @@ window.__ModuleLoader__.load({
     		className: "buka-workers-toolbarButton",
     		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
     		disabled: mutating,
-    		"aria-label": `${t("newSession")} ${selectedWorker.name}`,
+    		"aria-label": `${t("newSession")} ${workerDisplayName(selectedWorker)}`,
     		onClick: () => openWorker(selectedWorker)
     	}, t("newSession")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "reveal",
     		variant: "outline",
     		size: "sm",
     		className: "buka-workers-toolbarButton",
-    		icon: busy === `reveal:${selectedWorker.name}` ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    		icon: busy === `reveal:${selectedWorker.id}` ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     			state: "ongoing",
     			size: 13
     		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenOutlineRegular, { size: 13 }),
     		disabled: mutating || selectedWorker.exists === false,
-    		"aria-label": `${t("reveal")} ${selectedWorker.name}`,
+    		"aria-label": `${t("reveal")} ${workerDisplayName(selectedWorker)}`,
     		onClick: () => revealWorker(selectedWorker)
     	}, t("reveal"))];
     	return h("div", { className: "buka-workers-head" }, h("div", { className: "buka-workers-headInner" }, h("div", { className: "buka-workers-heading" }, h("div", { className: "buka-workers-headingRow" }, selectedWorker === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
@@ -1759,18 +1781,18 @@ window.__ModuleLoader__.load({
     	}, h("button", {
     		type: "button",
     		className: "buka-workers-avatarButton",
-    		"aria-label": `${t("changeAvatar")} ${selectedWorker.name}`,
+    		"aria-label": `${t("changeAvatar")} ${workerDisplayName(selectedWorker)}`,
     		disabled: mutating,
     		onClick: () => openAvatarDialog(selectedWorker)
-    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, selectedWorker === null ? t("title") : String(selectedWorker.name ?? "")), selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
-    		label: `${t("renameLabel")} ${selectedWorker.name}`,
+    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, selectedWorker === null ? t("title") : workerIdentityLabel(selectedWorker)), selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    		label: `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
     		side: "top",
     		delayMs: 400
     	}, h("button", {
     		type: "button",
     		className: "buka-workers-iconButton",
-    		"aria-label": `${t("renameLabel")} ${selectedWorker.name}`,
-    		disabled: mutating || corrupt || selectedWorker.exists === false,
+    		"aria-label": `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
+    		disabled: mutating || corrupt,
     		onClick: openRenameDialog
     	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedWorker === null ? null : h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
     		t,
@@ -2145,8 +2167,11 @@ window.__ModuleLoader__.load({
     *
     */
     function CreateWorkerDialog({ t, state, actions }) {
-    	const { dialogOpen, creating, name, setName, draftDescription, setDraftDescription, draftAvatar, setDraftAvatar, createError } = state;
+    	const { dialogOpen, creating, createId, setCreateId, createName, setCreateName, workers, draftDescription, setDraftDescription, draftAvatar, setDraftAvatar, createError } = state;
     	const { createWorker, closeCreateDialog } = actions;
+    	const idValue = createId.trim();
+    	const idTaken = workers.some((worker) => worker.id === idValue);
+    	const canCreate = isValidWorkerId(idValue) && !idTaken;
     	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
     		open: dialogOpen,
     		onClose: closeCreateDialog,
@@ -2160,7 +2185,7 @@ window.__ModuleLoader__.load({
     			variant: "primary",
     			type: "submit",
     			form: CREATE_FORM_ID,
-    			disabled: creating || name.trim() === ""
+    			disabled: creating || !canCreate
     		}, creating ? t("creating") : t("create")))
     	}, h("form", {
     		id: CREATE_FORM_ID,
@@ -2171,18 +2196,28 @@ window.__ModuleLoader__.load({
     		current: draftAvatar,
     		disabled: creating,
     		onSelect: setDraftAvatar
-    	})), h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("createFieldName")), h(_deepseek_ai_dsh_client_ui_primitives.Input, {
+    	})), h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("createFieldId")), h(_deepseek_ai_dsh_client_ui_primitives.Input, {
     		className: "buka-workers-fieldInput",
     		type: "text",
-    		value: name,
-    		placeholder: t("createPlaceholder"),
+    		value: createId,
+    		placeholder: t("createIdPlaceholder"),
     		autoComplete: "off",
     		spellCheck: false,
     		maxLength: 64,
     		disabled: creating,
     		"data-modal-autofocus": "",
-    		onChange: (event) => setName(event.target.value)
-    	})), h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("descriptionLabel")), h("textarea", {
+    		onChange: (event) => setCreateId(event.target.value)
+    	}), idValue !== "" && !isValidWorkerId(idValue) ? h("span", { className: "buka-workers-formError" }, t("errInvalidId")) : idTaken ? h("span", { className: "buka-workers-formError" }, t("errIdTaken")) : h("span", { className: "buka-workers-fieldHint" }, t("createIdHint"))), h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("createFieldName")), h(_deepseek_ai_dsh_client_ui_primitives.Input, {
+    		className: "buka-workers-fieldInput",
+    		type: "text",
+    		value: createName,
+    		placeholder: t("createNamePlaceholder"),
+    		autoComplete: "off",
+    		spellCheck: false,
+    		maxLength: 64,
+    		disabled: creating,
+    		onChange: (event) => setCreateName(event.target.value)
+    	}), h("span", { className: "buka-workers-fieldHint" }, t("createNameHint"))), h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("descriptionLabel")), h("textarea", {
     		className: "buka-workers-descriptionInput",
     		value: draftDescription,
     		placeholder: t("descriptionPlaceholder"),
@@ -2200,12 +2235,12 @@ window.__ModuleLoader__.load({
     *
     */
     function AvatarDialog({ t, state, detail }) {
-    	const { avatarOpen, avatarSaving, avatarTarget, draftAvatar, setDraftAvatar, avatarError } = state;
+    	const { avatarOpen, avatarSaving, avatarTarget, draftAvatar, setDraftAvatar, avatarError, selectedWorker } = state;
     	const { closeAvatarDialog, saveAvatar } = detail;
     	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
     		open: avatarOpen,
     		onClose: closeAvatarDialog,
-    		title: avatarTarget === null ? t("changeAvatar") : `${t("changeAvatar")} · ${avatarTarget}`,
+    		title: avatarTarget === null || selectedWorker === null ? t("changeAvatar") : `${t("changeAvatar")} · ${workerIdentityLabel(selectedWorker)}`,
     		closeLabel: t("close"),
     		footer: h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			variant: "outline",
@@ -2244,7 +2279,7 @@ window.__ModuleLoader__.load({
     	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
     		open: renameOpen,
     		onClose: closeRenameDialog,
-    		title: t("rename"),
+    		title: selectedWorker === null ? t("rename") : `${t("rename")} · ${workerIdentityLabel(selectedWorker)}`,
     		closeLabel: t("close"),
     		footer: h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			variant: "outline",
@@ -2254,7 +2289,7 @@ window.__ModuleLoader__.load({
     			variant: "primary",
     			type: "submit",
     			form: RENAME_FORM_ID,
-    			disabled: renameSaving || selectedWorker === null || renameDraft.trim() === "" || renameDraft.trim() === selectedWorker.name
+    			disabled: renameSaving || selectedWorker === null || renameDraft.trim() === selectedWorker.name
     		}, renameSaving ? t("saving") : t("save")))
     	}, renameOpen && selectedWorker !== null ? h("form", {
     		id: RENAME_FORM_ID,
@@ -2264,7 +2299,7 @@ window.__ModuleLoader__.load({
     		className: "buka-workers-fieldInput",
     		type: "text",
     		value: renameDraft,
-    		placeholder: String(selectedWorker.name ?? ""),
+    		placeholder: String(selectedWorker.name ?? selectedWorker.id ?? ""),
     		autoComplete: "off",
     		spellCheck: false,
     		maxLength: 64,
@@ -2298,7 +2333,7 @@ window.__ModuleLoader__.load({
     	const { openWorker, mountWorker, removeWorker, toggleAssistant } = workerActions;
     	const skills = skillsOf(worker);
     	const robot = isRobotWorker(worker);
-    	const confirmingThis = confirming === worker.name;
+    	const confirmingThis = confirming === worker.id;
     	const missing = !robot && worker.exists === false;
     	const mounted = worker.mounted === true;
     	const anyBusy = mutating || corrupt;
@@ -2324,29 +2359,29 @@ window.__ModuleLoader__.load({
     			size: "sm",
     			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconNewChatOutlineRegular, { size: 13 }),
     			disabled: mutating,
-    			"aria-label": `${t("newSession")} ${worker.name}`,
+    			"aria-label": `${t("newSession")} ${workerDisplayName(worker)}`,
     			onClick: () => openWorker(worker)
     		}, t("newSession")),
     		mounted ? null : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "mount",
     			variant: "outline",
     			size: "sm",
-    			icon: busy === `mount:${worker.name}` ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    			icon: busy === `mount:${worker.id}` ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     				state: "ongoing",
     				size: 13
     			}) : h(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 13 }),
     			disabled: anyBusy,
-    			"aria-label": `${t("mount")} ${worker.name}`,
+    			"aria-label": `${t("mount")} ${workerDisplayName(worker)}`,
     			onClick: () => mountWorker(worker)
-    		}, busy === `mount:${worker.name}` ? t("mounting") : t("mount")),
+    		}, busy === `mount:${worker.id}` ? t("mounting") : t("mount")),
     		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "assistant",
     			variant: "outline",
     			size: "sm",
-    			disabled: anyBusy || busy === `assistant:${worker.name}`,
-    			"aria-label": `${worker.assistant === true ? t("clearAssistant") : t("setAssistant")} ${worker.name}`,
+    			disabled: anyBusy || busy === `assistant:${worker.id}`,
+    			"aria-label": `${worker.assistant === true ? t("clearAssistant") : t("setAssistant")} ${workerDisplayName(worker)}`,
     			onClick: () => toggleAssistant(worker)
-    		}, busy === `assistant:${worker.name}` ? t("saving") : worker.assistant === true ? t("clearAssistant") : t("setAssistant")),
+    		}, busy === `assistant:${worker.id}` ? t("saving") : worker.assistant === true ? t("clearAssistant") : t("setAssistant")),
     		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "delete",
     			variant: "outline",
@@ -2354,13 +2389,13 @@ window.__ModuleLoader__.load({
     			className: "buka-workers-danger",
     			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 13 }),
     			disabled: anyBusy,
-    			"aria-label": `${t("delete")} ${worker.name}`,
-    			onClick: () => setConfirming(worker.name)
+    			"aria-label": `${t("delete")} ${workerDisplayName(worker)}`,
+    			onClick: () => setConfirming(worker.id)
     		}, t("delete"))
     	];
     	return h("li", {
     		className: `buka-workers-card${canOpen ? " is-clickable" : ""}${robot ? " is-robot" : ""}`,
-    		key: worker.name,
+    		key: worker.id,
     		"aria-busy": busy !== null ? true : void 0,
     		onClick: () => {
     			if (canOpen) openDetail(worker);
@@ -2368,14 +2403,14 @@ window.__ModuleLoader__.load({
     	}, h("div", { className: "buka-workers-cardHead" }, h("div", { className: "buka-workers-titleRow" }, h("div", { className: "buka-workers-titleCluster" }, renderAvatar(worker.avatar, 26), h("button", {
     		type: "button",
     		className: "buka-workers-cardTitle",
-    		title: worker.name,
-    		"aria-label": `${t("openDetail")} ${worker.name}`,
+    		title: workerIdentityLabel(worker),
+    		"aria-label": `${t("openDetail")} ${workerDisplayName(worker)}`,
     		disabled: !canOpen,
     		onClick: (event) => {
     			event.stopPropagation();
     			if (canOpen) openDetail(worker);
     		}
-    	}, String(worker.name ?? "")), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null, robot ? null : h(MountedTag, {
+    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null, robot ? null : h(MountedTag, {
     		t,
     		worker
     	}), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
@@ -2402,7 +2437,7 @@ window.__ModuleLoader__.load({
     		worker,
     		state,
     		actions,
-    		key: worker.name
+    		key: worker.id
     	}))));
     }
     // .build/workers/client/components/workers-page.js
@@ -2485,8 +2520,12 @@ window.__ModuleLoader__.load({
     	loadFailed: "Request failed:",
     	empty: "No workers yet. Creating one adds a directory in the plugin folder and mounts it to the sidebar workspace list.",
     	corruptNote: "The worker registry cannot be read. Fix or delete the file, then refresh:",
-    	createPlaceholder: "Worker name, e.g. writer",
-    	createFieldName: "Worker name",
+    	createFieldId: "Identifier",
+    	createIdPlaceholder: "Identifier, e.g. writer",
+    	createIdHint: "Required and immutable. It becomes the worker directory and the reference key used by workflows; lowercase letters, digits, \"_\" and \"-\", starting with a letter.",
+    	createFieldName: "Name (optional)",
+    	createNamePlaceholder: "Display name, e.g. Writer",
+    	createNameHint: "Shown in the UI only; it can be changed later. When empty, the identifier is shown.",
     	create: "Create worker",
     	close: "Close",
     	creating: "Creating…",
@@ -2521,12 +2560,11 @@ window.__ModuleLoader__.load({
     	createExisting: "Worker already existed:",
     	createFailed: "Could not create the worker:",
     	createMountFailed: "The worker was created, but mounting it to a workspace failed. Use “Mount” to retry:",
-    	createEmpty: "Enter a worker name first.",
+    	createEmptyId: "Enter a worker identifier first.",
     	rename: "Rename worker",
     	renameLabel: "Rename",
-    	renameFieldLabel: "New name",
-    	renameHint: "Renaming moves the worker directory and re-creates the DSH workspace. Earlier conversations are kept, but they are no longer listed under this worker.",
-    	renameEmpty: "Enter a new name first.",
+    	renameFieldLabel: "Name",
+    	renameHint: "Only the display name changes: the directory and the workspace stay where they are. Leave it empty to show the identifier.",
     	renameSame: "The new name is the same as the current name.",
     	renameSaveFailed: "Could not rename the worker:",
     	renamed: "Renamed worker:",
@@ -2628,13 +2666,13 @@ window.__ModuleLoader__.load({
     	avatarPenguin: "Penguin",
     	avatarUnicorn: "Unicorn",
     	avatarMushroom: "Mushroom",
-    	errInvalidName: "Invalid name: use 1–64 characters, do not start with a dot, and avoid slashes.",
+    	errInvalidId: "Invalid identifier: use ^[a-z][a-z0-9_-]{0,63}$ (lowercase letters, digits, \"_\" and \"-\", starting with a letter). It cannot be changed after creation.",
+    	errInvalidName: "Invalid name: use a single line of at most 64 characters.",
     	errInvalidAvatar: "That avatar is not available. Pick one from the list.",
     	errNotDirectory: "A file already exists at that path, so no directory could be created.",
     	errUnknownWorker: "This worker is no longer in the registry. Refresh and try again.",
-    	errNameTaken: "That name is already taken. Pick another one.",
+    	errIdTaken: "That identifier is already taken. Pick another one.",
     	errInvalidUpdate: "This request is missing the update flag, so the name was not changed.",
-    	errPathOutsideRoot: "The worker directory is outside the workers folder, so it cannot be renamed. Fix the registry entry first.",
     	errMissingDirectory: "The worker directory does not exist, so this operation cannot run.",
     	errRegistryUnreadable: "The worker registry cannot be read, so this change was cancelled. Fix or delete the file, then refresh.",
     	errRobotWorker: "Robots are read-only: they have no directory or session, so this change is not available.",
@@ -2657,8 +2695,12 @@ window.__ModuleLoader__.load({
     	loadFailed: "请求失败：",
     	empty: "还没有打工人。创建打工人会在插件目录下新建目录，并挂到侧边栏的工作区列表。",
     	corruptNote: "打工人登记文件无法读取，请修复或删除该文件后刷新：",
-    	createPlaceholder: "打工人名称，如 writer",
-    	createFieldName: "打工人名称",
+    	createFieldId: "标识符",
+    	createIdPlaceholder: "标识符，如 writer",
+    	createIdHint: "必填，创建后不可修改；它同时是打工人目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。",
+    	createFieldName: "名称（可选）",
+    	createNamePlaceholder: "展示名，如 写作助手",
+    	createNameHint: "只用于展示，可随时修改；留空时显示标识符。",
     	create: "创建打工人",
     	close: "关闭",
     	creating: "创建中…",
@@ -2693,12 +2735,11 @@ window.__ModuleLoader__.load({
     	createExisting: "打工人已存在：",
     	createFailed: "创建失败：",
     	createMountFailed: "打工人已创建，但挂载到工作区失败，可点「挂载」重试：",
-    	createEmpty: "先填一个打工人名称。",
+    	createEmptyId: "先填一个打工人标识符。",
     	rename: "重命名打工人",
     	renameLabel: "重命名",
-    	renameFieldLabel: "新名称",
-    	renameHint: "重命名会改打工人目录名并重建 DSH 工作区；已有会话仍保留，但不再列在这个打工人下。",
-    	renameEmpty: "先填一个新名称。",
+    	renameFieldLabel: "名称",
+    	renameHint: "只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。",
     	renameSame: "新名称与当前名称相同。",
     	renameSaveFailed: "重命名失败：",
     	renamed: "已重命名为：",
@@ -2800,13 +2841,13 @@ window.__ModuleLoader__.load({
     	avatarPenguin: "企鹅",
     	avatarUnicorn: "独角兽",
     	avatarMushroom: "蘑菇",
-    	errInvalidName: "名称不合法：1–64 个字符，不能以 . 开头，不能包含斜杠。",
+    	errInvalidId: "标识符不合法：需匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -），且创建后不可修改。",
+    	errInvalidName: "名称不合法：需要不超过 64 个字符的单行文本。",
     	errInvalidAvatar: "这个头像不可用，请从列表里重新选一个。",
     	errNotDirectory: "目标路径已存在且不是目录，无法创建。",
     	errUnknownWorker: "这个打工人已不在登记表里，请刷新后重试。",
-    	errNameTaken: "这个名称已被占用，请换一个。",
+    	errIdTaken: "这个标识符已被占用，请换一个。",
     	errInvalidUpdate: "请求缺少 update 标记，名称未修改。",
-    	errPathOutsideRoot: "打工人目录不在打工人根目录下，无法重命名；请先修复登记表。",
     	errMissingDirectory: "打工人目录不存在，无法执行这个操作。",
     	errRegistryUnreadable: "打工人登记文件无法读取，本次修改已取消；请修复或删除该文件后刷新。",
     	errRobotWorker: "机器人只读：没有目录与会话，不能执行这个操作。",
@@ -2995,13 +3036,14 @@ window.__ModuleLoader__.load({
     *   注册、再删插件记录，目录与文件保留；登记文件损坏时只允许刷新，新建/删除/
     *   挂载都会禁用。列表**不展示目录**（打工人根目录与各打工人路径都只在详情页
     *   出现）；每张卡片显示打工人的一行描述（工作流靠它决定是否选用该打工人）；
-    *   标题行「刷新」右侧的「创建打工人」按钮打开对话框填名称与描述后提交；全新
-    *   安装时插件会自动补上「软件工程师」与「质量保障工程师」两个预设打工人。
+    *   标题行「刷新」右侧的「创建打工人」按钮打开对话框填标识符（必填且创建后
+    *   不可改）、可选展示名与描述后提交；列表与详情都显示「展示名 · 标识符」；
+    *   全新安装时插件会自动补上「软件工程师」与「质量保障工程师」两个预设打工人。
     *   机器人（内建 clock）只读：卡片展示驱动与描述，没有新会话 / 挂载 /
     *   删除 / 助理入口，也不能编辑 AGENTS.md 或安装 skills；
     * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
-    *   打工人名旁的铅笔按钮打开「重命名打工人」对话框：改的是打工人目录名，Host 会
-    *   在新路径重建 DSH 工作区，已有会话日志保留但不再列在这个打工人下。正文用
+    *   打工人标题旁的铅笔按钮打开「重命名打工人」对话框：只改展示名，目录与工作区
+    *   注册都不动，只同步工作区标题。正文用
     *   可切换的页签分成
     *   「描述」（一句话摘要，工作流用它决定是否选用这个打工人）、
     *   「AGENTS.md」（编辑目录下的 AGENTS.md，Host 同时维护 CLAUDE.md 软链接）

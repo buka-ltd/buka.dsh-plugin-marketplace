@@ -163,7 +163,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const resolved = await resolveWorker(registryFile, body?.name)
+          const resolved = await resolveWorker(registryFile, body?.id)
           if (resolved.error !== undefined) {
             sendWorkerError(res, resolved.error)
             return
@@ -240,7 +240,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const resolved = await resolveWorker(registryFile, body?.name)
+          const resolved = await resolveWorker(registryFile, body?.id)
           if (resolved.error !== undefined) {
             sendWorkerError(res, resolved.error)
             return
@@ -321,7 +321,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const resolved = await resolveWorker(registryFile, body?.name)
+          const resolved = await resolveWorker(registryFile, body?.id)
           if (resolved.error !== undefined) {
             sendWorkerError(res, resolved.error)
             return

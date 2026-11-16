@@ -5,7 +5,7 @@
  *
  * - `list()`：打工人登记表 + 目录状态 + 挂载状态 + 已装 skills，摘要里带
  *   `driver`（agent / robot）/ `assistant` / `program`；
- * - `avatarMap()`：打工人名 → 预设头像 id（只读登记表，工作流节点图用它）；
+ * - `avatarMap()`：打工人标识符 → 预设头像 id（只读登记表，工作流节点图用它）；
  * - `dispatchSession(request)`：在打工人目录下**新开**一条会话并投递一段提示词，
  *   立即返回观测句柄；不在服务里等待这一轮结束，也不设默认超时；
  * - `openSession(request)`：只续接（resume / attach）一条已有会话，不发 prompt；
@@ -61,10 +61,11 @@ import type {
   WorkerTarget,
 } from './service/types.ts'
 import {
-  isValidWorkerName,
+  isResolvableWorkerId,
   listWorkers,
   readWorkerRegistry,
   withBuiltinWorkers,
+  workerDisplayName,
 } from './worker-store.ts'
 
 /** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaWorkers`。 */
@@ -149,7 +150,7 @@ export class WorkerSessionService {
    * 不扫描每个打工人目录里的 skills / AGENTS.md，所以可以频繁调用。
    *
    * 内建机器人（clock）也在这里，工作流把它画在节点上。旧登记表里
-   * 缺头像的打工人按名字兜底成一个确定的预设。登记表损坏时返回空表。
+   * 缺头像的打工人按标识符兜底成一个确定的预设。登记表损坏时返回空表。
    *
    */
   async avatarMap(): Promise<Record<string, string>> {
@@ -157,7 +158,7 @@ export class WorkerSessionService {
     const map: Record<string, string> = {}
     if (!registry.corrupt) {
       for (const worker of withBuiltinWorkers(registry.workers))
-        map[worker.name] = resolveAvatar(worker.avatar, worker.name)
+        map[worker.id] = resolveAvatar(worker.avatar, worker.id)
     }
     return map
   }
@@ -242,7 +243,7 @@ export class WorkerSessionService {
     if (signal?.aborted === true)
       return error instanceof Error ? error : new Error(describeError(error))
     return new Error(
-      `could not create a visible worker session for worker "${worker.name}": ${describeError(error)}; refusing to fall back to a hidden subagent or a replacement session`,
+      `could not create a visible worker session for worker "${worker.id}": ${describeError(error)}; refusing to fall back to a hidden subagent or a replacement session`,
       { cause: error },
     )
   }
@@ -424,7 +425,7 @@ export class WorkerSessionService {
       if (signal?.aborted === true)
         throw new WorkerSessionStop('aborted', 'worker session was cancelled')
       throw new Error(
-        `could not resume worker session "${sessionId}" for worker "${worker.name}": ${describeError(error)}; refusing to start a new worker session`,
+        `could not resume worker session "${sessionId}" for worker "${worker.id}": ${describeError(error)}; refusing to start a new worker session`,
         { cause: error },
       )
     }
@@ -627,7 +628,7 @@ export class WorkerSessionService {
     const observer: WorkerSessionObserver = {
       mode: 'session',
       sessionId: typeof agent?.id === 'string' && agent.id !== '' ? agent.id : (sessionId ?? ''),
-      worker: worker.name,
+      worker: worker.id,
       cwd: worker.path,
       resumed,
       startSeq,
@@ -830,24 +831,26 @@ export class WorkerSessionService {
   }
 
   /**
-   * 解析打工人名称并在登记表 / 磁盘上确认。
+   * 按标识符解析打工人并在登记表 / 磁盘上确认。
    *
-   * 机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
+   * 请求里的 `worker` 字段是打工人标识符；为兼容工作流插件还没升级到按
+   * 标识符引用的版本，标识符查不到时再按展示名兜底匹配一次（旧的「名字即
+   * 身份」调用）。机器人没有目录、也不建会话：它们由工作流按 `program` 驱动，
    * 这里直接拒绝，让调用方知道该走 program 路径。
    *
    */
-  async #resolveWorker(name: unknown): Promise<WorkerTarget> {
-    const trimmed = typeof name === 'string' ? name.trim() : ''
-    if (!isValidWorkerName(trimmed)) {
-      throw new Error(`invalid worker name: ${String(name)}`)
-    }
+  async #resolveWorker(workerRef: unknown): Promise<WorkerTarget> {
+    const trimmed = typeof workerRef === 'string' ? workerRef.trim() : ''
+    if (trimmed === '') throw new Error(`invalid worker identifier: ${String(workerRef)}`)
     const registry = await readWorkerRegistry({ file: this.registryFile })
     if (!registry.corrupt) {
-      const worker = registry.workers.find((entry) => entry.name === trimmed)
+      const worker =
+        registry.workers.find((entry) => entry.id === trimmed) ??
+        registry.workers.find((entry) => entry.name === trimmed)
       if (worker !== undefined) {
         if (worker.driver === 'robot') {
           throw new Error(
-            `worker "${worker.name}" is a robot and has no session; drive it by its "program" id instead of dispatching a session`,
+            `worker "${worker.id}" is a robot and has no session; drive it by its "program" id instead of dispatching a session`,
           )
         }
         let stat: import('node:fs').Stats | undefined
@@ -860,7 +863,8 @@ export class WorkerSessionService {
           throw new Error(`worker directory does not exist: ${worker.path}`)
         }
         return {
-          name: worker.name,
+          id: worker.id,
+          name: workerDisplayName(worker),
           path: worker.path,
           model: worker.model ?? null,
         }
@@ -869,6 +873,9 @@ export class WorkerSessionService {
 
     if (registry.corrupt) {
       throw new Error(`worker registry is unreadable: ${this.registryFile}`)
+    }
+    if (!isResolvableWorkerId(trimmed)) {
+      throw new Error(`invalid worker identifier: ${String(workerRef)}`)
     }
     throw new Error(`unknown worker: ${trimmed}`)
   }

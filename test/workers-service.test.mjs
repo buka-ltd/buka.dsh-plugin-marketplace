@@ -28,7 +28,8 @@ import {
 
 test('workers service: summarizeWorker keeps orchestration fields and driver/assistant', () => {
   const summary = summarizeWorker({
-    name: 'writer',
+    id: 'writer',
+    name: '',
     driver: 'agent',
     program: '',
     assistant: true,
@@ -42,7 +43,9 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/ass
     agents: { exists: true, bytes: 42, modifiedAt: '2026-01-02T00:00:00.000Z', content: '# big' },
     claude: { exists: true, symlink: true, mode: 'symlink', target: 'AGENTS.md' },
   })
-  assert.equal(summary.name, 'writer')
+  assert.equal(summary.id, 'writer')
+  assert.equal(summary.name, '')
+  assert.equal(summary.displayName, 'writer')
   assert.equal(summary.driver, 'agent')
   assert.equal(summary.program, '')
   assert.equal(summary.assistant, true)
@@ -64,6 +67,7 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/ass
 
   // 机器人：登记与展示用，但没有会话 / 目录。
   const clock = summarizeWorker({
+    id: 'clock',
     name: 'clock',
     driver: 'robot',
     program: 'clock',
@@ -158,7 +162,7 @@ async function makeWorkerHome() {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-workers-service-'))
   const workersDir = path.join(root, 'workers')
   const registryFile = resolveWorkerRegistryFile(workersDir)
-  await addWorker({ workersDir, file: registryFile, name: 'writer' })
+  await addWorker({ workersDir, file: registryFile, id: 'writer', name: '写作助手' })
   await ensureBuiltinWorkers({ file: registryFile })
   return { root, workersDir, registryFile }
 }
@@ -410,17 +414,19 @@ test('workers service: list returns summarized registry workers including the bu
     const listed = await service.list()
     assert.equal(listed.corrupt, false)
     assert.deepEqual(
-      listed.workers.map((worker) => worker.name),
+      listed.workers.map((worker) => worker.id),
       ['writer', 'clock'],
     )
-    const writer = listed.workers.find((worker) => worker.name === 'writer')
+    const writer = listed.workers.find((worker) => worker.id === 'writer')
+    assert.equal(writer.name, '写作助手')
+    assert.equal(writer.displayName, '写作助手')
     assert.equal(writer.driver, 'agent')
     assert.equal(writer.assistant, false)
     assert.equal(writer.description, '')
     assert.ok(typeof writer.avatar === 'string' && writer.avatar !== '')
     assert.equal(writer.agents.exists, true)
     assert.equal('content' in writer.agents, false)
-    const clock = listed.workers.find((worker) => worker.name === 'clock')
+    const clock = listed.workers.find((worker) => worker.id === 'clock')
     assert.equal(clock.driver, 'robot')
     assert.equal(clock.program, 'clock')
     assert.equal(clock.assistant, false)
@@ -431,7 +437,7 @@ test('workers service: list returns summarized registry workers including the bu
   }
 })
 
-test('workers service: avatarMap is a lightweight name -> avatar lookup with builtins', async () => {
+test('workers service: avatarMap is a lightweight id -> avatar lookup with builtins', async () => {
   const home = await makeWorkerHome()
   try {
     const service = new WorkerSessionService({
@@ -483,7 +489,7 @@ test('workers service: dispatchSession uses the worker model before the host def
   try {
     await setWorkerModel({
       file: home.registryFile,
-      name: 'writer',
+      id: 'writer',
       model: { provider: 'worker-provider', model: 'worker-model', reasoningEffort: 'high' },
     })
     const fake = makeDispatchContext()

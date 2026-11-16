@@ -38,9 +38,10 @@ export function useWorkersState(props: { getService: GetService }) {
   const [list, setList] = React.useState<ListState>({ data: null, error: null, loading: true })
   const [reloadKey, setReloadKey] = React.useState(0)
 
-  /** 列表页状态。 */
-  const [name, setName] = React.useState('')
-  /** 创建对话框里的描述草稿；提交时随名字一起写入登记表。 */
+  /** 创建对话框里的标识符草稿（必填、创建后不可改）与可选展示名。 */
+  const [createId, setCreateId] = React.useState('')
+  const [createName, setCreateName] = React.useState('')
+  /** 创建对话框里的描述草稿；提交时随标识符一起写入登记表。 */
   const [draftDescription, setDraftDescription] = React.useState('')
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [createError, setCreateError] = React.useState<string | null>(null)
@@ -50,7 +51,7 @@ export function useWorkersState(props: { getService: GetService }) {
 
   /**
    * 头像状态：`draftAvatar` 是创建对话框 / 「更换头像」对话框里当前选中的
-   * 预设；`avatarTarget` 非空时「更换头像」对话框打开，值是打工人名。
+   * 预设；`avatarTarget` 非空时「更换头像」对话框打开，值是打工人标识符。
    */
   const [draftAvatar, setDraftAvatar] = React.useState<string>(DEFAULT_AVATAR_ID)
   const [avatarOpen, setAvatarOpen] = React.useState(false)
@@ -68,7 +69,7 @@ export function useWorkersState(props: { getService: GetService }) {
   const [descriptionError, setDescriptionError] = React.useState<string | null>(null)
 
   /**
-   * 「重命名打工人」对话框：`renameDraft` 是新名称草稿，默认带出当前名称；
+   * 「重命名打工人」对话框：`renameDraft` 是新展示名草稿，默认带出当前名称；
    * 失败提示留在对话框里，提交中不响应关闭。
    */
   const [renameOpen, setRenameOpen] = React.useState(false)
@@ -89,8 +90,8 @@ export function useWorkersState(props: { getService: GetService }) {
   const [modelSaving, setModelSaving] = React.useState(false)
   const [modelError, setModelError] = React.useState<string | null>(null)
 
-  /** 详情页状态：`selectedName` 非空时显示配置视图，`tab` 是页签。 */
-  const [selectedName, setSelectedName] = React.useState<string | null>(null)
+  /** 详情页状态：`selectedId` 非空时显示配置视图，`tab` 是页签。 */
+  const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const [tab, setTab] = React.useState('agents')
   const [agentsDraft, setAgentsDraft] = React.useState('')
   const [agentsSaving, setAgentsSaving] = React.useState(false)
@@ -148,7 +149,7 @@ export function useWorkersState(props: { getService: GetService }) {
   const registry = typeof data?.registry === 'string' ? data.registry : ''
   const corrupt = data?.corrupt === true
   const selectedWorker =
-    selectedName === null ? null : (workers.find((worker) => worker.name === selectedName) ?? null)
+    selectedId === null ? null : (workers.find((worker) => worker.id === selectedId) ?? null)
 
   /** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
   const mutating =
@@ -176,9 +177,9 @@ export function useWorkersState(props: { getService: GetService }) {
   // 详情里的打工人被外部移除（刷新后不在登记表里）时回到列表页，避免停在
   // 一个永远加载不出来的配置页。
   React.useEffect(() => {
-    if (data === null || selectedName === null) return
-    if (!workers.some((worker) => worker.name === selectedName)) setSelectedName(null)
-  }, [data, selectedName])
+    if (data === null || selectedId === null) return
+    if (!workers.some((worker) => worker.id === selectedId)) setSelectedId(null)
+  }, [data, selectedId])
 
   /**
    * 用 Toast 显示一次操作结果；同一时刻只保留最后一条。
@@ -215,7 +216,7 @@ export function useWorkersState(props: { getService: GetService }) {
    * 用 Host 的响应局部更新一个打工人，不整表刷新，避免详情页闪烁。
    *
    */
-  function patchWorker(workerName: string, patch: Partial<Worker>) {
+  function patchWorker(workerId: string, patch: Partial<Worker>) {
     setList((prev) => {
       if (prev.data === null || !Array.isArray(prev.data.workers)) return prev
       return {
@@ -223,7 +224,7 @@ export function useWorkersState(props: { getService: GetService }) {
         data: {
           ...prev.data,
           workers: prev.data.workers.map((worker) =>
-            worker.name === workerName ? { ...worker, ...patch } : worker,
+            worker.id === workerId ? { ...worker, ...patch } : worker,
           ),
         },
       }
@@ -251,7 +252,7 @@ export function useWorkersState(props: { getService: GetService }) {
   function openDetail(worker: Worker) {
     // 机器人只读：没有目录、AGENTS.md 与 skills，不进入配置视图。
     if (worker.driver === 'robot') return
-    setSelectedName(worker.name)
+    setSelectedId(worker.id)
     setTab('agents')
     setAgentsDraft(agentsOf(worker).content)
     setDescriptionDraft(typeof worker.description === 'string' ? worker.description : '')
@@ -269,7 +270,7 @@ export function useWorkersState(props: { getService: GetService }) {
 
   /** 返回列表页，并清掉详情页临时状态。 */
   function backToList() {
-    setSelectedName(null)
+    setSelectedId(null)
     setDescriptionError(null)
     setSkillError(null)
     setConfirmingSkill(null)
@@ -297,8 +298,10 @@ export function useWorkersState(props: { getService: GetService }) {
     setList,
     reloadKey,
     setReloadKey,
-    name,
-    setName,
+    createId,
+    setCreateId,
+    createName,
+    setCreateName,
     draftDescription,
     setDraftDescription,
     dialogOpen,
@@ -344,8 +347,8 @@ export function useWorkersState(props: { getService: GetService }) {
     modelError,
     setModelError,
     loadModelCatalog,
-    selectedName,
-    setSelectedName,
+    selectedId,
+    setSelectedId,
     tab,
     setTab,
     agentsDraft,

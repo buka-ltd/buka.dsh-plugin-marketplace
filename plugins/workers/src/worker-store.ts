@@ -3,13 +3,14 @@
  *
  * 实现按职责拆在 `store/` 下：
  *
- * - `store/paths.ts`：插件全局目录、路径展开、名称校验与 fs 小工具；
- * - `store/types.ts`：登记表 / 列表 / 文件摘要的数据结构；
+ * - `store/paths.ts`：插件全局目录、路径展开、标识符校验（新 / 旧兼容）与
+ *   fs 小工具；
+ * - `store/types.ts`：登记表 / 列表 / 文件摘要的数据结构与展示名回退；
  * - `store/builtin.ts`：内建机器人（clock）的登记数据；
- * - `store/registry.ts`：登记表读写与条目增删（version 3、旧表迁移、原子写、
+ * - `store/registry.ts`：登记表读写与条目增删（version 4、旧表迁移、原子写、
  *   权限 0600、损坏拒绝写、内建打工人补写）；
  * - `store/agents.ts`：AGENTS.md 读写、模板与 CLAUDE.md 链接；
- * - `store/rename.ts`：重命名（改目录 + 就地更新登记表）；
+ * - `store/rename.ts`：改名（只改展示名，不移动目录）；
  * - `store/list.ts`：列表汇总（目录 / 挂载状态 / skills / AGENTS.md）；
  * - `store/project-skills.ts`：项目级 skills 扫描。
  *
@@ -28,8 +29,8 @@ export {
 export {
   BUILTIN_WORKERS,
   builtinWorker,
-  CLOCK_WORKER_NAME,
-  isBuiltinWorkerName,
+  CLOCK_WORKER_ID,
+  isBuiltinWorkerId,
   withBuiltinWorkers,
 } from './store/builtin.ts'
 export { listWorkers } from './store/list.ts'
@@ -40,7 +41,9 @@ export {
   AGENTS_MAX_WRITE_BYTES,
   CLAUDE_FILE,
   defaultWorkersRoot,
-  isValidWorkerName,
+  isLegacyWorkerId,
+  isResolvableWorkerId,
+  isValidWorkerId,
   LEGACY_PLUGIN_CACHE_DIR,
   legacyPluginCacheDir,
   PLUGIN_CACHE_DIR,
@@ -57,14 +60,22 @@ export { parseFrontmatter, scanProjectSkills } from './store/project-skills.ts'
 export {
   addWorker,
   ensureBuiltinWorkers,
+  idTakenError,
+  invalidIdError,
+  invalidNameError,
   isValidWorkerDescription,
+  isValidWorkerName,
   normalizeWorkerDescription,
+  normalizeWorkerName,
+  normalizeWorkerNameInput,
   readWorkerRegistry,
   removeWorker,
   setWorkerAssistant,
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
+  setWorkerName,
+  WORKER_NAME_MAX_LENGTH,
   writeWorkerRegistry,
 } from './store/registry.ts'
 export { renameWorker } from './store/rename.ts'
@@ -78,3 +89,4 @@ export type {
   WorkerRecordInput,
   WorkspaceRegistryLike,
 } from './store/types.ts'
+export { workerDisplayName } from './store/types.ts'

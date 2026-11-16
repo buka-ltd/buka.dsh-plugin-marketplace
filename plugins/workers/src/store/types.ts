@@ -1,8 +1,9 @@
 /**
  * 打工人存储层的数据结构。
  *
- * 登记表是 version 3：每个打工人都有 `driver`（agent / robot）与 `assistant`
- * 标记。智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，
+ * 登记表是 version 4：每个打工人有不可变标识符 `id`（目录名与引用键）、可选
+ * 展示名 `name`（空串表示未设置、显示标识符）、`driver`（agent / robot）与
+ * `assistant` 标记。智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，
  * 没有目录，只登记 `program` id（稳定契约，v1 只有 `clock`）。
  *
  * @module @buka/dsh-plugin-workers/store/types
@@ -25,6 +26,9 @@ export interface WorkspaceRegistryLike {
 
 /** 一条打工人记录；写回登记表后这些字段总是齐全。 */
 export interface WorkerRecord {
+  /** 不可变标识符：引用键，也是智能体目录名。 */
+  id: string
+  /** 可选展示名；空串表示未设置，展示时回退到 `id`。 */
   name: string
   driver: WorkerDriver
   /** 智能体的目录；机器人没有目录，固定空串。 */
@@ -40,9 +44,12 @@ export interface WorkerRecord {
   model?: WorkerModelSelection | undefined
 }
 
-/** 写登记表时接受的记录：`driver` 缺省按 agent，其它字段由写回逻辑补齐。 */
+/**
+ * 写登记表时接受的记录：`id` 必填，`name` 可选；其它字段由写回逻辑补齐。
+ */
 export interface WorkerRecordInput {
-  name: string
+  id: string
+  name?: string | undefined
   driver?: WorkerDriver | undefined
   path?: string | undefined
   program?: string | undefined
@@ -51,6 +58,16 @@ export interface WorkerRecordInput {
   description?: string | undefined
   assistant?: boolean | undefined
   model?: WorkerModelSelection | null | undefined
+}
+
+/**
+ * 打工人的展示名：`name` 非空时用它，否则回退到标识符。
+ *
+ */
+export function workerDisplayName(worker: { id?: unknown; name?: unknown }): string {
+  const name = typeof worker.name === 'string' ? worker.name.trim() : ''
+  if (name !== '') return name
+  return typeof worker.id === 'string' ? worker.id : ''
 }
 
 /** AGENTS.md 的摘要；文件不存在或读不了时字段取空值，保证响应结构稳定。 */

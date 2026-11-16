@@ -8,7 +8,16 @@
  */
 
 import type { FormEvent } from 'react'
-import { agentsOf, errorCode, failureText, isRobotWorker, messageOf, requestJson } from '../api.ts'
+import {
+  agentsOf,
+  errorCode,
+  failureText,
+  isRobotWorker,
+  messageOf,
+  requestJson,
+  workerDisplayName,
+  workerIdentityLabel,
+} from '../api.ts'
 import {
   AGENTS_ROUTE,
   ASSISTANT_ROUTE,
@@ -32,8 +41,10 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     service,
     mutating,
     creating,
-    name,
-    setName,
+    createId,
+    setCreateId,
+    createName,
+    setCreateName,
     draftDescription,
     draftAvatar,
     nextAvatarId,
@@ -41,8 +52,8 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     setCreateError,
     setCreating,
     setConfirming,
-    selectedName,
-    setSelectedName,
+    selectedId,
+    setSelectedId,
     agentsDraft,
     agentsSaving,
     setAgentsSaving,
@@ -74,7 +85,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       flash('error', t('noUiWorkspace'))
       return
     }
-    setBusy(`open:${worker.name}`)
+    setBusy(`open:${worker.id}`)
     try {
       await uiWorkspace.openWorkspace(worker.workspaceId)
     } catch (failure) {
@@ -96,11 +107,11 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       flash('error', t('robotReadOnly'))
       return
     }
-    setBusy(`reveal:${worker.name}`)
+    setBusy(`reveal:${worker.id}`)
     try {
       await requestJson(REVEAL_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: worker.name }),
+        body: JSON.stringify({ id: worker.id }),
       })
     } catch (failure) {
       const extra = errorCode(failure) === 'reveal-failed' ? '' : ` ${failureText(t, failure)}`
@@ -125,10 +136,10 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       flash('error', t('noWorkspacesCreate'))
       return
     }
-    setBusy(`mount:${worker.name}`)
+    setBusy(`mount:${worker.id}`)
     try {
       await workspaces.create({ path: worker.path })
-      flash('success', `${t('mounted')} ${worker.name}`)
+      flash('success', `${t('mounted')} ${workerDisplayName(worker)}`)
       reload()
     } catch (failure) {
       flash('error', `${t('mountFailed')} ${messageOf(failure)}`)
@@ -140,7 +151,8 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   /** 打开「创建打工人」对话框：清掉上一次的输入，并按现有打工人挑一个新头像。 */
   function openCreateDialog() {
     if (creating || corrupt) return
-    setName('')
+    setCreateId('')
+    setCreateName('')
     setDraftDescription('')
     setDraftAvatar(nextAvatarId())
     setCreateError(null)
@@ -163,9 +175,10 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   async function createWorker(event: FormEvent) {
     event.preventDefault()
     if (creating || corrupt) return
-    const value = name.trim()
+    const value = createId.trim()
+    const displayName = createName.trim()
     if (value === '') {
-      setCreateError(t('createEmpty'))
+      setCreateError(t('createEmptyId'))
       return
     }
     setCreating(true)
@@ -173,9 +186,15 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(CREATE_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: value, avatar: draftAvatar, description: draftDescription }),
+        body: JSON.stringify({
+          id: value,
+          name: displayName,
+          avatar: draftAvatar,
+          description: draftDescription,
+        }),
       })
-      setName('')
+      setCreateId('')
+      setCreateName('')
       setDialogOpen(false)
       const workerPath = body?.worker?.path
       if (typeof workerPath !== 'string' || workerPath === '') {
@@ -192,7 +211,8 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       const created = body?.created !== false
       try {
         await workspaces.create({ path: workerPath })
-        flash('success', `${created ? t('created') : t('createExisting')} ${value}`)
+        const createdLabel = workerIdentityLabel(body?.worker ?? { id: value, name: displayName })
+        flash('success', `${created ? t('created') : t('createExisting')} ${createdLabel}`)
       } catch (failure) {
         // 目录与登记已经落盘，挂载失败只影响「已挂载」状态，刷新后仍可重试。
         flash('error', `${t('createMountFailed')} ${messageOf(failure)}`)
@@ -215,7 +235,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       flash('error', t('robotReadOnly'))
       return
     }
-    setBusy(`delete:${worker.name}`)
+    setBusy(`delete:${worker.id}`)
     try {
       if (
         worker.mounted === true &&
@@ -237,7 +257,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
       try {
         await requestJson(REMOVE_ROUTE, {
           method: 'POST',
-          body: JSON.stringify({ name: worker.name }),
+          body: JSON.stringify({ id: worker.id }),
         })
       } catch (failure) {
         // 工作区注册可能已经摘掉；刷新让卡片回到真实状态，确认按钮保留可重试。
@@ -246,16 +266,16 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
         return
       }
       setConfirming(null)
-      if (selectedName === worker.name) setSelectedName(null)
+      if (selectedId === worker.id) setSelectedId(null)
       reload()
-      flash('success', `${t('deleted')} ${worker.name}`)
+      flash('success', `${t('deleted')} ${workerDisplayName(worker)}`)
     } finally {
       setBusy(null)
     }
   }
 
   /**
-   * 保存 AGENTS.md：Host 按打工人 name 解析目录并写文件，返回值里带字节数
+   * 保存 AGENTS.md：Host 按打工人标识符解析目录并写文件，返回值里带字节数
    * 与修改时间，用来更新本地摘要。
    *
    */
@@ -271,9 +291,9 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     try {
       const body = await requestJson(AGENTS_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: worker.name, content }),
+        body: JSON.stringify({ id: worker.id, content }),
       })
-      patchWorker(worker.name, {
+      patchWorker(worker.id, {
         agents: {
           ...agentsOf(worker),
           exists: true,
@@ -299,14 +319,14 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   async function toggleAssistant(worker: Worker) {
     if (mutating || isRobotWorker(worker)) return
     const next = worker.assistant !== true
-    setBusy(`assistant:${worker.name}`)
+    setBusy(`assistant:${worker.id}`)
     try {
       const body = await requestJson(ASSISTANT_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ name: worker.name, assistant: next }),
+        body: JSON.stringify({ id: worker.id, assistant: next }),
       })
       const saved = body?.worker?.assistant
-      patchWorker(worker.name, { assistant: typeof saved === 'boolean' ? saved : next })
+      patchWorker(worker.id, { assistant: typeof saved === 'boolean' ? saved : next })
       flash('success', next ? t('assistantSet') : t('assistantCleared'))
     } catch (failure) {
       flash('error', `${t('assistantSaveFailed')} ${failureText(t, failure)}`)

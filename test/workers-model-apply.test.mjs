@@ -21,10 +21,10 @@ async function makeHarness() {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-workers-model-apply-'))
   const workersDir = path.join(root, 'workers')
   const registryFile = resolveWorkerRegistryFile(workersDir)
-  await addWorker({ workersDir, file: registryFile, name: 'writer' })
+  await addWorker({ workersDir, file: registryFile, id: 'writer' })
   await setWorkerModel({
     file: registryFile,
-    name: 'writer',
+    id: 'writer',
     model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
   })
 

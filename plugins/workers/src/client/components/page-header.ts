@@ -20,6 +20,7 @@ import {
 import type { ReactElement } from 'react'
 import type { createDetailActions } from '../actions/detail.ts'
 import type { createWorkerActions } from '../actions/workers.ts'
+import { workerDisplayName, workerIdentityLabel } from '../api.ts'
 import { renderAvatar } from '../avatar.ts'
 import { TABS } from '../constants.ts'
 import { h } from '../h.ts'
@@ -130,7 +131,7 @@ export function PageHeader({
               className: 'buka-workers-toolbarButton',
               icon: h(IconNewChatOutlineRegular, { size: 13 }),
               disabled: mutating,
-              'aria-label': `${t('newSession')} ${selectedWorker.name}`,
+              'aria-label': `${t('newSession')} ${workerDisplayName(selectedWorker)}`,
               onClick: () => openWorker(selectedWorker),
             },
             t('newSession'),
@@ -143,11 +144,11 @@ export function PageHeader({
               size: 'sm',
               className: 'buka-workers-toolbarButton',
               icon:
-                busy === `reveal:${selectedWorker.name}`
+                busy === `reveal:${selectedWorker.id}`
                   ? h(StateDot, { state: 'ongoing', size: 13 })
                   : h(IconFolderOpenOutlineRegular, { size: 13 }),
               disabled: mutating || selectedWorker.exists === false,
-              'aria-label': `${t('reveal')} ${selectedWorker.name}`,
+              'aria-label': `${t('reveal')} ${workerDisplayName(selectedWorker)}`,
               onClick: () => revealWorker(selectedWorker),
             },
             t('reveal'),
@@ -193,7 +194,7 @@ export function PageHeader({
                   {
                     type: 'button',
                     className: 'buka-workers-avatarButton',
-                    'aria-label': `${t('changeAvatar')} ${selectedWorker.name}`,
+                    'aria-label': `${t('changeAvatar')} ${workerDisplayName(selectedWorker)}`,
                     disabled: mutating,
                     onClick: () => openAvatarDialog(selectedWorker),
                   },
@@ -203,22 +204,26 @@ export function PageHeader({
           h(
             'h1',
             { className: 'buka-workers-title' },
-            selectedWorker === null ? t('title') : String(selectedWorker.name ?? ''),
+            selectedWorker === null ? t('title') : workerIdentityLabel(selectedWorker),
           ),
-          // 重命名入口紧挨打工人名：改名会移动目录并重建工作区（旧会话不再
-          // 列在这个打工人下），登记文件损坏、目录缺失或写操作进行中时禁用。
+          // 重命名入口紧挨打工人标题：只改展示名，目录与工作区注册不变；
+          // 登记文件损坏或写操作进行中时禁用（目录缺失不影响改展示名）。
           selectedWorker === null || robot
             ? null
             : h(
                 Tooltip,
-                { label: `${t('renameLabel')} ${selectedWorker.name}`, side: 'top', delayMs: 400 },
+                {
+                  label: `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
+                  side: 'top',
+                  delayMs: 400,
+                },
                 h(
                   'button',
                   {
                     type: 'button',
                     className: 'buka-workers-iconButton',
-                    'aria-label': `${t('renameLabel')} ${selectedWorker.name}`,
-                    disabled: mutating || corrupt || selectedWorker.exists === false,
+                    'aria-label': `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
+                    disabled: mutating || corrupt,
                     onClick: openRenameDialog,
                   },
                   h(IconEditOutlineRegular, { size: 16 }),

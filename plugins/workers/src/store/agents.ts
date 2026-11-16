@@ -18,7 +18,7 @@ import { AGENTS_FILE, AGENTS_MAX_READ_BYTES, CLAUDE_FILE, pathExists, realpathOr
  * 登记进 `workers.json` 的路径、DSH 工作区记录里的路径保持一致。
  *
  */
-export async function ensureWorkerDirectory(directory: string, name: string): Promise<string> {
+export async function ensureWorkerDirectory(directory: string, label: string): Promise<string> {
   await fs.mkdir(directory, { recursive: true })
   const stat = await fs.stat(directory)
   if (!stat.isDirectory()) {
@@ -28,7 +28,7 @@ export async function ensureWorkerDirectory(directory: string, name: string): Pr
   const canonical = await realpathOr(directory, directory)
   const agentsFile = path.join(canonical, AGENTS_FILE)
   if (!(await pathExists(agentsFile))) {
-    await fs.writeFile(agentsFile, workerAgentsTemplate(name, canonical), 'utf8')
+    await fs.writeFile(agentsFile, workerAgentsTemplate(label, canonical), 'utf8')
   }
   // Claude Code 读 CLAUDE.md：打工人目录里让它指向同一份 AGENTS.md。已存在的
   // 用户文件 / 别的链接不覆盖（首次创建以外的调用都是幂等的）。
@@ -206,13 +206,14 @@ export async function writeAgentsFile(
 }
 
 /**
- * 新打工人的 AGENTS.md 模板；路径与名字都是磁盘上的真实值。
+ * 新打工人的 AGENTS.md 模板；路径是磁盘上的真实值，`label` 是展示名
+ * （名称为空时用标识符）。
  *
  */
-export function workerAgentsTemplate(name: string, workerPath: string): string {
+export function workerAgentsTemplate(label: string, workerPath: string): string {
   return `# AGENTS.md
 
-这是「${name}」打工人的协作说明。这个目录同时是一个 DSH 工作区。
+这是「${label}」打工人的协作说明。这个目录同时是一个 DSH 工作区。
 
 ## 项目
 

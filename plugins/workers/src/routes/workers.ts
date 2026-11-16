@@ -2,18 +2,19 @@
  * 「打工人」页面的打工人相关 HTTP 路由。
  *
  * 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、助理标记、
- * 重命名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 / 打开会话）都由
- * 浏览器一半走 DSH Client Service，这里只处理磁盘事实。
+ * 改展示名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 /
+ * 打开会话）都由浏览器一半走 DSH Client Service，这里只处理磁盘事实。
  *
- * 机器人（内建 clock）只读：创建 / 删除 / 改名 / 改字段都会被拒绝，
- * 助理标记只对智能体开放。
+ * 打工人按不可变标识符 `id` 寻址；`name` 只是可选展示名。创建时 `id` 必填，
+ * 之后任何入口都不能改它。机器人（内建 clock）只读：创建 / 删除 / 改名 /
+ * 改字段都会被拒绝，助理标记只对智能体开放。
  *
  * @module @buka/dsh-plugin-workers/routes/workers
  */
 
 import type { ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { buildWorker } from '../builder.ts'
+import { mountWorker } from '../builder.ts'
 import { buildWorkerModelCatalog } from '../model-catalog.ts'
 import { revealDirectory } from '../reveal.ts'
 import type { WorkerModelSelection } from '../store/types.ts'
@@ -21,15 +22,18 @@ import {
   AGENTS_MAX_WRITE_BYTES,
   addWorker,
   ensureClaudeLink,
-  isValidWorkerName,
+  isResolvableWorkerId,
+  isValidWorkerId,
   listWorkers,
-  readAgentsFile,
+  readWorkerRegistry,
   removeWorker,
+  renameWorker,
   setWorkerAssistant,
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
   WORKER_DESCRIPTION_MAX_LENGTH,
+  workerDisplayName,
   writeAgentsFile,
 } from '../worker-store.ts'
 import {
@@ -65,7 +69,7 @@ const MODEL_ROUTE = '/buka-workers/model'
 /** 页面标记 / 取消助理（只有智能体可设）用的路由。 */
 const ASSISTANT_ROUTE = '/buka-workers/assistant'
 
-/** 页面重命名打工人（改目录 + 重建工作区）用的路由。 */
+/** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = '/buka-workers/rename'
 
 /** 页面删除打工人（只删登记）用的路由。 */
@@ -143,13 +147,13 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isValidWorkerId(id)) {
             sendError(
               res,
               400,
-              'invalid-name',
-              '打工人名称不合法：需要 1–64 个字符，不能以点开头，只能包含字母、数字、汉字与 ._-。',
+              'invalid-id',
+              '打工人标识符不合法：需要匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -）。',
             )
             return
           }
@@ -163,7 +167,8 @@ export function registerWorkerRoutes(
             )
             return
           }
-          // 头像可选：不传 / 传了非法 id 时由 addWorker 按名字分配默认头像。
+          // 展示名可选；类型不对或超长由 addWorker 拒绝。
+          // 头像可选：不传 / 传了非法 id 时由 addWorker 按标识符分配默认头像。
           const avatar = typeof body?.avatar === 'string' ? body.avatar.trim() : ''
           if (body?.description !== undefined && typeof body.description !== 'string') {
             sendError(res, 400, 'invalid-description', 'description 必须是字符串')
@@ -173,17 +178,33 @@ export function registerWorkerRoutes(
 
           try {
             const result = await serializeRegistry(() =>
-              addWorker({ workersDir, file: registryFile, name, avatar, description }),
+              addWorker({
+                workersDir,
+                file: registryFile,
+                id,
+                name: body?.name,
+                avatar,
+                description,
+              }),
             )
             webCtx.logger?.info?.(
-              'buka-workers: 已登记打工人 %s（%s）',
+              'buka-workers: 已登记打工人 %s（%s，%s）',
+              result.worker.id,
               result.worker.name,
               result.worker.path,
             )
             sendJson(res, 200, { ok: true, worker: result.worker, created: result.created })
           } catch (error) {
+            if (errorCode(error) === 'invalid-id') {
+              sendError(res, 400, 'invalid-id', describeError(error))
+              return
+            }
             if (errorCode(error) === 'invalid-name') {
               sendError(res, 400, 'invalid-name', describeError(error))
+              return
+            }
+            if (errorCode(error) === 'id-taken') {
+              sendError(res, 409, 'id-taken', describeError(error))
               return
             }
             if (errorCode(error) === 'invalid-description') {
@@ -225,26 +246,26 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
           const avatar = typeof body?.avatar === 'string' ? body.avatar.trim() : ''
 
           try {
             const result = await serializeRegistry(() =>
-              setWorkerAvatar({ file: registryFile, name, avatar }),
+              setWorkerAvatar({ file: registryFile, id, avatar }),
             )
-            webCtx.logger?.info?.('buka-workers: 打工人 %s 的头像改为 %s', name, avatar)
+            webCtx.logger?.info?.('buka-workers: 打工人 %s 的头像改为 %s', id, avatar)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-avatar') {
               sendError(res, 400, 'invalid-avatar', describeError(error))
               return
             }
-            if (errorCode(error) === 'invalid-name') {
-              sendError(res, 400, 'invalid-name', describeError(error))
+            if (errorCode(error) === 'invalid-id') {
+              sendError(res, 400, 'invalid-id', describeError(error))
               return
             }
             if (errorCode(error) === 'unknown-worker') {
@@ -281,9 +302,9 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
           const description = body?.description
@@ -294,9 +315,9 @@ export function registerWorkerRoutes(
 
           try {
             const result = await serializeRegistry(() =>
-              setWorkerDescription({ file: registryFile, name, description }),
+              setWorkerDescription({ file: registryFile, id, description }),
             )
-            webCtx.logger?.info?.('buka-workers: 已更新打工人 %s 的描述', name)
+            webCtx.logger?.info?.('buka-workers: 已更新打工人 %s 的描述', id)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-description') {
@@ -308,8 +329,8 @@ export function registerWorkerRoutes(
               )
               return
             }
-            if (errorCode(error) === 'invalid-name') {
-              sendError(res, 400, 'invalid-name', describeError(error))
+            if (errorCode(error) === 'invalid-id') {
+              sendError(res, 400, 'invalid-id', describeError(error))
               return
             }
             if (errorCode(error) === 'unknown-worker') {
@@ -372,9 +393,9 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
           const model = body?.model
@@ -391,20 +412,20 @@ export function registerWorkerRoutes(
             const result = await serializeRegistry(() =>
               setWorkerModel({
                 file: registryFile,
-                name,
+                id,
                 model:
                   model === null || model === undefined ? null : (model as WorkerModelSelection),
               }),
             )
-            webCtx.logger?.info?.('buka-workers: 智能体 %s 的模型已更新', name)
+            webCtx.logger?.info?.('buka-workers: 智能体 %s 的模型已更新', id)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-model') {
               sendError(res, 400, 'invalid-model', describeError(error))
               return
             }
-            if (errorCode(error) === 'invalid-name') {
-              sendError(res, 400, 'invalid-name', describeError(error))
+            if (errorCode(error) === 'invalid-id') {
+              sendError(res, 400, 'invalid-id', describeError(error))
               return
             }
             if (errorCode(error) === 'unknown-worker') {
@@ -441,9 +462,9 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
           const assistant = body?.assistant
@@ -454,17 +475,17 @@ export function registerWorkerRoutes(
 
           try {
             const result = await serializeRegistry(() =>
-              setWorkerAssistant({ file: registryFile, name, assistant }),
+              setWorkerAssistant({ file: registryFile, id, assistant }),
             )
             webCtx.logger?.info?.(
               'buka-workers: 打工人 %s 的助理标记改为 %s',
-              name,
+              id,
               String(assistant),
             )
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             switch (errorCode(error)) {
-              case 'invalid-name':
+              case 'invalid-id':
               case 'invalid-assistant':
                 sendError(res, 400, String(errorCode(error)), describeError(error))
                 return
@@ -501,72 +522,70 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          const newName = typeof body?.newName === 'string' ? body.newName.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
-          if (!isValidWorkerName(newName)) {
-            sendError(res, 400, 'invalid-name', `新打工人名称不合法：${String(body?.newName)}`)
+          const name = body?.name
+          if (name !== undefined && name !== null && typeof name !== 'string') {
+            sendError(res, 400, 'invalid-name', 'name 必须是字符串')
             return
           }
-          if (name === newName) {
-            sendError(res, 400, 'invalid-name', '新名称与当前名称相同')
-            return
-          }
+          const nextName = typeof name === 'string' ? name : ''
 
           try {
-            // 与构建工具走同一条 buildWorker 路径：目录改名、登记表更新、
-            // 工作区重建（旧会话保留但不再挂在该打工人下）语义完全一致。
-            const result = await serializeRegistry(() =>
-              buildWorker({
-                workersDir,
+            // 改名路由只更新已有打工人：registry 里必须先有这个标识符。
+            // 只改展示名，目录不移动、工作区注册不重建，只同步标题。
+            const result = await serializeRegistry(async () => {
+              const registry = await readWorkerRegistry({ file: registryFile })
+              if (registry.corrupt)
+                throw Object.assign(new Error('registry corrupt'), {
+                  code: 'registry-unreadable',
+                })
+              if (!registry.workers.some((worker) => worker.id === id)) {
+                throw Object.assign(new Error(`no worker with id ${id}`), {
+                  code: 'unknown-worker',
+                })
+              }
+              const renamed = await renameWorker({
                 file: registryFile,
-                name,
-                newName,
-                update: true,
+                id,
+                name: nextName,
+              })
+              const mount = await mountWorker({
                 workspaceRegistry: ctx.workspaceRegistry,
-              }),
-            )
+                workerPath: renamed.worker.path,
+                title: workerDisplayName(renamed.worker),
+              })
+              return { ...renamed, mount }
+            })
             webCtx.logger?.info?.(
-              'buka-workers: 打工人 %s 已重命名为 %s（%s）',
-              name,
+              'buka-workers: 打工人 %s 的展示名改为 %s',
+              result.worker.id,
               result.worker.name,
-              result.worker.path,
             )
-            // 带上改名后的 AGENTS.md 摘要：Host 会把未改过的模板同步成新名 /
-            // 新路径，页面据此重设草稿，避免「保存」把旧模板写回去。
-            const agents = await readAgentsFile(result.worker.path)
             sendJson(res, 200, {
               ok: true,
+              id: result.worker.id,
+              name: result.worker.name,
               previousName: result.previousName,
               renamed: result.renamed,
               worker: result.worker,
-              agents,
-              mounted: result.mounted,
-              workspaceId: typeof result.workspaceId === 'string' ? result.workspaceId : null,
-              mountError: result.mountError,
+              mounted: result.mount.mounted,
+              workspaceId:
+                typeof result.mount.workspaceId === 'string' ? result.mount.workspaceId : null,
+              mountError: result.mount.mountError,
             })
           } catch (error) {
             switch (errorCode(error)) {
+              case 'invalid-id':
               case 'invalid-name':
-                sendError(res, 400, 'invalid-name', describeError(error))
-                return
               case 'invalid-update':
-                sendError(res, 400, 'invalid-update', describeError(error))
+                sendError(res, 400, String(errorCode(error)), describeError(error))
                 return
               case 'unknown-worker':
                 sendError(res, 404, 'unknown-worker', describeError(error))
-                return
-              case 'name-taken':
-                sendError(res, 409, 'name-taken', describeError(error))
-                return
-              case 'missing-directory':
-                sendError(res, 409, 'missing-directory', describeError(error))
-                return
-              case 'path-outside-root':
-                sendError(res, 409, 'path-outside-root', describeError(error))
                 return
               case 'registry-unreadable':
                 sendError(res, 409, 'registry-unreadable', describeError(error))
@@ -578,8 +597,8 @@ export function registerWorkerRoutes(
                 sendError(res, 409, 'robot-worker', describeError(error))
                 return
               default:
-                webCtx.logger?.warn?.('buka-workers: 重命名打工人失败：%s', describeError(error))
-                sendError(res, 500, 'rename-failed', `重命名打工人失败：${describeError(error)}`)
+                webCtx.logger?.warn?.('buka-workers: 改展示名失败：%s', describeError(error))
+                sendError(res, 500, 'rename-failed', `改展示名失败：${describeError(error)}`)
             }
           }
         },
@@ -601,16 +620,16 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const name = typeof body?.name === 'string' ? body.name.trim() : ''
-          if (!isValidWorkerName(name)) {
-            sendError(res, 400, 'invalid-name', `打工人名称不合法：${String(body?.name)}`)
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
             return
           }
 
           try {
-            const result = await serializeRegistry(() => removeWorker({ file: registryFile, name }))
-            if (result.removed) webCtx.logger?.info?.('buka-workers: 已移除打工人登记 %s', name)
-            sendJson(res, 200, { ok: true, name, removed: result.removed })
+            const result = await serializeRegistry(() => removeWorker({ file: registryFile, id }))
+            if (result.removed) webCtx.logger?.info?.('buka-workers: 已移除打工人登记 %s', id)
+            sendJson(res, 200, { ok: true, id, removed: result.removed })
           } catch (error) {
             if (errorCode(error) === 'registry-unreadable') {
               sendError(res, 409, 'registry-unreadable', describeError(error))
@@ -642,7 +661,7 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const resolved = await resolveWorker(registryFile, body?.name)
+          const resolved = await resolveWorker(registryFile, body?.id)
           if (resolved.error !== undefined) {
             sendWorkerError(res, resolved.error)
             return
@@ -689,7 +708,7 @@ export function registerWorkerRoutes(
           const body = await readJsonBody(req, res)
           if (body === undefined) return
 
-          const resolved = await resolveWorker(registryFile, body?.name)
+          const resolved = await resolveWorker(registryFile, body?.id)
           if (resolved.error !== undefined) {
             sendWorkerError(res, resolved.error)
             return

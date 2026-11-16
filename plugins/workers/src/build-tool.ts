@@ -31,6 +31,7 @@ export function createWorkerBuildTool({
   avatarIds?: readonly string[]
   runBuild?: (args: Record<string, unknown>) => Promise<{
     worker: {
+      id: string
       name: string
       driver: 'agent'
       path: string
@@ -61,14 +62,19 @@ export function createWorkerBuildTool({
   return defineTool({
     name: WORKER_BUILD_TOOL_NAME,
     description:
-      'Create, update or rename one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker is a directory the plugin manages (by default ~/.cache/dsh-plugin-workers/workers/<name>) whose AGENTS.md tells every session in it who the worker is and how it works. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing worker name is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To rename that existing worker, also pass newName: the directory is renamed and its DSH workspace is re-registered at the new path, so earlier conversations stay in history but are no longer listed under the worker — confirm the new name with the user first. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ' +
+      'Create or update one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ' +
       `${avatars}. Workers created here are agents; the assistant flag starts false and can be turned on for an agent on the Workers page.`,
     parameters: {
-      name: {
+      id: {
         type: 'string',
         required: true,
         description:
-          'Worker name: 1-64 characters, letters, digits or Chinese plus ".", "_" and "-"; it becomes the directory name and the mounted workspace title.',
+          'Immutable worker identifier. New ids must match ^[a-z][a-z0-9_-]{0,63}$ (lowercase letters, digits, "_" and "-", starting with a letter). It becomes the directory workers/<id> and the reference key used by workflows; it cannot be changed after creation. Pass the current id to update an existing worker.',
+      },
+      name: {
+        type: 'string',
+        description:
+          'Optional display name (a single line of at most 64 characters); it is only shown in the UI, need not be unique, and can be changed later. Empty means no display name, so the id is shown. On update, omit it to keep the current name, or pass an empty string to clear it.',
       },
       avatar: {
         type: 'string',
@@ -89,12 +95,7 @@ export function createWorkerBuildTool({
       update: {
         type: 'boolean',
         description:
-          'Set true only when the user asked to change a worker that already exists. Without it, an existing name is rejected.',
-      },
-      newName: {
-        type: 'string',
-        description:
-          'Optional new name when the user asked to rename an existing worker: pass name as the current name, newName as the new one, and update: true. Renaming moves the worker directory and re-registers its DSH workspace; earlier conversations stay in history but are no longer listed under the worker, so confirm with the user first. Same rules as name: 1-64 characters, letters, digits or Chinese plus ".", "_" and "-".',
+          'Set true only when the user asked to change a worker that already exists (including changing its display name). Without it, an existing id is rejected.',
       },
     },
     output: {
@@ -102,7 +103,16 @@ export function createWorkerBuildTool({
         type: 'object',
         additionalProperties: false,
         properties: {
-          name: { type: 'string', required: true, description: 'Worker name.' },
+          id: {
+            type: 'string',
+            required: true,
+            description: 'Immutable worker identifier.',
+          },
+          name: {
+            type: 'string',
+            required: true,
+            description: 'Display name; empty when none is set (the id is shown instead).',
+          },
           path: { type: 'string', required: true, description: 'Absolute worker directory.' },
           avatar: {
             type: 'string',
@@ -134,11 +144,12 @@ export function createWorkerBuildTool({
             type: 'boolean',
             required: true,
             description:
-              'Whether this call renamed an existing worker (moved its directory and re-registered its workspace).',
+              'Whether this call changed the display name of an existing worker. The directory and workspace registration are unchanged.',
           },
           previousName: {
             required: true,
-            description: 'Worker name before this call when it renamed the worker, otherwise null.',
+            description:
+              'Display name before this call when it changed the display name, otherwise null.',
             oneOf: [{ type: 'string' }, { type: 'null' }],
           },
           agentsBytes: {
@@ -165,6 +176,10 @@ export function createWorkerBuildTool({
         },
       },
       render: (_args, value) => {
+        const id = String(value?.id ?? '')
+        const name = typeof value?.name === 'string' ? value.name : ''
+        const display = name === '' ? id : name
+        const identity = name === '' ? id : `${name} (${id})`
         const previousName =
           typeof value?.previousName === 'string' && value.previousName !== ''
             ? value.previousName
@@ -174,26 +189,28 @@ export function createWorkerBuildTool({
           value?.created === true
             ? 'Created worker'
             : renamed
-              ? `Renamed worker: ${previousName} → ${String(value?.name ?? '')}`
+              ? `Renamed worker: ${previousName === '' ? display : previousName} → ${display}`
               : value?.updated === true
                 ? 'Updated worker'
                 : 'Worker ready'
         const description = String(value?.description ?? '')
-        const identity = renamed
-          ? `${action} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`
-          : `${action}: ${String(value?.name ?? '')} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`
-        const lines = [identity, `Description: ${description === '' ? '(none)' : description}`]
+        const lines = [
+          renamed
+            ? `${action} (id ${id}) · ${String(value?.path ?? '')} · avatar ${String(value?.avatar ?? '')}`
+            : `${action}: ${identity} (${String(value?.path ?? '')}) · avatar ${String(value?.avatar ?? '')}`,
+          `Description: ${description === '' ? '(none)' : description}`,
+        ]
         if (renamed) {
           lines.push(
-            'The workspace was re-registered at the new path; earlier conversations stay in history but are no longer listed under the worker.',
+            'Only the display name changed: the directory and the workspace registration were kept.',
           )
         }
         if (typeof value?.agentsBytes === 'number' && value.agentsBytes > 0) {
           lines.push(`AGENTS.md written: ${value.agentsBytes} bytes.`)
         }
         if (value?.mounted === true) {
-          const id = typeof value?.workspaceId === 'string' ? ` ${value.workspaceId}` : ''
-          lines.push(`Mounted as a workspace${id}.`)
+          const workspaceId = typeof value?.workspaceId === 'string' ? ` ${value.workspaceId}` : ''
+          lines.push(`Mounted as a workspace${workspaceId}.`)
         } else {
           lines.push(
             `Not mounted: ${String(value?.mountError ?? 'unknown error')}. The user can mount it from the Workers page.`,
@@ -207,6 +224,7 @@ export function createWorkerBuildTool({
       assertAccess(exec?.agent)
       const result = await runBuild(args ?? {})
       return {
+        id: result.worker.id,
         name: result.worker.name,
         path: result.worker.path,
         avatar: result.worker.avatar,

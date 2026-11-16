@@ -88,6 +88,9 @@ export interface WorkerModelCatalogState {
 
 /** 列表接口里的一行打工人。 */
 export interface Worker {
+  /** 不可变标识符：引用键与目录名。 */
+  id: string
+  /** 可选展示名；空串表示未设置，展示时回退到 `id`。 */
   name: string
   /** 智能体有目录并跑会话；机器人（clock）只读、没有目录与会话。 */
   driver: WorkerDriver
@@ -161,6 +164,7 @@ export interface DialogFailure {
 /** Host 各路由的统一响应：每个接口只返回其中一部分字段，页面按需读取。 */
 export interface HostResponse {
   worker?: Partial<Worker> | undefined
+  id?: string | undefined
   created?: boolean | undefined
   mounted?: boolean | undefined
   workspaceId?: string | null | undefined

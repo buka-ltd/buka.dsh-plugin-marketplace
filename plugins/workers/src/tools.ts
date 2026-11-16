@@ -5,9 +5,9 @@
  *
  * - 只读的 `buka_workers`：让模型回答「有哪些打工人、挂没挂载、是否写了
  *   AGENTS.md、装了什么技能」（工作流编排 preset 固定看不到技能清单）；
- * - 写工具 `buka_worker_build`：创建 / 修改 / 重命名打工人、写 AGENTS.md 并挂到
- *   工作区，但**只对随包发布的「打工人」preset 的根会话可见**
- *   （Config.builderPresets）。
+ * - 写工具 `buka_worker_build`：按标识符创建 / 修改打工人（改名只改展示名）、
+ *   写 AGENTS.md 并挂到工作区，但**只对随包发布的「打工人」preset 的根会话
+ *   可见**（Config.builderPresets）。
  *
  * 可见性判定放在本模块，入口只负责传入 preset 名单与登记表写队列。
  *
@@ -149,22 +149,23 @@ export function registerWorkerTools(ctx: Context, deps: WorkerToolDeps): void {
           buildWorker({
             workersDir,
             file: registryFile,
+            id: args?.id,
             name: args?.name,
             avatar: args?.avatar,
             description: args?.description,
             agents: args?.agents,
             update: args?.update,
-            newName: args?.newName,
             workspaceRegistry: ctx.workspaceRegistry,
           }),
         )
         ctx.logger?.info?.(
-          'buka-workers: %s 打工人 %s（%s）',
+          'buka-workers: %s 打工人 %s（%s，%s）',
           result.created
             ? '已创建'
             : result.renamed
-              ? `已重命名（原 ${result.previousName}）`
+              ? `已改展示名（原 ${result.previousName ?? ''}）`
               : '已更新',
+          result.worker.id,
           result.worker.name,
           result.worker.path,
         )

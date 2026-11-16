@@ -67,3 +67,17 @@ export const AVATAR_FORM_ID = 'buka-workers-avatar-form'
  * 保持一致：描述是一行摘要，工作流靠它决定是否把节点交给这个打工人。
  */
 export const WORKER_DESCRIPTION_MAX_LENGTH = 500
+
+/**
+ * 新标识符的字符集（与 Host 的 `isValidWorkerId` 一致）：小写字母开头，
+ * 后面可以跟小写字母、数字、`_` 与 `-`，总长 1–64。
+ */
+const WORKER_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/
+
+/** 标识符是否是合法的新标识符（创建对话框用；已有旧标识符不受此约束）。 */
+export function isValidWorkerId(value: unknown): boolean {
+  return typeof value === 'string' && WORKER_ID_PATTERN.test(value.trim())
+}
+
+/** 展示名上限（UTF-16 长度），与 Host 的 `WORKER_NAME_MAX_LENGTH` 一致。 */
+export const WORKER_NAME_MAX_LENGTH = 64

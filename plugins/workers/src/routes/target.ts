@@ -1,15 +1,16 @@
 /**
- * 按 name 解析打工人并确认目录仍在。
+ * 按标识符解析打工人并确认目录仍在。
  *
- * 打工人路由与 skills 路由共用的前置步骤：登记表损坏、名称不合法、条目不存在
- * 与目录缺失各自映射成稳定的错误码，由调用方按 HTTP 状态码回给页面。
+ * 打工人路由与 skills 路由共用的前置步骤：登记表损坏、标识符不合法、条目不存在
+ * 与目录缺失各自映射成稳定的错误码，由调用方按 HTTP 状态码回给页面。标识符
+ * 接受新格式与迁移来的旧格式（`isResolvableWorkerId`）。
  *
  * @module @buka/dsh-plugin-workers/routes/target
  */
 
 import { promises as fs } from 'node:fs'
 import type { WorkerRecord } from '../store/types.ts'
-import { isValidWorkerName, readWorkerRegistry } from '../worker-store.ts'
+import { isResolvableWorkerId, readWorkerRegistry } from '../worker-store.ts'
 
 /** 路由错误的统一形状：状态码 + 错误码 + 可展示文案。 */
 export interface WorkerRouteError {
@@ -31,25 +32,25 @@ function registryUnreadableError(registryFile: string): WorkerRouteError {
 }
 
 /**
- * 按 name 从登记表里取打工人，并确认它的目录还在。
+ * 按标识符从登记表里取打工人，并确认它的目录还在。
  *
  */
 export async function resolveWorker(
   registryFile: string,
-  name: unknown,
+  id: unknown,
 ): Promise<
   { worker: WorkerRecord; error?: undefined } | { worker?: undefined; error: WorkerRouteError }
 > {
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) return { error: registryUnreadableError(registryFile) }
 
-  const trimmed = typeof name === 'string' ? name.trim() : ''
-  if (!isValidWorkerName(trimmed)) {
+  const trimmed = typeof id === 'string' ? id.trim() : ''
+  if (!isResolvableWorkerId(trimmed)) {
     return {
-      error: { status: 400, code: 'invalid-name', message: `打工人名称不合法：${String(name)}` },
+      error: { status: 400, code: 'invalid-id', message: `打工人标识符不合法：${String(id)}` },
     }
   }
-  const worker = registry.workers.find((entry) => entry.name === trimmed)
+  const worker = registry.workers.find((entry) => entry.id === trimmed)
   if (worker === undefined) {
     return {
       error: { status: 404, code: 'unknown-worker', message: `没有找到这个打工人：${trimmed}` },
