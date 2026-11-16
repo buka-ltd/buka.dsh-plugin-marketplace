@@ -131,7 +131,7 @@ git：  git+https://github.com/buka-ltd/buka.dsh-plugin-marketplace.git#<40 位 
 
 `pnpm run check` 会依次：
 
-1. 用 `loadMarket` 生成索引，收集清单类问题：包名与目录名、`version` 是否精确 SemVer、`dsh.bundle.patch` 是否存在、`main` / `exports["."]` 入口是否存在、`engines.dsh` 是否合法、`files` 是否包含 `lib` 与 `cordis.patch.yml`、`market.json` 指向的本地 `icon` 是否存在、目录是否已提交。
+1. 用 `loadMarket` 生成索引，收集清单类问题：包名与目录名、`version` 是否精确 SemVer、`dsh.bundle.patch` 是否存在、`main` / `exports["."]` 入口是否存在、`engines.dsh` 是否合法、`files` 是否包含 `lib` 与 `cordis.patch.yml`、`dependencies` 里是否写了宿主提供的包（`@deepseek-ai/dsh*` 与 `cordis`，只能放 `peerDependencies`）、`market.json` 指向的本地 `icon` 是否存在、目录是否已提交。
 2. 检查仓库文件：根 `market.json` 与 `schemas/index.schema.json` 是否存在、能否解析；根 `market.json` 是否有未定义字段。
 3. 检查插件 `market.json` 的字段白名单；`title` / `description` 报错误，其他未定义字段报警告。
 4. 检查每个插件的 `locale/{en,zh}.json`：`meta.title` / `meta.description` 必须是非空字符串；`meta.detail` 若存在，指向的文件必须存在。

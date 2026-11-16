@@ -144,7 +144,7 @@ window.__ModuleLoader__.load({
 - **`dsh.bundle.patch` 必须存在**，否则 DSH 不会把它当 bundle 安装；值可以是单个路径，也可以是有序数组（多个补丁按顺序作为一个 bundle 层应用）。补丁路径与 `files` 都要能在发布包里找到。
 - **`dsh.client` 决定有没有界面一半**：`platform: "web"` 表示浏览器模块；`immediately: true` 让界面一半随插件加载。没有界面一半就不要写这个字段。
 - **`engines.dsh` 只写下限**，例如 `>=0.2.1-rc.5`。它单独决定兼容性；一旦声明，`peerDependencies` 里的 `@deepseek-ai/dsh*` 范围会被加载器忽略。不要写 `<0.3.0` 之类的上限（见 [ADR 0004](../adr/0004-兼容范围只写下限.md)）。
-- **`@deepseek-ai/cordis` 的 peer 范围对齐 `~4.1.0`**（宿主实际是 4.1.0）。其他运行时 `@deepseek-ai/*`（例如 `dsh-tools`）按实际使用放进 `peerDependencies`，不要放进 `dependencies` 跟着发布。
+- **`@deepseek-ai/cordis` 的 peer 范围对齐 `~4.1.0`**（宿主实际是 4.1.0）。其他运行时 `@deepseek-ai/*`（例如 `dsh-tools`、`dsh-storage-domain`）按实际使用放进 `peerDependencies`，不要放进 `dependencies` 跟着发布；`pnpm run check` 会拒绝 `dependencies` 里的 `@deepseek-ai/dsh*` 与 `cordis`——profile 是 hoisted 安装，写进 `dependencies` 的副本会被提升到 `node_modules` 根、盖住宿主自带的版本。
 - `dsh.manifestVersion: 1` 建议保留，但 DSH 不校验它；它只是自我说明，不能当兼容性依据。
 - `dependencies` 只放插件真正需要、且 DSH 不提供的包（例如 `schemastery`）。开发依赖一律留在仓库根，不要写进插件清单，否则用户安装时会被迫装编译工具。
 

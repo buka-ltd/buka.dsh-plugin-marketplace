@@ -351,6 +351,42 @@ test('缺少 market.json 与包名不符都是错误，不会被静默跳过', (
   )
 })
 
+test('宿主提供的 dsh / dsh-* / cordis 写进 dependencies 是错误：安装时会被提升并盖住宿主版本', (t) => {
+  const root = makeRepo()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const manifestFile = path.join(root, 'plugins/hello/package.json')
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  const errors = () => loadMarket({ root }).problems.filter((problem) => problem.level === 'error')
+  const write = (dependencies) => {
+    writeFile(root, 'plugins/hello/package.json', { ...manifest, dependencies })
+    git(root, ['add', '-A'])
+    git(root, ['commit', '-q', '-m', 'chore: 改依赖'])
+  }
+
+  // 库依赖照常可以放：只有宿主提供的那些会被提升后盖住宿主自带版本
+  write({ '@deepseek-ai/schemastery': '~3.18.5' })
+  assert.deepEqual(errors(), [])
+
+  // dsh 本体、dsh-* 系列与 cordis 都由宿主提供，必须声明成 peerDependency
+  for (const dependency of ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh', '@deepseek-ai/cordis']) {
+    write({ '@deepseek-ai/schemastery': '~3.18.5', [dependency]: '0.2.2-rc.1' })
+    assert.ok(
+      errors().some(
+        (problem) =>
+          problem.plugin === 'hello' &&
+          problem.message.includes(dependency) &&
+          problem.message.includes('peerDependencies'),
+      ),
+      `${dependency} 没被拦下：${JSON.stringify(errors())}`,
+    )
+  }
+
+  // 移到 peerDependencies 后不再报错
+  write(undefined)
+  assert.deepEqual(errors(), [])
+})
+
 test('origin 的常见写法归一成 https 仓库地址', () => {
   assert.equal(
     normalizeRemote('git@github.com:buka-ltd/demo.git'),

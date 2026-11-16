@@ -28,6 +28,7 @@ interface PluginManifest {
   exports?: Record<string, { default?: string } | undefined>
   files?: unknown
   engines?: { dsh?: string; [key: string]: unknown }
+  dependencies?: Record<string, unknown>
   peerDependencies?: Record<string, unknown>
   dsh?: { manifestVersion?: unknown; bundle?: { patch?: string | string[] } }
 }
@@ -62,6 +63,14 @@ const LOCALE_LANGUAGES: ReadonlyArray<readonly [file: string, language: string]>
   ['en', 'en'],
   ['zh', 'zh-cn'],
 ]
+
+/**
+ * 由 DSH 宿主自己提供的包：cordis、`@deepseek-ai/dsh` 本体与 `@deepseek-ai/dsh-*` 系列。
+ * 它们只能写进 `peerDependencies`；写进 `dependencies` 会被 profile 的 hoisted 安装
+ * 提升到 `node_modules` 根、盖住宿主自带的版本，Harness 升级后兼容检查会禁用它（见 issue #4）。
+ * 普通库（例如 `@deepseek-ai/schemastery`）不受这条限制。
+ */
+const HOST_PROVIDED_PACKAGE = /^@deepseek-ai\/(?:cordis$|dsh(?:-|$))/u
 
 /** 仓库根的 `market.json`。 */
 interface RootMarketConfig {
@@ -329,6 +338,18 @@ export function loadMarket(options: LoadMarketOptions = {}): LoadedMarket {
     }
     if (typeof manifest.peerDependencies?.['@deepseek-ai/cordis'] !== 'string') {
       warning('package.json 建议把 @deepseek-ai/cordis 声明为 peerDependency', directory)
+    }
+    /**
+     * 宿主提供的包只能声明成 peerDependency：profile 用 hoisted 链接方式，
+     * 写进 dependencies 的那份会被提升到 node_modules 根、盖住宿主自带的版本。
+     */
+    for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+      if (HOST_PROVIDED_PACKAGE.test(dependency)) {
+        error(
+          `package.json 把宿主提供的 ${dependency} 写进了 dependencies；改放 peerDependencies，否则安装时会被提升并盖住宿主版本`,
+          directory,
+        )
+      }
     }
     const files = manifest.files
     if (Array.isArray(files)) {
