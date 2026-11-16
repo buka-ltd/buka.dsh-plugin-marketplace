@@ -60,7 +60,7 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
         return { kind: 'error', text: '/job 需要在一个会话里使用（发起人 = 当前会话）' }
       }
       const raw = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
-      if (raw === '') return { kind: 'success', text: describeAvailableWorkflows(engine) }
+      if (raw === '') return { kind: 'success', text: await describeAvailableWorkflows(engine) }
       const space = raw.search(/\s/u)
       const workflowId = (space < 0 ? raw : raw.slice(0, space)).trim()
       const request = space < 0 ? '' : raw.slice(space + 1).trim()
@@ -96,10 +96,10 @@ export function registerJobCommand({ ctx, ready }: JobCommandDeps): boolean {
 }
 
 /** 列出可用工作流与启动输入要求。 */
-function describeAvailableWorkflows(engine: WorkflowEngine): string {
-  const workflows = engine
-    .listWorkflowSummaries()
-    .filter((workflow) => workflow.status === 'active')
+async function describeAvailableWorkflows(engine: WorkflowEngine): Promise<string> {
+  const workflows = (await engine.listWorkflowSummaries()).filter(
+    (workflow) => workflow.status === 'active',
+  )
   if (workflows.length === 0) {
     return '没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。'
   }

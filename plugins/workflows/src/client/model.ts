@@ -4,6 +4,7 @@
  * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
  */
 
+import { fill } from './i18n.ts'
 import type {
   ActionDefinition,
   AttachmentMeta,
@@ -14,6 +15,7 @@ import type {
   JobDetail,
   JobSummary,
   JsonSchema,
+  MissingWorkerRef,
   PageState,
   PositionDefinition,
   Starter,
@@ -21,6 +23,7 @@ import type {
   TaskSummary,
   TaskTypeDefinition,
   Translate,
+  WorkerAvailability,
   WorkflowDefinition,
   WorkflowDetail,
 } from './types.ts'
@@ -78,6 +81,63 @@ export function workerIdentityText(
   return identity.displayName === identity.id
     ? identity.id
     : `${identity.displayName} · ${identity.id}`
+}
+
+/**
+ * 当前页面的派生可用性：作业页取作业的，工作流页取工作流详情的。
+ *
+ * @param state 页面状态
+ * @returns 可用性；还没加载或 Host 没给时 null
+ */
+export function currentAvailability(state: PageState): WorkerAvailability | null {
+  if (state.route.kind === 'job') return state.job.data?.availability ?? null
+  return state.workflow.data?.workflow?.availability ?? null
+}
+
+/**
+ * 缺失的打工人引用。
+ *
+ * @param state 页面状态
+ * @returns 缺失引用数组；可用时是空数组
+ */
+export function missingWorkersOf(state: PageState): MissingWorkerRef[] {
+  const availability = currentAvailability(state)
+  return Array.isArray(availability?.missingWorkers) ? availability.missingWorkers : []
+}
+
+/**
+ * 判断一条打工人引用是否已不存在（历史展示据此显示「已删除」与占位头像）。
+ *
+ * @param state 页面状态
+ * @param ref 打工人标识符（v7 快照里是当时的名字）
+ * @returns 缺失时为 true
+ */
+export function isWorkerMissing(state: PageState, ref: string): boolean {
+  if (typeof ref !== 'string' || ref === '') return false
+  return missingWorkersOf(state).some((entry) => entry.id === ref)
+}
+
+/**
+ * 一条缺失引用的可读说明（工作流 / 作业的不可用提示）。
+ *
+ * @param t 翻译函数
+ * @param entry 缺失引用
+ * @returns 一句话
+ */
+export function describeMissingWorker(t: Translate, entry: MissingWorkerRef): string {
+  if (entry.role === 'delivery') {
+    return fill(t, 'workerMissingDelivery', { id: entry.id })
+  }
+  if (entry.role === 'assistant') {
+    return fill(t, 'workerMissingAssistant', {
+      type: entry.taskTypeLabel ?? entry.taskTypeId ?? '',
+      id: entry.id,
+    })
+  }
+  return fill(t, 'workerMissingExecutor', {
+    position: entry.positionLabel ?? entry.positionId ?? '',
+    id: entry.id,
+  })
 }
 
 /**
@@ -521,7 +581,10 @@ export function claimantName(
   if (ref === '') return typeof claimant.kind === 'string' ? t(actorKindKeySafe(claimant.kind)) : ''
   if (claimant.kind === 'human') return ref
   const displayName = displayNameOfWorker(state, ref, positionId)
-  return displayName === null ? ref : workerIdentity({ id: ref, name: displayName }).displayName
+  const label =
+    displayName === null ? ref : workerIdentity({ id: ref, name: displayName }).displayName
+  // 承办的打工人已删除：保留引用键但明确标「已删除」，不伪造一个历史名称。
+  return isWorkerMissing(state, ref) ? `${label} · ${t('workerDeleted')}` : label
 }
 
 /**

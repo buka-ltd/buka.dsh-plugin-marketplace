@@ -12,6 +12,7 @@ import { agentsOf, messageOf, requestJson } from './api.ts'
 import { AVATARS, avatarPreset, DEFAULT_AVATAR_ID } from './avatar.ts'
 import { LIST_ROUTE, MODELS_ROUTE } from './constants.ts'
 import type {
+  DeleteDialogState,
   DialogFailure,
   FavouritesState,
   InstallCandidates,
@@ -46,7 +47,18 @@ export function useWorkersState(props: { getService: GetService }) {
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [createError, setCreateError] = React.useState<string | null>(null)
   const [creating, setCreating] = React.useState(false)
-  const [confirming, setConfirming] = React.useState<string | null>(null)
+
+  /**
+   * 删除确认弹窗：先读影响面（阻塞作业 / 会变成不可用的工作流 / 历史作业数 /
+   * 将被删除的目录），确认按钮在 `saving` 或存在阻塞作业时禁用。
+   */
+  const [deleteDialog, setDeleteDialog] = React.useState<DeleteDialogState>({
+    target: null,
+    impact: null,
+    loading: false,
+    error: null,
+    saving: false,
+  })
   const [busy, setBusy] = React.useState<string | null>(null)
 
   /**
@@ -161,7 +173,8 @@ export function useWorkersState(props: { getService: GetService }) {
     avatarSaving ||
     descriptionSaving ||
     renameSaving ||
-    modelSaving
+    modelSaving ||
+    deleteDialog.saving
 
   /**
    * 新建打工人时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
@@ -310,8 +323,8 @@ export function useWorkersState(props: { getService: GetService }) {
     setCreateError,
     creating,
     setCreating,
-    confirming,
-    setConfirming,
+    deleteDialog,
+    setDeleteDialog,
     busy,
     setBusy,
     draftAvatar,

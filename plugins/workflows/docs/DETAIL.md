@@ -67,6 +67,17 @@ Position labels, channel ids, job numbers, dependency lists and attachment lists
   - `null`: the task waits in ready; the person claims it, picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything.
 - If the assistant fails the task returns to ready; no automatic switch, and the person can always finish it.
 
+## Unavailable (derived state)
+
+Workflows and jobs can enter a derived "unavailable" state: a worker identifier they reference no longer exists in the Workers registry. The state is never persisted; readers compute it from whether references resolve, and rebinding an existing worker clears it automatically.
+
+- **Reference sources**: the executor of a position and the assistant of a task type in any workflow version; the pinned definition (position executors and task-type assistants) and the delivery assistant of a job. Legacy `name` values in v7 job snapshots are resolved as identifiers too.
+- **Workflow**: the list and detail show which identifier is missing, and the workflow cannot start a job. Saving a new definition still validates that identifiers exist (reading an existing definition does not validate; it only marks it unavailable).
+- **Job**: the job page marks it unavailable. A task whose executor is missing fails dispatch with an error that names the task, the position and the missing identifier; the task can be retried and other branches keep running. Human tasks whose assistant is missing stay claimable so a person can finish them.
+- **Difference from "disabled"**: disabled is a deliberate pause and existing jobs keep running; unavailable means a reference broke and must be rebound. History shows a placeholder avatar and "Deleted" for positions, tasks and claimants of deleted workers, keeping no tombstone records.
+
+Deleting a worker is a hard delete (registry entry, directory and workspace registration together), blocked only by running jobs that reference the identifier. The Workers delete dialog reads the impact through this plugin's read-only `ctx.bukaWorkflows.workerUsage(id)` service; when this plugin is not installed, workers treat it as having no job references.
+
 ## Ending a job
 
 - The previous task creates the end task along a channel; its `content` is the final report, validated against the end node content schema.

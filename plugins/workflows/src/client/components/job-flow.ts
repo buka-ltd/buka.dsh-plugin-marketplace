@@ -7,6 +7,7 @@
 
 import type React from 'react'
 
+import { MISSING_AVATAR_ID } from '../avatars.ts'
 import type { GraphEdgeInput, GraphNodeInput } from '../graph/layout.ts'
 import { renderWorkflowGraph } from '../graph/render.ts'
 import {
@@ -76,9 +77,11 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
         label: position.label,
         kind: 'position' as const,
         executor: position.executor,
-        ...(typeof position.executor.avatar === 'string' && position.executor.avatar !== ''
-          ? { avatar: position.executor.avatar }
-          : {}),
+        ...(position.executor.missing === true
+          ? { avatar: MISSING_AVATAR_ID }
+          : typeof position.executor.avatar === 'string' && position.executor.avatar !== ''
+            ? { avatar: position.executor.avatar }
+            : {}),
         status: aggregateOf(list),
         meta: metaOf(list),
         title: titleOf(position.label, list),

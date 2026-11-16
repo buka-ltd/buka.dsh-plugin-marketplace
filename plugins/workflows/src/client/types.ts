@@ -89,6 +89,24 @@ export interface Executor {
   avatar?: string
   /** 打工人驱动：agent / robot（只读展示用）。 */
   driver?: string
+  /** 登记表里查不到这个标识符：显示占位头像与「已删除」。 */
+  missing?: boolean
+}
+
+/** 一条缺失的打工人引用。 */
+export interface MissingWorkerRef {
+  id: string
+  role?: 'executor' | 'assistant' | 'delivery'
+  positionId?: string
+  positionLabel?: string
+  taskTypeId?: string
+  taskTypeLabel?: string
+}
+
+/** 工作流 / 作业的派生可用性：引用断了时不可用，重新绑定后自动恢复。 */
+export interface WorkerAvailability {
+  available?: boolean
+  missingWorkers?: MissingWorkerRef[]
 }
 
 /** 受限 JSON Schema 子集（与 `src/json-schema.ts` 的规则一致，这里只做展示与表单）。 */
@@ -188,6 +206,7 @@ export interface WorkflowSummary {
   status?: string
   jobCount?: number
   updatedAt?: string | null
+  availability?: WorkerAvailability
 }
 
 /** 作业列表里的一条。 */
@@ -201,6 +220,7 @@ export interface JobSummary {
   taskCounts?: Partial<Record<TaskStatus, number>>
   createdAt?: string
   updatedAt?: string
+  availability?: WorkerAvailability
 }
 
 /** 承办者（人 / 助理打工人 / 执行打工人）。 */
@@ -300,6 +320,7 @@ export interface WorkflowDetail {
     version?: number
     status?: string
     definition?: WorkflowDefinition
+    availability?: WorkerAvailability
   }
   graph?: {
     positions?: Array<{ id?: string; label?: string; executor?: Executor }>
@@ -340,6 +361,8 @@ export interface JobDetail {
   definition?: JobDefinition
   tasks?: TaskSummary[]
   canRetryDelivery?: boolean
+  /** 派生可用性：缺执行者 / 助理时作业页标注「不可用」。 */
+  availability?: WorkerAvailability
 }
 
 /** 作业详情页的视图页签。 */
@@ -387,7 +410,7 @@ export interface Notice {
 }
 
 /** 交回方式：交回发起人，或交给某个助理；v8 用 `id`，旧快照用 `name`。 */
-export type DeliveryRule = { kind?: string; id?: string; name?: string }
+export type DeliveryRule = { kind?: string; id?: string; name?: string; missing?: boolean }
 
 /** 人任务表单的草稿。 */
 export interface TaskFormState {

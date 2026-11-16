@@ -17,7 +17,8 @@
  * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
  * | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
  * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
- * | `POST /buka-workers/remove` | 从登记表移除（目录、文件与会话保留） |
+ * | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
+ * | `POST /buka-workers/remove` | 硬删登记条目 + 打工人目录 + 工作区注册；有 running 作业引用时 409 |
  * | `POST /buka-workers/agents` | 写入某打工人的 AGENTS.md，并补 CLAUDE.md 链接 |
  * | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
  * | `POST /buka-workers/skills/install` | 只安装选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
@@ -32,6 +33,9 @@
  * 创建 / 修改打工人（改名只改展示名）、写 AGENTS.md 并挂到工作区，但**只对
  * 随包发布的「打工人」preset 的根会话可见**（Config.builderPresets，判定见
  * `lib/access.js`）。删除打工人、安装 skills、页面上的编辑仍然只留给用户。
+ *
+ * 删除通过可选的 `ctx.bukaWorkflows` 服务读引用面；没装 Workflows 插件时视为
+ * 没有作业引用。唯一阻塞是引用该标识符的运行中作业。
  *
  * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
  * `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建

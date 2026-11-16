@@ -280,6 +280,12 @@ window.__ModuleLoader__.load({
     	workflowActive: "Available",
     	workflowRetired: "Disabled",
     	workflowOutdated: "Needs upgrade",
+    	workerUnavailable: "Unavailable",
+    	workerUnavailableHint: "A worker referenced by this workflow or job no longer exists. Start and dispatch stay blocked until an existing worker is bound again.",
+    	workerDeleted: "Deleted",
+    	workerMissingExecutor: "Position \"{position}\" references missing worker identifier \"{id}\".",
+    	workerMissingAssistant: "Task type \"{type}\" references missing assistant identifier \"{id}\".",
+    	workerMissingDelivery: "The delivery assistant \"{id}\" no longer exists.",
     	workflowRetiredHint: "Read-only; no new jobs",
     	workflowStatusFailed: "Could not update the workflow: ",
     	workflowEnabled: "Workflow enabled.",
@@ -536,6 +542,12 @@ window.__ModuleLoader__.load({
     	workflowActive: "可用",
     	workflowRetired: "已停用",
     	workflowOutdated: "待升级",
+    	workerUnavailable: "不可用",
+    	workerUnavailableHint: "这个工作流或作业引用的打工人已不存在。重新绑定一个已存在的打工人之前，启动作业与任务派发都会保持阻塞。",
+    	workerDeleted: "已删除",
+    	workerMissingExecutor: "岗位「{position}」引用的打工人标识符「{id}」已不存在。",
+    	workerMissingAssistant: "任务类型「{type}」引用的助理标识符「{id}」已不存在。",
+    	workerMissingDelivery: "交回方式里的助理「{id}」已不存在。",
     	workflowRetiredHint: "只读，不能新建作业",
     	workflowStatusFailed: "更新工作流失败：",
     	workflowEnabled: "工作流已重新启用。",
@@ -1192,6 +1204,55 @@ window.__ModuleLoader__.load({
     	return identity.displayName === identity.id ? identity.id : `${identity.displayName} · ${identity.id}`;
     }
     /**
+    * 当前页面的派生可用性：作业页取作业的，工作流页取工作流详情的。
+    *
+    * @param state 页面状态
+    * @returns 可用性；还没加载或 Host 没给时 null
+    */
+    function currentAvailability(state) {
+    	if (state.route.kind === "job") return state.job.data?.availability ?? null;
+    	return state.workflow.data?.workflow?.availability ?? null;
+    }
+    /**
+    * 缺失的打工人引用。
+    *
+    * @param state 页面状态
+    * @returns 缺失引用数组；可用时是空数组
+    */
+    function missingWorkersOf(state) {
+    	const availability = currentAvailability(state);
+    	return Array.isArray(availability?.missingWorkers) ? availability.missingWorkers : [];
+    }
+    /**
+    * 判断一条打工人引用是否已不存在（历史展示据此显示「已删除」与占位头像）。
+    *
+    * @param state 页面状态
+    * @param ref 打工人标识符（v7 快照里是当时的名字）
+    * @returns 缺失时为 true
+    */
+    function isWorkerMissing(state, ref) {
+    	if (typeof ref !== "string" || ref === "") return false;
+    	return missingWorkersOf(state).some((entry) => entry.id === ref);
+    }
+    /**
+    * 一条缺失引用的可读说明（工作流 / 作业的不可用提示）。
+    *
+    * @param t 翻译函数
+    * @param entry 缺失引用
+    * @returns 一句话
+    */
+    function describeMissingWorker(t, entry) {
+    	if (entry.role === "delivery") return fill(t, "workerMissingDelivery", { id: entry.id });
+    	if (entry.role === "assistant") return fill(t, "workerMissingAssistant", {
+    		type: entry.taskTypeLabel ?? entry.taskTypeId ?? "",
+    		id: entry.id
+    	});
+    	return fill(t, "workerMissingExecutor", {
+    		position: entry.positionLabel ?? entry.positionId ?? "",
+    		id: entry.id
+    	});
+    }
+    /**
     * 助理引用 → 展示身份；展示名来自工作流详情里的助理列表。
     *
     * @param state 页面状态
@@ -1424,10 +1485,11 @@ window.__ModuleLoader__.load({
     	if (ref === "") return typeof claimant.kind === "string" ? t(actorKindKeySafe(claimant.kind)) : "";
     	if (claimant.kind === "human") return ref;
     	const displayName = displayNameOfWorker(state, ref, positionId);
-    	return displayName === null ? ref : workerIdentity({
+    	const label = displayName === null ? ref : workerIdentity({
     		id: ref,
     		name: displayName
     	}).displayName;
+    	return isWorkerMissing(state, ref) ? `${label} · ${t("workerDeleted")}` : label;
     }
     /**
     * 从当前作业 / 工作流定义里找一条打工人引用的展示名。
@@ -1971,6 +2033,23 @@ window.__ModuleLoader__.load({
     function renderEmptyAction(title, hint, action) {
     	return h("div", { className: "buka-workflows-emptyBox" }, h("p", { className: "buka-workflows-empty" }, title), hint === null || hint === "" ? null : h("p", { className: "buka-workflows-hint" }, hint), action);
     }
+    /**
+    * 派生不可用的提示条：列出缺口位置与缺失的标识符。
+    *
+    * @param page 页面上下文
+    * @param availability 可用性；可用或没加载时返回 null
+    * @returns 提示条或 null
+    */
+    function renderAvailabilityNotice(page, availability) {
+    	if (availability === null || availability === void 0) return null;
+    	if (availability.available !== false) return null;
+    	const missing = Array.isArray(availability.missingWorkers) ? availability.missingWorkers : [];
+    	const { t } = page;
+    	return h("div", {
+    		className: "buka-workflows-unavailableNotice",
+    		role: "alert"
+    	}, h("strong", { className: "buka-workflows-unavailableTitle" }, t("workerUnavailable")), h("p", { className: "buka-workflows-unavailableHint" }, t("workerUnavailableHint")), h("ul", { className: "buka-workflows-unavailableList" }, ...missing.map((entry, index) => h("li", { key: `${entry.role ?? "executor"}-${entry.id}-${index}` }, describeMissingWorker(t, entry)))));
+    }
     /** 状态标签（任务 / 作业 / 工作流通用）。 */
     function renderStatusTag(t, status, kind = "task") {
     	const label = kind === "workflow" ? t(workflowStatusKey(status)) : statusLabel(t, status);
@@ -2060,18 +2139,21 @@ window.__ModuleLoader__.load({
     function renderSection(title, children, extra) {
     	return h("section", { className: "buka-workflows-section" }, h("div", { className: "buka-workflows-sectionHead" }, h("h3", { className: "buka-workflows-sectionTitle" }, title), extra ?? null), children);
     }
-    /** 执行者展示：打工人 / 人 + 「展示名 · 标识符」。 */
+    /** 执行者展示：打工人 / 人 + 「展示名 · 标识符」；已删打工人标「已删除」。 */
     function renderExecutor(page, executor) {
     	const { t } = page;
     	if (!isRecord(executor)) return t("taskTypeUnset");
     	if (executor.kind === "human") return t("actorHuman");
     	const kind = executor.kind === "worker" ? t("actorWorker") : t("taskTypeUnset");
     	const label = workerIdentityText(executor);
-    	return label === "" ? kind : `${kind} · ${label}`;
+    	if (label === "") return kind;
+    	const ref = typeof executor.id === "string" && executor.id !== "" ? executor.id : typeof executor.name === "string" ? executor.name : "";
+    	return executor.missing === true || isWorkerMissing(page.state, ref) ? `${kind} · ${label} · ${t("workerDeleted")}` : `${kind} · ${label}`;
     }
-    /** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符。 */
+    /** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符，已删标「已删除」。 */
     function renderAssistant(page, id) {
-    	return workerIdentityText(assistantIdentity(page.state, id));
+    	const label = workerIdentityText(assistantIdentity(page.state, id));
+    	return isWorkerMissing(page.state, id) ? `${label} · ${page.t("workerDeleted")}` : label;
     }
     /** 字段类型 → 展示文本。 */
     function schemaTypeLabel(schema) {
@@ -2262,6 +2344,7 @@ window.__ModuleLoader__.load({
     * @returns React 元素；没有头像时返回 null
     */
     function renderAvatar(avatar, size, className = "") {
+    	if (avatar === "__missing-worker__") return renderMissingAvatar(size, className);
     	const preset = avatarPreset(avatar);
     	if (preset === null) return null;
     	return h("span", {
@@ -2275,6 +2358,26 @@ window.__ModuleLoader__.load({
     		},
     		"aria-hidden": true
     	}, preset.emoji);
+    }
+    /** 已删打工人的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
+    const MISSING_AVATAR_ID = "__missing-worker__";
+    /**
+    * 已删打工人的占位头像：灰色圆片 + 问号，与预设头像同样尺寸。
+    *
+    * @param size 直径（px）
+    * @param className 额外类名
+    * @returns React 元素
+    */
+    function renderMissingAvatar(size, className = "") {
+    	return h("span", {
+    		className: `buka-workflows-avatar buka-workflows-avatarMissing${className === "" ? "" : ` ${className}`}`,
+    		style: {
+    			width: `${size}px`,
+    			height: `${size}px`,
+    			fontSize: `${Math.max(8, Math.round(size * .62))}px`
+    		},
+    		"aria-hidden": true
+    	}, "?");
     }
     // .build/workflows/client/components/definition-drawer.js
     /**
@@ -3182,7 +3285,7 @@ window.__ModuleLoader__.load({
     					label: position.label,
     					kind: "position",
     					executor: position.executor,
-    					...typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
+    					...position.executor.missing === true ? { avatar: MISSING_AVATAR_ID } : typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
     					status: aggregateOf(list),
     					meta: metaOf(list),
     					title: titleOf(position.label, list)
@@ -3294,7 +3397,7 @@ window.__ModuleLoader__.load({
     	}, t("overviewOpenFinalTask"))), renderSection(t("overviewStarter"), h("div", { className: "buka-workflows-overviewCard" }, renderKv([
     		[t("overviewWorkflow"), `${job.workflowName ?? job.workflowId ?? ""}${typeof job.workflowVersion === "number" ? ` · v${job.workflowVersion}` : ""}`],
     		[t("starter"), starter === null ? t("taskTypeUnset") : starter.kind === "session" ? t("starterSession") : t("starterHuman")],
-    		[t("overviewDelivery"), job.delivery?.kind === "assistant" ? `${t("newJobDeliveryAssistant")} · ${workerIdentityText(deliveryIdentity(job.delivery))}` : t("newJobDeliveryStarter")],
+    		[t("overviewDelivery"), job.delivery?.kind === "assistant" ? `${t("newJobDeliveryAssistant")} · ${workerIdentityText(deliveryIdentity(job.delivery))}${job.delivery.missing === true || isWorkerMissing(state, workerIdentity(deliveryIdentity(job.delivery)).id) ? ` · ${t("workerDeleted")}` : ""}` : t("newJobDeliveryStarter")],
     		[t("jobCreatedAt"), formatTime(job.createdAt)],
     		[t("jobUpdatedAt"), formatTime(job.updatedAt)]
     	]), starter !== null && starter.kind === "session" && typeof starter.sessionId === "string" && starter.sessionId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -3436,7 +3539,7 @@ window.__ModuleLoader__.load({
     	const tasks = sortTasks(jobTasks(state).filter((task) => task.position === selection.positionId));
     	const title = fill(t, "nodeTasksTitle", { label: selection.label });
     	const position = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state))).find((item) => item.id === selection.positionId);
-    	const avatar = position !== void 0 && typeof position.executor.avatar === "string" ? renderAvatar(position.executor.avatar, 28, "buka-workflows-drawerAvatar") : null;
+    	const avatar = position?.executor.missing === true ? renderAvatar(MISSING_AVATAR_ID, 28, "buka-workflows-drawerAvatar") : position !== void 0 && typeof position.executor.avatar === "string" ? renderAvatar(position.executor.avatar, 28, "buka-workflows-drawerAvatar") : null;
     	const meta = [fill(t, "flowTaskCount", { n: tasks.length }), position === void 0 ? "" : renderExecutor(page, position.executor)].filter((part) => part !== "");
     	return h(ClientModal, {
     		open: true,
@@ -3563,6 +3666,7 @@ window.__ModuleLoader__.load({
     function executorAvatar(page, task) {
     	if (task.position === void 0 || task.position === "") return void 0;
     	const position = positionsOf(mergedDefinition(currentJobDefinition(page.state), currentDefinition(page.state))).find((item) => item.id === task.position);
+    	if (position?.executor.missing === true) return MISSING_AVATAR_ID;
     	return typeof position?.executor.avatar === "string" && position.executor.avatar !== "" ? position.executor.avatar : void 0;
     }
     /** 抽屉正文。 */
@@ -3783,7 +3887,7 @@ window.__ModuleLoader__.load({
     			label: position.label,
     			kind: "position",
     			executor: position.executor,
-    			...typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
+    			...position.executor.missing === true ? { avatar: MISSING_AVATAR_ID } : typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
     			status: "idle",
     			title: `${position.label} · ${renderExecutor(page, position.executor)}`
     		})),
@@ -3865,6 +3969,7 @@ window.__ModuleLoader__.load({
     	const workflow = loaded.data.workflow;
     	const workflowId = workflow?.id ?? "";
     	const retired = workflow?.status === "retired";
+    	const unavailable = workflow?.availability?.available === false;
     	const jobs = Array.isArray(loaded.data.jobs) ? loaded.data.jobs : [];
     	const counts = {
     		all: jobs.length,
@@ -3874,7 +3979,7 @@ window.__ModuleLoader__.load({
     	};
     	const visible = sortJobs(filterJobs(jobs, state.jobFilter));
     	const outdated = typeof state.workflow.data?.workflow?.definition?.version === "number" && state.workflow.data?.workflow?.definition?.version !== 8;
-    	const newJobAction = retired || outdated || workflowId === "" ? null : h("button", {
+    	const newJobAction = retired || outdated || unavailable || workflowId === "" ? null : h("button", {
     		key: "new-job-empty",
     		type: "button",
     		className: "buka-workflows-textButton",
@@ -3904,6 +4009,7 @@ window.__ModuleLoader__.load({
     	const oldVersion = typeof job.definitionVersion === "number" && job.definitionVersion !== 8;
     	const legacy = typeof job.definitionVersion === "number" && job.definitionVersion < 7;
     	const total = Object.values(job.taskCounts ?? {}).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0);
+    	const unavailable = job.availability?.available === false;
     	const done = typeof job.taskCounts?.completed === "number" ? job.taskCounts.completed : 0;
     	const ready = typeof job.taskCounts?.ready === "number" ? job.taskCounts.ready : 0;
     	const running = typeof job.taskCounts?.running === "number" ? job.taskCounts.running : 0;
@@ -3924,7 +4030,7 @@ window.__ModuleLoader__.load({
     		disabled: legacy,
     		title: legacy ? t("jobLegacyHint") : void 0,
     		onClick: legacy ? void 0 : () => actions.openJob(workflowId, job.id)
-    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("span", { className: "buka-workflows-cardTitle" }, job.inputSummary ?? job.id)), h("span", { className: "buka-workflows-cardTags" }, oldVersion ? h("span", { className: "buka-workflows-tag" }, t("jobLegacy")) : null, renderStatusTag(t, job.status, "job"))), h("span", { className: "buka-workflows-meta" }, parts.join(" · ")), total > 0 ? h("span", {
+    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("span", { className: "buka-workflows-cardTitle" }, job.inputSummary ?? job.id)), h("span", { className: "buka-workflows-cardTags" }, oldVersion ? h("span", { className: "buka-workflows-tag" }, t("jobLegacy")) : null, unavailable ? h("span", { className: "buka-workflows-tag" }, t("workerUnavailable")) : null, renderStatusTag(t, job.status, "job"))), h("span", { className: "buka-workflows-meta" }, parts.join(" · ")), total > 0 ? h("span", {
     		className: "buka-workflows-progress",
     		"aria-hidden": true
     	}, h("span", {
@@ -3953,15 +4059,18 @@ window.__ModuleLoader__.load({
     function renderWorkflowCard(page, workflow) {
     	const { t, actions } = page;
     	const retired = workflow.status === "retired";
+    	const unavailable = workflow.availability?.available === false;
+    	const missing = Array.isArray(workflow.availability?.missingWorkers) ? workflow.availability?.missingWorkers : [];
     	const outdated = typeof workflow.definitionVersion === "number" && workflow.definitionVersion !== 8;
     	return h("li", { key: workflow.id }, h("button", {
     		type: "button",
     		className: `buka-workflows-card${retired ? " is-disabled" : ""}`,
     		onClick: () => actions.openWorkflow(workflow.id)
-    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-cardTitle" }, typeof workflow.name === "string" && workflow.name !== "" ? workflow.name : workflow.id), typeof workflow.version === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `v${workflow.version}`) : null), outdated ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warn" }, t("workflowOutdated")) : null, retired ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("workflowRetired")) : null), typeof workflow.description === "string" && workflow.description !== "" ? h("span", { className: "buka-workflows-cardDesc" }, workflow.description) : null, h("span", { className: "buka-workflows-meta" }, [
+    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-cardTitle" }, typeof workflow.name === "string" && workflow.name !== "" ? workflow.name : workflow.id), typeof workflow.version === "number" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `v${workflow.version}`) : null), outdated ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warn" }, t("workflowOutdated")) : null, retired ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("workflowRetired")) : null, unavailable ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warn" }, t("workerUnavailable")) : null), typeof workflow.description === "string" && workflow.description !== "" ? h("span", { className: "buka-workflows-cardDesc" }, workflow.description) : null, h("span", { className: "buka-workflows-meta" }, [
     		fill(t, "jobCount", { n: typeof workflow.jobCount === "number" ? workflow.jobCount : 0 }),
     		typeof workflow.updatedAt === "string" && workflow.updatedAt !== "" ? `${t("updatedAt")} ${formatTime(workflow.updatedAt)}` : "",
-    		retired ? t("workflowRetiredHint") : ""
+    		retired ? t("workflowRetiredHint") : "",
+    		unavailable ? missing.map((entry) => describeMissingWorker(t, entry)).join("; ") : ""
     	].filter((part) => part !== "").join(" · "))));
     }
     // .build/workflows/client/components/page-shell.js
@@ -4001,7 +4110,11 @@ window.__ModuleLoader__.load({
     	const jobStatus = state.job.data?.job?.status;
     	const live = jobStatus === "running";
     	const retired = route.kind === "workflow" && workflowStatus === "retired";
-    	const workflowAvailable = workflowStatus !== void 0 && workflowStatus !== "retired";
+    	const workflowAvailability = state.workflow.data?.workflow?.availability;
+    	const jobAvailability = state.job.data?.availability;
+    	const availability = route.kind === "job" ? jobAvailability : workflowAvailability;
+    	const unavailable = availability?.available === false;
+    	const workflowAvailable = workflowStatus !== void 0 && workflowStatus !== "retired" && !unavailable;
     	const tabs = route.kind === "workflow" ? [{
     		value: "jobs",
     		label: t("jobsTab"),
@@ -4097,7 +4210,7 @@ window.__ModuleLoader__.load({
     		title: t("back"),
     		"aria-label": t("back"),
     		onClick: route.kind === "workflow" ? actions.backToWorkflows : actions.backToWorkflow
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })), h("h1", { className: "buka-workflows-title" }, heading.title), route.kind === "workflow" && retired ? renderStatusTag(t, workflowStatus, "workflow") : null, route.kind === "job" ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-titleSub" }, heading.subtitle), renderStatusTag(t, jobStatus, "job"), live ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }) : null) : null), h("div", { className: "buka-workflows-toolbar" }, ...toolbar)), tabs === null ? null : h("div", { className: "buka-workflows-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })), h("h1", { className: "buka-workflows-title" }, heading.title), route.kind === "workflow" && retired ? renderStatusTag(t, workflowStatus, "workflow") : null, route.kind === "workflow" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-titleSub" }, heading.subtitle), renderStatusTag(t, jobStatus, "job"), live ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }) : null) : null), h("div", { className: "buka-workflows-toolbar" }, ...toolbar)), tabs === null ? null : h("div", { className: "buka-workflows-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-workflows-tabList",
     		label: route.kind === "workflow" ? t("workflowTabsAria") : t("jobTabsAria"),
@@ -4110,7 +4223,7 @@ window.__ModuleLoader__.load({
     	})))), h("div", {
     		key: routeHash(route),
     		className: `buka-workflows-body${route.kind === "job" ? " is-wide" : ""}${graphView ? " is-graph" : ""}`
-    	}, body), renderNewJobDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
+    	}, renderAvailabilityNotice(page, availability), body), renderNewJobDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
     		key: state.notice.seq,
     		text: state.notice.text,
     		...state.notice.kind === "success" ? { tone: "success" } : {},
@@ -5633,6 +5746,7 @@ window.__ModuleLoader__.load({
     .buka-workflows-dialogSection{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
     .buka-workflows-dialogSectionTitle{margin:0;font-size:13px;font-weight:600;line-height:20px}
     .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
+    .buka-workflows-avatarMissing{background:var(--dsw-alias-fill-secondary);border-color:var(--dsw-alias-border-secondary);color:var(--dsw-alias-label-tertiary);font-weight:600}
     .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(720px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
     .buka-workflows-inspector.buka-workflows-inspector{width:min(640px,100vw)}
     .buka-workflows-inspector .buka-workflows-drawerHead{padding:16px 20px}
@@ -5680,6 +5794,11 @@ window.__ModuleLoader__.load({
     .buka-workflows-overviewCard{padding:10px 12px}
     .buka-workflows-valueRow{flex-direction:column;gap:2px}
     }
+    .buka-workflows-unavailableNotice{display:flex;flex-direction:column;gap:4px;margin:0 0 12px;padding:10px 12px;border-radius:var(--dsw-radius-md);border:1px solid var(--dsw-alias-border-warning);background:var(--dsw-alias-fill-warning);color:var(--dsw-alias-label-primary)}
+    .buka-workflows-unavailableTitle{font-size:13px;line-height:18px}
+    .buka-workflows-unavailableHint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+    .buka-workflows-unavailableList{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+    .buka-workflows-unavailableTag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:11px;line-height:16px;border:1px solid var(--dsw-alias-border-warning);color:var(--dsw-alias-label-warning)}
     `;
     // .build/workflows/client/index.js
     /**

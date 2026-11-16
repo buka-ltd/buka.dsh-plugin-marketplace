@@ -134,6 +134,48 @@ export interface Notice {
   seq: number
 }
 
+/** 一条引用该打工人的运行中作业：删除的唯一阻塞，弹窗里列出来。 */
+export interface WorkerUsageJob {
+  jobId: string
+  jobSeq: number
+  workflowId: string
+  workflowName: string
+  jobName: string
+}
+
+/** 一条引用该打工人的工作流（含停用），删除后它会变成「不可用」。 */
+export interface WorkerUsageWorkflow {
+  workflowId: string
+  name: string
+  status: string
+}
+
+/** `/buka-workers/remove-impact` 的成功响应：删除影响面。 */
+export interface WorkerRemoveImpact {
+  id: string
+  name: string
+  path: string
+  mounted: boolean
+  workspaceId: string | null
+  blockers: { runningJobs: WorkerUsageJob[] }
+  workflows: WorkerUsageWorkflow[]
+  finishedJobs: number
+}
+
+/**
+ * 删除确认弹窗的状态。
+ *
+ * 打开时先读影响面；`impact.blockers.runningJobs` 非空时禁用确认按钮，提示
+ * 先去作业页终止作业。删除失败（例如刚好又有作业开始）留在框里。
+ */
+export interface DeleteDialogState {
+  target: Worker | null
+  impact: WorkerRemoveImpact | null
+  loading: boolean
+  error: string | null
+  saving: boolean
+}
+
 /** 「安装 skills」对话框里可勾选的候选。 */
 export interface SkillCandidate {
   name: string
@@ -181,6 +223,10 @@ export interface HostResponse {
   name?: string | undefined
   removed?: boolean | undefined
   repos?: Array<{ id?: string; source?: string; note?: string }> | undefined
+  jobs?: WorkerUsageJob[] | undefined
+  blockers?: { runningJobs?: WorkerUsageJob[] } | undefined
+  workflows?: WorkerUsageWorkflow[] | undefined
+  finishedJobs?: number | undefined
 }
 
 /** 带错误码的错误；`npx-failed` 还带命令输出。 */

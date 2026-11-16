@@ -15,8 +15,10 @@ import {
   currentJobDefinition,
   deliveryIdentity,
   endTaskSummary,
+  isWorkerMissing,
   jobTasks,
   mergedDefinition,
+  workerIdentity,
   workerIdentityText,
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
@@ -107,7 +109,12 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
           [
             t('overviewDelivery'),
             job.delivery?.kind === 'assistant'
-              ? `${t('newJobDeliveryAssistant')} · ${workerIdentityText(deliveryIdentity(job.delivery))}`
+              ? `${t('newJobDeliveryAssistant')} · ${workerIdentityText(deliveryIdentity(job.delivery))}${
+                  job.delivery.missing === true ||
+                  isWorkerMissing(state, workerIdentity(deliveryIdentity(job.delivery)).id)
+                    ? ` · ${t('workerDeleted')}`
+                    : ''
+                }`
               : t('newJobDeliveryStarter'),
           ],
           [t('jobCreatedAt'), formatTime(job.createdAt)],

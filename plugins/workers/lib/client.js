@@ -335,6 +335,9 @@ window.__ModuleLoader__.load({
     		case "registry-unreadable": return t("errRegistryUnreadable");
     		case "robot-worker": return t("errRobotWorker");
     		case "builtin-worker": return t("errBuiltinWorker");
+    		case "worker-in-use": return t("deleteBlockedByJobs");
+    		case "outside-root": return t("errOutsideRoot");
+    		case "workspace-unavailable": return t("errWorkspaceUnavailable");
     		case "invalid-assistant": return t("errInvalidAssistant");
     		case "invalid-model": return t("errInvalidModel");
     		case "invalid-driver": return t("errInvalidDriver");
@@ -450,6 +453,7 @@ window.__ModuleLoader__.load({
     const DESCRIPTION_ROUTE = "/buka-workers/description";
     const MODELS_ROUTE = "/buka-workers/models";
     const ASSISTANT_ROUTE = "/buka-workers/assistant";
+    const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
     const REMOVE_ROUTE = "/buka-workers/remove";
     const AGENTS_ROUTE = "/buka-workers/agents";
     const REVEAL_ROUTE = "/buka-workers/reveal";
@@ -903,7 +907,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createWorkerActions(state, t) {
-    	const { setBusy, flash, reload, patchWorker, service, mutating, creating, createId, setCreateId, createName, setCreateName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, setConfirming, selectedId, setSelectedId, agentsDraft, agentsSaving, setAgentsSaving, corrupt, setDraftDescription, setDraftAvatar } = state;
+    	const { setBusy, flash, reload, patchWorker, service, mutating, creating, createId, setCreateId, createName, setCreateName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, deleteDialog, setDeleteDialog, selectedId, setSelectedId, agentsDraft, agentsSaving, setAgentsSaving, corrupt, setDraftDescription, setDraftAvatar } = state;
     	/**
     	* 打开打工人会话：只有已挂载（有 workspaceId）才能打开；否则提示先挂载。
     	* 打开走 DSH 的 `uiWorkspace.openWorkspace(workspaceId)`。
@@ -1059,48 +1063,98 @@ window.__ModuleLoader__.load({
     			setCreating(false);
     		}
     	}
+    	/** 空的删除弹窗状态。 */
+    	function emptyDeleteDialog() {
+    		return {
+    			target: null,
+    			impact: null,
+    			loading: false,
+    			error: null,
+    			saving: false
+    		};
+    	}
     	/**
-    	* 删除打工人：先摘掉 DSH 工作区注册（若已挂载），再删插件登记记录。
-    	* 打工人目录与文件保留，这也是二次确认文案要说明的语义。
+    	* 读一次删除影响面；同一时刻只保留最后一次打开的打工人。
     	*
     	*/
-    	async function removeWorker(worker) {
+    	async function loadDeleteImpact(worker) {
+    		try {
+    			const impact = await requestJson(REMOVE_IMPACT_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({ id: worker.id })
+    			});
+    			setDeleteDialog((prev) => prev.target?.id === worker.id ? {
+    				...prev,
+    				impact,
+    				loading: false
+    			} : prev);
+    		} catch (failure) {
+    			setDeleteDialog((prev) => prev.target?.id === worker.id ? {
+    				...prev,
+    				loading: false,
+    				error: `${t("deleteImpactFailed")} ${failureText(t, failure)}`
+    			} : prev);
+    		}
+    	}
+    	/**
+    	* 打开删除确认弹窗：先拉影响面，列出阻塞的作业、会变成不可用的工作流、
+    	* 历史作业数量与将被删除的目录。删除是硬删，目录里的 AGENTS.md 与项目
+    	* skills 会一起消失（弹窗文案会写明）。
+    	*
+    	*/
+    	async function openDeleteDialog(worker) {
     		if (isRobotWorker(worker)) {
     			flash("error", t("robotReadOnly"));
     			return;
     		}
-    		setBusy(`delete:${worker.id}`);
+    		setDeleteDialog({
+    			target: worker,
+    			impact: null,
+    			loading: true,
+    			error: null,
+    			saving: false
+    		});
+    		await loadDeleteImpact(worker);
+    	}
+    	/** 关闭删除弹窗；提交中不响应关闭。 */
+    	function closeDeleteDialog() {
+    		setDeleteDialog((prev) => prev.saving ? prev : emptyDeleteDialog());
+    	}
+    	/**
+    	* 确认删除：Host 在一个事务里删登记条目、打工人目录与工作区注册行。
+    	* 有引用该标识符的运行中作业时 Host 返回 409 `worker-in-use`，这里刷新
+    	* 影响面并保留弹窗，不提供强制删除。
+    	*
+    	*/
+    	async function confirmDeleteWorker() {
+    		const target = deleteDialog.target;
+    		if (target === null || deleteDialog.saving) return;
+    		if ((deleteDialog.impact?.blockers.runningJobs.length ?? 0) > 0) return;
+    		setDeleteDialog((prev) => ({
+    			...prev,
+    			saving: true,
+    			error: null
+    		}));
     		try {
-    			if (worker.mounted === true && typeof worker.workspaceId === "string" && worker.workspaceId !== "") {
-    				const workspaces = service("workspaces");
-    				if (workspaces === null || typeof workspaces.delete !== "function") {
-    					flash("error", t("noWorkspacesDelete"));
-    					return;
-    				}
-    				try {
-    					await workspaces.delete(worker.workspaceId);
-    				} catch (failure) {
-    					flash("error", `${t("deleteFailed")} ${messageOf(failure)}`);
-    					return;
-    				}
-    			}
-    			try {
-    				await requestJson(REMOVE_ROUTE, {
-    					method: "POST",
-    					body: JSON.stringify({ id: worker.id })
-    				});
-    			} catch (failure) {
-    				flash("error", `${t("deleteFailed")} ${failureText(t, failure)}`);
-    				reload();
-    				return;
-    			}
-    			setConfirming(null);
-    			if (selectedId === worker.id) setSelectedId(null);
+    			await requestJson(REMOVE_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({ id: target.id })
+    			});
+    		} catch (failure) {
+    			const blocked = errorCode(failure) === "worker-in-use";
+    			setDeleteDialog((prev) => ({
+    				...prev,
+    				saving: false,
+    				error: blocked ? t("deleteBlockedByJobs") : `${t("deleteFailed")} ${failureText(t, failure)}`
+    			}));
+    			if (blocked) await loadDeleteImpact(target);
     			reload();
-    			flash("success", `${t("deleted")} ${workerDisplayName(worker)}`);
-    		} finally {
-    			setBusy(null);
+    			return;
     		}
+    		setDeleteDialog(emptyDeleteDialog());
+    		if (selectedId === target.id) setSelectedId(null);
+    		reload();
+    		flash("success", `${t("deleted")} ${workerDisplayName(target)}`);
     	}
     	/**
     	* 保存 AGENTS.md：Host 按打工人标识符解析目录并写文件，返回值里带字节数
@@ -1170,7 +1224,9 @@ window.__ModuleLoader__.load({
     		openCreateDialog,
     		closeCreateDialog,
     		createWorker,
-    		removeWorker,
+    		openDeleteDialog,
+    		closeDeleteDialog,
+    		confirmDeleteWorker,
     		saveAgents,
     		toggleAssistant
     	};
@@ -1205,7 +1261,17 @@ window.__ModuleLoader__.load({
     	const [dialogOpen, setDialogOpen] = react.default.useState(false);
     	const [createError, setCreateError] = react.default.useState(null);
     	const [creating, setCreating] = react.default.useState(false);
-    	const [confirming, setConfirming] = react.default.useState(null);
+    	/**
+    	* 删除确认弹窗：先读影响面（阻塞作业 / 会变成不可用的工作流 / 历史作业数 /
+    	* 将被删除的目录），确认按钮在 `saving` 或存在阻塞作业时禁用。
+    	*/
+    	const [deleteDialog, setDeleteDialog] = react.default.useState({
+    		target: null,
+    		impact: null,
+    		loading: false,
+    		error: null,
+    		saving: false
+    	});
     	const [busy, setBusy] = react.default.useState(null);
     	/**
     	* 头像状态：`draftAvatar` 是创建对话框 / 「更换头像」对话框里当前选中的
@@ -1311,7 +1377,7 @@ window.__ModuleLoader__.load({
     	const corrupt = data?.corrupt === true;
     	const selectedWorker = selectedId === null ? null : workers.find((worker) => worker.id === selectedId) ?? null;
     	/** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
-    	const mutating = creating || busy !== null || installing || removing !== null || agentsSaving || avatarSaving || descriptionSaving || renameSaving || modelSaving;
+    	const mutating = creating || busy !== null || installing || removing !== null || agentsSaving || avatarSaving || descriptionSaving || renameSaving || modelSaving || deleteDialog.saving;
     	/**
     	* 新建打工人时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
     	* 打工人全是一个样子（Host 也会在没传头像时做同样的分配）。
@@ -1453,8 +1519,8 @@ window.__ModuleLoader__.load({
     		setCreateError,
     		creating,
     		setCreating,
-    		confirming,
-    		setConfirming,
+    		deleteDialog,
+    		setDeleteDialog,
     		busy,
     		setBusy,
     		draftAvatar,
@@ -2311,6 +2377,47 @@ window.__ModuleLoader__.load({
     		role: "alert"
     	}, renameError)) : null);
     }
+    /**
+    * 删除打工人确认弹窗。
+    *
+    * 删除是硬删：登记条目、打工人目录与工作区注册行一起消失，目录里的
+    * AGENTS.md 与项目 skills 也会一起消失。弹窗先列出影响面（阻塞的作业、
+    * 会变成不可用的工作流、历史作业数量、将被删除的目录）；存在引用该打工人的
+    * 运行中作业时禁用确认，只能先去作业页主动终止它们。
+    *
+    */
+    function DeleteWorkerDialog({ t, state, actions }) {
+    	const { deleteDialog } = state;
+    	const { closeDeleteDialog, confirmDeleteWorker } = actions;
+    	const target = deleteDialog.target;
+    	const impact = deleteDialog.impact;
+    	const runningJobs = impact?.blockers.runningJobs ?? [];
+    	const blocked = runningJobs.length > 0;
+    	const workflows = impact?.workflows ?? [];
+    	const footer = target === null ? null : h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		onClick: closeDeleteDialog,
+    		disabled: deleteDialog.saving
+    	}, t("cancel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "primary",
+    		className: "buka-workers-danger",
+    		disabled: blocked || deleteDialog.saving || deleteDialog.loading,
+    		onClick: () => void confirmDeleteWorker()
+    	}, deleteDialog.saving ? t("deleting") : t("deleteConfirm")));
+    	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
+    		open: target !== null,
+    		onClose: closeDeleteDialog,
+    		title: target === null ? t("deleteTitle") : `${t("deleteTitle")} · ${workerIdentityLabel(target)}`,
+    		closeLabel: t("close"),
+    		footer
+    	}, target === null ? null : h("div", { className: "buka-workers-dialogForm" }, h("p", { className: "buka-workers-fieldHint" }, t("deleteHardDeleteNote")), deleteDialog.loading ? h("p", { className: "buka-workers-fieldHint" }, t("deleteImpactLoading")) : null, impact === null ? null : h(react.default.Fragment, null, h("p", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteDir")), h("code", { className: "buka-workers-inlineCode" }, impact.path)), h("p", { className: "buka-workers-fieldHint" }, impact.mounted ? t("deleteMounted") : t("deleteNotMounted")), h("p", { className: "buka-workers-fieldHint" }, `${t("deleteFinishedJobs")} ${String(impact.finishedJobs)}`), h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, `${t("deleteAffectedWorkflows")} ${String(workflows.length)}`), workflows.length === 0 ? h("span", { className: "buka-workers-fieldHint" }, t("deleteNoWorkflows")) : h("ul", { className: "buka-workers-plainList" }, ...workflows.map((workflow) => h("li", { key: workflow.workflowId }, `${workflow.name || workflow.workflowId} · ${workflow.status}`)))), blocked ? h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("deleteBlockedTitle")), h("ul", { className: "buka-workers-plainList" }, ...runningJobs.map((job) => h("li", { key: job.jobId }, `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`))), h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, t("deleteBlockedByJobs"))) : null), deleteDialog.error === null ? null : h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, deleteDialog.error)));
+    }
     // .build/workers/client/components/worker-list.js
     /**
     * 「打工人」列表：打工人卡片与列表状态。
@@ -2329,30 +2436,15 @@ window.__ModuleLoader__.load({
     *
     */
     function WorkerCard({ t, worker, state, actions: workerActions }) {
-    	const { confirming, setConfirming, busy, mutating, corrupt, openDetail } = state;
-    	const { openWorker, mountWorker, removeWorker, toggleAssistant } = workerActions;
+    	const { busy, mutating, corrupt, openDetail } = state;
+    	const { openWorker, mountWorker, openDeleteDialog, toggleAssistant } = workerActions;
     	const skills = skillsOf(worker);
     	const robot = isRobotWorker(worker);
-    	const confirmingThis = confirming === worker.id;
     	const missing = !robot && worker.exists === false;
     	const mounted = worker.mounted === true;
     	const anyBusy = mutating || corrupt;
     	const canOpen = !mutating && !robot;
-    	const actions = robot ? [] : confirmingThis ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		key: "confirm",
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workers-danger",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 13 }),
-    		disabled: anyBusy,
-    		onClick: () => removeWorker(worker)
-    	}, t("confirmDelete")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		key: "cancel",
-    		variant: "ghost",
-    		size: "sm",
-    		disabled: mutating,
-    		onClick: () => setConfirming(null)
-    	}, t("cancel"))] : [
+    	const actions = robot ? [] : [
     		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "open",
     			variant: "outline",
@@ -2390,7 +2482,7 @@ window.__ModuleLoader__.load({
     			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 13 }),
     			disabled: anyBusy,
     			"aria-label": `${t("delete")} ${workerDisplayName(worker)}`,
-    			onClick: () => setConfirming(worker.id)
+    			onClick: () => openDeleteDialog(worker)
     		}, t("delete"))
     	];
     	return h("li", {
@@ -2416,7 +2508,7 @@ window.__ModuleLoader__.load({
     	}), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
     		className: "buka-workers-titleActions",
     		onClick: (event) => event.stopPropagation()
-    	}, ...actions.filter(Boolean))), typeof worker.description === "string" && worker.description !== "" ? h("p", { className: "buka-workers-cardDesc" }, worker.description) : null, robot ? h("p", { className: "buka-workers-hint" }, t("robotReadOnly")) : null, missing ? h("p", { className: "buka-workers-hint" }, t("missingDirHint")) : null, confirmingThis ? h("p", { className: "buka-workers-hint" }, t("deleteHint")) : null));
+    	}, ...actions.filter(Boolean))), typeof worker.description === "string" && worker.description !== "" ? h("p", { className: "buka-workers-cardDesc" }, worker.description) : null, robot ? h("p", { className: "buka-workers-hint" }, t("robotReadOnly")) : null, missing ? h("p", { className: "buka-workers-hint" }, t("missingDirHint")) : null));
     }
     /** 列表页：登记文件提示、加载 / 失败 / 空状态与打工人卡片（不展示目录）。 */
     function WorkerList({ t, state, actions }) {
@@ -2499,6 +2591,10 @@ window.__ModuleLoader__.load({
     		t,
     		state,
     		detail
+    	}), h(DeleteWorkerDialog, {
+    		t,
+    		state,
+    		actions
     	}), h(InstallSkillsModal, {
     		t,
     		state,
@@ -2579,11 +2675,24 @@ window.__ModuleLoader__.load({
     	mounted: "Mounted to a workspace:",
     	mountFailed: "Could not mount the worker:",
     	delete: "Delete",
-    	confirmDelete: "Confirm delete",
+    	deleteTitle: "Delete worker",
+    	deleteConfirm: "Delete permanently",
+    	deleting: "Deleting…",
     	cancel: "Cancel",
-    	deleted: "Removed worker:",
-    	deleteFailed: "Could not remove the worker:",
-    	deleteHint: "Only the plugin record and the workspace registration are removed. The worker directory and files are kept.",
+    	deleted: "Deleted worker:",
+    	deleteFailed: "Could not delete the worker:",
+    	deleteHardDeleteNote: "Delete is permanent: the registry entry, the worker directory and its workspace registration are removed together. AGENTS.md and the project skills inside the directory disappear with it; there is no recycle bin.",
+    	deleteImpactLoading: "Reading what this deletion affects…",
+    	deleteImpactFailed: "Could not read the impact:",
+    	deleteDir: "Directory to delete",
+    	deleteMounted: "This worker is mounted; its workspace registration is removed too.",
+    	deleteNotMounted: "This worker is not mounted; there is no workspace registration to remove.",
+    	deleteFinishedJobs: "Finished jobs that referenced it:",
+    	deleteAffectedWorkflows: "Workflows that will become unavailable:",
+    	deleteNoWorkflows: "No workflow references this worker.",
+    	deleteBlockedTitle: "Running jobs block deletion",
+    	deleteBlockedByJobs: "Running jobs reference this worker. Terminate those jobs on their job pages first, then delete the worker; force delete is not available.",
+    	deleteHint: "The worker directory and files are kept.",
     	skillsBadge: "{n} skills",
     	mountedBadge: "Mounted",
     	unmountedBadge: "Not mounted",
@@ -2677,6 +2786,8 @@ window.__ModuleLoader__.load({
     	errRegistryUnreadable: "The worker registry cannot be read, so this change was cancelled. Fix or delete the file, then refresh.",
     	errRobotWorker: "Robots are read-only: they have no directory or session, so this change is not available.",
     	errBuiltinWorker: "Built-in workers cannot be created, changed or removed.",
+    	errOutsideRoot: "The worker directory is outside the worker root, so it was not deleted.",
+    	errWorkspaceUnavailable: "The workspace registry is unavailable, so the worker could not be deleted safely. Refresh and try again.",
     	errInvalidAssistant: "The assistant flag must be true or false.",
     	errInvalidModel: "The model selection is invalid. Pick a provider and a model.",
     	errInvalidDriver: "Only agents can be created; robots are built into the plugin.",
@@ -2754,11 +2865,24 @@ window.__ModuleLoader__.load({
     	mounted: "已挂载到工作区：",
     	mountFailed: "挂载失败：",
     	delete: "删除",
-    	confirmDelete: "确认删除",
+    	deleteTitle: "删除打工人",
+    	deleteConfirm: "永久删除",
+    	deleting: "正在删除…",
     	cancel: "取消",
-    	deleted: "已移除打工人：",
-    	deleteFailed: "移除失败：",
-    	deleteHint: "只移除插件记录与工作区注册；打工人目录、文件保留。",
+    	deleted: "已删除打工人：",
+    	deleteFailed: "删除失败：",
+    	deleteHardDeleteNote: "删除是硬删：登记条目、打工人目录与工作区注册会一起消失。目录里的 AGENTS.md 与项目 skills 也会一起消失，没有回收站。",
+    	deleteImpactLoading: "正在读取删除影响面…",
+    	deleteImpactFailed: "读取删除影响面失败：",
+    	deleteDir: "将被删除的目录",
+    	deleteMounted: "这个打工人已挂载，工作区注册会一起摘掉。",
+    	deleteNotMounted: "这个打工人没有挂载，没有工作区注册需要摘掉。",
+    	deleteFinishedJobs: "引用它的已结束作业数：",
+    	deleteAffectedWorkflows: "会因此变成不可用的工作流：",
+    	deleteNoWorkflows: "没有工作流引用这个打工人。",
+    	deleteBlockedTitle: "运行中的作业阻塞删除",
+    	deleteBlockedByJobs: "有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。",
+    	deleteHint: "打工人目录、文件保留。",
     	skillsBadge: "{n} skills",
     	mountedBadge: "已挂载",
     	unmountedBadge: "未挂载",
@@ -2852,6 +2976,8 @@ window.__ModuleLoader__.load({
     	errRegistryUnreadable: "打工人登记文件无法读取，本次修改已取消；请修复或删除该文件后刷新。",
     	errRobotWorker: "机器人只读：没有目录与会话，不能执行这个操作。",
     	errBuiltinWorker: "内建打工人不可创建、修改或删除。",
+    	errOutsideRoot: "打工人目录不在打工人根目录下，已拒绝删除。",
+    	errWorkspaceUnavailable: "工作区注册服务不可用，无法安全删除这个打工人；请刷新后重试。",
     	errInvalidAssistant: "助理标记必须是 true 或 false。",
     	errInvalidModel: "模型选择不合法，请选择提供方与模型。",
     	errInvalidDriver: "只能创建智能体；机器人由插件内建。",
@@ -2990,6 +3116,7 @@ window.__ModuleLoader__.load({
     @media (width<=372px){.buka-workers-tabList{min-width:0}}
     .buka-workers-panel{display:flex;flex-direction:column;gap:24px;flex:1 1 auto;min-height:0}
     .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
+    .buka-workers-plainList{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
     .buka-workers-candidatesHead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
     .buka-workers-candidates{display:flex;flex-direction:column;gap:2px;max-height:320px;overflow:auto;overscroll-behavior:contain;margin:0;padding:4px;list-style:none;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}
     .buka-workers-candidate{display:flex;align-items:flex-start;gap:10px;padding:7px 8px;border-radius:var(--dsw-radius-sm);cursor:pointer}

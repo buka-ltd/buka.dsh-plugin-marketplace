@@ -13,24 +13,26 @@
 
 侧边栏「打工人」：
 
-- **列表**：卡片显示头像、名称、driver（agent / robot）、挂载状态、项目 skills 数、是否为助理、职责。智能体可「新会话 / 挂载 / 删除 / 重命名」，机器人只读；列表可按「只看助理」筛选。
-- **配置页**（智能体）：职责、模型、AGENTS.md、项目 skills、头像、重命名、设 / 取消助理。
-- **创建**：对话框填名称与职责，创建目录、写 AGENTS.md 模板、登记、挂载成工作区；新打工人 `driver=agent`、`assistant=false`。
+- **列表**：卡片显示头像、名称 · id、driver（agent / robot）、挂载状态、项目 skills 数、是否为助理、职责。智能体可「新会话 / 挂载 / 删除 / 重命名」，机器人只读；列表可按「只看助理」筛选。
+- **配置页**（智能体）：职责、模型、AGENTS.md、项目 skills、头像、重命名（只改展示名）、设 / 取消助理。
+- **创建**：对话框填必填的标识符与可选展示名、职责；按标识符创建目录、写 AGENTS.md 模板、登记、挂载成工作区；新打工人 `driver=agent`、`assistant=false`。
+- **删除**：硬删。确认弹窗先列出影响面——引用该标识符的运行中作业（唯一阻塞）、会因此变成不可用的工作流、引用它的已结束作业数、将被删除的目录；确认后登记条目、打工人目录与工作区注册行一起删除。目录里的 AGENTS.md 与项目 skills 会一起消失，不提供强制删除。
 - **模型**：在「模型」页签给智能体选新会话使用的模型；不选时跟随宿主默认模型。只影响之后新开的会话，已有会话保留自己的模型（可在会话里用 `/model` 切换）。
 - **打工人 preset**：安装插件后新增的 preset（显示名「打工人」）；智能体会问清打工人要做什么，起草 AGENTS.md，再调用 `buka_worker_build` 创建 / 改名 / 更新。不能创建机器人。
 
-## 登记表 `workers.json`（version 3）
+## 登记表 `workers.json`（version 4）
 
 路径默认 `${XDG_CACHE_HOME:-~/.cache}/dsh-plugin-workers/workers.json`，打工人目录默认同级的 `workers/`。
 
 ```jsonc
 {
-  "version": 3,
+  "version": 4,
   "workers": [
     {
+      "id": "software-engineer",
       "name": "软件工程师",
       "driver": "agent",
-      "path": "/abs/.../workers/软件工程师",
+      "path": "/abs/.../workers/software-engineer",
       "createdAt": "…",
       "avatar": "rocket",
       "description": "负责软件功能的设计与实现",
@@ -38,7 +40,8 @@
       "model": { "provider": "deepseek", "model": "deepseek-chat" }
     },
     {
-      "name": "clock",
+      "id": "clock",
+      "name": "",
       "driver": "robot",
       "program": "clock",
       "createdAt": "…",
@@ -49,8 +52,9 @@
 }
 ```
 
+- `id` 是不可变标识符、工作流引用键与目录名；`name` 是可选展示名（空串表示未设置），改名只改它。
 - `model` 可选，只对智能体生效：写 `{ provider, model, reasoningEffort? }` 表示新会话使用它，不写表示跟随宿主默认模型；模型目录里暂时找不到也保留已存的选择。
-- 读 v1 旧表时自动补 `driver: "agent"`、`assistant: false`；v2 的 `driver: "program"` 读成 `"robot"`，下次写入落盘 v3；打工人目录、AGENTS.md、skills 不动。
+- 读 v1 / v2 / v3 旧表时在内存里迁移：`id` 取旧 `name`、`name` 置空；v2 的 `driver: "program"` 读成 `"robot"`，下次写入落盘 v4；打工人目录、AGENTS.md、skills 不动。
 - 写入原子（临时文件 + rename，0600），新建 / 删除 / 改名串行。
 - 文件缺失按空表处理；损坏时页面提示并拒绝写入。
 - `clock` 由插件启动时幂等补进登记表；不可创建、删除、改名或改字段。
@@ -60,8 +64,8 @@
 
 bundle 补丁插入 `worker-builder` preset（显示名「打工人」）。`buka_worker_build` 只对 `builderPresets`（默认 `['worker-builder']`）点名的 preset 根会话可见：
 
-- 参数：`name` / `newName` / `avatar` / `description` / `agents` / `update`；`newName` 改名需要 `update: true`，会移动目录并重建工作区，旧会话保留但不再挂在打工人下。
-- 创建智能体，`assistant` 默认 false；机器人只读，拒绝修改。
+- 参数：`id`（必填，创建后不可改）/ `name`（可选展示名）/ `avatar` / `description` / `agents` / `update`；`update: true` 时改名只改展示名，不移动目录、不重建工作区。
+- 创建智能体，`assistant` 默认 false；机器人只读，拒绝修改；不提供删除。
 - 挂载失败不算构建失败：返回 `mounted: false` 与 `mountError`。
 
 ## 助理
@@ -76,7 +80,7 @@ bundle 补丁插入 `worker-builder` preset（显示名「打工人」）。`buk
 
 ```ts
 const { workers } = await ctx.bukaWorkers.list()
-// [{ name, driver: 'agent' | 'robot', assistant, program?, model?, description, avatar, mounted, ... }]
+// [{ id, name, displayName, driver: 'agent' | 'robot', assistant, program?, model?, description, avatar, mounted, ... }]
 
 const handle = await ctx.bukaWorkers.dispatchSession({
   worker: '软件工程师',
@@ -108,26 +112,28 @@ const resumed = await ctx.bukaWorkers.openSession({ worker: '软件工程师', s
 - 头像只存预设 id，id 是跨插件契约（workers 页面与 workflows 节点图各自维护 emoji / 底色映射）。
 - 项目 skills 落在 `<打工人目录>/.agents/skills` 与 `.claude/skills`；页面用 `npx skills` 列出 / 安装 / 移除。
 - AGENTS.md 读取上限 256 KiB、保存上限 512 KiB；`CLAUDE.md` 自动做成指向它的相对符号链接。
-- 重命名会移动目录并重建 DSH 工作区；旧会话日志保留，但不再列在这个打工人下。
+- 重命名只改展示名：目录不移动、DSH 工作区注册保留（只同步标题），引用该标识符的工作流不受影响。
+- 删除是硬删：登记条目、目录与工作区注册一起删除；唯一阻塞是引用该标识符的运行中作业。
 
 ## 路由
 
-| 路由                                                         | 作用                                                                  |
-| ------------------------------------------------------------ | --------------------------------------------------------------------- |
-| `GET /buka-workers/list`                                     | 打工人 + 挂载状态 + skills + AGENTS.md + driver / assistant / program |
-| `POST /buka-workers/create`                                  | 创建智能体并挂载                                                      |
-| `POST /buka-workers/rename`                                  | 改名并重建工作区                                                      |
-| `POST /buka-workers/avatar`                                  | 改头像                                                                |
-| `POST /buka-workers/description`                             | 改职责                                                                |
-| `GET /buka-workers/models`                                   | 读可选模型目录（按提供方分组）                                        |
-| `POST /buka-workers/model`                                   | 设置 / 清除智能体新会话的模型                                         |
-| `POST /buka-workers/assistant`                               | 设 / 取消助理（仅智能体）                                             |
-| `POST /buka-workers/remove`                                  | 只删登记（目录、文件保留）                                            |
-| `POST /buka-workers/agents`                                  | 写 AGENTS.md                                                          |
-| `POST /buka-workers/skills/available` / `install` / `remove` | 项目 skills                                                           |
-| `POST /buka-workers/reveal`                                  | 打开打工人目录                                                        |
+| 路由                                                         | 作用                                                                    |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `GET /buka-workers/list`                                     | 打工人 + 挂载状态 + skills + AGENTS.md + driver / assistant / program   |
+| `POST /buka-workers/create`                                  | 创建智能体并挂载                                                        |
+| `POST /buka-workers/rename`                                  | 改名并重建工作区                                                        |
+| `POST /buka-workers/avatar`                                  | 改头像                                                                  |
+| `POST /buka-workers/description`                             | 改职责                                                                  |
+| `GET /buka-workers/models`                                   | 读可选模型目录（按提供方分组）                                          |
+| `POST /buka-workers/model`                                   | 设置 / 清除智能体新会话的模型                                           |
+| `POST /buka-workers/assistant`                               | 设 / 取消助理（仅智能体）                                               |
+| `POST /buka-workers/remove-impact`                           | 删除影响面：阻塞的运行中作业 / 工作流 / 历史作业数 / 目录               |
+| `POST /buka-workers/remove`                                  | 硬删登记 + 目录 + 工作区注册；有 running 作业引用时 409 `worker-in-use` |
+| `POST /buka-workers/agents`                                  | 写 AGENTS.md                                                            |
+| `POST /buka-workers/skills/available` / `install` / `remove` | 项目 skills                                                             |
+| `POST /buka-workers/reveal`                                  | 打开打工人目录                                                          |
 
-除 create / remove 外按 `name` 寻址；路径由 Host 从登记表读取。所有路由沿用 DSH 的信任栅栏。
+所有路由按不可变 `id` 寻址；路径由 Host 从登记表读取。删除通过可选的 `ctx.bukaWorkflows` 服务读引用面，没装 Workflows 插件时视为没有作业引用。所有路由沿用 DSH 的信任栅栏。
 
 ## 模型工具
 
@@ -137,7 +143,7 @@ const resumed = await ctx.bukaWorkers.openSession({ worker: '软件工程师', s
 ## 结构与测试
 
 - `src/index.ts`：装配路由、工具、服务与种子。
-- `src/worker-store.ts`、`src/store/**`：名称规则、登记表 v3、目录、AGENTS.md、skills、重命名、挂载、内建 clock。
+- `src/worker-store.ts`、`src/store/**`：标识符 / 名称规则、登记表 v4、目录、AGENTS.md、skills、重命名、删除事务、挂载、内建 clock。
 - `src/service.ts`、`src/service/**`：`ctx.bukaWorkers` 会话服务（去压缩、一任务一会话）。
 - `src/routes/**`、`src/client/**`：页面与路由。
 - `test/workers-*.test.mjs`：登记表 / 服务 / 页面冒烟 / 构建工具 / 路由。

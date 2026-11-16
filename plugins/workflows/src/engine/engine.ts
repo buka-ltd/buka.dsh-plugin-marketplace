@@ -23,6 +23,13 @@ import {
   visibleTaskIds,
 } from '../attachments/index.ts'
 import { contentIssues, findTaskType, validateWorkflowDefinition } from '../definition/validate.ts'
+import {
+  definitionAvailability,
+  definitionReferencesWorker,
+  describeUnavailable,
+  jobAvailability,
+  jobReferencesWorker,
+} from '../domain/availability.ts'
 import { deliveryWorkerRef, storedExecutorRef } from '../domain/identity.ts'
 import { newAttemptId, newJobId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import {
@@ -44,7 +51,11 @@ import type {
   TaskRecord,
   TaskResult,
   TaskStatus,
+  WorkerAvailability,
   WorkerInfo,
+  WorkerUsage,
+  WorkerUsageJob,
+  WorkerUsageWorkflow,
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
@@ -68,6 +79,7 @@ import {
   buildAssistantPrompt,
   buildEndDeliveryText,
   buildExecutionPrompt,
+  positionLabel,
   taskTypeLabel,
 } from './prompt.ts'
 import { handleSessionId, handleStartSeq, poll, readHandleResult } from './session.ts'
@@ -332,20 +344,29 @@ export class WorkflowEngine {
   /**
    * 工作流列表投影。
    *
+   * 读时现取打工人登记表，给每条工作流算派生的可用性：引用了已不存在的
+   * 打工人时标不可用并列出缺失的标识符（不落盘）。
+   *
    * @returns 工作流摘要
    */
-  listWorkflowSummaries(): Record<string, unknown>[] {
+  async listWorkflowSummaries(): Promise<Record<string, unknown>[]> {
+    const workers = await this.workers()
     return this.store.listWorkflows().map((workflow) => {
+      const latest = this.store.readWorkflowVersion(workflow.id)
+      const availability: WorkerAvailability =
+        latest === null
+          ? { available: true, missingWorkers: [] }
+          : definitionAvailability(latest.versionRecord.definition, workers)
       return {
         id: workflow.id,
         name: workflow.name,
         description: workflow.description,
         version: workflow.latestVersion,
-        definitionVersion: this.store.readWorkflowVersion(workflow.id)?.versionRecord.definition
-          .version,
+        definitionVersion: latest?.versionRecord.definition.version,
         status: workflow.status,
         jobCount: this.store.countJobs(workflow.id),
         updatedAt: workflow.updatedAt,
+        availability,
       }
     })
   }
@@ -369,7 +390,7 @@ export class WorkflowEngine {
     const workers = await this.workers()
     const jobs = this.store
       .listJobs(workflowId)
-      .map((job) => jobSummary(job, this.store.listTasks(job.id)))
+      .map((job) => jobSummary(job, this.store.listTasks(job.id), jobAvailability(job, workers)))
     return {
       workflow: {
         id: found.record.id,
@@ -378,6 +399,7 @@ export class WorkflowEngine {
         version: found.version,
         status: found.record.status,
         definition: found.versionRecord.definition,
+        availability: definitionAvailability(found.versionRecord.definition, workers),
       },
       graph: workflowGraph(found.versionRecord.definition, workers),
       assistants: [...workers.values()]
@@ -422,7 +444,9 @@ export class WorkflowEngine {
     readonly delivery?: DeliveryRule | undefined
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    const workers = await this.workers()
+    // 启动前强制刷新登记表：刚被删除的打工人不能靠缓存再启动一个作业。
+    const workers = await this.refreshWorkers(true)
+    this.assertDefinitionAvailable(definition, workers, workflow.name)
     return await this.startJob({
       workflow,
       definition,
@@ -446,7 +470,9 @@ export class WorkflowEngine {
     readonly delivery?: DeliveryRule | undefined
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    const workers = await this.workers()
+    // 启动前强制刷新登记表：刚被删除的打工人不能靠缓存再启动一个作业。
+    const workers = await this.refreshWorkers(true)
+    this.assertDefinitionAvailable(definition, workers, workflow.name)
     const starter: Starter = { kind: 'session', sessionId: input.sessionId }
     return await this.startJob({
       workflow,
@@ -588,6 +614,24 @@ export class WorkflowEngine {
     return { kind: 'assistant', id: worker.id }
   }
 
+  /**
+   * 启动作业前检查派生可用性：引用了已不存在的打工人时拒绝启动，并列出
+   * 缺哪个标识符。读取既有定义本身不校验，只在真正要跑的时候收紧。
+   *
+   */
+  private assertDefinitionAvailable(
+    definition: WorkflowDefinition,
+    workers: ReadonlyMap<string, WorkerInfo>,
+    workflowName: string,
+  ): void {
+    const availability = definitionAvailability(definition, workers)
+    if (availability.available) return
+    throw new WorkflowError(
+      'workflow-unavailable',
+      `workflow "${workflowName}" cannot start: it references missing worker identifiers (${describeUnavailable(availability)}); rebind those positions or task types to registered workers first`,
+    )
+  }
+
   /** 取一个可启动的工作流：必须存在、未停用、且定义是当前版本。 */
   private requireStartableWorkflow(workflowId: string): {
     workflow: WorkflowRecord
@@ -682,19 +726,67 @@ export class WorkflowEngine {
       definition: jobDefinition(job.definition, workers),
       tasks: tasks.map((task) => taskSummary(task, job.definition)),
       canRetryDelivery: canRetryDelivery(tasks),
+      availability: jobAvailability(job, workers),
     }
   }
 
   /**
    * 作业列表（某个工作流下）。
    *
+   * 每条作业都带派生的可用性：钉住的定义或交回方式引用了已不存在的打工人时，
+   * 页面据此标注「不可用」。
+   *
    * @param workflowId 工作流 id
    * @returns 作业摘要
    */
-  listJobSummaries(workflowId: string): Record<string, unknown>[] {
+  async listJobSummaries(workflowId: string): Promise<Record<string, unknown>[]> {
+    const workers = await this.workers()
     return this.store
       .listJobs(workflowId)
-      .map((job) => jobSummary(job, this.store.listTasks(job.id)))
+      .map((job) => jobSummary(job, this.store.listTasks(job.id), jobAvailability(job, workers)))
+  }
+
+  /**
+   * 一个打工人标识符的引用面：给 Workers 插件删除前算阻塞与影响面。
+   *
+   * 引用 = 工作流任一版本定义、或作业钉住的定义里出现该标识符（岗位执行者、
+   * 任务类型助理），或作业的交回方式点名了它。运行中的作业阻塞删除；已结束
+   * 的作业只计数；工作流（含停用）全部列出但不阻塞。
+   *
+   * @param id 打工人标识符
+   * @returns 引用摘要
+   */
+  async workerUsage(id: string): Promise<WorkerUsage> {
+    const target = typeof id === 'string' ? id.trim() : ''
+    if (target === '') return { runningJobs: [], workflows: [], finishedJobs: 0 }
+
+    const workflows: WorkerUsageWorkflow[] = []
+    for (const record of this.store.listWorkflows()) {
+      const referenced = Object.values(record.versions).some((snapshot) =>
+        definitionReferencesWorker(snapshot.definition, target),
+      )
+      if (referenced) {
+        workflows.push({ workflowId: record.id, name: record.name, status: record.status })
+      }
+    }
+
+    const runningJobs: WorkerUsageJob[] = []
+    let finishedJobs = 0
+    for (const job of this.store.allJobs()) {
+      if (!jobReferencesWorker(job, target)) continue
+      if (job.status === 'running') {
+        runningJobs.push({
+          jobId: job.id,
+          jobSeq: job.seq,
+          workflowId: job.workflowId,
+          workflowName: job.workflowName,
+          jobName: job.workflowName,
+        })
+      } else {
+        finishedJobs += 1
+      }
+    }
+    return { runningJobs, workflows, finishedJobs }
   }
 
   /**
@@ -1662,6 +1754,9 @@ export class WorkflowEngine {
     const tasks = this.store.listTasks(jobId)
     const ready = tasks.filter((task) => task.status === 'ready')
     if (ready.length === 0) return []
+    // 调度前现取打工人登记表：执行者标识符查不到时任务直接失败并写明原因，
+    // 而不是等到开会话时才报一个笼统的「unknown worker」。
+    const workers = await this.refreshWorkers()
     const launches: Launch[] = []
     const busyPositions = new Set<string>()
     for (const task of tasks) {
@@ -1685,6 +1780,11 @@ export class WorkflowEngine {
         }
         // 交给助理：按普通智能体任务派发，由它代收。
         if (busyPositions.has('end')) continue
+        const missing = this.missingWorkerOf(task, workers)
+        if (missing !== null) {
+          await this.failMissingWorkerTask(job, task, missing)
+          continue
+        }
         const launch = await this.claimAgentTask(job, task, tasks)
         if (launch !== null) {
           busyPositions.add('end')
@@ -1696,6 +1796,9 @@ export class WorkflowEngine {
       if (executor.kind === 'human') {
         const assistantName = this.assistantFor(job.definition, task.type)
         if (assistantName === null || task.assistantBlocked) continue
+        // 助理已不存在时不再自动派发：任务留在「待认领」，由人兜底完成；
+        // 作业页按派生不可用标注，重新绑定助理后恢复自动承办。
+        if (!workers.has(assistantName)) continue
         if (this.busyAssistants.has(assistantName)) continue
         const launch = await this.claimAssistantTask(job, task, assistantName)
         if (launch !== null) {
@@ -1711,6 +1814,11 @@ export class WorkflowEngine {
         if (launch !== null) launches.push(launch)
         continue
       }
+      const missing = this.missingWorkerOf(task, workers)
+      if (missing !== null) {
+        await this.failMissingWorkerTask(job, task, missing)
+        continue
+      }
       if (busyPositions.has(task.position)) continue
       const launch = await this.claimAgentTask(job, task, tasks)
       if (launch !== null) {
@@ -1719,6 +1827,53 @@ export class WorkflowEngine {
       }
     }
     return launches
+  }
+
+  /**
+   * 任务执行者是否已不在登记表里：机器人不走登记表（由 `program` 驱动），
+   * 只检查智能体执行者。返回缺失的标识符，没有缺失时返回 null。
+   *
+   */
+  private missingWorkerOf(
+    task: TaskRecord,
+    workers: ReadonlyMap<string, WorkerInfo>,
+  ): string | null {
+    if (task.assignee.kind !== 'worker') return null
+    if (task.assignee.driver !== 'agent') return null
+    const id = storedExecutorRef(task.assignee) ?? ''
+    if (id === '') return ''
+    return workers.has(id) ? null : id
+  }
+
+  /**
+   * 缺失执行者的任务派发失败：写明是哪条任务、哪个岗位、缺哪个标识符；
+   * 任务进入可重试的失败状态，其它分支照常推进。
+   *
+   */
+  private async failMissingWorkerTask(
+    job: JobRecord,
+    task: TaskRecord,
+    identifier: string,
+  ): Promise<void> {
+    const position = positionLabel(job.definition, task.position)
+    const type = taskTypeLabel(job.definition, task.type)
+    const id = identifier === '' ? '(unknown)' : identifier
+    // ready 任务不能直接进 failed（状态机只允许 pending/ready -> … -> running
+    // -> failed）；派发失败也是一次尝试：先认领、记一条执行记录，再判失败。
+    if (task.status === 'ready') {
+      const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
+      await this.claimTaskRecord(
+        job,
+        task,
+        { kind: 'worker', name: id, sessionId: null },
+        attempt.id,
+      )
+    }
+    await this.failTaskLocked(
+      job.id,
+      task.id,
+      `task "${task.id}" (position "${position}" / ${task.position}, type "${type}" / ${task.type}) cannot be dispatched: worker identifier "${id}" is not registered in the Buka Workers registry; rebind the workflow to an existing worker and retry the task`,
+    )
   }
 
   /** 取人任务类型点名的助理。 */

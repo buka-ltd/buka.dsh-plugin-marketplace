@@ -53,11 +53,10 @@ export function WorkerCard({
   state: WorkersPageState
   actions: WorkerActions
 }): ReactElement {
-  const { confirming, setConfirming, busy, mutating, corrupt, openDetail } = state
-  const { openWorker, mountWorker, removeWorker, toggleAssistant } = workerActions
+  const { busy, mutating, corrupt, openDetail } = state
+  const { openWorker, mountWorker, openDeleteDialog, toggleAssistant } = workerActions
   const skills = skillsOf(worker)
   const robot = isRobotWorker(worker)
-  const confirmingThis = confirming === worker.id
   const missing = !robot && worker.exists === false
   const mounted = worker.mounted === true
   const anyBusy = mutating || corrupt
@@ -67,98 +66,71 @@ export function WorkerCard({
 
   const actions = robot
     ? []
-    : confirmingThis
-      ? [
-          h(
-            Button,
-            {
-              key: 'confirm',
-              variant: 'outline',
-              size: 'sm',
-              className: 'buka-workers-danger',
-              icon: h(IconWarningOutlineRegular, { size: 13 }),
-              disabled: anyBusy,
-              onClick: () => removeWorker(worker),
-            },
-            t('confirmDelete'),
-          ),
-          h(
-            Button,
-            {
-              key: 'cancel',
-              variant: 'ghost',
-              size: 'sm',
-              disabled: mutating,
-              onClick: () => setConfirming(null),
-            },
-            t('cancel'),
-          ),
-        ]
-      : [
-          h(
-            Button,
-            {
-              key: 'open',
-              variant: 'outline',
-              size: 'sm',
-              icon: h(IconNewChatOutlineRegular, { size: 13 }),
-              disabled: mutating,
-              'aria-label': `${t('newSession')} ${workerDisplayName(worker)}`,
-              onClick: () => openWorker(worker),
-            },
-            t('newSession'),
-          ),
-          mounted
-            ? null
-            : h(
-                Button,
-                {
-                  key: 'mount',
-                  variant: 'outline',
-                  size: 'sm',
-                  icon:
-                    busy === `mount:${worker.id}`
-                      ? h(StateDot, { state: 'ongoing', size: 13 })
-                      : h(IconPlusOutlineRegular, { size: 13 }),
-                  disabled: anyBusy,
-                  'aria-label': `${t('mount')} ${workerDisplayName(worker)}`,
-                  onClick: () => mountWorker(worker),
-                },
-                busy === `mount:${worker.id}` ? t('mounting') : t('mount'),
-              ),
-          h(
-            Button,
-            {
-              key: 'assistant',
-              variant: 'outline',
-              size: 'sm',
-              disabled: anyBusy || busy === `assistant:${worker.id}`,
-              'aria-label': `${worker.assistant === true ? t('clearAssistant') : t('setAssistant')} ${workerDisplayName(worker)}`,
-              onClick: () => toggleAssistant(worker),
-            },
-            busy === `assistant:${worker.id}`
-              ? t('saving')
-              : worker.assistant === true
-                ? t('clearAssistant')
-                : t('setAssistant'),
-          ),
-          // 删除与其它行内动作共用同一套按钮（outline + sm + 危险色），
-          // 不再用裸图标按钮，避免这一行里出现两种按钮风格。
-          h(
-            Button,
-            {
-              key: 'delete',
-              variant: 'outline',
-              size: 'sm',
-              className: 'buka-workers-danger',
-              icon: h(IconTrashOutlineRegular, { size: 13 }),
-              disabled: anyBusy,
-              'aria-label': `${t('delete')} ${workerDisplayName(worker)}`,
-              onClick: () => setConfirming(worker.id),
-            },
-            t('delete'),
-          ),
-        ]
+    : [
+        h(
+          Button,
+          {
+            key: 'open',
+            variant: 'outline',
+            size: 'sm',
+            icon: h(IconNewChatOutlineRegular, { size: 13 }),
+            disabled: mutating,
+            'aria-label': `${t('newSession')} ${workerDisplayName(worker)}`,
+            onClick: () => openWorker(worker),
+          },
+          t('newSession'),
+        ),
+        mounted
+          ? null
+          : h(
+              Button,
+              {
+                key: 'mount',
+                variant: 'outline',
+                size: 'sm',
+                icon:
+                  busy === `mount:${worker.id}`
+                    ? h(StateDot, { state: 'ongoing', size: 13 })
+                    : h(IconPlusOutlineRegular, { size: 13 }),
+                disabled: anyBusy,
+                'aria-label': `${t('mount')} ${workerDisplayName(worker)}`,
+                onClick: () => mountWorker(worker),
+              },
+              busy === `mount:${worker.id}` ? t('mounting') : t('mount'),
+            ),
+        h(
+          Button,
+          {
+            key: 'assistant',
+            variant: 'outline',
+            size: 'sm',
+            disabled: anyBusy || busy === `assistant:${worker.id}`,
+            'aria-label': `${worker.assistant === true ? t('clearAssistant') : t('setAssistant')} ${workerDisplayName(worker)}`,
+            onClick: () => toggleAssistant(worker),
+          },
+          busy === `assistant:${worker.id}`
+            ? t('saving')
+            : worker.assistant === true
+              ? t('clearAssistant')
+              : t('setAssistant'),
+        ),
+        // 删除与其它行内动作共用同一套按钮（outline + sm + 危险色）。
+        // 点它先打开确认弹窗，弹窗读完影响面才允许确认。
+        h(
+          Button,
+          {
+            key: 'delete',
+            variant: 'outline',
+            size: 'sm',
+            className: 'buka-workers-danger',
+            icon: h(IconTrashOutlineRegular, { size: 13 }),
+            disabled: anyBusy,
+            'aria-label': `${t('delete')} ${workerDisplayName(worker)}`,
+            onClick: () => openDeleteDialog(worker),
+          },
+          t('delete'),
+        ),
+      ]
 
   return h(
     'li',
@@ -219,7 +191,6 @@ export function WorkerCard({
         : null,
       robot ? h('p', { className: 'buka-workers-hint' }, t('robotReadOnly')) : null,
       missing ? h('p', { className: 'buka-workers-hint' }, t('missingDirHint')) : null,
-      confirmingThis ? h('p', { className: 'buka-workers-hint' }, t('deleteHint')) : null,
     ),
   )
 }

@@ -58,6 +58,7 @@ function statusForError(error: unknown): number {
         return 404
       case 'workflow-not-active':
       case 'workflow-retired':
+      case 'workflow-unavailable':
         return 409
       case 'job-not-running':
       case 'task-not-running':
@@ -141,7 +142,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
     route(ROUTES.workflows, async (req, res) => {
       if (req.method !== 'GET') return sendMethodNotAllowed(res, 'GET')
       const engine = await ready()
-      sendJson(res, 200, { ok: true, workflows: engine.listWorkflowSummaries() })
+      sendJson(res, 200, { ok: true, workflows: await engine.listWorkflowSummaries() })
     })
 
     route(ROUTES.workflow, async (req, res) => {
@@ -183,7 +184,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
       const workflowId = (query(req).get('workflowId') ?? '').trim()
       if (workflowId === '') return sendError(res, 400, 'invalid-id', 'workflowId is required')
       const engine = await ready()
-      sendJson(res, 200, { ok: true, jobs: engine.listJobSummaries(workflowId) })
+      sendJson(res, 200, { ok: true, jobs: await engine.listJobSummaries(workflowId) })
     })
 
     route(ROUTES.jobStart, async (req, res) => {

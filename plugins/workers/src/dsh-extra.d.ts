@@ -7,8 +7,10 @@
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** 工作区注册表：打工人挂载、列表与改展示名时用它同步工作区标题。 */
+    /** 工作区注册表：打工人挂载、列表、改名同步与删除时用它。 */
     workspaceRegistry: WorkspaceRegistry
+    /** Workflows 插件的只读查询服务；没装时不存在，删除按「没有作业引用」处理。 */
+    bukaWorkflows: BukaWorkflowsService | undefined
   }
 
   interface Events {
@@ -44,4 +46,44 @@ export interface WorkspaceRegistry {
   create(directory: string, title?: string): Promise<{ id?: unknown }>
   /** 删除一个工作区注册；`id` 是 `list()` / `create()` 返回的 id。 */
   delete(id: unknown): boolean
+}
+
+/**
+ * Workflows 插件提供的只读查询服务（`ctx.bukaWorkflows`）。
+ *
+ * Workers 插件只在删除前调用它：引用该标识符的运行中作业是唯一的删除阻塞，
+ * 引用了它但已结束的作业与工作流只用于展示影响面。
+ */
+export interface BukaWorkflowsService {
+  /**
+   * 一个打工人标识符被哪些工作流 / 作业引用。
+   *
+   * @param id 打工人标识符
+   */
+  workerUsage(id: string): Promise<WorkerUsage>
+}
+
+/** 一条引用某个打工人的运行中作业。 */
+export interface WorkerUsageJob {
+  readonly jobId: string
+  /** 作业在所属工作流内的编号。 */
+  readonly jobSeq: number
+  readonly workflowId: string
+  readonly workflowName: string
+  /** 作业展示名（取钉住的工作流名）。 */
+  readonly jobName: string
+}
+
+/** 一条引用某个打工人的工作流（含停用）。 */
+export interface WorkerUsageWorkflow {
+  readonly workflowId: string
+  readonly name: string
+  readonly status: string
+}
+
+/** `workerUsage()` 的返回形状。 */
+export interface WorkerUsage {
+  readonly runningJobs: readonly WorkerUsageJob[]
+  readonly workflows: readonly WorkerUsageWorkflow[]
+  readonly finishedJobs: number
 }

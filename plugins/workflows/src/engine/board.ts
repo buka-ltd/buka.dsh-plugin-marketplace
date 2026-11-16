@@ -19,6 +19,7 @@ import type {
   PositionDefinition,
   TaskRecord,
   TaskStatus,
+  WorkerAvailability,
   WorkerInfo,
   WorkflowDefinition,
   WorkflowRecord,
@@ -32,7 +33,8 @@ const SUMMARY_BYTES = 240
  * 把打工人登记里的展示名 / driver / avatar 补到执行者上（只用于展示）。
  *
  * 旧作业快照只有 `name`（当时的标识符）；这里统一投影出 `id`，并优先用登记
- * 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值，交给页面兜底。
+ * 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值并标记
+ * `missing: true`，交给页面显示占位头像与「已删除」。
  */
 function executorView(
   executor: PositionDefinition['executor'],
@@ -41,16 +43,25 @@ function executorView(
   if (executor.kind === 'human') return executor
   const id = executorRef(executor)
   const worker = id === null ? undefined : workers?.get(id)
+  if (worker === undefined) {
+    return {
+      ...executor,
+      ...(id === null ? {} : { id }),
+      ...(workers === undefined ? {} : { missing: true }),
+    }
+  }
   return {
     ...executor,
     ...(id === null ? {} : { id }),
-    ...(worker === undefined ? {} : { name: worker.displayName, driver: worker.driver }),
-    ...(worker?.avatar === undefined ? {} : { avatar: worker.avatar }),
+    name: worker.displayName,
+    driver: worker.driver,
+    ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
   }
 }
 
 /**
- * 交回方式的展示投影：助理用展示名覆盖 `name`，保留 `id` 供页面消歧。
+ * 交回方式的展示投影：助理用展示名覆盖 `name`，保留 `id` 供页面消歧；
+ * 助理已不在登记表里时标 `missing: true`。
  *
  * @param delivery 钉住的交回方式
  * @param workers 打工人登记表
@@ -63,14 +74,18 @@ export function deliveryView(
   if (delivery.kind !== 'assistant') return delivery
   const id = deliveryWorkerRef(delivery)
   const worker = id === null ? undefined : workers?.get(id)
+  if (worker === undefined) {
+    return {
+      kind: 'assistant',
+      ...(id === null ? {} : { id }),
+      ...(delivery.name === undefined ? {} : { name: delivery.name }),
+      ...(workers === undefined ? {} : { missing: true }),
+    }
+  }
   return {
     kind: 'assistant',
     ...(id === null ? {} : { id }),
-    ...(worker === undefined
-      ? delivery.name === undefined
-        ? {}
-        : { name: delivery.name }
-      : { name: worker.displayName }),
+    name: worker.displayName,
   }
 }
 
@@ -228,9 +243,14 @@ export function taskDetail(input: TaskDetailInput): Record<string, unknown> {
  *
  * @param job 作业
  * @param tasks 作业任务
+ * @param availability 派生的可用性（缺引用时页面标不可用）
  * @returns 契约形状
  */
-export function jobSummary(job: JobRecord, tasks: readonly TaskRecord[]): Record<string, unknown> {
+export function jobSummary(
+  job: JobRecord,
+  tasks: readonly TaskRecord[],
+  availability?: WorkerAvailability,
+): Record<string, unknown> {
   return {
     id: job.id,
     seq: job.seq,
@@ -241,6 +261,7 @@ export function jobSummary(job: JobRecord, tasks: readonly TaskRecord[]): Record
     taskCounts: countTasks(tasks),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
+    ...(availability === undefined ? {} : { availability }),
   }
 }
 

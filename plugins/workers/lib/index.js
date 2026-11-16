@@ -827,273 +827,6 @@ function builtinWorkerError(id) {
 	const error = /* @__PURE__ */ new Error(`内建打工人不可创建、修改或删除：${String(id)}`);
 	return Object.assign(error, { code: "builtin-worker" });
 }
-// .build/workers/avatar.js
-/**
-* 打工人头像的 Host 侧契约：预设 id、默认分配与校验。
-*
-* 头像在登记表里只存一个 id（例如 `panda`），显示由两个浏览器一半各自维护一份
-* 同一 id → emoji / 底色的映射（本仓库不允许插件之间互相 import）：
-* `plugins/workers/client.js` 的打工人页与 `plugins/workflows/client.js` 的工作流
-* 节点图。因此 **id 是跨插件的稳定契约**，增删预设时要同步两处客户端。
-*
-* 默认分配是确定性的：没有指定头像的打工人按不可变标识符哈希到一个预设，这样
-* 旧登记表里的打工人也有稳定头像，改名不会让头像漂移；新建打工人优先挑一个还
-* 没被占用的预设，避免刚创建的一批打工人全是一个样子。
-*
-* 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
-*
-* @module @buka/dsh-plugin-workers/avatar
-*/
-/**
-* 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是标识符
-* 哈希的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
-*
-* 这里**没有** 🤖 打工人 emoji：那是历史遗留的「通用型打工人」专属头像，通用型
-* 打工人已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按
-* 标识符哈希落回其它预设。
-*
-*/
-const AVATAR_IDS = Object.freeze([
-	"sprout",
-	"sun",
-	"cat",
-	"fox",
-	"panda",
-	"owl",
-	"whale",
-	"octopus",
-	"bee",
-	"rocket",
-	"dino",
-	"ghost",
-	"penguin",
-	"unicorn",
-	"mushroom"
-]);
-/** 没有任何可用 id 时的兜底头像。 */
-const DEFAULT_AVATAR_ID = AVATAR_IDS[0];
-/** id → 是否属于预设集合。 */
-const AVATAR_ID_SET = new Set(AVATAR_IDS);
-/**
-* 这个值是不是一个预设头像 id。
-*
-*/
-function isAvatarId(value) {
-	return typeof value === "string" && AVATAR_ID_SET.has(value);
-}
-/**
-* 标识符 → 稳定哈希（FNV-1a，按 Unicode 码点遍历；迁移来的旧标识符可能含汉字）。
-*
-*/
-function hashName(id) {
-	let hash = 2166136261;
-	for (const char of String(id ?? "")) {
-		hash ^= char.codePointAt(0) ?? 0;
-		hash = Math.imul(hash, 16777619);
-	}
-	return hash >>> 0;
-}
-/**
-* 标识符对应的确定性头像：同一个标识符永远得到同一个头像。
-*
-*/
-function defaultAvatarFor(id) {
-	return AVATAR_IDS[hashName(id) % AVATAR_IDS.length] ?? DEFAULT_AVATAR_ID;
-}
-/**
-* 新建打工人时的默认头像：先按标识符哈希，如果这个 id 已经被别的打工人用了，
-* 就按预设顺序挑第一个没被占用的；全被占用时回到标识符哈希的结果。
-*
-*/
-function pickDefaultAvatar(id, used = []) {
-	const taken = new Set(used);
-	const preferred = defaultAvatarFor(id);
-	if (!taken.has(preferred)) return preferred;
-	for (const id of AVATAR_IDS) if (!taken.has(id)) return id;
-	return preferred;
-}
-/**
-* 读取登记表里的头像值并规范化：合法的 id 原样返回，缺省 / 非法值按打工人标识符兜底。
-*
-*/
-function resolveAvatar(value, workerId) {
-	return isAvatarId(value) ? value : defaultAvatarFor(workerId);
-}
-// .build/workers/store/project-skills.js
-/**
-* 扫描工作区里的项目级 skills。
-*
-* 三个根目录：`<path>/.agents/skills`、`<path>/.claude/skills`、
-* `<path>/.dsh/skills`（`<name>/SKILL.md` 或平铺的 `<name>.md`）；`source`
-* 从项目级 `skills-lock.json` 里补。单个条目读不了时跳过，整次扫描不抛错。
-*
-* @module @buka/dsh-plugin-workers/store/project-skills
-*/
-/**
-* 项目级 skills 的三个根目录（相对工作区），按扫描优先级排列。
-* `.agents/skills` 是 `npx skills` 的默认落点，`.claude/skills` 是 Claude Code
-* 的约定；同一个 skill 同时落两处时按名字去重，只展示一条。
-*/
-const PROJECT_SKILL_ROOTS = [
-	path.join(".agents", "skills"),
-	path.join(".claude", "skills"),
-	path.join(".dsh", "skills")
-];
-/** `npx skills add` 在项目里写下的 lockfile 名。 */
-const PROJECT_LOCK_FILE = "skills-lock.json";
-/**
-* 极简 YAML frontmatter 解析：只取顶层的 `name` 与 `description`。
-*
-* 支持单行标量与单/双引号标量；没有 frontmatter、frontmatter 未闭合或
-* 两个字段都不存在时返回空对象。解析失败不抛错——skill 仍然要被列出来，
-* 只是元数据回退到目录名与空描述。
-*
-*/
-function parseFrontmatter(text) {
-	if (typeof text !== "string") return {};
-	const lines = text.replace(/^\uFEFF/u, "").replace(/\r\n/gu, "\n").split("\n");
-	if (lines[0]?.trim() !== "---") return {};
-	let end = -1;
-	for (let index = 1; index < lines.length; index += 1) if (lines[index]?.trim() === "---") {
-		end = index;
-		break;
-	}
-	if (end < 0) return {};
-	const result = {};
-	for (const line of lines.slice(1, end)) {
-		const match = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/u.exec(line);
-		if (match === null) continue;
-		const key = match[1];
-		if (key !== "name" && key !== "description") continue;
-		if (result[key] !== void 0) continue;
-		result[key] = stripQuotes(match[2]?.trim() ?? "");
-	}
-	return result;
-}
-/**
-* 去掉 YAML 标量两侧的引号；普通标量原样返回。
-*
-*/
-function stripQuotes(value) {
-	if (value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) try {
-		return JSON.parse(value);
-	} catch {
-		return value.slice(1, -1);
-	}
-	if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
-	return value;
-}
-/**
-* 扫描一个工作区的项目级 skills。
-*
-* 两个根目录里的条目都算：带 `SKILL.md` 的子目录，以及根下平铺的 `<name>.md`。
-* 名字优先取 frontmatter，缺省回退目录名/文件名；`source` 从
-* `<path>/skills-lock.json` 的 `skills.<name>` 里取 `source`（缺省回退
-* `sourceUrl`），取不到就是 null。单个条目读不了（坏链接、权限、ENOTDIR）
-* 时跳过，整次扫描不抛错。
-*
-*/
-async function scanProjectSkills(workspacePath) {
-	if (typeof workspacePath !== "string" || workspacePath.trim() === "") return { skills: [] };
-	const base = path.resolve(workspacePath);
-	const lock = await readProjectLock(base);
-	const byName = /* @__PURE__ */ new Map();
-	for (const relativeRoot of PROJECT_SKILL_ROOTS) {
-		const skillsDir = path.join(base, relativeRoot);
-		for (const dirent of await readDirents(skillsDir)) {
-			if (dirent.name.startsWith(".")) continue;
-			const full = path.join(skillsDir, dirent.name);
-			let stat;
-			try {
-				stat = await promises.stat(full);
-			} catch {
-				continue;
-			}
-			let file;
-			let kind;
-			let fallbackName;
-			if (stat.isDirectory()) {
-				file = path.join(full, "SKILL.md");
-				kind = "directory";
-				fallbackName = dirent.name;
-			} else if (stat.isFile() && dirent.name.endsWith(".md")) {
-				file = full;
-				kind = "file";
-				fallbackName = dirent.name.slice(0, -3);
-			} else continue;
-			let text;
-			try {
-				text = await promises.readFile(file, "utf8");
-			} catch {
-				continue;
-			}
-			const front = parseFrontmatter(text);
-			const name = typeof front.name === "string" && front.name !== "" ? front.name : fallbackName;
-			const entry = {
-				name,
-				description: typeof front.description === "string" ? front.description : "",
-				source: lockSource(lock, name, fallbackName),
-				kind
-			};
-			const existing = byName.get(name);
-			if (existing === void 0 || existing.kind === "file" && entry.kind === "directory") byName.set(name, entry);
-		}
-	}
-	return { skills: [...byName.values()].map(({ name, description, source }) => ({
-		name,
-		description,
-		source
-	})).sort((left, right) => left.name.localeCompare(right.name)) };
-}
-/**
-* 读项目级 `skills-lock.json` 的 `skills` 表；文件缺失、非法 JSON 或结构
-* 不对时按空表处理（只是所有 skill 都显示为没有来源）。
-*
-*/
-async function readProjectLock(workspacePath) {
-	let text;
-	try {
-		text = await promises.readFile(path.join(workspacePath, PROJECT_LOCK_FILE), "utf8");
-	} catch {
-		return {};
-	}
-	try {
-		const parsed = JSON.parse(text);
-		if (parsed === null || typeof parsed !== "object") return {};
-		const skills = parsed.skills;
-		if (skills === null || typeof skills !== "object" || Array.isArray(skills)) return {};
-		return skills;
-	} catch {
-		return {};
-	}
-}
-/**
-* 从 lockfile 的 `skills` 表里取一个条目的来源。
-*
-* 依次尝试 skill 的展示名与安装目录名（frontmatter 里的名字可能和目录不同），
-* 条目里优先 `source`、其次 `sourceUrl`；都没有就返回 null。
-*
-*/
-function lockSource(lock, ...names) {
-	for (const name of names) {
-		const record = lock[name];
-		if (record === null || typeof record !== "object") continue;
-		if ("source" in record && typeof record.source === "string" && record.source.trim() !== "") return record.source.trim();
-		if ("sourceUrl" in record && typeof record.sourceUrl === "string" && record.sourceUrl.trim() !== "") return record.sourceUrl.trim();
-	}
-	return null;
-}
-/**
-* 读目录项；目录不存在或不是目录时当作空目录。
-*
-*/
-async function readDirents(dir) {
-	try {
-		return await promises.readdir(dir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
-}
 // packages/plugin-kit/lib/npx.js
 /**
 * 定位并执行 `npx skills`：安装、卸载与列清单共用。
@@ -1477,6 +1210,98 @@ async function writeJsonAtomic(file, value, options = {}) {
 		} catch {}
 		throw error;
 	}
+}
+// .build/workers/avatar.js
+/**
+* 打工人头像的 Host 侧契约：预设 id、默认分配与校验。
+*
+* 头像在登记表里只存一个 id（例如 `panda`），显示由两个浏览器一半各自维护一份
+* 同一 id → emoji / 底色的映射（本仓库不允许插件之间互相 import）：
+* `plugins/workers/client.js` 的打工人页与 `plugins/workflows/client.js` 的工作流
+* 节点图。因此 **id 是跨插件的稳定契约**，增删预设时要同步两处客户端。
+*
+* 默认分配是确定性的：没有指定头像的打工人按不可变标识符哈希到一个预设，这样
+* 旧登记表里的打工人也有稳定头像，改名不会让头像漂移；新建打工人优先挑一个还
+* 没被占用的预设，避免刚创建的一批打工人全是一个样子。
+*
+* 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
+*
+* @module @buka/dsh-plugin-workers/avatar
+*/
+/**
+* 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是标识符
+* 哈希的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
+*
+* 这里**没有** 🤖 打工人 emoji：那是历史遗留的「通用型打工人」专属头像，通用型
+* 打工人已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按
+* 标识符哈希落回其它预设。
+*
+*/
+const AVATAR_IDS = Object.freeze([
+	"sprout",
+	"sun",
+	"cat",
+	"fox",
+	"panda",
+	"owl",
+	"whale",
+	"octopus",
+	"bee",
+	"rocket",
+	"dino",
+	"ghost",
+	"penguin",
+	"unicorn",
+	"mushroom"
+]);
+/** 没有任何可用 id 时的兜底头像。 */
+const DEFAULT_AVATAR_ID = AVATAR_IDS[0];
+/** id → 是否属于预设集合。 */
+const AVATAR_ID_SET = new Set(AVATAR_IDS);
+/**
+* 这个值是不是一个预设头像 id。
+*
+*/
+function isAvatarId(value) {
+	return typeof value === "string" && AVATAR_ID_SET.has(value);
+}
+/**
+* 标识符 → 稳定哈希（FNV-1a，按 Unicode 码点遍历；迁移来的旧标识符可能含汉字）。
+*
+*/
+function hashName(id) {
+	let hash = 2166136261;
+	for (const char of String(id ?? "")) {
+		hash ^= char.codePointAt(0) ?? 0;
+		hash = Math.imul(hash, 16777619);
+	}
+	return hash >>> 0;
+}
+/**
+* 标识符对应的确定性头像：同一个标识符永远得到同一个头像。
+*
+*/
+function defaultAvatarFor(id) {
+	return AVATAR_IDS[hashName(id) % AVATAR_IDS.length] ?? DEFAULT_AVATAR_ID;
+}
+/**
+* 新建打工人时的默认头像：先按标识符哈希，如果这个 id 已经被别的打工人用了，
+* 就按预设顺序挑第一个没被占用的；全被占用时回到标识符哈希的结果。
+*
+*/
+function pickDefaultAvatar(id, used = []) {
+	const taken = new Set(used);
+	const preferred = defaultAvatarFor(id);
+	if (!taken.has(preferred)) return preferred;
+	for (const id of AVATAR_IDS) if (!taken.has(id)) return id;
+	return preferred;
+}
+/**
+* 读取登记表里的头像值并规范化：合法的 id 原样返回，缺省 / 非法值按打工人标识符兜底。
+*
+*/
+function resolveAvatar(value, workerId) {
+	return isAvatarId(value) ? value : defaultAvatarFor(workerId);
 }
 /** 登记表里能读到的版本：当前版本 + 仍需要迁移的旧版本。 */
 const READABLE_VERSIONS = /* @__PURE__ */ new Set([4, ...WORKER_REGISTRY_LEGACY_VERSIONS]);
@@ -2045,28 +1870,326 @@ async function setWorkerAssistant({ file, id, assistant } = {}) {
 	});
 	return { worker };
 }
+// .build/workers/store/delete.js
 /**
-* 从登记表移除一个智能体：**目录不删**（目录、文件与会话都保留）。
+* 删除打工人：登记条目、打工人目录与工作区注册行一起清掉（硬删，不归档）。
 *
-* - 内建机器人（clock）与其它机器人只读，拒绝移除；
-* - 登记文件损坏抛 `code = 'registry-unreadable'`；未知标识符返回
-*   `{ removed: false }`，不写文件。
+* 事务顺序（见 ADR 0021）：
+*
+* 1. 校验目录在打工人根目录下；
+* 2. 把目录原子改名为同级回收名；
+* 3. 删工作区注册行；
+* 4. 删登记条目；
+* 5. 尽力删除回收目录。
+*
+* 第 2～4 步任一步失败都把目录改回原名、登记条目保持原样；工作区注册行已经
+* 删掉时用 `create` 尽力恢复。内建 clock 与 `driver: robot` 的条目不可删。
+*
+* 唯一阻塞条件（引用该标识符的运行中作业）由路由通过 `bukaWorkflows` 服务
+* 检查，本模块只处理磁盘与登记表。
+*
+* @module @buka/dsh-plugin-workers/store/delete
+*/
+/** 目录不在打工人根目录下：拒绝删除，避免误删任意路径。 */
+function deleteOutsideRootError(target) {
+	const error = /* @__PURE__ */ new Error(`打工人目录不在打工人根目录下，拒绝删除：${target}`);
+	return Object.assign(error, { code: "outside-root" });
+}
+/** 工作区注册服务不可用：无法安全摘掉注册行。 */
+function workspaceUnavailableError() {
+	return Object.assign(/* @__PURE__ */ new Error("工作区注册服务不可用，无法确认或摘掉打工人的工作区注册，拒绝删除；请刷新后重试。"), { code: "workspace-unavailable" });
+}
+/** 判断 `child` 是否在 `root` 目录下（不含 root 本身）。 */
+function isInside(root, child) {
+	const relative = path.relative(root, child);
+	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+	return true;
+}
+/**
+* 按规范路径在已注册工作区里找打工人目录。
+*
+* 工作区路径用 `path.resolve` 与 `fs.realpath` 两种形式比较，缓存目录本身是
+* 符号链接时也能对齐；注册表不可用时抛 `workspace-unavailable`。
 *
 */
-async function removeWorker({ file, id } = {}) {
+async function findWorkerWorkspace(workspaceRegistry, workerPath) {
+	if (workspaceRegistry === void 0 || workspaceRegistry === null) throw workspaceUnavailableError();
+	let entries;
+	try {
+		const listed = workspaceRegistry.list();
+		entries = Array.isArray(listed) ? listed : [];
+	} catch {
+		throw workspaceUnavailableError();
+	}
+	const resolved = path.resolve(workerPath);
+	const real = await realpathOrNull(workerPath);
+	for (const entry of entries) {
+		if (entry === null || typeof entry !== "object") continue;
+		if (typeof entry.path !== "string" || entry.path.trim() === "") continue;
+		const candidate = path.resolve(entry.path);
+		if (candidate === resolved || real !== null && candidate === real) return {
+			id: entry.id,
+			path: candidate
+		};
+		const candidateReal = await realpathOrNull(entry.path);
+		if (real !== null && candidateReal === real) return {
+			id: entry.id,
+			path: candidate
+		};
+	}
+	return null;
+}
+/**
+* 硬删一个打工人：目录、登记条目与工作区注册行一起删除。
+*
+* - 标识符不合法抛 `code = 'invalid-id'`；不在登记表里抛 `code = 'unknown-worker'`；
+* - 内建 clock 抛 `code = 'builtin-worker'`，其它机器人抛 `code = 'robot-worker'`；
+* - 目录不在打工人根目录下抛 `code = 'outside-root'`；
+* - 工作区注册服务不可用抛 `code = 'workspace-unavailable'`；
+* - 目录不存在时只删登记与注册行，不报错。
+*
+*/
+async function deleteWorker({ workersDir, file, id, workspaceRegistry } = {}) {
 	const registryFile = requireRegistryFile(file);
+	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
+	const workerId = id.trim();
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const workerId = typeof id === "string" ? id.trim() : "";
-	const current = findWorker(registry, workerId);
-	if (current === void 0) return { removed: false };
+	const worker = registry.workers.find((entry) => entry.id === workerId);
+	if (worker === void 0) throw unknownWorkerError(workerId);
 	if (isBuiltinWorkerId(workerId)) throw builtinWorkerError(workerId);
-	if (current.driver !== "agent") throw robotWorkerError(workerId);
-	await writeWorkerRegistry({
-		file: registryFile,
-		workers: registry.workers.filter((worker) => worker.id !== workerId)
-	});
-	return { removed: true };
+	if (worker.driver !== "agent") throw robotWorkerError(workerId);
+	const root = typeof workersDir === "string" && workersDir.trim() !== "" ? path.resolve(workersDir) : null;
+	if (root === null) throw invalidIdError(workerId);
+	const expected = workerDirectory(root, workerId);
+	if (expected === null) throw invalidIdError(workerId);
+	const rootCanonical = await realpathOr(root, root);
+	const expectedCanonical = await realpathOr(expected, expected);
+	const sourcePath = await realpathOr(worker.path, path.resolve(worker.path));
+	if (!isInside(rootCanonical, expectedCanonical) || !isInside(rootCanonical, sourcePath)) throw deleteOutsideRootError(worker.path);
+	const workspace = await findWorkerWorkspace(workspaceRegistry, worker.path);
+	let recycledPath = null;
+	if (await isDirectory(sourcePath)) {
+		recycledPath = `${sourcePath}.deleted-${Date.now()}-${randomUUID().slice(0, 8)}`;
+		await promises.rename(sourcePath, recycledPath);
+	}
+	const rollbackDirectory = async () => {
+		if (recycledPath === null) return;
+		try {
+			await promises.rename(recycledPath, sourcePath);
+		} catch {}
+	};
+	if (workspace !== null) {
+		if (typeof workspaceRegistry?.delete !== "function") {
+			await rollbackDirectory();
+			throw workspaceUnavailableError();
+		}
+		try {
+			await workspaceRegistry.delete(workspace.id);
+		} catch (error) {
+			await rollbackDirectory();
+			throw error;
+		}
+	}
+	try {
+		await writeWorkerRegistry({
+			file: registryFile,
+			workers: registry.workers.filter((entry) => entry.id !== workerId)
+		});
+	} catch (error) {
+		await rollbackDirectory();
+		if (workspace !== null && typeof workspaceRegistry?.create === "function") try {
+			await workspaceRegistry.create(worker.path, worker.name === "" ? workerId : worker.name);
+		} catch {}
+		throw error;
+	}
+	if (recycledPath !== null) try {
+		await promises.rm(recycledPath, {
+			recursive: true,
+			force: true
+		});
+	} catch {}
+	return {
+		worker,
+		path: worker.path,
+		workspaceId: workspace === null ? null : String(workspace.id),
+		directoryRemoved: recycledPath !== null
+	};
+}
+// .build/workers/store/project-skills.js
+/**
+* 扫描工作区里的项目级 skills。
+*
+* 三个根目录：`<path>/.agents/skills`、`<path>/.claude/skills`、
+* `<path>/.dsh/skills`（`<name>/SKILL.md` 或平铺的 `<name>.md`）；`source`
+* 从项目级 `skills-lock.json` 里补。单个条目读不了时跳过，整次扫描不抛错。
+*
+* @module @buka/dsh-plugin-workers/store/project-skills
+*/
+/**
+* 项目级 skills 的三个根目录（相对工作区），按扫描优先级排列。
+* `.agents/skills` 是 `npx skills` 的默认落点，`.claude/skills` 是 Claude Code
+* 的约定；同一个 skill 同时落两处时按名字去重，只展示一条。
+*/
+const PROJECT_SKILL_ROOTS = [
+	path.join(".agents", "skills"),
+	path.join(".claude", "skills"),
+	path.join(".dsh", "skills")
+];
+/** `npx skills add` 在项目里写下的 lockfile 名。 */
+const PROJECT_LOCK_FILE = "skills-lock.json";
+/**
+* 极简 YAML frontmatter 解析：只取顶层的 `name` 与 `description`。
+*
+* 支持单行标量与单/双引号标量；没有 frontmatter、frontmatter 未闭合或
+* 两个字段都不存在时返回空对象。解析失败不抛错——skill 仍然要被列出来，
+* 只是元数据回退到目录名与空描述。
+*
+*/
+function parseFrontmatter(text) {
+	if (typeof text !== "string") return {};
+	const lines = text.replace(/^\uFEFF/u, "").replace(/\r\n/gu, "\n").split("\n");
+	if (lines[0]?.trim() !== "---") return {};
+	let end = -1;
+	for (let index = 1; index < lines.length; index += 1) if (lines[index]?.trim() === "---") {
+		end = index;
+		break;
+	}
+	if (end < 0) return {};
+	const result = {};
+	for (const line of lines.slice(1, end)) {
+		const match = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/u.exec(line);
+		if (match === null) continue;
+		const key = match[1];
+		if (key !== "name" && key !== "description") continue;
+		if (result[key] !== void 0) continue;
+		result[key] = stripQuotes(match[2]?.trim() ?? "");
+	}
+	return result;
+}
+/**
+* 去掉 YAML 标量两侧的引号；普通标量原样返回。
+*
+*/
+function stripQuotes(value) {
+	if (value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) try {
+		return JSON.parse(value);
+	} catch {
+		return value.slice(1, -1);
+	}
+	if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/gu, "'");
+	return value;
+}
+/**
+* 扫描一个工作区的项目级 skills。
+*
+* 两个根目录里的条目都算：带 `SKILL.md` 的子目录，以及根下平铺的 `<name>.md`。
+* 名字优先取 frontmatter，缺省回退目录名/文件名；`source` 从
+* `<path>/skills-lock.json` 的 `skills.<name>` 里取 `source`（缺省回退
+* `sourceUrl`），取不到就是 null。单个条目读不了（坏链接、权限、ENOTDIR）
+* 时跳过，整次扫描不抛错。
+*
+*/
+async function scanProjectSkills(workspacePath) {
+	if (typeof workspacePath !== "string" || workspacePath.trim() === "") return { skills: [] };
+	const base = path.resolve(workspacePath);
+	const lock = await readProjectLock(base);
+	const byName = /* @__PURE__ */ new Map();
+	for (const relativeRoot of PROJECT_SKILL_ROOTS) {
+		const skillsDir = path.join(base, relativeRoot);
+		for (const dirent of await readDirents(skillsDir)) {
+			if (dirent.name.startsWith(".")) continue;
+			const full = path.join(skillsDir, dirent.name);
+			let stat;
+			try {
+				stat = await promises.stat(full);
+			} catch {
+				continue;
+			}
+			let file;
+			let kind;
+			let fallbackName;
+			if (stat.isDirectory()) {
+				file = path.join(full, "SKILL.md");
+				kind = "directory";
+				fallbackName = dirent.name;
+			} else if (stat.isFile() && dirent.name.endsWith(".md")) {
+				file = full;
+				kind = "file";
+				fallbackName = dirent.name.slice(0, -3);
+			} else continue;
+			let text;
+			try {
+				text = await promises.readFile(file, "utf8");
+			} catch {
+				continue;
+			}
+			const front = parseFrontmatter(text);
+			const name = typeof front.name === "string" && front.name !== "" ? front.name : fallbackName;
+			const entry = {
+				name,
+				description: typeof front.description === "string" ? front.description : "",
+				source: lockSource(lock, name, fallbackName),
+				kind
+			};
+			const existing = byName.get(name);
+			if (existing === void 0 || existing.kind === "file" && entry.kind === "directory") byName.set(name, entry);
+		}
+	}
+	return { skills: [...byName.values()].map(({ name, description, source }) => ({
+		name,
+		description,
+		source
+	})).sort((left, right) => left.name.localeCompare(right.name)) };
+}
+/**
+* 读项目级 `skills-lock.json` 的 `skills` 表；文件缺失、非法 JSON 或结构
+* 不对时按空表处理（只是所有 skill 都显示为没有来源）。
+*
+*/
+async function readProjectLock(workspacePath) {
+	let text;
+	try {
+		text = await promises.readFile(path.join(workspacePath, PROJECT_LOCK_FILE), "utf8");
+	} catch {
+		return {};
+	}
+	try {
+		const parsed = JSON.parse(text);
+		if (parsed === null || typeof parsed !== "object") return {};
+		const skills = parsed.skills;
+		if (skills === null || typeof skills !== "object" || Array.isArray(skills)) return {};
+		return skills;
+	} catch {
+		return {};
+	}
+}
+/**
+* 从 lockfile 的 `skills` 表里取一个条目的来源。
+*
+* 依次尝试 skill 的展示名与安装目录名（frontmatter 里的名字可能和目录不同），
+* 条目里优先 `source`、其次 `sourceUrl`；都没有就返回 null。
+*
+*/
+function lockSource(lock, ...names) {
+	for (const name of names) {
+		const record = lock[name];
+		if (record === null || typeof record !== "object") continue;
+		if ("source" in record && typeof record.source === "string" && record.source.trim() !== "") return record.source.trim();
+		if ("sourceUrl" in record && typeof record.sourceUrl === "string" && record.sourceUrl.trim() !== "") return record.sourceUrl.trim();
+	}
+	return null;
+}
+/**
+* 读目录项；目录不存在或不是目录时当作空目录。
+*
+*/
+async function readDirents(dir) {
+	try {
+		return await promises.readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
 }
 // .build/workers/store/list.js
 /**
@@ -3331,12 +3454,33 @@ const MODEL_ROUTE = "/buka-workers/model";
 const ASSISTANT_ROUTE = "/buka-workers/assistant";
 /** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = "/buka-workers/rename";
-/** 页面删除打工人（只删登记）用的路由。 */
+/** 页面读取删除影响面（阻塞作业 / 受影响工作流 / 历史作业数）用的路由。 */
+const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
+/** 页面删除打工人（登记 + 目录 + 工作区注册）用的路由。 */
 const REMOVE_ROUTE = "/buka-workers/remove";
 /** 页面写入 AGENTS.md 用的路由。 */
 const AGENTS_ROUTE = "/buka-workers/agents";
 /** 页面「打开 Finder」用的路由。 */
 const REVEAL_ROUTE = "/buka-workers/reveal";
+/** 把服务返回值收窄成稳定形状：缺字段按空值处理，不让页面拿到坏结构。 */
+function normalizeWorkerUsage(raw) {
+	const record = raw ?? {};
+	return {
+		runningJobs: Array.isArray(record.runningJobs) ? record.runningJobs.filter((entry) => entry !== null && typeof entry === "object").map((entry) => ({
+			jobId: typeof entry.jobId === "string" ? entry.jobId : "",
+			jobSeq: typeof entry.jobSeq === "number" ? entry.jobSeq : 0,
+			workflowId: typeof entry.workflowId === "string" ? entry.workflowId : "",
+			workflowName: typeof entry.workflowName === "string" ? entry.workflowName : "",
+			jobName: typeof entry.jobName === "string" ? entry.jobName : ""
+		})) : [],
+		workflows: Array.isArray(record.workflows) ? record.workflows.filter((entry) => entry !== null && typeof entry === "object").map((entry) => ({
+			workflowId: typeof entry.workflowId === "string" ? entry.workflowId : "",
+			name: typeof entry.name === "string" ? entry.name : "",
+			status: typeof entry.status === "string" ? entry.status : ""
+		})) : [],
+		finishedJobs: typeof record.finishedJobs === "number" ? record.finishedJobs : 0
+	};
+}
 /**
 * 注册打工人管理相关的精确路由。
 *
@@ -3344,6 +3488,23 @@ const REVEAL_ROUTE = "/buka-workers/reveal";
 function registerWorkerRoutes(hostCtx, webCtx, deps) {
 	const { workersDir, registryFile, serializeRegistry } = deps;
 	const ctx = hostCtx;
+	/**
+	* 跨插件读取一个打工人的引用面。
+	*
+	* Workflows 插件可选：取不到服务时视为「没有作业引用」——没装 workflows
+	* 插件就不可能有作业。服务存在但读取失败时向上抛，删除与影响面都中止，
+	* 避免在未知引用的情况下误删。
+	*
+	*/
+	async function readWorkerUsage(id) {
+		const service = optionalService(ctx, "bukaWorkflows");
+		if (service === null || service === void 0 || typeof service.workerUsage !== "function") return {
+			runningJobs: [],
+			workflows: [],
+			finishedJobs: 0
+		};
+		return normalizeWorkerUsage(await service.workerUsage(id));
+	}
 	/** 把 resolveWorker 的错误写成响应。 */
 	function sendWorkerError(res, error) {
 		sendError(res, error.status, error.code, error.message);
@@ -3772,6 +3933,56 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 	}), `buka-workers: POST ${RENAME_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
+		path: REMOVE_IMPACT_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "POST") {
+				sendMethodNotAllowed(res, "POST");
+				return;
+			}
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const id = typeof body?.id === "string" ? body.id.trim() : "";
+			if (!isResolvableWorkerId(id)) {
+				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
+				return;
+			}
+			try {
+				const registry = await readWorkerRegistry({ file: registryFile });
+				if (registry.corrupt) {
+					sendError(res, 409, "registry-unreadable", `打工人登记文件无法读取：${registryFile}。请修复或删除该文件后刷新。`);
+					return;
+				}
+				const worker = registry.workers.find((entry) => entry.id === id);
+				if (worker === void 0) {
+					sendError(res, 404, "unknown-worker", `没有找到这个打工人：${id}`);
+					return;
+				}
+				if (worker.driver !== "agent") {
+					sendError(res, 409, "robot-worker", `机器人只读，不能删除：${id}`);
+					return;
+				}
+				const workspace = await findWorkerWorkspace(ctx.workspaceRegistry, worker.path).catch(() => null);
+				const usage = await readWorkerUsage(id);
+				sendJson(res, 200, {
+					ok: true,
+					id,
+					name: workerDisplayName(worker),
+					path: worker.path,
+					mounted: workspace !== null,
+					workspaceId: workspace === null ? null : String(workspace.id),
+					blockers: { runningJobs: usage.runningJobs },
+					workflows: usage.workflows,
+					finishedJobs: usage.finishedJobs
+				});
+			} catch (error) {
+				webCtx.logger?.warn?.("buka-workers: 读取删除影响面失败：%s", describeError$1(error));
+				sendError(res, 500, "remove-impact-failed", `读取删除影响面失败：${describeError$1(error)}`);
+			}
+		}
+	}), `buka-workers: POST ${REMOVE_IMPACT_ROUTE}`);
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
 		path: REMOVE_ROUTE,
 		handler: async (req, res) => {
 			if (rejected(webCtx, req, res)) return;
@@ -3787,27 +3998,52 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 				return;
 			}
 			try {
-				const result = await serializeRegistry(() => removeWorker({
+				const usage = await readWorkerUsage(id);
+				if (usage.runningJobs.length > 0) {
+					sendJson(res, 409, {
+						ok: false,
+						code: "worker-in-use",
+						message: "有引用这个打工人的运行中作业，删除会打断它们；请先在作业页主动终止这些作业，再回来删除。",
+						jobs: usage.runningJobs
+					});
+					return;
+				}
+				const result = await serializeRegistry(() => deleteWorker({
+					workersDir,
 					file: registryFile,
-					id
+					id,
+					workspaceRegistry: ctx.workspaceRegistry
 				}));
-				if (result.removed) webCtx.logger?.info?.("buka-workers: 已移除打工人登记 %s", id);
+				webCtx.logger?.info?.("buka-workers: 已删除打工人 %s（目录 %s，工作区注册 %s）", result.worker.id, result.path, result.workspaceId ?? "无");
 				sendJson(res, 200, {
 					ok: true,
 					id,
-					removed: result.removed
+					removed: true,
+					path: result.path,
+					workspaceId: result.workspaceId,
+					directoryRemoved: result.directoryRemoved,
+					workflows: usage.workflows,
+					finishedJobs: usage.finishedJobs
 				});
 			} catch (error) {
-				if (errorCode(error) === "registry-unreadable") {
-					sendError(res, 409, "registry-unreadable", describeError$1(error));
-					return;
+				switch (errorCode(error)) {
+					case "invalid-id":
+						sendError(res, 400, "invalid-id", describeError$1(error));
+						return;
+					case "registry-unreadable":
+					case "builtin-worker":
+					case "robot-worker":
+					case "outside-root":
+					case "workspace-unavailable":
+						sendError(res, 409, String(errorCode(error)), describeError$1(error));
+						return;
+					case "unknown-worker":
+						sendError(res, 404, "unknown-worker", describeError$1(error));
+						return;
+					default:
+						webCtx.logger?.warn?.("buka-workers: 删除打工人失败：%s", describeError$1(error));
+						sendError(res, 500, "remove-failed", `删除打工人失败：${describeError$1(error)}`);
 				}
-				if (errorCode(error) === "builtin-worker" || errorCode(error) === "robot-worker") {
-					sendError(res, 409, String(errorCode(error)), describeError$1(error));
-					return;
-				}
-				webCtx.logger?.warn?.("buka-workers: 移除打工人失败：%s", describeError$1(error));
-				sendError(res, 500, "remove-failed", `移除打工人失败：${describeError$1(error)}`);
 			}
 		}
 	}), `buka-workers: POST ${REMOVE_ROUTE}`);
@@ -5300,7 +5536,8 @@ function registerWorkerTools(ctx, deps) {
 * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
 * | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
 * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
-* | `POST /buka-workers/remove` | 从登记表移除（目录、文件与会话保留） |
+* | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
+* | `POST /buka-workers/remove` | 硬删登记条目 + 打工人目录 + 工作区注册；有 running 作业引用时 409 |
 * | `POST /buka-workers/agents` | 写入某打工人的 AGENTS.md，并补 CLAUDE.md 链接 |
 * | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
 * | `POST /buka-workers/skills/install` | 只安装选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
@@ -5315,6 +5552,9 @@ function registerWorkerTools(ctx, deps) {
 * 创建 / 修改打工人（改名只改展示名）、写 AGENTS.md 并挂到工作区，但**只对
 * 随包发布的「打工人」preset 的根会话可见**（Config.builderPresets，判定见
 * `lib/access.js`）。删除打工人、安装 skills、页面上的编辑仍然只留给用户。
+*
+* 删除通过可选的 `ctx.bukaWorkflows` 服务读引用面；没装 Workflows 插件时视为
+* 没有作业引用。唯一阻塞是引用该标识符的运行中作业。
 *
 * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
 * `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建

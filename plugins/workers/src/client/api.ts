@@ -73,6 +73,12 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errRobotWorker')
     case 'builtin-worker':
       return t('errBuiltinWorker')
+    case 'worker-in-use':
+      return t('deleteBlockedByJobs')
+    case 'outside-root':
+      return t('errOutsideRoot')
+    case 'workspace-unavailable':
+      return t('errWorkspaceUnavailable')
     case 'invalid-assistant':
       return t('errInvalidAssistant')
     case 'invalid-model':

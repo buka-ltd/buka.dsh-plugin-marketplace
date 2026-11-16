@@ -1197,3 +1197,122 @@ test('资产：资产池按来源任务分组，最终交付物带标记', async
   assert.match(text, /最终/u)
   assert.match(text, /产出者/u)
 })
+
+test('派生不可用：工作流列表 / 详情标出缺失的标识符，新建作业禁用', async () => {
+  const client = await loadClient()
+  const missing = [
+    {
+      id: '软件工程师',
+      role: 'executor',
+      positionId: 'dev',
+      positionLabel: '研发',
+    },
+  ]
+  const unavailableDefinition = {
+    ...DEFINITION,
+    positions: DEFINITION.positions.map((position) =>
+      position.id === 'dev'
+        ? { ...position, executor: { ...position.executor, missing: true } }
+        : position,
+    ),
+  }
+  const unavailableDetail = {
+    ...WORKFLOW_DETAIL,
+    workflow: {
+      ...WORKFLOW_DETAIL.workflow,
+      definition: unavailableDefinition,
+      availability: { available: false, missingWorkers: missing },
+    },
+    graph: {
+      ...WORKFLOW_DETAIL.graph,
+      positions: WORKFLOW_DETAIL.graph.positions.map((position) =>
+        position.id === 'dev'
+          ? { ...position, executor: { ...position.executor, missing: true } }
+          : position,
+      ),
+    },
+  }
+
+  // 列表：不可用的工作流带「不可用」标签与缺失说明。
+  const list = render(client, {
+    route: { kind: 'workflows' },
+    workflows: {
+      status: 'ready',
+      error: null,
+      data: [
+        {
+          id: 'wf-1',
+          name: '研发交付',
+          status: 'active',
+          version: 3,
+          jobCount: 1,
+          availability: { available: false, missingWorkers: missing },
+        },
+      ],
+    },
+  })
+  assert.ok(list.texts.includes('不可用'), 'list marks the workflow unavailable')
+  assert.match(
+    list.texts.join(' '),
+    /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u,
+    'the list names the missing identifier',
+  )
+
+  // 详情：提示条列出缺口，新建作业按钮禁用。
+  const { tree, texts } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+    workflows: { status: 'ready', error: null, data: [] },
+    workflow: { status: 'ready', data: unavailableDetail, error: null },
+  })
+  const text = texts.join(' ')
+  assert.ok(text.includes('不可用'), 'the detail keeps an unavailable tag')
+  assert.match(text, /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u)
+  const newJob = findBy(tree, (node) => node.type === 'button' && textOf(node) === '新建作业')
+  assert.ok(newJob, 'the new job button still renders')
+  assert.equal(newJob.props.disabled, true, 'starting a job is blocked while unavailable')
+})
+
+test('派生不可用：作业页标注，承办者与交回助理显示「已删除」与占位头像', async () => {
+  const client = await loadClient()
+  const missing = [
+    { id: '软件工程师', role: 'executor', positionId: 'dev', positionLabel: '研发' },
+    { id: 'secretary', role: 'delivery' },
+  ]
+  const job = {
+    ...JOB_DETAIL,
+    job: {
+      ...JOB_DETAIL.job,
+      delivery: { kind: 'assistant', id: 'secretary', name: '沟通助理', missing: true },
+    },
+    definition: {
+      ...JOB_DETAIL.definition,
+      positions: JOB_DETAIL.definition.positions.map((position) =>
+        position.id === 'dev'
+          ? { ...position, executor: { ...position.executor, missing: true } }
+          : position,
+      ),
+    },
+    availability: { available: false, missingWorkers: missing },
+  }
+  const { tree, texts } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: job, error: null },
+    taskId: 'task-1',
+    task: { status: 'ready', data: TASK_DETAIL.task, error: null },
+  })
+  const text = texts.join(' ')
+  assert.ok(text.includes('不可用'), 'the job page marks the job unavailable')
+  assert.match(text, /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u)
+  assert.match(text, /交回方式里的助理「secretary」已不存在/u)
+  assert.match(text, /软件工程师 · 已删除/u, 'the claimant is marked deleted')
+  assert.match(text, /沟通助理 · secretary · 已删除/u, 'the delivery assistant is marked deleted')
+  assert.ok(
+    findBy(tree, (node) =>
+      String(node.props?.className ?? '')
+        .split(/\s+/)
+        .includes('buka-workflows-avatarMissing'),
+    ) !== null,
+    'the deleted worker gets a placeholder avatar',
+  )
+})

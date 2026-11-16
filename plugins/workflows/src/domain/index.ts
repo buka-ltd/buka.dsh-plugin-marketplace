@@ -4,6 +4,7 @@
  * @module @buka/dsh-plugin-workflows/domain
  */
 
+export * from './availability.ts'
 export * from './ids.ts'
 export * from './status.ts'
 export * from './types.ts'

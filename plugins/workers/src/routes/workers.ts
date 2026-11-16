@@ -15,18 +15,20 @@
 import type { ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { mountWorker } from '../builder.ts'
+import { optionalService } from '../engine/session-runtime.ts'
 import { buildWorkerModelCatalog } from '../model-catalog.ts'
 import { revealDirectory } from '../reveal.ts'
 import type { WorkerModelSelection } from '../store/types.ts'
 import {
   AGENTS_MAX_WRITE_BYTES,
   addWorker,
+  deleteWorker,
   ensureClaudeLink,
+  findWorkerWorkspace,
   isResolvableWorkerId,
   isValidWorkerId,
   listWorkers,
   readWorkerRegistry,
-  removeWorker,
   renameWorker,
   setWorkerAssistant,
   setWorkerAvatar,
@@ -72,7 +74,10 @@ const ASSISTANT_ROUTE = '/buka-workers/assistant'
 /** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = '/buka-workers/rename'
 
-/** 页面删除打工人（只删登记）用的路由。 */
+/** 页面读取删除影响面（阻塞作业 / 受影响工作流 / 历史作业数）用的路由。 */
+const REMOVE_IMPACT_ROUTE = '/buka-workers/remove-impact'
+
+/** 页面删除打工人（登记 + 目录 + 工作区注册）用的路由。 */
 const REMOVE_ROUTE = '/buka-workers/remove'
 
 /** 页面写入 AGENTS.md 用的路由。 */
@@ -88,6 +93,68 @@ export interface WorkerRouteDeps {
   serializeRegistry: <T>(work: () => Promise<T>) => Promise<T>
 }
 
+/** 一条引用该打工人的运行中作业（只读展示 / 删除阻塞）。 */
+interface WorkerUsageJobView {
+  jobId: string
+  jobSeq: number
+  workflowId: string
+  workflowName: string
+  jobName: string
+}
+
+/** 一条引用该打工人的工作流（含停用）。 */
+interface WorkerUsageWorkflowView {
+  workflowId: string
+  name: string
+  status: string
+}
+
+/** `bukaWorkflows.workerUsage()` 的本插件视图。 */
+interface WorkerUsageView {
+  runningJobs: WorkerUsageJobView[]
+  workflows: WorkerUsageWorkflowView[]
+  finishedJobs: number
+}
+
+/** Workflows 插件只读服务的收窄形状；没装时不存在。 */
+interface WorkflowUsageService {
+  workerUsage?(id: string): Promise<unknown>
+}
+
+/** 把服务返回值收窄成稳定形状：缺字段按空值处理，不让页面拿到坏结构。 */
+function normalizeWorkerUsage(raw: unknown): WorkerUsageView {
+  const record = (raw ?? {}) as Record<string, unknown>
+  const runningJobs = Array.isArray(record.runningJobs)
+    ? record.runningJobs
+        .filter(
+          (entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object',
+        )
+        .map((entry) => ({
+          jobId: typeof entry.jobId === 'string' ? entry.jobId : '',
+          jobSeq: typeof entry.jobSeq === 'number' ? entry.jobSeq : 0,
+          workflowId: typeof entry.workflowId === 'string' ? entry.workflowId : '',
+          workflowName: typeof entry.workflowName === 'string' ? entry.workflowName : '',
+          jobName: typeof entry.jobName === 'string' ? entry.jobName : '',
+        }))
+    : []
+  const workflows = Array.isArray(record.workflows)
+    ? record.workflows
+        .filter(
+          (entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object',
+        )
+        .map((entry) => ({
+          workflowId: typeof entry.workflowId === 'string' ? entry.workflowId : '',
+          name: typeof entry.name === 'string' ? entry.name : '',
+          status: typeof entry.status === 'string' ? entry.status : '',
+        }))
+    : []
+  return {
+    runningJobs,
+    workflows,
+    finishedJobs: typeof record.finishedJobs === 'number' ? record.finishedJobs : 0,
+  }
+}
+
 /**
  * 注册打工人管理相关的精确路由。
  *
@@ -100,6 +167,22 @@ export function registerWorkerRoutes(
   const { workersDir, registryFile, serializeRegistry } = deps
   // 路由体沿用入口里的 `ctx` 名字读 workspaceRegistry，避免搬运时改散逻辑。
   const ctx = hostCtx
+
+  /**
+   * 跨插件读取一个打工人的引用面。
+   *
+   * Workflows 插件可选：取不到服务时视为「没有作业引用」——没装 workflows
+   * 插件就不可能有作业。服务存在但读取失败时向上抛，删除与影响面都中止，
+   * 避免在未知引用的情况下误删。
+   *
+   */
+  async function readWorkerUsage(id: string): Promise<WorkerUsageView> {
+    const service = optionalService<WorkflowUsageService>(ctx, 'bukaWorkflows')
+    if (service === null || service === undefined || typeof service.workerUsage !== 'function') {
+      return { runningJobs: [], workflows: [], finishedJobs: 0 }
+    }
+    return normalizeWorkerUsage(await service.workerUsage(id))
+  }
 
   /** 把 resolveWorker 的错误写成响应。 */
   function sendWorkerError(res: ServerResponse, error: WorkerRouteError): void {
@@ -610,6 +693,75 @@ export function registerWorkerRoutes(
     () =>
       webCtx.webServer.register({
         kind: 'exact',
+        path: REMOVE_IMPACT_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'POST') {
+            sendMethodNotAllowed(res, 'POST')
+            return
+          }
+          const body = await readJsonBody(req, res)
+          if (body === undefined) return
+
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
+            return
+          }
+
+          try {
+            const registry = await readWorkerRegistry({ file: registryFile })
+            if (registry.corrupt) {
+              sendError(
+                res,
+                409,
+                'registry-unreadable',
+                `打工人登记文件无法读取：${registryFile}。请修复或删除该文件后刷新。`,
+              )
+              return
+            }
+            const worker = registry.workers.find((entry) => entry.id === id)
+            if (worker === undefined) {
+              sendError(res, 404, 'unknown-worker', `没有找到这个打工人：${id}`)
+              return
+            }
+            if (worker.driver !== 'agent') {
+              sendError(res, 409, 'robot-worker', `机器人只读，不能删除：${id}`)
+              return
+            }
+            const workspace = await findWorkerWorkspace(ctx.workspaceRegistry, worker.path).catch(
+              () => null,
+            )
+            const usage = await readWorkerUsage(id)
+            sendJson(res, 200, {
+              ok: true,
+              id,
+              name: workerDisplayName(worker),
+              path: worker.path,
+              mounted: workspace !== null,
+              workspaceId: workspace === null ? null : String(workspace.id),
+              blockers: { runningJobs: usage.runningJobs },
+              workflows: usage.workflows,
+              finishedJobs: usage.finishedJobs,
+            })
+          } catch (error) {
+            webCtx.logger?.warn?.('buka-workers: 读取删除影响面失败：%s', describeError(error))
+            sendError(
+              res,
+              500,
+              'remove-impact-failed',
+              `读取删除影响面失败：${describeError(error)}`,
+            )
+          }
+        },
+      }),
+    `buka-workers: POST ${REMOVE_IMPACT_ROUTE}`,
+  )
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
         path: REMOVE_ROUTE,
         handler: async (req, res) => {
           if (rejected(webCtx, req, res)) return
@@ -627,20 +779,61 @@ export function registerWorkerRoutes(
           }
 
           try {
-            const result = await serializeRegistry(() => removeWorker({ file: registryFile, id }))
-            if (result.removed) webCtx.logger?.info?.('buka-workers: 已移除打工人登记 %s', id)
-            sendJson(res, 200, { ok: true, id, removed: result.removed })
+            // 唯一阻塞条件：有引用该标识符的 running 作业。已结束的作业不阻塞。
+            const usage = await readWorkerUsage(id)
+            if (usage.runningJobs.length > 0) {
+              sendJson(res, 409, {
+                ok: false,
+                code: 'worker-in-use',
+                message:
+                  '有引用这个打工人的运行中作业，删除会打断它们；请先在作业页主动终止这些作业，再回来删除。',
+                jobs: usage.runningJobs,
+              })
+              return
+            }
+            const result = await serializeRegistry(() =>
+              deleteWorker({
+                workersDir,
+                file: registryFile,
+                id,
+                workspaceRegistry: ctx.workspaceRegistry,
+              }),
+            )
+            webCtx.logger?.info?.(
+              'buka-workers: 已删除打工人 %s（目录 %s，工作区注册 %s）',
+              result.worker.id,
+              result.path,
+              result.workspaceId ?? '无',
+            )
+            sendJson(res, 200, {
+              ok: true,
+              id,
+              removed: true,
+              path: result.path,
+              workspaceId: result.workspaceId,
+              directoryRemoved: result.directoryRemoved,
+              workflows: usage.workflows,
+              finishedJobs: usage.finishedJobs,
+            })
           } catch (error) {
-            if (errorCode(error) === 'registry-unreadable') {
-              sendError(res, 409, 'registry-unreadable', describeError(error))
-              return
+            switch (errorCode(error)) {
+              case 'invalid-id':
+                sendError(res, 400, 'invalid-id', describeError(error))
+                return
+              case 'registry-unreadable':
+              case 'builtin-worker':
+              case 'robot-worker':
+              case 'outside-root':
+              case 'workspace-unavailable':
+                sendError(res, 409, String(errorCode(error)), describeError(error))
+                return
+              case 'unknown-worker':
+                sendError(res, 404, 'unknown-worker', describeError(error))
+                return
+              default:
+                webCtx.logger?.warn?.('buka-workers: 删除打工人失败：%s', describeError(error))
+                sendError(res, 500, 'remove-failed', `删除打工人失败：${describeError(error)}`)
             }
-            if (errorCode(error) === 'builtin-worker' || errorCode(error) === 'robot-worker') {
-              sendError(res, 409, String(errorCode(error)), describeError(error))
-              return
-            }
-            webCtx.logger?.warn?.('buka-workers: 移除打工人失败：%s', describeError(error))
-            sendError(res, 500, 'remove-failed', `移除打工人失败：${describeError(error)}`)
           }
         },
       }),

@@ -35,6 +35,7 @@ export function renderAvatar(
   size: number,
   className = '',
 ): React.ReactElement | null {
+  if (avatar === MISSING_AVATAR_ID) return renderMissingAvatar(size, className)
   const preset = avatarPreset(avatar)
   if (preset === null) return null
   return h(
@@ -51,5 +52,31 @@ export function renderAvatar(
       'aria-hidden': true,
     },
     preset.emoji,
+  )
+}
+
+/** 已删打工人的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
+export const MISSING_AVATAR_ID = '__missing-worker__'
+
+/**
+ * 已删打工人的占位头像：灰色圆片 + 问号，与预设头像同样尺寸。
+ *
+ * @param size 直径（px）
+ * @param className 额外类名
+ * @returns React 元素
+ */
+export function renderMissingAvatar(size: number, className = ''): React.ReactElement {
+  return h(
+    'span',
+    {
+      className: `buka-workflows-avatar buka-workflows-avatarMissing${className === '' ? '' : ` ${className}`}`,
+      style: {
+        width: `${size}px`,
+        height: `${size}px`,
+        fontSize: `${Math.max(8, Math.round(size * 0.62))}px`,
+      },
+      'aria-hidden': true,
+    },
+    '?',
   )
 }

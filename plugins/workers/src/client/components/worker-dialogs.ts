@@ -334,3 +334,148 @@ export function RenameDialog({
     )
   )
 }
+
+/**
+ * 删除打工人确认弹窗。
+ *
+ * 删除是硬删：登记条目、打工人目录与工作区注册行一起消失，目录里的
+ * AGENTS.md 与项目 skills 也会一起消失。弹窗先列出影响面（阻塞的作业、
+ * 会变成不可用的工作流、历史作业数量、将被删除的目录）；存在引用该打工人的
+ * 运行中作业时禁用确认，只能先去作业页主动终止它们。
+ *
+ */
+export function DeleteWorkerDialog({
+  t,
+  state,
+  actions,
+}: {
+  t: Translate
+  state: WorkersPageState
+  actions: WorkerActions
+}): ReactElement {
+  const { deleteDialog } = state
+  const { closeDeleteDialog, confirmDeleteWorker } = actions
+  const target = deleteDialog.target
+  const impact = deleteDialog.impact
+  const runningJobs = impact?.blockers.runningJobs ?? []
+  const blocked = runningJobs.length > 0
+  const workflows = impact?.workflows ?? []
+  const footer =
+    target === null
+      ? null
+      : h(
+          React.Fragment,
+          null,
+          h(
+            Button,
+            {
+              variant: 'outline',
+              onClick: closeDeleteDialog,
+              disabled: deleteDialog.saving,
+            },
+            t('cancel'),
+          ),
+          h(
+            Button,
+            {
+              variant: 'primary',
+              className: 'buka-workers-danger',
+              disabled: blocked || deleteDialog.saving || deleteDialog.loading,
+              onClick: () => void confirmDeleteWorker(),
+            },
+            deleteDialog.saving ? t('deleting') : t('deleteConfirm'),
+          ),
+        )
+
+  return h(
+    Modal,
+    {
+      open: target !== null,
+      onClose: closeDeleteDialog,
+      title:
+        target === null ? t('deleteTitle') : `${t('deleteTitle')} · ${workerIdentityLabel(target)}`,
+      closeLabel: t('close'),
+      footer,
+    },
+    target === null
+      ? null
+      : h(
+          'div',
+          { className: 'buka-workers-dialogForm' },
+          h('p', { className: 'buka-workers-fieldHint' }, t('deleteHardDeleteNote')),
+          deleteDialog.loading
+            ? h('p', { className: 'buka-workers-fieldHint' }, t('deleteImpactLoading'))
+            : null,
+          impact === null
+            ? null
+            : h(
+                React.Fragment,
+                null,
+                h(
+                  'p',
+                  { className: 'buka-workers-field' },
+                  h('span', { className: 'buka-workers-fieldLabel' }, t('deleteDir')),
+                  h('code', { className: 'buka-workers-inlineCode' }, impact.path),
+                ),
+                h(
+                  'p',
+                  { className: 'buka-workers-fieldHint' },
+                  impact.mounted ? t('deleteMounted') : t('deleteNotMounted'),
+                ),
+                h(
+                  'p',
+                  { className: 'buka-workers-fieldHint' },
+                  `${t('deleteFinishedJobs')} ${String(impact.finishedJobs)}`,
+                ),
+                h(
+                  'div',
+                  { className: 'buka-workers-field' },
+                  h(
+                    'span',
+                    { className: 'buka-workers-fieldLabel' },
+                    `${t('deleteAffectedWorkflows')} ${String(workflows.length)}`,
+                  ),
+                  workflows.length === 0
+                    ? h('span', { className: 'buka-workers-fieldHint' }, t('deleteNoWorkflows'))
+                    : h(
+                        'ul',
+                        { className: 'buka-workers-plainList' },
+                        ...workflows.map((workflow) =>
+                          h(
+                            'li',
+                            { key: workflow.workflowId },
+                            `${workflow.name || workflow.workflowId} · ${workflow.status}`,
+                          ),
+                        ),
+                      ),
+                ),
+                blocked
+                  ? h(
+                      'div',
+                      { className: 'buka-workers-field' },
+                      h('span', { className: 'buka-workers-fieldLabel' }, t('deleteBlockedTitle')),
+                      h(
+                        'ul',
+                        { className: 'buka-workers-plainList' },
+                        ...runningJobs.map((job) =>
+                          h(
+                            'li',
+                            { key: job.jobId },
+                            `${job.jobName || job.workflowName || job.workflowId} #${String(job.jobSeq)}`,
+                          ),
+                        ),
+                      ),
+                      h(
+                        'p',
+                        { className: 'buka-workers-formError', role: 'alert' },
+                        t('deleteBlockedByJobs'),
+                      ),
+                    )
+                  : null,
+              ),
+          deleteDialog.error === null
+            ? null
+            : h('p', { className: 'buka-workers-formError', role: 'alert' }, deleteDialog.error),
+        ),
+  )
+}

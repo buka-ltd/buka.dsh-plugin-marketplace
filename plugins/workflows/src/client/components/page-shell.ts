@@ -23,7 +23,7 @@ import { renderDefinitionDrawer } from './definition-drawer.ts'
 import { renderJobDetail } from './job-detail.ts'
 import { renderNewJobDialog } from './new-job-dialog.ts'
 import { renderNodeTasksDrawer } from './node-tasks-drawer.ts'
-import { ConfirmButton, renderStatusTag } from './parts.ts'
+import { ConfirmButton, renderAvailabilityNotice, renderStatusTag } from './parts.ts'
 import { renderTaskDrawer } from './task-drawer.ts'
 import { renderWorkflowDefinition } from './workflow-definition.ts'
 import { renderWorkflowJobs } from './workflow-jobs.ts'
@@ -62,7 +62,12 @@ export function renderPage(page: AppContext): React.ReactElement {
   const jobStatus = state.job.data?.job?.status
   const live = jobStatus === 'running'
   const retired = route.kind === 'workflow' && workflowStatus === 'retired'
-  const workflowAvailable = workflowStatus !== undefined && workflowStatus !== 'retired'
+  const workflowAvailability = state.workflow.data?.workflow?.availability
+  const jobAvailability = state.job.data?.availability
+  const availability = route.kind === 'job' ? jobAvailability : workflowAvailability
+  const unavailable = availability?.available === false
+  const workflowAvailable =
+    workflowStatus !== undefined && workflowStatus !== 'retired' && !unavailable
 
   const tabs =
     route.kind === 'workflow'
@@ -247,6 +252,20 @@ export function renderPage(page: AppContext): React.ReactElement {
             route.kind === 'workflow' && retired
               ? renderStatusTag(t, workflowStatus, 'workflow')
               : null,
+            route.kind === 'workflow' && unavailable
+              ? h(
+                  'span',
+                  { className: 'buka-workflows-titleMeta' },
+                  h('span', { className: 'buka-workflows-unavailableTag' }, t('workerUnavailable')),
+                )
+              : null,
+            route.kind === 'job' && unavailable
+              ? h(
+                  'span',
+                  { className: 'buka-workflows-titleMeta' },
+                  h('span', { className: 'buka-workflows-unavailableTag' }, t('workerUnavailable')),
+                )
+              : null,
             route.kind === 'job'
               ? h(
                   'span',
@@ -284,6 +303,7 @@ export function renderPage(page: AppContext): React.ReactElement {
         key: routeHash(route),
         className: `buka-workflows-body${route.kind === 'job' ? ' is-wide' : ''}${graphView ? ' is-graph' : ''}`,
       },
+      renderAvailabilityNotice(page, availability),
       body,
     ),
     renderNewJobDialog(page),

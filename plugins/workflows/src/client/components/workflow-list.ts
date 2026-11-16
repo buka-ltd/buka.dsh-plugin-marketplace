@@ -8,6 +8,7 @@ import type React from 'react'
 import { h } from '../element.ts'
 import { formatTime } from '../format.ts'
 import { fill } from '../i18n.ts'
+import { describeMissingWorker } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { DEFINITION_VERSION, type WorkflowSummary } from '../types.ts'
 import { renderEmpty, renderFailure, renderLoading } from './parts.ts'
@@ -47,6 +48,10 @@ export function renderWorkflowList(page: AppContext): React.ReactElement {
 function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.ReactElement {
   const { t, actions } = page
   const retired = workflow.status === 'retired'
+  const unavailable = workflow.availability?.available === false
+  const missing = Array.isArray(workflow.availability?.missingWorkers)
+    ? workflow.availability?.missingWorkers
+    : []
   const outdated =
     typeof workflow.definitionVersion === 'number' &&
     workflow.definitionVersion !== DEFINITION_VERSION
@@ -77,6 +82,7 @@ function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.
         ),
         outdated ? h(Tag, { tone: 'warn' }, t('workflowOutdated')) : null,
         retired ? h(Tag, { tone: 'neutral' }, t('workflowRetired')) : null,
+        unavailable ? h(Tag, { tone: 'warn' }, t('workerUnavailable')) : null,
       ),
       typeof workflow.description === 'string' && workflow.description !== ''
         ? h('span', { className: 'buka-workflows-cardDesc' }, workflow.description)
@@ -90,6 +96,7 @@ function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.
             ? `${t('updatedAt')} ${formatTime(workflow.updatedAt)}`
             : '',
           retired ? t('workflowRetiredHint') : '',
+          unavailable ? missing.map((entry) => describeMissingWorker(t, entry)).join('; ') : '',
         ]
           .filter((part) => part !== '')
           .join(' · '),

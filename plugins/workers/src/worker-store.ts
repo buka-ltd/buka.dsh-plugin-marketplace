@@ -11,6 +11,7 @@
  *   权限 0600、损坏拒绝写、内建打工人补写）；
  * - `store/agents.ts`：AGENTS.md 读写、模板与 CLAUDE.md 链接；
  * - `store/rename.ts`：改名（只改展示名，不移动目录）；
+ * - `store/delete.ts`：删除事务（目录改名回收 → 删工作区注册 → 删登记 → 清理；失败回滚）；
  * - `store/list.ts`：列表汇总（目录 / 挂载状态 / skills / AGENTS.md）；
  * - `store/project-skills.ts`：项目级 skills 扫描。
  *
@@ -33,6 +34,13 @@ export {
   isBuiltinWorkerId,
   withBuiltinWorkers,
 } from './store/builtin.ts'
+export type { DeleteWorkerResult, WorkerWorkspaceMatch } from './store/delete.ts'
+export {
+  deleteOutsideRootError,
+  deleteWorker,
+  findWorkerWorkspace,
+  workspaceUnavailableError,
+} from './store/delete.ts'
 export { listWorkers } from './store/list.ts'
 export { migrateWorkerStore } from './store/migrate.ts'
 export {

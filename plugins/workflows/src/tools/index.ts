@@ -220,7 +220,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
       async execute(_args, exec) {
         assertOrchestrator(exec.agent)
         const engine = await ready()
-        return { workflows: toolJson(engine.listWorkflowSummaries()) }
+        return { workflows: toolJson(await engine.listWorkflowSummaries()) }
       },
     }),
     orchestratorVisible,

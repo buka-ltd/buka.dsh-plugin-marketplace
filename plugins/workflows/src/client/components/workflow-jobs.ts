@@ -32,6 +32,7 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
   const workflow = loaded.data.workflow
   const workflowId = workflow?.id ?? ''
   const retired = workflow?.status === 'retired'
+  const unavailable = workflow?.availability?.available === false
   const jobs = Array.isArray(loaded.data.jobs) ? loaded.data.jobs : []
   const counts = {
     all: jobs.length,
@@ -45,7 +46,7 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
     typeof state.workflow.data?.workflow?.definition?.version === 'number' &&
     state.workflow.data?.workflow?.definition?.version !== DEFINITION_VERSION
   const newJobAction =
-    retired || outdated || workflowId === ''
+    retired || outdated || unavailable || workflowId === ''
       ? null
       : h(
           'button',
@@ -119,6 +120,7 @@ function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): R
     (sum, value) => sum + (typeof value === 'number' ? value : 0),
     0,
   )
+  const unavailable = job.availability?.available === false
   const done = typeof job.taskCounts?.completed === 'number' ? job.taskCounts.completed : 0
   const ready = typeof job.taskCounts?.ready === 'number' ? job.taskCounts.ready : 0
   const running = typeof job.taskCounts?.running === 'number' ? job.taskCounts.running : 0
@@ -163,6 +165,9 @@ function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): R
           'span',
           { className: 'buka-workflows-cardTags' },
           oldVersion ? h('span', { className: 'buka-workflows-tag' }, t('jobLegacy')) : null,
+          unavailable
+            ? h('span', { className: 'buka-workflows-tag' }, t('workerUnavailable'))
+            : null,
           renderStatusTag(t, job.status, 'job'),
         ),
       ),

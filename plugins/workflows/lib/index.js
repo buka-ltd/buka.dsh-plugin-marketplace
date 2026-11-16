@@ -210,7 +210,7 @@ function registerJobCommand({ ctx, ready }) {
 			const raw = typeof invocation.rawInput === "string" ? invocation.rawInput.trim() : "";
 			if (raw === "") return {
 				kind: "success",
-				text: describeAvailableWorkflows(engine)
+				text: await describeAvailableWorkflows(engine)
 			};
 			const space = raw.search(/\s/u);
 			const workflowId = (space < 0 ? raw : raw.slice(0, space)).trim();
@@ -241,8 +241,8 @@ function registerJobCommand({ ctx, ready }) {
 	return true;
 }
 /** 列出可用工作流与启动输入要求。 */
-function describeAvailableWorkflows(engine) {
-	const workflows = engine.listWorkflowSummaries().filter((workflow) => workflow.status === "active");
+async function describeAvailableWorkflows(engine) {
+	const workflows = (await engine.listWorkflowSummaries()).filter((workflow) => workflow.status === "active");
 	if (workflows.length === 0) return "没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。";
 	const lines = ["可用的工作流："];
 	for (const workflow of workflows) {
@@ -2549,6 +2549,136 @@ function contentIssues(schema, value) {
 	checkTemplatedContent(schema, value, "content", issues);
 	return issues.list;
 }
+// .build/workflows/domain/availability.js
+/**
+* 派生的「不可用」状态：工作流 / 作业引用的打工人已不在登记表里。
+*
+* 不可用不落盘，由读取方按引用能否解析实时计算；重新绑定一个已存在的打工人
+* 后自动恢复。它与「停用」不同：停用是人为收起，不可用是引用断了。
+*
+* 引用来源：
+*
+* - 工作流定义：岗位执行者、任务类型的助理；
+* - 作业快照：钉住的定义 + 交回方式里的助理（v7 快照用 `name` 兜底）。
+*
+* @module @buka/dsh-plugin-workflows/domain/availability
+*/
+/** 空的可用性结果（没有缺失引用）。 */
+const AVAILABLE = {
+	available: true,
+	missingWorkers: []
+};
+/** 判断登记表里有没有这个标识符。 */
+function hasWorker(workers, id) {
+	return workers.has(id);
+}
+/** 追加一条缺失引用；同一个标识符在同一位置只记一次。 */
+function collect(missing, seen, entry) {
+	const key = `${entry.role}:${entry.positionId ?? ""}:${entry.taskTypeId ?? ""}:${entry.id}`;
+	if (seen.has(key)) return;
+	seen.add(key);
+	missing.push(entry);
+}
+/**
+* 计算一份工作流定义里的缺失引用。
+*
+* @param definition 工作流定义（v8）或作业钉住的旧快照（v7）
+* @param workers 打工人登记表（按标识符）
+* @returns 可用性：缺哪些标识符、分别在哪
+*/
+function definitionAvailability(definition, workers) {
+	const missing = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const position of definition.positions) {
+		const executorId = executorRef(position.executor);
+		if (executorId !== null && !hasWorker(workers, executorId)) collect(missing, seen, {
+			id: executorId,
+			role: "executor",
+			positionId: position.id,
+			positionLabel: position.label
+		});
+		for (const taskType of position.taskTypes) {
+			const assistantId = typeof taskType.assistant === "string" ? taskType.assistant.trim() : "";
+			if (assistantId !== "" && !hasWorker(workers, assistantId)) collect(missing, seen, {
+				id: assistantId,
+				role: "assistant",
+				positionId: position.id,
+				positionLabel: position.label,
+				taskTypeId: taskType.id,
+				taskTypeLabel: taskType.label
+			});
+		}
+	}
+	if (missing.length === 0) return AVAILABLE;
+	return {
+		available: false,
+		missingWorkers: missing
+	};
+}
+/**
+* 计算一个作业的派生可用性：钉住的定义 + 交回方式的助理。
+*
+* @param job 作业记录
+* @param workers 打工人登记表（按标识符）
+* @returns 可用性
+*/
+function jobAvailability(job, workers) {
+	const missing = [...definitionAvailability(job.definition, workers).missingWorkers];
+	const deliveryId = deliveryWorkerRef(job.delivery);
+	if (deliveryId !== null && !hasWorker(workers, deliveryId)) missing.push({
+		id: deliveryId,
+		role: "delivery"
+	});
+	if (missing.length === 0) return AVAILABLE;
+	return {
+		available: false,
+		missingWorkers: missing
+	};
+}
+/**
+* 把缺失引用拼成一句可展示的原因（工具 / 报错都用它）。
+*
+* @param availability 可用性
+* @returns 一句话；可用时是空串
+*/
+function describeUnavailable(availability) {
+	if (availability.available) return "";
+	return availability.missingWorkers.map((entry) => {
+		if (entry.role === "delivery") return `delivery assistant "${entry.id}"`;
+		if (entry.role === "assistant") return `task type "${entry.taskTypeId ?? entry.id}" assistant "${entry.id}"`;
+		return `position "${entry.positionLabel ?? entry.positionId ?? ""}" executor "${entry.id}"`;
+	}).join("; ");
+}
+/**
+* 判断一份工作流定义是否引用了某个打工人标识符。
+*
+* 引用 = 岗位执行者、任务类型助理（定义里是字符串）。
+*
+* @param definition 工作流定义 / 作业快照
+* @param id 打工人标识符
+* @returns 引用时为 true
+*/
+function definitionReferencesWorker(definition, id) {
+	if (typeof id !== "string" || id === "") return false;
+	for (const position of definition.positions) {
+		if (executorRef(position.executor) === id) return true;
+		for (const taskType of position.taskTypes) if (typeof taskType.assistant === "string" && taskType.assistant.trim() === id) return true;
+	}
+	return false;
+}
+/**
+* 判断一个作业是否引用了某个打工人标识符：钉住的定义 + 交回方式。
+*
+* v7 作业快照用 `name` 兜底，读取时统一按标识符比较。
+*
+* @param job 作业记录
+* @param id 打工人标识符
+* @returns 引用时为 true
+*/
+function jobReferencesWorker(job, id) {
+	if (definitionReferencesWorker(job.definition, id)) return true;
+	return deliveryWorkerRef(job.delivery) === id;
+}
 // .build/workflows/domain/status.js
 /**
 * 任务 / 作业状态机：合法的状态转换矩阵。
@@ -2850,24 +2980,29 @@ const SUMMARY_BYTES = 240;
 * 把打工人登记里的展示名 / driver / avatar 补到执行者上（只用于展示）。
 *
 * 旧作业快照只有 `name`（当时的标识符）；这里统一投影出 `id`，并优先用登记
-* 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值，交给页面兜底。
+* 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值并标记
+* `missing: true`，交给页面显示占位头像与「已删除」。
 */
 function executorView(executor, workers) {
 	if (executor.kind === "human") return executor;
 	const id = executorRef(executor);
 	const worker = id === null ? void 0 : workers?.get(id);
+	if (worker === void 0) return {
+		...executor,
+		...id === null ? {} : { id },
+		...workers === void 0 ? {} : { missing: true }
+	};
 	return {
 		...executor,
 		...id === null ? {} : { id },
-		...worker === void 0 ? {} : {
-			name: worker.displayName,
-			driver: worker.driver
-		},
-		...worker?.avatar === void 0 ? {} : { avatar: worker.avatar }
+		name: worker.displayName,
+		driver: worker.driver,
+		...worker.avatar === void 0 ? {} : { avatar: worker.avatar }
 	};
 }
 /**
-* 交回方式的展示投影：助理用展示名覆盖 `name`，保留 `id` 供页面消歧。
+* 交回方式的展示投影：助理用展示名覆盖 `name`，保留 `id` 供页面消歧；
+* 助理已不在登记表里时标 `missing: true`。
 *
 * @param delivery 钉住的交回方式
 * @param workers 打工人登记表
@@ -2877,10 +3012,16 @@ function deliveryView(delivery, workers) {
 	if (delivery.kind !== "assistant") return delivery;
 	const id = deliveryWorkerRef(delivery);
 	const worker = id === null ? void 0 : workers?.get(id);
+	if (worker === void 0) return {
+		kind: "assistant",
+		...id === null ? {} : { id },
+		...delivery.name === void 0 ? {} : { name: delivery.name },
+		...workers === void 0 ? {} : { missing: true }
+	};
 	return {
 		kind: "assistant",
 		...id === null ? {} : { id },
-		...worker === void 0 ? delivery.name === void 0 ? {} : { name: delivery.name } : { name: worker.displayName }
+		name: worker.displayName
 	};
 }
 /** 任务计数。 */
@@ -3003,9 +3144,10 @@ function taskDetail(input) {
 *
 * @param job 作业
 * @param tasks 作业任务
+* @param availability 派生的可用性（缺引用时页面标不可用）
 * @returns 契约形状
 */
-function jobSummary(job, tasks) {
+function jobSummary(job, tasks, availability) {
 	return {
 		id: job.id,
 		seq: job.seq,
@@ -3015,7 +3157,8 @@ function jobSummary(job, tasks) {
 		delivery: job.delivery,
 		taskCounts: countTasks(tasks),
 		createdAt: job.createdAt,
-		updatedAt: job.updatedAt
+		updatedAt: job.updatedAt,
+		...availability === void 0 ? {} : { availability }
 	};
 }
 /**
@@ -3748,19 +3891,29 @@ var WorkflowEngine = class {
 	/**
 	* 工作流列表投影。
 	*
+	* 读时现取打工人登记表，给每条工作流算派生的可用性：引用了已不存在的
+	* 打工人时标不可用并列出缺失的标识符（不落盘）。
+	*
 	* @returns 工作流摘要
 	*/
-	listWorkflowSummaries() {
+	async listWorkflowSummaries() {
+		const workers = await this.workers();
 		return this.store.listWorkflows().map((workflow) => {
+			const latest = this.store.readWorkflowVersion(workflow.id);
+			const availability = latest === null ? {
+				available: true,
+				missingWorkers: []
+			} : definitionAvailability(latest.versionRecord.definition, workers);
 			return {
 				id: workflow.id,
 				name: workflow.name,
 				description: workflow.description,
 				version: workflow.latestVersion,
-				definitionVersion: this.store.readWorkflowVersion(workflow.id)?.versionRecord.definition.version,
+				definitionVersion: latest?.versionRecord.definition.version,
 				status: workflow.status,
 				jobCount: this.store.countJobs(workflow.id),
-				updatedAt: workflow.updatedAt
+				updatedAt: workflow.updatedAt,
+				availability
 			};
 		});
 	}
@@ -3778,7 +3931,7 @@ var WorkflowEngine = class {
 		const found = this.store.readWorkflowVersion(workflowId, version);
 		if (found === null) return null;
 		const workers = await this.workers();
-		const jobs = this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id)));
+		const jobs = this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id), jobAvailability(job, workers)));
 		return {
 			workflow: {
 				id: found.record.id,
@@ -3786,7 +3939,8 @@ var WorkflowEngine = class {
 				description: found.versionRecord.definition.description ?? "",
 				version: found.version,
 				status: found.record.status,
-				definition: found.versionRecord.definition
+				definition: found.versionRecord.definition,
+				availability: definitionAvailability(found.versionRecord.definition, workers)
 			},
 			graph: workflowGraph(found.versionRecord.definition, workers),
 			assistants: [...workers.values()].filter((worker) => worker.assistant && worker.driver === "agent").map((worker) => ({
@@ -3817,7 +3971,8 @@ var WorkflowEngine = class {
 	*/
 	async createJobFromHuman(input) {
 		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
-		const workers = await this.workers();
+		const workers = await this.refreshWorkers(true);
+		this.assertDefinitionAvailable(definition, workers, workflow.name);
 		return await this.startJob({
 			workflow,
 			definition,
@@ -3835,7 +3990,8 @@ var WorkflowEngine = class {
 	*/
 	async createJobFromSession(input) {
 		const { workflow, definition } = this.requireStartableWorkflow(input.workflowId);
-		const workers = await this.workers();
+		const workers = await this.refreshWorkers(true);
+		this.assertDefinitionAvailable(definition, workers, workflow.name);
 		const starter = {
 			kind: "session",
 			sessionId: input.sessionId
@@ -3959,6 +4115,16 @@ var WorkflowEngine = class {
 			id: worker.id
 		};
 	}
+	/**
+	* 启动作业前检查派生可用性：引用了已不存在的打工人时拒绝启动，并列出
+	* 缺哪个标识符。读取既有定义本身不校验，只在真正要跑的时候收紧。
+	*
+	*/
+	assertDefinitionAvailable(definition, workers, workflowName) {
+		const availability = definitionAvailability(definition, workers);
+		if (availability.available) return;
+		throw new WorkflowError("workflow-unavailable", `workflow "${workflowName}" cannot start: it references missing worker identifiers (${describeUnavailable(availability)}); rebind those positions or task types to registered workers first`);
+	}
 	/** 取一个可启动的工作流：必须存在、未停用、且定义是当前版本。 */
 	requireStartableWorkflow(workflowId) {
 		const found = this.store.readWorkflowVersion(workflowId);
@@ -4028,17 +4194,64 @@ var WorkflowEngine = class {
 			},
 			definition: jobDefinition(job.definition, workers),
 			tasks: tasks.map((task) => taskSummary(task, job.definition)),
-			canRetryDelivery: canRetryDelivery(tasks)
+			canRetryDelivery: canRetryDelivery(tasks),
+			availability: jobAvailability(job, workers)
 		};
 	}
 	/**
 	* 作业列表（某个工作流下）。
 	*
+	* 每条作业都带派生的可用性：钉住的定义或交回方式引用了已不存在的打工人时，
+	* 页面据此标注「不可用」。
+	*
 	* @param workflowId 工作流 id
 	* @returns 作业摘要
 	*/
-	listJobSummaries(workflowId) {
-		return this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id)));
+	async listJobSummaries(workflowId) {
+		const workers = await this.workers();
+		return this.store.listJobs(workflowId).map((job) => jobSummary(job, this.store.listTasks(job.id), jobAvailability(job, workers)));
+	}
+	/**
+	* 一个打工人标识符的引用面：给 Workers 插件删除前算阻塞与影响面。
+	*
+	* 引用 = 工作流任一版本定义、或作业钉住的定义里出现该标识符（岗位执行者、
+	* 任务类型助理），或作业的交回方式点名了它。运行中的作业阻塞删除；已结束
+	* 的作业只计数；工作流（含停用）全部列出但不阻塞。
+	*
+	* @param id 打工人标识符
+	* @returns 引用摘要
+	*/
+	async workerUsage(id) {
+		const target = typeof id === "string" ? id.trim() : "";
+		if (target === "") return {
+			runningJobs: [],
+			workflows: [],
+			finishedJobs: 0
+		};
+		const workflows = [];
+		for (const record of this.store.listWorkflows()) if (Object.values(record.versions).some((snapshot) => definitionReferencesWorker(snapshot.definition, target))) workflows.push({
+			workflowId: record.id,
+			name: record.name,
+			status: record.status
+		});
+		const runningJobs = [];
+		let finishedJobs = 0;
+		for (const job of this.store.allJobs()) {
+			if (!jobReferencesWorker(job, target)) continue;
+			if (job.status === "running") runningJobs.push({
+				jobId: job.id,
+				jobSeq: job.seq,
+				workflowId: job.workflowId,
+				workflowName: job.workflowName,
+				jobName: job.workflowName
+			});
+			else finishedJobs += 1;
+		}
+		return {
+			runningJobs,
+			workflows,
+			finishedJobs
+		};
 	}
 	/**
 	* 任务详情（契约形状）。
@@ -4785,6 +4998,7 @@ var WorkflowEngine = class {
 		const tasks = this.store.listTasks(jobId);
 		const ready = tasks.filter((task) => task.status === "ready");
 		if (ready.length === 0) return [];
+		const workers = await this.refreshWorkers();
 		const launches = [];
 		const busyPositions = /* @__PURE__ */ new Set();
 		for (const task of tasks) if (task.status === "running") busyPositions.add(task.position);
@@ -4799,6 +5013,11 @@ var WorkflowEngine = class {
 					continue;
 				}
 				if (busyPositions.has("end")) continue;
+				const missing = this.missingWorkerOf(task, workers);
+				if (missing !== null) {
+					await this.failMissingWorkerTask(job, task, missing);
+					continue;
+				}
 				const launch = await this.claimAgentTask(job, task, tasks);
 				if (launch !== null) {
 					busyPositions.add("end");
@@ -4810,6 +5029,7 @@ var WorkflowEngine = class {
 			if (executor.kind === "human") {
 				const assistantName = this.assistantFor(job.definition, task.type);
 				if (assistantName === null || task.assistantBlocked) continue;
+				if (!workers.has(assistantName)) continue;
 				if (this.busyAssistants.has(assistantName)) continue;
 				const launch = await this.claimAssistantTask(job, task, assistantName);
 				if (launch !== null) {
@@ -4825,6 +5045,11 @@ var WorkflowEngine = class {
 				if (launch !== null) launches.push(launch);
 				continue;
 			}
+			const missing = this.missingWorkerOf(task, workers);
+			if (missing !== null) {
+				await this.failMissingWorkerTask(job, task, missing);
+				continue;
+			}
 			if (busyPositions.has(task.position)) continue;
 			const launch = await this.claimAgentTask(job, task, tasks);
 			if (launch !== null) {
@@ -4833,6 +5058,41 @@ var WorkflowEngine = class {
 			}
 		}
 		return launches;
+	}
+	/**
+	* 任务执行者是否已不在登记表里：机器人不走登记表（由 `program` 驱动），
+	* 只检查智能体执行者。返回缺失的标识符，没有缺失时返回 null。
+	*
+	*/
+	missingWorkerOf(task, workers) {
+		if (task.assignee.kind !== "worker") return null;
+		if (task.assignee.driver !== "agent") return null;
+		const id = storedExecutorRef(task.assignee) ?? "";
+		if (id === "") return "";
+		return workers.has(id) ? null : id;
+	}
+	/**
+	* 缺失执行者的任务派发失败：写明是哪条任务、哪个岗位、缺哪个标识符；
+	* 任务进入可重试的失败状态，其它分支照常推进。
+	*
+	*/
+	async failMissingWorkerTask(job, task, identifier) {
+		const position = positionLabel(job.definition, task.position);
+		const type = taskTypeLabel(job.definition, task.type);
+		const id = identifier === "" ? "(unknown)" : identifier;
+		if (task.status === "ready") {
+			const attempt = await this.createAttempt({
+				jobId: job.id,
+				taskId: task.id,
+				promptFile: null
+			});
+			await this.claimTaskRecord(job, task, {
+				kind: "worker",
+				name: id,
+				sessionId: null
+			}, attempt.id);
+		}
+		await this.failTaskLocked(job.id, task.id, `task "${task.id}" (position "${position}" / ${task.position}, type "${type}" / ${task.type}) cannot be dispatched: worker identifier "${id}" is not registered in the Buka Workers registry; rebind the workflow to an existing worker and retry the task`);
 	}
 	/** 取人任务类型点名的助理。 */
 	assistantFor(definition, typeId) {
@@ -5878,7 +6138,8 @@ function statusForError(error) {
 	if (error instanceof WorkflowError) switch (error.code) {
 		case "not-found": return 404;
 		case "workflow-not-active":
-		case "workflow-retired": return 409;
+		case "workflow-retired":
+		case "workflow-unavailable": return 409;
 		case "job-not-running":
 		case "task-not-running":
 		case "invalid-status":
@@ -5941,7 +6202,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			if (req.method !== "GET") return sendMethodNotAllowed(res, "GET");
 			sendJson(res, 200, {
 				ok: true,
-				workflows: (await ready()).listWorkflowSummaries()
+				workflows: await (await ready()).listWorkflowSummaries()
 			});
 		});
 		route(ROUTES.workflow, async (req, res) => {
@@ -5982,7 +6243,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			if (workflowId === "") return sendError(res, 400, "invalid-id", "workflowId is required");
 			sendJson(res, 200, {
 				ok: true,
-				jobs: (await ready()).listJobSummaries(workflowId)
+				jobs: await (await ready()).listJobSummaries(workflowId)
 			});
 		});
 		route(ROUTES.jobStart, async (req, res) => {
@@ -6210,6 +6471,40 @@ function registerWorkflowRoutes({ ctx, ready }) {
 		});
 	});
 }
+// .build/workflows/service.js
+/**
+* `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.bukaWorkflows`。
+*
+* 目前只有一个能力：`workerUsage(id)`。Workers 插件在删除打工人前用它算出
+* 影响面与唯一阻塞条件（引用该标识符的运行中作业）；取不到服务时视为没有
+* 作业引用。
+*
+* 服务只读，不改变工作流 / 作业状态，也不落盘任何派生状态：可用性由读取方
+* 按引用能否解析实时计算。
+*
+* @module @buka/dsh-plugin-workflows/service
+*/
+/** 服务名；消费方用 `ctx.get(SERVICE_NAME)` 读取，运行时是 `ctx.bukaWorkflows`。 */
+const SERVICE_NAME = "bukaWorkflows";
+/** 查询服务：等价于转发给就绪后的引擎。 */
+var WorkflowQueryService = class {
+	#ready;
+	/**
+	* @param options.ready 等存储 / 引擎就绪后返回引擎
+	*/
+	constructor(options) {
+		this.#ready = options.ready;
+	}
+	/**
+	* 一个打工人标识符被工作流 / 作业引用的情况。
+	*
+	* @param id 打工人标识符
+	* @returns 运行中作业、引用它的工作流与已结束作业数
+	*/
+	async workerUsage(id) {
+		return await (await this.#ready()).workerUsage(id);
+	}
+};
 // .build/workflows/store/dirs.js
 /**
 * 作业目录布局与路径安全。
@@ -11617,7 +11912,7 @@ function registerWorkflowTools(deps) {
 		},
 		async execute(_args, exec) {
 			assertOrchestrator(exec.agent);
-			return { workflows: toolJson((await ready()).listWorkflowSummaries()) };
+			return { workflows: toolJson(await (await ready()).listWorkflowSummaries()) };
 		}
 	}), orchestratorVisible);
 	register(defineTool({
@@ -12129,7 +12424,9 @@ function defineAttachmentsTool(ready) {
 * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
 * 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
 * 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
-* 5. 注册浏览器路由。
+* 5. 注册浏览器路由；
+* 6. 提供只读服务 `ctx.bukaWorkflows`（`workerUsage(id)`），供 Workers 插件删除前
+*    计算引用面与唯一阻塞（运行中作业）。
 *
 * `storageDomain` 不放进 `inject`：缺少它的组合里插件仍然加载，只在真正需要
 * 存储时给出明确错误。
@@ -12186,6 +12483,7 @@ function apply(ctx, config) {
 	ensureReady().catch((error) => {
 		ctx.logger?.warn?.(`buka-workflows: 初始化工作流存储失败：${describeError$1(error)}`);
 	});
+	ctx.provide(SERVICE_NAME, new WorkflowQueryService({ ready: ensureReady }));
 	/** 判定某个 agent 能否看到 / 调用工作流定义工具（编排 preset 根会话）。 */
 	function accessOf(agent) {
 		return resolveWorkflowAccess({

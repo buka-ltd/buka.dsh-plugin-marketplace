@@ -22,11 +22,18 @@ import {
   AGENTS_ROUTE,
   ASSISTANT_ROUTE,
   CREATE_ROUTE,
+  REMOVE_IMPACT_ROUTE,
   REMOVE_ROUTE,
   REVEAL_ROUTE,
 } from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
-import type { Translate, UiWorkspaceService, Worker, WorkspacesService } from '../types.ts'
+import type {
+  Translate,
+  UiWorkspaceService,
+  Worker,
+  WorkerRemoveImpact,
+  WorkspacesService,
+} from '../types.ts'
 
 /**
  * 构造打工人管理动作。
@@ -51,7 +58,8 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     setDialogOpen,
     setCreateError,
     setCreating,
-    setConfirming,
+    deleteDialog,
+    setDeleteDialog,
     selectedId,
     setSelectedId,
     agentsDraft,
@@ -225,53 +233,90 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     }
   }
 
+  /** 空的删除弹窗状态。 */
+  function emptyDeleteDialog() {
+    return { target: null, impact: null, loading: false, error: null, saving: false }
+  }
+
   /**
-   * 删除打工人：先摘掉 DSH 工作区注册（若已挂载），再删插件登记记录。
-   * 打工人目录与文件保留，这也是二次确认文案要说明的语义。
+   * 读一次删除影响面；同一时刻只保留最后一次打开的打工人。
    *
    */
-  async function removeWorker(worker: Worker) {
+  async function loadDeleteImpact(worker: Worker) {
+    try {
+      const impact = await requestJson<WorkerRemoveImpact>(REMOVE_IMPACT_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ id: worker.id }),
+      })
+      setDeleteDialog((prev) =>
+        prev.target?.id === worker.id ? { ...prev, impact, loading: false } : prev,
+      )
+    } catch (failure) {
+      setDeleteDialog((prev) =>
+        prev.target?.id === worker.id
+          ? {
+              ...prev,
+              loading: false,
+              error: `${t('deleteImpactFailed')} ${failureText(t, failure)}`,
+            }
+          : prev,
+      )
+    }
+  }
+
+  /**
+   * 打开删除确认弹窗：先拉影响面，列出阻塞的作业、会变成不可用的工作流、
+   * 历史作业数量与将被删除的目录。删除是硬删，目录里的 AGENTS.md 与项目
+   * skills 会一起消失（弹窗文案会写明）。
+   *
+   */
+  async function openDeleteDialog(worker: Worker) {
     if (isRobotWorker(worker)) {
       flash('error', t('robotReadOnly'))
       return
     }
-    setBusy(`delete:${worker.id}`)
+    setDeleteDialog({ target: worker, impact: null, loading: true, error: null, saving: false })
+    await loadDeleteImpact(worker)
+  }
+
+  /** 关闭删除弹窗；提交中不响应关闭。 */
+  function closeDeleteDialog() {
+    setDeleteDialog((prev) => (prev.saving ? prev : emptyDeleteDialog()))
+  }
+
+  /**
+   * 确认删除：Host 在一个事务里删登记条目、打工人目录与工作区注册行。
+   * 有引用该标识符的运行中作业时 Host 返回 409 `worker-in-use`，这里刷新
+   * 影响面并保留弹窗，不提供强制删除。
+   *
+   */
+  async function confirmDeleteWorker() {
+    const target = deleteDialog.target
+    if (target === null || deleteDialog.saving) return
+    if ((deleteDialog.impact?.blockers.runningJobs.length ?? 0) > 0) return
+    setDeleteDialog((prev) => ({ ...prev, saving: true, error: null }))
     try {
-      if (
-        worker.mounted === true &&
-        typeof worker.workspaceId === 'string' &&
-        worker.workspaceId !== ''
-      ) {
-        const workspaces = service<WorkspacesService>('workspaces')
-        if (workspaces === null || typeof workspaces.delete !== 'function') {
-          flash('error', t('noWorkspacesDelete'))
-          return
-        }
-        try {
-          await workspaces.delete(worker.workspaceId)
-        } catch (failure) {
-          flash('error', `${t('deleteFailed')} ${messageOf(failure)}`)
-          return
-        }
-      }
-      try {
-        await requestJson(REMOVE_ROUTE, {
-          method: 'POST',
-          body: JSON.stringify({ id: worker.id }),
-        })
-      } catch (failure) {
-        // 工作区注册可能已经摘掉；刷新让卡片回到真实状态，确认按钮保留可重试。
-        flash('error', `${t('deleteFailed')} ${failureText(t, failure)}`)
-        reload()
-        return
-      }
-      setConfirming(null)
-      if (selectedId === worker.id) setSelectedId(null)
+      await requestJson(REMOVE_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ id: target.id }),
+      })
+    } catch (failure) {
+      const blocked = errorCode(failure) === 'worker-in-use'
+      setDeleteDialog((prev) => ({
+        ...prev,
+        saving: false,
+        error: blocked
+          ? t('deleteBlockedByJobs')
+          : `${t('deleteFailed')} ${failureText(t, failure)}`,
+      }))
+      if (blocked) await loadDeleteImpact(target)
       reload()
-      flash('success', `${t('deleted')} ${workerDisplayName(worker)}`)
-    } finally {
-      setBusy(null)
+      return
     }
+    setDeleteDialog(emptyDeleteDialog())
+    if (selectedId === target.id) setSelectedId(null)
+    reload()
+    flash('success', `${t('deleted')} ${workerDisplayName(target)}`)
   }
 
   /**
@@ -342,7 +387,9 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     openCreateDialog,
     closeCreateDialog,
     createWorker,
-    removeWorker,
+    openDeleteDialog,
+    closeDeleteDialog,
+    confirmDeleteWorker,
     saveAgents,
     toggleAssistant,
   }

@@ -11,7 +11,9 @@
  * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
  * 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
  * 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
- * 5. 注册浏览器路由。
+ * 5. 注册浏览器路由；
+ * 6. 提供只读服务 `ctx.bukaWorkflows`（`workerUsage(id)`），供 Workers 插件删除前
+ *    计算引用面与唯一阻塞（运行中作业）。
  *
  * `storageDomain` 不放进 `inject`：缺少它的组合里插件仍然加载，只在真正需要
  * 存储时给出明确错误。
@@ -32,6 +34,7 @@ import { runMigrations } from './migration.ts'
 import type { WorkflowsConfig } from './options.ts'
 import { resolveOptions } from './options.ts'
 import { registerWorkflowRoutes } from './routes/index.ts'
+import { SERVICE_NAME, WorkflowQueryService } from './service.ts'
 import { openWorkflowStore } from './store/open.ts'
 import { registerWorkflowTools } from './tools/index.ts'
 
@@ -95,6 +98,10 @@ export function apply(ctx: Context, config: WorkflowsConfig): void {
   void ensureReady().catch((error) => {
     ctx.logger?.warn?.(`buka-workflows: 初始化工作流存储失败：${describeError(error)}`)
   })
+
+  // 只读查询服务：Workers 插件删除打工人前用它算影响面与阻塞（服务名见 service.ts）。
+  // 取不到时消费方视为没有作业引用——没装 workflows 插件就不可能有作业。
+  ctx.provide(SERVICE_NAME, new WorkflowQueryService({ ready: ensureReady }))
 
   /** 判定某个 agent 能否看到 / 调用工作流定义工具（编排 preset 根会话）。 */
   function accessOf(agent: { id?: unknown } | null | undefined): WorkflowAccess {

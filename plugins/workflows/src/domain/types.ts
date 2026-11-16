@@ -385,3 +385,60 @@ export interface DefinitionIssue {
   readonly path: string
   readonly message: string
 }
+
+/** 一条缺失的打工人引用：引用断了，派生「不可用」时用。 */
+export interface MissingWorkerRef {
+  /** 找不到的标识符（v7 快照里是当时的名字）。 */
+  readonly id: string
+  /** 引用出现在哪：岗位执行者、任务类型助理或交回方式的助理。 */
+  readonly role: 'executor' | 'assistant' | 'delivery'
+  /** 岗位 id（执行者 / 任务类型助理）。 */
+  readonly positionId?: string | undefined
+  /** 岗位展示名。 */
+  readonly positionLabel?: string | undefined
+  /** 任务类型 id（任务类型助理）。 */
+  readonly taskTypeId?: string | undefined
+  /** 任务类型展示名。 */
+  readonly taskTypeLabel?: string | undefined
+}
+
+/**
+ * 工作流 / 作业的派生可用性。
+ *
+ * `available: false` 表示至少有一条打工人引用断了：不能启动作业、不能派发
+ * 对应任务；重新绑定一个已存在的打工人后自动恢复。
+ */
+export interface WorkerAvailability {
+  readonly available: boolean
+  readonly missingWorkers: readonly MissingWorkerRef[]
+}
+
+/**
+ * 一个打工人被工作流 / 作业引用的摘要；Workers 插件删除前用它展示影响面。
+ */
+export interface WorkerUsage {
+  /** 引用该标识符且仍在运行的作业；它们阻塞删除。 */
+  readonly runningJobs: readonly WorkerUsageJob[]
+  /** 引用该标识符的工作流（含停用；任一定义版本引用即算）。 */
+  readonly workflows: readonly WorkerUsageWorkflow[]
+  /** 引用该标识符、已经结束的作业数（不阻塞删除）。 */
+  readonly finishedJobs: number
+}
+
+/** 一条引用某个打工人的运行中作业。 */
+export interface WorkerUsageJob {
+  readonly jobId: string
+  /** 作业在所属工作流内的编号。 */
+  readonly jobSeq: number
+  readonly workflowId: string
+  readonly workflowName: string
+  /** 作业展示名（取钉住的工作流名）。 */
+  readonly jobName: string
+}
+
+/** 一条引用某个打工人的工作流。 */
+export interface WorkerUsageWorkflow {
+  readonly workflowId: string
+  readonly name: string
+  readonly status: WorkflowStatus
+}

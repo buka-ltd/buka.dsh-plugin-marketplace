@@ -1813,3 +1813,349 @@ test('routes: registers the contract paths and answers the workflow list', async
     await env.cleanup()
   }
 })
+
+// ---------------------------------------------------------------------------
+// 派生不可用：工作流 / 作业引用缺失打工人
+// ---------------------------------------------------------------------------
+
+/** 两条并行分支：dev(软件工程师) 与 qa(质量保障工程师)，各自都能到 end。 */
+function parallelBranchesDefinition() {
+  const definition = simpleDevDefinition()
+  definition.start.next = [
+    { channel: 'start.dev', type: 'dev.implement', content: { requirement: 'x' } },
+    { channel: 'start.qa', type: 'qa.verify', content: { focus: 'x' } },
+  ]
+  definition.positions.push({
+    id: 'qa',
+    label: '验证',
+    executor: { kind: 'worker', id: '质量保障工程师' },
+    taskTypes: [
+      {
+        id: 'qa.verify',
+        label: '验证',
+        content: {
+          type: 'object',
+          properties: { focus: { type: 'string' } },
+          required: ['focus'],
+        },
+      },
+    ],
+  })
+  definition.channels = [
+    { id: 'start.dev', label: '开始研发', from: 'start', to: 'dev' },
+    { id: 'start.qa', label: '开始验证', from: 'start', to: 'qa' },
+    { id: 'dev.end', label: '交付', from: 'dev', to: 'end' },
+    { id: 'qa.end', label: '验证完成', from: 'qa', to: 'end' },
+  ]
+  return definition
+}
+
+/** 插一个带指定任务的 running 作业（任务直接构建，不经过调度）。 */
+async function insertJobWithTasks(store, { id, seq, definition, tasks }) {
+  const timestamp = new Date().toISOString()
+  const job = {
+    id,
+    seq,
+    workflowId: 'wf-availability',
+    workflowVersion: 1,
+    workflowName: definition.name,
+    workflowDescription: '',
+    definition,
+    status: 'running',
+    starter: { kind: 'human' },
+    input: { requirement: '不可用测试' },
+    delivery: { kind: 'starter' },
+    inputSummary: '不可用测试',
+    error: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    finishedAt: null,
+  }
+  await store.ensureJobDirectories(job.id)
+  await store.insertJob(job)
+  await store.insertTask({
+    id: START_TASK_ID,
+    jobId: job.id,
+    position: 'start',
+    type: 'start',
+    channel: null,
+    content: { requirement: '不可用测试' },
+    deps: [],
+    status: 'completed',
+    createdBy: null,
+    assignee: { kind: 'human' },
+    claimant: { kind: 'human', name: '本地用户', sessionId: null },
+    attemptIds: [],
+    result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
+    error: null,
+    assistantBlocked: false,
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    updatedAt: timestamp,
+  })
+  for (const task of tasks) {
+    await store.insertTask({
+      channel: null,
+      deps: [START_TASK_ID],
+      status: 'pending',
+      createdBy: { taskId: START_TASK_ID, position: 'start' },
+      claimant: null,
+      attemptIds: [],
+      result: null,
+      error: null,
+      assistantBlocked: false,
+      createdAt: timestamp,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: timestamp,
+      ...task,
+    })
+  }
+  return job
+}
+
+test('engine: a workflow referencing a deleted worker derives unavailable, blocks start and recovers on rebind', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-unavailable-'))
+  const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
+  await store.init()
+  const delivery = makeDelivery()
+  const options = makeOptions(dataDir)
+  const workersFull = makeWorkers()
+  let engine
+  try {
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => workersFull,
+      delivery,
+    })
+    await engine.start()
+    const workflow = await engine.saveWorkflow({ definition: simpleDevDefinition() })
+    await engine.setWorkflowActive(workflow.id, true)
+    engine.dispose()
+
+    // 删除打工人：重新读登记表，工作流派生「不可用」。
+    const workersMissing = makeWorkers(WORKER_ENTRIES.filter((entry) => entry.id !== '软件工程师'))
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => workersMissing,
+      delivery,
+    })
+    await engine.start()
+
+    const summaries = await engine.listWorkflowSummaries()
+    const summary = summaries.find((entry) => entry.id === workflow.id)
+    assert.equal(summary.availability.available, false, 'list marks the workflow unavailable')
+    assert.deepEqual(
+      summary.availability.missingWorkers.map((entry) => entry.id),
+      ['软件工程师'],
+    )
+
+    const detail = await engine.readWorkflowDetail(workflow.id)
+    assert.equal(detail.workflow.availability.available, false)
+    assert.equal(detail.graph.positions[0].executor.missing, true)
+    assert.equal(detail.graph.positions[0].executor.name, undefined)
+
+    await assert.rejects(
+      () =>
+        engine.createJobFromHuman({
+          workflowId: workflow.id,
+          content: { requirement: 'x' },
+        }),
+      (error) =>
+        error.code === 'workflow-unavailable' &&
+        /missing worker identifiers/u.test(error.message) &&
+        /软件工程师/u.test(error.message),
+    )
+    engine.dispose()
+
+    // 重新绑定一个已存在的打工人：自动恢复可用，可以启动作业。
+    const workersRebound = makeWorkers()
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => workersRebound,
+      delivery,
+    })
+    await engine.start()
+    const recovered = await engine.readWorkflowDetail(workflow.id)
+    assert.equal(recovered.workflow.availability.available, true, 'rebinding clears unavailable')
+    const job = await engine.createJobFromHuman({
+      workflowId: workflow.id,
+      content: { requirement: 'x' },
+    })
+    assert.equal(job.status, 'running')
+  } finally {
+    engine?.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('engine: workerUsage lists running jobs, workflows and finished job count', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-usage-'))
+  const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
+  await store.init()
+  const workers = makeWorkers()
+  const engine = new WorkflowEngine({
+    ctx: {},
+    store,
+    options: makeOptions(dataDir),
+    logger: undefined,
+    workers: () => workers,
+    delivery: makeDelivery(),
+  })
+  try {
+    await engine.start()
+    const workflow = await engine.saveWorkflow({ definition: simpleDevDefinition() })
+    await engine.setWorkflowActive(workflow.id, true)
+    const running = await engine.createJobFromHuman({
+      workflowId: workflow.id,
+      content: { requirement: 'x' },
+    })
+
+    // 一个引用同一标识符的已结束作业，与一个交回方式点名助理的已结束作业。
+    const finished = await insertJobWithTasks(store, {
+      id: 'job-finished',
+      seq: 9,
+      definition: simpleDevDefinition(),
+      tasks: [],
+    })
+    await store.updateJob(finished.id, (current) => ({
+      ...current,
+      status: 'completed',
+      finishedAt: current.updatedAt,
+    }))
+    const deliveryOnlyDefinition = simpleDevDefinition()
+    deliveryOnlyDefinition.positions[0].executor = { kind: 'human' }
+    const delivered = await insertJobWithTasks(store, {
+      id: 'job-delivered',
+      seq: 10,
+      definition: deliveryOnlyDefinition,
+      tasks: [],
+    })
+    await store.updateJob(delivered.id, (current) => ({
+      ...current,
+      status: 'completed',
+      delivery: { kind: 'assistant', id: '沟通助理' },
+      finishedAt: current.updatedAt,
+    }))
+
+    const usage = await engine.workerUsage('软件工程师')
+    assert.deepEqual(usage.workflows, [
+      { workflowId: workflow.id, name: '简单研发', status: 'active' },
+    ])
+    assert.equal(usage.runningJobs.length, 1)
+    assert.equal(usage.runningJobs[0].jobId, running.id)
+    assert.equal(usage.runningJobs[0].jobSeq, running.seq)
+    assert.equal(usage.runningJobs[0].workflowId, workflow.id)
+    assert.equal(usage.runningJobs[0].jobName, '简单研发')
+    assert.equal(usage.finishedJobs, 1, 'only the finished job that references the identifier')
+
+    const assistantUsage = await engine.workerUsage('沟通助理')
+    assert.equal(assistantUsage.runningJobs.length, 0)
+    assert.equal(assistantUsage.finishedJobs, 1, 'a finished job delivery reference still counts')
+    assert.deepEqual(assistantUsage.workflows, [])
+  } finally {
+    engine.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('engine: a task with a deleted executor fails with the identifier, retries, and other branches keep running', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-missing-dispatch-'))
+  const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
+  await store.init()
+  const options = makeOptions(dataDir)
+  const definition = parallelBranchesDefinition()
+  const job = await insertJobWithTasks(store, {
+    id: 'job-missing',
+    seq: 1,
+    definition,
+    tasks: [
+      {
+        id: 'task-dev',
+        jobId: 'job-missing',
+        position: 'dev',
+        type: 'dev.implement',
+        content: { requirement: 'x' },
+        assignee: { kind: 'worker', id: '软件工程师', driver: 'agent', avatar: 'rocket' },
+      },
+      {
+        id: 'task-qa',
+        jobId: 'job-missing',
+        position: 'qa',
+        type: 'qa.verify',
+        content: { focus: 'x' },
+        assignee: { kind: 'worker', id: '质量保障工程师', driver: 'agent', avatar: 'owl' },
+      },
+    ],
+  })
+
+  const workersMissing = makeWorkers(WORKER_ENTRIES.filter((entry) => entry.id !== '软件工程师'))
+  let engine = new WorkflowEngine({
+    ctx: {},
+    store,
+    options,
+    logger: undefined,
+    workers: () => workersMissing,
+    delivery: makeDelivery(),
+  })
+  try {
+    await engine.start()
+    await waitFor(() => workersMissing.dispatched.length === 1)
+
+    const dev = store.getTask('task-dev')
+    assert.equal(dev.status, 'failed', 'the missing executor task fails')
+    assert.match(dev.error, /task "task-dev"/u)
+    assert.match(dev.error, /position "研发"/u)
+    assert.match(dev.error, /type "开发"/u)
+    assert.match(dev.error, /"软件工程师"/u)
+    assert.equal(store.getTask('task-qa').status, 'running', 'the other branch keeps running')
+    assert.equal(workersMissing.dispatched[0].request.worker, '质量保障工程师')
+
+    const detail = await engine.jobDetail(job.id)
+    assert.equal(detail.job.status, 'running')
+    assert.equal(detail.availability.available, false)
+    assert.deepEqual(
+      detail.availability.missingWorkers.map((entry) => entry.id),
+      ['软件工程师'],
+    )
+    // 失败任务可重试：允许的动作里有 retry。
+    const taskDetail = engine.taskDetail(job.id, 'task-dev')
+    assert.ok(taskDetail.allowedActions.includes('retry'))
+
+    // 等 qa 的 attempt 记下 sessionId，重启续接时才不会丢会话。
+    await waitFor(() => store.listAttempts('task-qa').some((attempt) => attempt.sessionId !== null))
+    engine.dispose()
+
+    // 重新绑定同一个标识符后重试：任务恢复可派发。
+    const workersRebound = makeWorkers()
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => workersRebound,
+      delivery: makeDelivery(),
+    })
+    await engine.start()
+    await engine.retryTask(job.id, 'task-dev')
+    await waitFor(() =>
+      workersRebound.dispatched.some((entry) => entry.request.worker === '软件工程师'),
+    )
+    const retried = store.getTask('task-dev')
+    assert.equal(retried.status, 'running')
+    assert.equal(retried.error, null)
+  } finally {
+    engine?.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})

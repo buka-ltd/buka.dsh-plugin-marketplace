@@ -14,10 +14,15 @@ import {
   statusTone,
   workflowStatusKey,
 } from '../format.ts'
-import { assistantIdentity, workerIdentityText } from '../model.ts'
+import {
+  assistantIdentity,
+  describeMissingWorker,
+  isWorkerMissing,
+  workerIdentityText,
+} from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { schemaFields } from '../schema.ts'
-import type { Executor, JsonSchema, Translate } from '../types.ts'
+import type { Executor, JsonSchema, Translate, WorkerAvailability } from '../types.ts'
 import { isRecord } from '../types.ts'
 
 /** 加载态。 */
@@ -80,6 +85,40 @@ export function renderEmptyAction(
     h('p', { className: 'buka-workflows-empty' }, title),
     hint === null || hint === '' ? null : h('p', { className: 'buka-workflows-hint' }, hint),
     action,
+  )
+}
+
+/**
+ * 派生不可用的提示条：列出缺口位置与缺失的标识符。
+ *
+ * @param page 页面上下文
+ * @param availability 可用性；可用或没加载时返回 null
+ * @returns 提示条或 null
+ */
+export function renderAvailabilityNotice(
+  page: AppContext,
+  availability: WorkerAvailability | null | undefined,
+): React.ReactElement | null {
+  if (availability === null || availability === undefined) return null
+  if (availability.available !== false) return null
+  const missing = Array.isArray(availability.missingWorkers) ? availability.missingWorkers : []
+  const { t } = page
+  return h(
+    'div',
+    { className: 'buka-workflows-unavailableNotice', role: 'alert' },
+    h('strong', { className: 'buka-workflows-unavailableTitle' }, t('workerUnavailable')),
+    h('p', { className: 'buka-workflows-unavailableHint' }, t('workerUnavailableHint')),
+    h(
+      'ul',
+      { className: 'buka-workflows-unavailableList' },
+      ...missing.map((entry, index) =>
+        h(
+          'li',
+          { key: `${entry.role ?? 'executor'}-${entry.id}-${index}` },
+          describeMissingWorker(t, entry),
+        ),
+      ),
+    ),
   )
 }
 
@@ -326,19 +365,28 @@ export function renderSection(
   )
 }
 
-/** 执行者展示：打工人 / 人 + 「展示名 · 标识符」。 */
+/** 执行者展示：打工人 / 人 + 「展示名 · 标识符」；已删打工人标「已删除」。 */
 export function renderExecutor(page: AppContext, executor: Executor | null | undefined): string {
   const { t } = page
   if (!isRecord(executor)) return t('taskTypeUnset')
   if (executor.kind === 'human') return t('actorHuman')
   const kind = executor.kind === 'worker' ? t('actorWorker') : t('taskTypeUnset')
   const label = workerIdentityText(executor)
-  return label === '' ? kind : `${kind} · ${label}`
+  if (label === '') return kind
+  const ref =
+    typeof executor.id === 'string' && executor.id !== ''
+      ? executor.id
+      : typeof executor.name === 'string'
+        ? executor.name
+        : ''
+  const missing = executor.missing === true || isWorkerMissing(page.state, ref)
+  return missing ? `${kind} · ${label} · ${t('workerDeleted')}` : `${kind} · ${label}`
 }
 
-/** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符。 */
+/** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符，已删标「已删除」。 */
 export function renderAssistant(page: AppContext, id: string): string {
-  return workerIdentityText(assistantIdentity(page.state, id))
+  const label = workerIdentityText(assistantIdentity(page.state, id))
+  return isWorkerMissing(page.state, id) ? `${label} · ${page.t('workerDeleted')}` : label
 }
 
 /** 字段类型 → 展示文本。 */

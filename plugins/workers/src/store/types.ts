@@ -19,9 +19,15 @@ export interface WorkerModelSelection {
   reasoningEffort?: string
 }
 
-/** 工作区注册表的最小形状：只声明列表判断挂载用到的 `list`。 */
+/**
+ * 工作区注册表的最小形状：列表判断挂载用到的 `list`，删除打工人时用 `delete`
+ * 摘掉注册行；`create` 只在回滚时尽力恢复。
+ */
 export interface WorkspaceRegistryLike {
   list(): Array<{ id?: unknown; path?: unknown }>
+  delete?(id: unknown): boolean | Promise<boolean>
+  create?(directory: string, title?: string): Promise<{ id?: unknown }>
+  resolveByPath?(directory: string): Promise<{ id?: unknown; path?: unknown } | null | undefined>
 }
 
 /** 一条打工人记录；写回登记表后这些字段总是齐全。 */

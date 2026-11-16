@@ -189,6 +189,7 @@ async function loadClient() {
           .join(' '),
         type: props.type ?? 'button',
         disabled: props.disabled === true,
+        onClick: props.onClick,
         'aria-label': props['aria-label'],
         'aria-busy': props['aria-busy'],
         'aria-pressed': props['aria-pressed'],
@@ -412,6 +413,22 @@ const zh = {
   tabsLabel: '打工人详情页签',
   tabAgents: 'AGENTS.md',
   tabSkills: '技能',
+  deleteTitle: '删除打工人',
+  deleteConfirm: '永久删除',
+  deleting: '正在删除…',
+  deleteHardDeleteNote:
+    '删除是硬删：登记条目、打工人目录与工作区注册会一起消失。目录里的 AGENTS.md 与项目 skills 也会一起消失，没有回收站。',
+  deleteImpactLoading: '正在读取删除影响面…',
+  deleteImpactFailed: '读取删除影响面失败：',
+  deleteDir: '将被删除的目录',
+  deleteMounted: '这个打工人已挂载，工作区注册会一起摘掉。',
+  deleteNotMounted: '这个打工人没有挂载，没有工作区注册需要摘掉。',
+  deleteFinishedJobs: '引用它的已结束作业数：',
+  deleteAffectedWorkflows: '会因此变成不可用的工作流：',
+  deleteNoWorkflows: '没有工作流引用这个打工人。',
+  deleteBlockedTitle: '运行中的作业阻塞删除',
+  deleteBlockedByJobs:
+    '有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。',
 }
 
 /**
@@ -509,6 +526,7 @@ function states({
   modelError = null,
   tab = 'agents',
   assistantOnly = false,
+  deleteDialog = { target: null, impact: null, loading: false, error: null, saving: false },
 } = {}) {
   return [
     { data, error: null, loading: false }, // list
@@ -519,7 +537,7 @@ function states({
     dialogOpen, // dialogOpen
     null, // createError
     false, // creating
-    null, // confirming
+    deleteDialog, // deleteDialog
     null, // busy
     'panda', // draftAvatar
     false, // avatarOpen
@@ -542,7 +560,7 @@ function states({
     '', // agentsDraft
     false, // agentsSaving
     null, // removing
-    null, // confirmingSkill
+    deleteDialog, // deleteDialogSkill
     null, // skillError
     false, // installOpen
     '', // installSource
@@ -997,4 +1015,100 @@ test('打工人页：模型目录不可用时说明原因', async () => {
     ),
   )
   assert.ok(view.texts.includes('当前组合没有模型目录（ctx.llm 不可用），无法为智能体选择模型。'))
+})
+
+test('删除弹窗：列出影响面、硬删说明，被 running 作业阻塞时禁用确认', async () => {
+  const client = await loadClient()
+  const workerEntry = worker('writer', 'panda', '写发布说明')
+  const impact = {
+    id: 'writer',
+    name: 'writer',
+    path: workerEntry.path,
+    mounted: true,
+    workspaceId: 'ws-1',
+    blockers: {
+      runningJobs: [
+        {
+          jobId: 'job-1',
+          jobSeq: 3,
+          workflowId: 'wf-1',
+          workflowName: '写作流程',
+          jobName: '写作流程',
+        },
+      ],
+    },
+    workflows: [{ workflowId: 'wf-1', name: '写作流程', status: 'active' }],
+    finishedJobs: 2,
+  }
+
+  // 有运行中作业：确认按钮禁用，弹窗列出作业并提示先终止。
+  const blocked = collect(
+    client.render(
+      states({
+        deleteDialog: {
+          target: workerEntry,
+          impact,
+          loading: false,
+          error: null,
+          saving: false,
+        },
+      }),
+    ),
+  )
+  const blockedText = blocked.texts.join(' ')
+  assert.match(blockedText, /删除是硬删/u, 'hard delete is explained')
+  assert.match(blockedText, /AGENTS\.md 与项目 skills 也会一起消失/u)
+  assert.ok(blockedText.includes(workerEntry.path), 'the directory to delete is shown')
+  assert.match(blockedText, /写作流程 #3/u, 'running jobs are listed')
+  assert.match(blockedText, /运行中的作业阻塞删除/u)
+  assert.match(blockedText, /请先在这些作业的作业页主动终止它们/u)
+  assert.match(blockedText, /引用它的已结束作业数： 2/u)
+  assert.match(blockedText, /会因此变成不可用的工作流： 1/u)
+  const deleteButton = findNode(
+    client.render(
+      states({
+        deleteDialog: {
+          target: workerEntry,
+          impact,
+          loading: false,
+          error: null,
+          saving: false,
+        },
+      }),
+    ),
+    (node) => node.type === 'button' && collect(node).texts.includes('永久删除'),
+  )
+  assert.ok(deleteButton, 'the confirm button exists')
+  assert.equal(deleteButton.props.disabled, true, 'blocked deletion cannot be confirmed')
+
+  // 没有运行中作业：确认按钮可用。
+  const free = collect(
+    client.render(
+      states({
+        deleteDialog: {
+          target: workerEntry,
+          impact: { ...impact, blockers: { runningJobs: [] } },
+          loading: false,
+          error: null,
+          saving: false,
+        },
+      }),
+    ),
+  )
+  assert.ok(!free.texts.join(' ').includes('运行中的作业阻塞删除'))
+  const freeButton = findNode(
+    client.render(
+      states({
+        deleteDialog: {
+          target: workerEntry,
+          impact: { ...impact, blockers: { runningJobs: [] } },
+          loading: false,
+          error: null,
+          saving: false,
+        },
+      }),
+    ),
+    (node) => node.type === 'button' && collect(node).texts.includes('永久删除'),
+  )
+  assert.equal(freeButton.props.disabled, false, 'unblocked deletion can be confirmed')
 })
