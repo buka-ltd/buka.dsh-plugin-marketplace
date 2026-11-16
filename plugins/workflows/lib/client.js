@@ -2462,7 +2462,15 @@ window.__ModuleLoader__.load({
     		key: column.key,
     		className: `buka-workflows-boardColumnHead is-${column.key}`,
     		role: "columnheader"
-    	}, t(column.labelKey)))), ...rows.map((row) => renderBoardRow(page, row)))));
+    	}, t(column.labelKey)))), ...rows.flatMap((row, index) => index === 0 ? [renderBoardRow(page, row)] : [renderBoardDivider(`${row.id}-divider`), renderBoardRow(page, row)]))));
+    }
+    /** 行与行之间的分割虚线：横跨整行，单独占一个 grid 行。 */
+    function renderBoardDivider(key) {
+    	return h("div", {
+    		key,
+    		className: "buka-workflows-boardDivider",
+    		"aria-hidden": "true"
+    	});
     }
     /** 网格里的一行。 */
     function renderBoardRow(page, row) {
@@ -5413,6 +5421,7 @@ window.__ModuleLoader__.load({
     .buka-workflows-boardPane{display:flex;flex-direction:column;gap:10px;min-width:0}
     .buka-workflows-board{width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding-bottom:8px}
     .buka-workflows-boardGrid{display:grid;grid-template-columns:148px repeat(5,minmax(150px,1fr));gap:6px;min-width:940px}
+    .buka-workflows-boardDivider{grid-column:1/-1;height:0;border-top:1px dashed var(--dsw-alias-border-l2)}
     .buka-workflows-boardHeader{display:contents}
     .buka-workflows-boardRowHead{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);min-width:0}
     .buka-workflows-boardHeader>.buka-workflows-boardRowHead{background:transparent;padding-top:0}
@@ -5422,7 +5431,6 @@ window.__ModuleLoader__.load({
     .buka-workflows-boardRowTitle{font-size:12px;font-weight:600;line-height:18px;overflow-wrap:anywhere}
     .buka-workflows-boardRowExecutor{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px;overflow-wrap:anywhere}
     .buka-workflows-boardRowMeta{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:15px}
-    .buka-workflows-boardRow.is-starter .buka-workflows-boardRowHead{border-left:2px solid var(--dsw-alias-border-l2)}
     .buka-workflows-boardCell{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:52px;padding:4px;border-radius:var(--dsw-radius-sm);border:0.5px dashed var(--dsw-alias-border-l1)}
     .buka-workflows-boardCell.is-ready{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 35%,transparent)}
     .buka-workflows-boardCompact{display:flex;flex-direction:column;gap:16px}

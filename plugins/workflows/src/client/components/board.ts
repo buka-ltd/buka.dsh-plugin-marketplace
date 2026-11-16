@@ -74,10 +74,23 @@ export function renderBoard(page: AppContext): React.ReactElement {
                 ),
               ),
             ),
-            ...rows.map((row) => renderBoardRow(page, row)),
+            ...rows.flatMap((row, index) =>
+              index === 0
+                ? [renderBoardRow(page, row)]
+                : [renderBoardDivider(`${row.id}-divider`), renderBoardRow(page, row)],
+            ),
           ),
         ),
   )
+}
+
+/** 行与行之间的分割虚线：横跨整行，单独占一个 grid 行。 */
+function renderBoardDivider(key: string): React.ReactElement {
+  return h('div', {
+    key,
+    className: 'buka-workflows-boardDivider',
+    'aria-hidden': 'true',
+  })
 }
 
 /** 网格里的一行。 */

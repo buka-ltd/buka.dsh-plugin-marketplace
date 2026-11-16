@@ -888,7 +888,7 @@ test('实时流程：节点聚合、待认领徽标、已走过的通道与点�
 
 test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡片打开任务抽屉', async () => {
   const client = await loadClient()
-  const { tree, texts } = render(client, {
+  const { tree, texts, classes } = render(client, {
     route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
     job: { status: 'ready', data: JOB_DETAIL, error: null },
@@ -897,6 +897,11 @@ test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡�
   for (const header of ['排队', '待认领', '进行中', '已完成', '异常']) {
     assert.match(text, new RegExp(header, 'u'), `board column ${header}`)
   }
+  assert.equal(
+    classes.filter((name) => name === 'buka-workflows-boardDivider').length,
+    3,
+    '四行之间各有一条分割虚线',
+  )
 
   const rowTitle = (node) => {
     const className = node.props?.className
