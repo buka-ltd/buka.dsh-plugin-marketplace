@@ -387,9 +387,9 @@ window.__ModuleLoader__.load({
     	newJobContentTitle: "Job input",
     	newJobContentHint: "This is what the workflow receives; tasks are created from it.",
     	newJobDeliveryTitle: "How the final report comes back",
-    	newJobDeliveryHint: "Hand it back to you, or let a secretary receive it for you.",
+    	newJobDeliveryHint: "Hand it back to you, or let an assistant receive it for you.",
     	newJobDeliveryStarter: "Back to me",
-    	newJobDeliveryAssistant: "To my secretary",
+    	newJobDeliveryAssistant: "To my assistant",
     	newJobTitle: "New job",
     	newJobHint: "Tell the workflow what needs to be done this time.",
     	newJobSubmit: "Start job",
@@ -474,7 +474,9 @@ window.__ModuleLoader__.load({
     	taskType: "Type",
     	taskChannel: "Channel",
     	taskStatus: "Status",
-    	taskClaimant: "Claimed by",
+    	taskDelegatedTo: "Delegated to",
+    	taskWaitingForYou: "Waiting for you",
+    	taskYouAreHandling: "You are handling this",
     	taskCreatedAt: "Created",
     	taskStartedAt: "Started",
     	taskFinishedAt: "Finished",
@@ -485,7 +487,6 @@ window.__ModuleLoader__.load({
     	taskAttemptsTitle: "Attempts",
     	taskAttemptsEmpty: "No attempts yet.",
     	taskDetailsTitle: "Details",
-    	taskUnclaimed: "Not claimed",
     	taskAttemptStopReason: "Stop reason",
     	taskAttemptError: "Error",
     	taskResultTitle: "Result",
@@ -736,7 +737,9 @@ window.__ModuleLoader__.load({
     	taskType: "类型",
     	taskChannel: "通道",
     	taskStatus: "状态",
-    	taskClaimant: "承办者",
+    	taskDelegatedTo: "代办",
+    	taskWaitingForYou: "待你办理",
+    	taskYouAreHandling: "你在办理",
     	taskCreatedAt: "创建",
     	taskStartedAt: "开始",
     	taskFinishedAt: "结束",
@@ -747,7 +750,6 @@ window.__ModuleLoader__.load({
     	taskAttemptsTitle: "执行记录",
     	taskAttemptsEmpty: "还没有执行记录。",
     	taskDetailsTitle: "更多信息",
-    	taskUnclaimed: "未认领",
     	taskAttemptStopReason: "停止原因",
     	taskAttemptError: "错误",
     	taskResultTitle: "结果",
@@ -1473,74 +1475,52 @@ window.__ModuleLoader__.load({
     	return rows;
     }
     /**
-    * 承办者的展示名。
-    *
-    * @param claimant
-    * @param t
-    * @returns
-    */
-    function claimantName(state, claimant, t, positionId) {
-    	if (!isRecord(claimant)) return "";
-    	const ref = typeof claimant.name === "string" ? claimant.name : "";
-    	if (ref === "") return typeof claimant.kind === "string" ? t(actorKindKeySafe(claimant.kind)) : "";
-    	if (claimant.kind === "human") return ref;
-    	const displayName = displayNameOfWorker(state, ref, positionId);
-    	const label = displayName === null ? ref : workerIdentity({
-    		id: ref,
-    		name: displayName
-    	}).displayName;
-    	return isWorkerMissing(state, ref) ? `${label} · ${t("workerDeleted")}` : label;
-    }
-    /**
-    * 从当前作业 / 工作流定义里找一条打工人引用的展示名。
+    * 人任务点名的助理标识符：从任务类型定义取，没有点名时 null。
     *
     * @param state 页面状态
-    * @param ref 标识符（可能来自 v7 快照的旧引用）
-    * @param positionId 任务岗位，优先按岗位执行者匹配
-    * @returns 展示名；找不到时 null
+    * @param task 任务
+    * @returns 助理标识符；没有点名时 null
     */
-    function displayNameOfWorker(state, ref, positionId) {
-    	const positions = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state)));
-    	if (typeof positionId === "string" && positionId !== "") {
-    		const position = positions.find((item) => item.id === positionId);
-    		const identity = position === void 0 ? null : identityOfExecutor(position.executor, ref);
-    		if (identity !== null) return identity;
-    	}
-    	for (const position of positions) {
-    		const identity = identityOfExecutor(position.executor, ref);
-    		if (identity !== null) return identity;
-    	}
-    	const found = asArray(state.workflow.data?.assistants).find((assistant) => (assistant.id ?? assistant.name) === ref);
-    	return found === void 0 ? null : workerIdentity({
-    		id: ref,
-    		name: found.name
-    	}).displayName;
+    function taskAssistantId(state, task) {
+    	const assistant = taskTypeOf(state, task)?.assistant;
+    	return typeof assistant === "string" && assistant.trim() !== "" ? assistant.trim() : null;
+    }
+    /** 岗位执行者（当前作业定义 + 工作流定义合并后）。 */
+    function positionExecutorOf(state, positionId) {
+    	return positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state))).find((position) => position.id === positionId)?.executor ?? null;
     }
     /**
-    * 执行者是否就是这条引用；是的话返回它的展示名。
+    * 任务「谁在办」：人任务说代办 / 待你办理 / 你在办理，打工人任务只说执行者。
     *
-    * @param executor 执行者
-    * @param ref 引用
-    * @returns 展示名；不匹配时 null
+    * 承办者（谁接走任务）不再展示；人任务的助理来自任务类型定义的点名。
+    *
+    * @param state 页面状态
+    * @param task 任务摘要或详情
+    * @returns 展示口径；开始 / 结束任务或无法解析时是 `none`
     */
-    function identityOfExecutor(executor, ref) {
+    function taskActor(state, task) {
+    	const position = typeof task.position === "string" ? task.position : "";
+    	if (position === "" || position === "start" || position === "end") return { kind: "none" };
+    	if (isHumanTask(state, task)) {
+    		const assistantId = taskAssistantId(state, task);
+    		if (assistantId !== null) return {
+    			kind: "assistant",
+    			assistantId
+    		};
+    		if (task.status === "running") return { kind: "handling" };
+    		if (task.status === "ready" || task.status === "pending") return { kind: "waiting" };
+    		return { kind: "none" };
+    	}
+    	const executor = positionExecutorOf(state, position);
+    	if (executor === null || executor.kind !== "worker") return { kind: "none" };
+    	const text = workerIdentityText(executor);
+    	if (text === "") return { kind: "none" };
     	const identity = workerIdentity(executor);
-    	if (identity.id !== ref && identity.displayName !== ref) return null;
-    	return identity.displayName === "" ? null : identity.displayName;
-    }
-    /**
-    * 承办者种类 → 词典 key（避免 format 与 model 相互依赖的重复）。
-    *
-    * @param kind
-    * @returns
-    */
-    function actorKindKeySafe(kind) {
-    	switch (kind) {
-    		case "worker": return "actorWorker";
-    		case "human": return "actorHuman";
-    		case "assistant": return "actorAssistant";
-    		default: return "unknown";
-    	}
+    	return {
+    		kind: "executor",
+    		text,
+    		missing: executor.missing === true || identity.id !== "" && isWorkerMissing(state, identity.id)
+    	};
     }
     /**
     * 作业详情里的 `definition` 与工作流定义合并（作业精简版缺 taskTypes 时回退）。
@@ -2155,6 +2135,21 @@ window.__ModuleLoader__.load({
     	const label = workerIdentityText(assistantIdentity(page.state, id));
     	return isWorkerMissing(page.state, id) ? `${label} · ${page.t("workerDeleted")}` : label;
     }
+    /**
+    * 任务「谁在办」：人任务说「代办：某人」/「待你办理」/「你在办理」，
+    * 打工人任务只给执行者。
+    */
+    function renderTaskActor(page, task) {
+    	const { t } = page;
+    	const actor = taskActor(page.state, task);
+    	switch (actor.kind) {
+    		case "assistant": return `${t("taskDelegatedTo")}: ${renderAssistant(page, actor.assistantId)}`;
+    		case "waiting": return t("taskWaitingForYou");
+    		case "handling": return t("taskYouAreHandling");
+    		case "executor": return actor.missing ? `${actor.text} · ${t("workerDeleted")}` : actor.text;
+    		default: return "";
+    	}
+    }
     /** 字段类型 → 展示文本。 */
     function schemaTypeLabel(schema) {
     	if (Array.isArray(schema.enum)) return `enum(${schema.enum.map(String).join(" | ")})`;
@@ -2722,7 +2717,7 @@ window.__ModuleLoader__.load({
     	if (Array.isArray(task.deps) && task.deps.length > 0) meta.push(fill(t, "boardCardDeps", { n: task.deps.length }));
     	if (typeof task.attemptCount === "number" && task.attemptCount > 1) meta.push(fill(t, "boardCardAttempts", { n: task.attemptCount }));
     	if (typeof task.attachmentCount === "number" && task.attachmentCount > 0) meta.push(fill(t, "boardCardAttachments", { n: task.attachmentCount }));
-    	const claimant = claimantName(page.state, task.claimant, t, task.position);
+    	const actor = renderTaskActor(page, task);
     	if (task.status === "ready" || task.status === "pending") {
     		const waiting = formatWaiting(task.createdAt);
     		if (waiting !== "") meta.push(fill(t, "boardCardWaiting", { duration: waiting }));
@@ -2735,7 +2730,7 @@ window.__ModuleLoader__.load({
     		type: "button",
     		className: `buka-workflows-taskCard is-${task.status ?? "pending"}`,
     		onClick: () => actions.openTask(task.id)
-    	}, compact && positionLabel !== "" ? h("span", { className: "buka-workflows-taskCardPosition" }, positionLabel) : null, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), compact ? renderStatusTag(t, task.status, "task") : null), claimant === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, `${t("taskClaimant")}: ${claimant}`), summary === "" ? null : h("span", { className: "buka-workflows-taskCardSummary" }, summary), meta.length === 0 ? null : h("span", { className: "buka-workflows-taskCardMeta" }, meta.join(" · "))));
+    	}, compact && positionLabel !== "" ? h("span", { className: "buka-workflows-taskCardPosition" }, positionLabel) : null, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), compact ? renderStatusTag(t, task.status, "task") : null), actor === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, actor), summary === "" ? null : h("span", { className: "buka-workflows-taskCardSummary" }, summary), meta.length === 0 ? null : h("span", { className: "buka-workflows-taskCardMeta" }, meta.join(" · "))));
     }
     // .build/workflows/client/graph/layout.js
     /** 估算文本宽度时的字宽：CJK 按一个字号，拉丁字母按半个多一点。 */
@@ -3560,13 +3555,13 @@ window.__ModuleLoader__.load({
     /** 一个任务行。 */
     function renderNodeTask(page, task) {
     	const { t, actions } = page;
-    	const claimant = claimantName(page.state, task.claimant, t, task.position);
+    	const actor = renderTaskActor(page, task);
     	const waiting = task.status === "ready" || task.status === "pending" ? formatWaiting(task.createdAt) : "";
     	return h("li", { key: task.id }, h("button", {
     		type: "button",
     		className: `buka-workflows-taskCard is-${task.status ?? "pending"}`,
     		onClick: () => actions.openTask(task.id)
-    	}, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), renderStatusTag(t, task.status, "task")), typeof task.resultSummary === "string" && task.resultSummary !== "" ? h("span", { className: "buka-workflows-taskCardSummary" }, task.resultSummary) : null, claimant === "" && waiting === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, [claimant === "" ? "" : `${t("taskClaimant")}: ${claimant}`, waiting === "" ? "" : fill(t, "boardCardWaiting", { duration: waiting })].filter((part) => part !== "").join(" · "))));
+    	}, h("span", { className: "buka-workflows-taskCardHead" }, h("span", { className: "buka-workflows-taskCardType" }, task.typeLabel ?? task.type ?? task.id), renderStatusTag(t, task.status, "task")), typeof task.resultSummary === "string" && task.resultSummary !== "" ? h("span", { className: "buka-workflows-taskCardSummary" }, task.resultSummary) : null, actor === "" && waiting === "" ? null : h("span", { className: "buka-workflows-taskCardMeta" }, [actor, waiting === "" ? "" : fill(t, "boardCardWaiting", { duration: waiting })].filter((part) => part !== "").join(" · "))));
     }
     // .build/workflows/client/components/task-form.js
     /**
@@ -3653,13 +3648,13 @@ window.__ModuleLoader__.load({
     		closeLabel: t("close")
     	}), h("div", { className: "buka-workflows-drawerBody" }, ...body));
     }
-    /** 头部第二行：岗位 · 入站通道 · 承办者。 */
+    /** 头部第二行：岗位 · 入站通道 · 代办 / 执行者。 */
     function taskMeta(page, task) {
     	const { t } = page;
     	return [
     		task.positionLabel ?? task.position ?? "",
     		typeof task.channelLabel === "string" && task.channelLabel !== "" ? `${t("taskChannel")}: ${task.channelLabel}` : "",
-    		claimantName(page.state, task.claimant, t, task.position) || t("taskUnclaimed")
+    		renderTaskActor(page, task)
     	].filter((part) => part !== "").join(" · ");
     }
     /** 任务岗位对应的打工人头像。 */
@@ -3703,7 +3698,7 @@ window.__ModuleLoader__.load({
     	}, dep.typeLabel ?? dep.type ?? dep.id), renderStatusTag(t, dep.status, "task"), dep.resultSummary === null || dep.resultSummary === void 0 ? null : h("span", { className: "buka-workflows-depSummary" }, dep.resultSummary))))));
     	const attempts = Array.isArray(task.attempts) ? task.attempts : [];
     	elements.push(renderFold(t("taskAttemptsTitle"), attempts.length === 0 ? renderEmpty(t("taskAttemptsEmpty")) : h("ul", { className: "buka-workflows-attemptList" }, ...attempts.map((attempt) => renderAttempt(page, attempt)))));
-    	elements.push(renderFold(t("taskDetailsTitle"), renderTaskDetails(page, task, typeDefinition)));
+    	elements.push(renderFold(t("taskDetailsTitle"), renderTaskDetails(page, task)));
     	return elements;
     }
     /** 人任务的填写表单：先选动作，再按动作的表单填，最后提交。 */
@@ -3833,13 +3828,12 @@ window.__ModuleLoader__.load({
     function resultBlock(label, content) {
     	return h("div", { className: "buka-workflows-resultBlock" }, h("span", { className: "buka-workflows-subLabel" }, label), content);
     }
-    /** 折叠区里的审计信息：类型 ID、助理与三个时间点。 */
-    function renderTaskDetails(page, task, typeDefinition) {
+    /** 折叠区里的审计信息：类型 ID、通道与三个时间点。 */
+    function renderTaskDetails(page, task) {
     	const { t } = page;
     	const rows = [];
     	if (typeof task.type === "string" && task.type !== "") rows.push([t("taskType"), h("code", { className: "buka-workflows-inlineCode" }, task.type)]);
     	if (typeof task.channel === "string" && task.channel !== "") rows.push([t("taskChannel"), h("code", { className: "buka-workflows-inlineCode" }, task.channel)]);
-    	if (isRecord(typeDefinition) && typeof typeDefinition.assistant === "string" && typeDefinition.assistant !== "") rows.push([t("taskTypeAssistant"), renderAssistant(page, typeDefinition.assistant)]);
     	rows.push([t("taskCreatedAt"), formatTime(task.createdAt)]);
     	if (task.startedAt !== null && task.startedAt !== void 0) rows.push([t("taskStartedAt"), formatTime(task.startedAt)]);
     	if (task.finishedAt !== null && task.finishedAt !== void 0) rows.push([t("taskFinishedAt"), formatTime(task.finishedAt)]);

@@ -1024,7 +1024,9 @@ test('任务抽屉：输入按契约、结果与操作', async () => {
   assert.match(text, /重试/u)
   assert.match(text, /取消任务/u)
   assert.match(text, /打开会话/u)
-  assert.match(text, /研发 · 软件工程师/u, 'header carries position and claimant')
+  assert.match(text, /研发/u, 'header carries the position')
+  assert.match(text, /通道: 开始研发/u, 'header carries the inbound channel')
+  assert.match(text, /软件工程师/u, 'worker tasks show only the executor')
   assert.match(text, /更多信息/u, 'audit details are folded away')
 })
 
@@ -1103,7 +1105,11 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
     })
     const text = texts.join(' ')
     assert.match(text, /接下来做什么/u)
-    assert.match(text, /沟通助理 · secretary/u, 'the assistant is shown by name and id')
+    assert.match(
+      text,
+      /代办: 沟通助理 · secretary/u,
+      'delegation names the assistant by name and id',
+    )
 
     const approved = findBy(
       tree,
@@ -1126,6 +1132,65 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('人任务与打工人任务：只显示代办 / 待你办理 / 你在办理或执行者', async () => {
+  const client = await loadClient()
+  const definition = {
+    ...DEFINITION,
+    positions: DEFINITION.positions.map((position) =>
+      position.id === 'approve'
+        ? {
+            ...position,
+            taskTypes: position.taskTypes.map((type) => {
+              const next = { ...type }
+              delete next.assistant
+              return next
+            }),
+          }
+        : position,
+    ),
+  }
+  const workflow = {
+    ...WORKFLOW_DETAIL,
+    workflow: { ...WORKFLOW_DETAIL.workflow, definition },
+  }
+
+  // 人任务没有点名助理且已就绪：待你办理。
+  let rendered = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: { status: 'ready', data: workflow, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+  })
+  assert.match(rendered.texts.join(' '), /待你办理/u)
+  assert.doesNotMatch(rendered.texts.join(' '), /承办者/u)
+
+  // 人任务在进行中：你在办理。
+  const humanTask = {
+    ...HUMAN_TASK_DETAIL.task,
+    claimant: { kind: 'human', name: '本地用户', sessionId: null },
+  }
+  rendered = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: { status: 'ready', data: workflow, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    taskId: 'task-3',
+    task: { status: 'ready', data: humanTask, error: null },
+  })
+  assert.match(rendered.texts.join(' '), /你在办理/u)
+  assert.doesNotMatch(rendered.texts.join(' '), /承办者/u)
+
+  // 打工人任务只显示执行者，不出现代办 / 承办者。
+  rendered = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: { status: 'ready', data: workflow, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    taskId: 'task-1',
+    task: { status: 'ready', data: TASK_DETAIL.task, error: null },
+  })
+  const workerText = rendered.texts.join(' ')
+  assert.match(workerText, /软件工程师/u)
+  assert.doesNotMatch(workerText, /承办者|代办/u)
 })
 
 test('新建作业：需求在前、结构化输入按契约渲染', async () => {
@@ -1272,7 +1337,7 @@ test('派生不可用：工作流列表 / 详情标出缺失的标识符，新�
   assert.equal(newJob.props.disabled, true, 'starting a job is blocked while unavailable')
 })
 
-test('派生不可用：作业页标注，承办者与交回助理显示「已删除」与占位头像', async () => {
+test('派生不可用：作业页标注，执行者与交回助理显示「已删除」与占位头像', async () => {
   const client = await loadClient()
   const missing = [
     { id: '软件工程师', role: 'executor', positionId: 'dev', positionLabel: '研发' },
@@ -1305,7 +1370,7 @@ test('派生不可用：作业页标注，承办者与交回助理显示「已�
   assert.ok(text.includes('不可用'), 'the job page marks the job unavailable')
   assert.match(text, /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u)
   assert.match(text, /交回方式里的助理「secretary」已不存在/u)
-  assert.match(text, /软件工程师 · 已删除/u, 'the claimant is marked deleted')
+  assert.match(text, /软件工程师 · 已删除/u, 'the executor is marked deleted')
   assert.match(text, /沟通助理 · secretary · 已删除/u, 'the delivery assistant is marked deleted')
   assert.ok(
     findBy(tree, (node) =>

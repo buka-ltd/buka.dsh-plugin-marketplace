@@ -96,8 +96,6 @@ export interface Worker {
   driver: WorkerDriver
   /** 机器人的程序 id（稳定契约）；智能体为空串。 */
   program: string
-  /** 只有智能体可以是助理（人任务的承办者）。 */
-  assistant: boolean
   path: string
   createdAt: string
   avatar: string

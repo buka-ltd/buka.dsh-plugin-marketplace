@@ -44,12 +44,13 @@ import { toV7, toV8 } from './workflows-fixture-v7.mjs'
 function sampleWorkers() {
   return new Map(
     [
-      { id: '产品经理', name: '', driver: 'agent', assistant: false },
-      { id: '软件工程师', name: '', driver: 'agent', assistant: false },
-      { id: '质量保障工程师', name: '', driver: 'agent', assistant: false },
-      { id: '发布工程师', name: '', driver: 'agent', assistant: false },
-      { id: '沟通助理', name: '', driver: 'agent', assistant: true },
-      { id: 'clock', name: '', driver: 'robot', program: 'clock', assistant: false },
+      { id: '产品经理', name: '', driver: 'agent' },
+      { id: '软件工程师', name: '', driver: 'agent' },
+      { id: '质量保障工程师', name: '', driver: 'agent' },
+      { id: '发布工程师', name: '', driver: 'agent' },
+      // 助理不是打工人身上的标记：这里不给它任何额外字段。
+      { id: '沟通助理', name: '', driver: 'agent' },
+      { id: 'clock', name: '', driver: 'robot', program: 'clock' },
     ].map((worker) => [worker.id, worker]),
   )
 }
@@ -409,7 +410,7 @@ function expectOk(result) {
 const EXPECTED_TASK_TRANSITIONS = {
   pending: ['ready', 'blocked', 'cancelled'],
   ready: ['running', 'completed', 'blocked', 'cancelled'],
-  running: ['completed', 'failed', 'cancelled', 'ready'],
+  running: ['completed', 'failed', 'cancelled'],
   completed: [],
   failed: ['ready', 'cancelled'],
   blocked: ['cancelled'],
@@ -556,13 +557,6 @@ test('definition: rejects structural and identity errors', () => {
       }),
       /positions\[3\]\.taskTypes\[0\]\.assistant/,
       /unknown assistant worker identifier/,
-    ],
-    [
-      mutate((d) => {
-        d.positions[3].taskTypes[0].assistant = '产品经理'
-      }),
-      /positions\[3\]\.taskTypes\[0\]\.assistant/,
-      /not marked as an assistant/,
     ],
     [
       mutate((d) => {
@@ -926,10 +920,7 @@ test('definition: robot positions must cover the program content contract', () =
 test('definition: robot executors must use a known program', () => {
   const workers = new Map([
     ...sampleWorkers(),
-    [
-      'brokenbot',
-      { id: 'brokenbot', name: '', driver: 'robot', program: 'nope', assistant: false },
-    ],
+    ['brokenbot', { id: 'brokenbot', name: '', driver: 'robot', program: 'nope' }],
   ])
   const definition = sampleClockDefinition()
   definition.positions[0].executor = { kind: 'worker', id: 'brokenbot' }
@@ -1047,7 +1038,6 @@ test('engine: robot tasks are checked against the program content contract', () 
     attemptIds: [],
     result: null,
     error: null,
-    assistantBlocked: false,
     createdAt: '2026-01-01T00:00:00.000Z',
     startedAt: null,
     finishedAt: '2026-01-01T00:00:00.000Z',
@@ -1183,7 +1173,6 @@ test('store: job / task / attempt / attachment records filter by job', async () 
       attemptIds: ['att-1'],
       result: null,
       error: null,
-      assistantBlocked: false,
       createdAt: '2026-01-01T00:00:00.000Z',
       startedAt: '2026-01-01T00:00:00.000Z',
       finishedAt: '2026-01-01T00:00:01.000Z',
@@ -1344,7 +1333,6 @@ test('store: init migrates v7 workflow definitions to v8 and normalizes legacy k
       attemptIds: [],
       result: null,
       error: null,
-      assistantBlocked: false,
       createdAt: 't',
       startedAt: null,
       finishedAt: null,
@@ -1453,7 +1441,6 @@ test('store: concurrent task updates are atomic', async () => {
       attemptIds: [],
       result: null,
       error: null,
-      assistantBlocked: false,
       createdAt: 't',
       startedAt: null,
       finishedAt: null,

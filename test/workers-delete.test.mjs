@@ -356,7 +356,6 @@ test('删除：目录不在打工人根目录下时拒绝', async () => {
             createdAt: new Date().toISOString(),
             avatar: 'panda',
             description: '',
-            assistant: false,
           },
         ],
       })

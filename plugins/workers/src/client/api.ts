@@ -79,8 +79,6 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errOutsideRoot')
     case 'workspace-unavailable':
       return t('errWorkspaceUnavailable')
-    case 'invalid-assistant':
-      return t('errInvalidAssistant')
     case 'invalid-model':
       return t('errInvalidModel')
     case 'invalid-driver':

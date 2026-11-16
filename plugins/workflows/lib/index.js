@@ -2026,7 +2026,12 @@ function readCreations(raw, path, issues) {
 	}
 	return creations;
 }
-/** 解析助理字段；只对人岗位有效。 */
+/**
+* 解析助理字段；只对人岗位有效。
+*
+* 助理是工作流上的点名：只要求标识符已登记且是智能体，不要求打工人身上带
+* 任何标记（ADR 0022）。
+*/
 function readAssistant(raw, path, positionId, taskTypeId, executor, workers, issues) {
 	if (raw === void 0) return void 0;
 	if (executor !== null && executor.kind !== "human") {
@@ -2046,10 +2051,6 @@ function readAssistant(raw, path, positionId, taskTypeId, executor, workers, iss
 	}
 	if (worker.driver !== "agent") {
 		issues.add(path, `assistant identifier "${id}" of task type "${positionId}.${taskTypeId}" must be an agent, not a robot`);
-		return;
-	}
-	if (!worker.assistant) {
-		issues.add(path, `worker identifier "${id}" of task type "${positionId}.${taskTypeId}" is not marked as an assistant in the Buka Workers plugin`);
 		return;
 	}
 	return id;
@@ -2688,6 +2689,7 @@ function jobReferencesWorker(job, id) {
 * - 任务依赖完成才 `ready`；依赖被取消 / 阻塞时 `blocked`；
 * - 认领把 `ready` 变成 `running`；
 * - 技术失败进 `failed`，重试把同一个任务退回 `ready`（新增执行记录，历史保留）；
+- 代办失败的作业直接 `failed`，任务不退回 `ready`（ADR 0022）；
 * - 失败任务被用户放弃（取消）后，依赖它的任务 `blocked`；
 * - 业务「不通过」不是状态：结果里写 `result: "fail"`，由执行者再派新任务。
 *
@@ -2733,8 +2735,7 @@ const TASK_TRANSITIONS = Object.freeze({
 	running: [
 		"completed",
 		"failed",
-		"cancelled",
-		"ready"
+		"cancelled"
 	],
 	completed: [],
 	failed: ["ready", "cancelled"],
@@ -3566,7 +3567,6 @@ function buildCreatedTask(input) {
 			attemptIds: [],
 			result: null,
 			error: null,
-			assistantBlocked: false,
 			createdAt: now,
 			startedAt: null,
 			finishedAt: null,
@@ -3714,7 +3714,6 @@ function buildInitialTasks(input) {
 			attemptIds: [],
 			result: null,
 			error: null,
-			assistantBlocked: false,
 			createdAt: now,
 			startedAt: null,
 			finishedAt: null,
@@ -3770,7 +3769,6 @@ function parseWorkerCatalog(raw) {
 			displayName,
 			driver,
 			...typeof record.program === "string" && record.program !== "" ? { program: record.program } : {},
-			assistant: record.assistant === true,
 			...typeof record.description === "string" ? { description: record.description } : {},
 			...typeof record.avatar === "string" ? { avatar: record.avatar } : {},
 			...typeof record.path === "string" && record.path !== "" ? { path: record.path } : {}
@@ -3943,7 +3941,7 @@ var WorkflowEngine = class {
 				availability: definitionAvailability(found.versionRecord.definition, workers)
 			},
 			graph: workflowGraph(found.versionRecord.definition, workers),
-			assistants: [...workers.values()].filter((worker) => worker.assistant && worker.driver === "agent").map((worker) => ({
+			assistants: [...workers.values()].filter((worker) => worker.driver === "agent").map((worker) => ({
 				id: worker.id,
 				name: worker.displayName,
 				...worker.description === void 0 ? {} : { description: worker.description },
@@ -4050,7 +4048,6 @@ var WorkflowEngine = class {
 						attachmentIds: []
 					},
 					error: null,
-					assistantBlocked: false,
 					createdAt: now,
 					startedAt: now,
 					finishedAt: now,
@@ -4102,14 +4099,13 @@ var WorkflowEngine = class {
 		const problems = contentIssues(schema, content);
 		if (problems.length > 0) throw new WorkflowError("invalid-input", `content does not match the workflow input: ${problems.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`);
 	}
-	/** 校验交回方式：助理必须存在、是智能体、且标记为助理。 */
+	/** 校验交回方式：被点名的助理必须存在且是智能体（不看任何标记）。 */
 	resolveDelivery(_definition, delivery, _starter, workers) {
 		if (delivery === void 0 || delivery.kind === "starter") return { kind: "starter" };
 		const id = deliveryWorkerRef(delivery);
 		const worker = id === null ? void 0 : workers.get(id);
 		if (worker === void 0) throw new WorkflowError("invalid-delivery", `unknown assistant identifier "${id ?? ""}"`);
 		if (worker.driver !== "agent") throw new WorkflowError("invalid-delivery", `assistant identifier "${worker.id}" must be an agent`);
-		if (!worker.assistant) throw new WorkflowError("invalid-delivery", `worker identifier "${worker.id}" is not marked as an assistant in the Buka Workers plugin`);
 		return {
 			kind: "assistant",
 			id: worker.id
@@ -4792,7 +4788,6 @@ var WorkflowEngine = class {
 				status: "ready",
 				error: null,
 				claimant: null,
-				assistantBlocked: false,
 				finishedAt: null,
 				updatedAt: nowIso()
 			}));
@@ -4871,7 +4866,10 @@ var WorkflowEngine = class {
 		const job = this.store.getJob(jobId);
 		if (job === void 0 || job.status !== "running") return;
 		for (const task of this.store.listTasks(jobId)) {
+			const currentJob = this.store.getJob(jobId);
+			if (currentJob === void 0 || currentJob.status !== "running") break;
 			if (task.status !== "running") continue;
+			const assistant = task.claimant?.kind === "assistant" ? task.claimant.name : null;
 			const attempt = this.store.listAttempts(task.id).find((entry) => entry.status === "running");
 			if (attempt !== void 0) await this.store.updateAttempt(attempt.id, (current) => ({
 				...current,
@@ -4886,18 +4884,29 @@ var WorkflowEngine = class {
 				continue;
 			}
 			if (attempt === void 0) {
-				await this.failTaskLocked(jobId, task.id, "host restarted and the execution attempt was lost");
+				if (assistant === null) await this.failTaskLocked(jobId, task.id, "host restarted and the execution attempt was lost");
+				else {
+					this.busyAssistants.delete(assistant);
+					await this.failAssistantLocked(jobId, task, assistant, "host restarted and the execution attempt was lost");
+				}
 				continue;
 			}
 			const sessionId = attempt.sessionId;
-			if (sessionId === null || executor.kind !== "worker") {
-				await this.failTaskLocked(jobId, task.id, "host restarted and the execution session was lost");
+			if (sessionId === null || executor.kind !== "worker" && assistant === null) {
+				if (assistant === null) await this.failTaskLocked(jobId, task.id, "host restarted and the execution session was lost");
+				else {
+					this.busyAssistants.delete(assistant);
+					await this.failAssistantLocked(jobId, task, assistant, "host restarted and the execution session was lost");
+				}
 				continue;
 			}
 			const executorId = storedExecutorRef(executor) ?? "";
-			if (!await this.resumeAgentAttempt(jobId, task, attempt, executorId, sessionId)) {
-				if (task.claimant?.kind === "assistant") await this.releaseAssistantLocked(jobId, task, "assistant session could not be resumed");
-				else await this.failTaskLocked(jobId, task.id, "host restarted and the execution session could not be resumed");
+			if (!await this.resumeAgentAttempt(jobId, task, attempt, assistant ?? executorId, sessionId)) {
+				if (assistant === null) await this.failTaskLocked(jobId, task.id, "host restarted and the execution session could not be resumed");
+				else {
+					this.busyAssistants.delete(assistant);
+					await this.failAssistantLocked(jobId, task, assistant, "host restarted and the assistant session could not be resumed");
+				}
 			}
 		}
 		const tasks = this.store.listTasks(jobId);
@@ -5028,7 +5037,7 @@ var WorkflowEngine = class {
 			const executor = task.assignee;
 			if (executor.kind === "human") {
 				const assistantName = this.assistantFor(job.definition, task.type);
-				if (assistantName === null || task.assistantBlocked) continue;
+				if (assistantName === null) continue;
 				if (!workers.has(assistantName)) continue;
 				if (this.busyAssistants.has(assistantName)) continue;
 				const launch = await this.claimAssistantTask(job, task, assistantName);
@@ -5360,7 +5369,7 @@ var WorkflowEngine = class {
 			const snapshot = readHandleResult(input.handle, input.startSeq);
 			if (!snapshot.turnEnded) return false;
 			finish();
-			if (input.kind === "assistant") await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.worker);
+			if (input.kind === "assistant") await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker);
 			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
 			return true;
 		});
@@ -5500,7 +5509,12 @@ var WorkflowEngine = class {
 			} catch {}
 			this.active.delete(taskId);
 			if (execution?.stopPoll != null) execution.stopPoll();
-			await this.failTaskLocked(jobId, taskId, `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`);
+			const assistant = task.claimant?.kind === "assistant" ? task.claimant.name : null;
+			if (assistant === null) await this.failTaskLocked(jobId, taskId, `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`);
+			else {
+				this.busyAssistants.delete(assistant);
+				await this.failAssistantLocked(jobId, task, assistant, `the task timed out after ${this.options.taskTimeoutMs}ms`);
+			}
 			await this.recomputeLocked(jobId);
 		});
 	}
@@ -5515,35 +5529,39 @@ var WorkflowEngine = class {
 			this.logger?.warn?.(`buka-workflows: could not mark task ${taskId} failed: ${describeError$1(error)}`);
 		}
 	}
-	/** 助理失败（会话结束但未提交）：回到待认领。 */
-	async releaseAssistantOutside(jobId, taskId, snapshot, worker) {
+	/** 代办失败（会话结束未提交）：任务与整个作业一起失败。 */
+	async failAssistantOutside(jobId, taskId, snapshot, assistant) {
 		try {
 			await this.store.runExclusive(jobId, async () => {
-				this.busyAssistants.delete(worker);
-				await this.releaseAssistantLocked(jobId, this.requireTask(jobId, taskId), `assistant session ended without completing the task (stopReason: ${snapshot.stopReason ?? "unknown"})`);
+				this.busyAssistants.delete(assistant);
+				await this.failAssistantLocked(jobId, this.requireTask(jobId, taskId), assistant, `assistant session ended without completing the task (stopReason: ${snapshot.stopReason ?? "unknown"})`);
 				await this.recomputeLocked(jobId);
 			});
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not release assistant task ${taskId}: ${describeError$1(error)}`);
+			this.logger?.warn?.(`buka-workflows: could not fail the job for assistant task ${taskId}: ${describeError$1(error)}`);
 		}
 	}
-	/** 助理失败后把任务放回「待认领」。 */
-	async releaseAssistantLocked(jobId, task, reason) {
-		const now = nowIso();
-		const current = this.store.getTask(task.id);
-		if (current === void 0 || current.status !== "running") return;
-		this.dropSessionTask(task.id);
-		await this.store.updateTask(task.id, (record) => ({
-			...record,
-			status: "ready",
-			claimant: null,
-			assistantBlocked: true,
-			updatedAt: now
-		}));
-		await this.closeRunningAttempts(task.id, "failed", reason);
-		await this.appendEvent(jobId, "task/assistant-failed", {
+	/** 代办失败的作业错误：写明是哪条任务、哪个代办者、什么原因。 */
+	assistantFailureReason(job, task, assistant, cause) {
+		const position = positionLabel(job.definition, task.position);
+		const type = taskTypeLabel(job.definition, task.type);
+		const worker = assistant === "" ? "(unknown)" : `${this.workerDisplayName(assistant)} (${assistant})`;
+		return `delegated task "${task.id}" (position "${position}" / ${task.position}, type "${type}" / ${task.type}) failed: assistant ${worker} did not hand back a result: ${cause}`;
+	}
+	/**
+	* 代办失败：任务标失败，整个作业进 `failed`，其余非终态任务取消。
+	*
+	* 被点名的智能体代办代表人的决策；没交出结果说明这个作业的结果不可信，
+	* 不再退回「待认领」让人接手（ADR 0022，取代 ADR 0010 第 6 条）。
+	*/
+	async failAssistantLocked(jobId, task, assistant, cause) {
+		const job = this.store.getJob(jobId);
+		if (job === void 0 || job.status !== "running") return;
+		const reason = this.assistantFailureReason(job, task, assistant, cause);
+		await this.failTaskLocked(jobId, task.id, reason);
+		await this.failJobLocked(job, reason, "job/assistant-failed", {
 			taskId: task.id,
-			reason
+			assistant
 		});
 	}
 	/** 标记任务技术失败。 */
@@ -5698,20 +5716,33 @@ var WorkflowEngine = class {
 	}
 	/** 超预算：取消非终态任务，作业 failed。 */
 	async failJobForBudget(job) {
+		const reason = `workflow exceeded its maxDurationHours budget (${job.definition.budgets.maxDurationHours}h)`;
+		await this.failJobLocked(job, reason, "job/budget-exceeded");
+	}
+	/**
+	* 失败整个作业：取消所有非终态任务（写清终止原因），作业进 `failed`，
+	* 追加作业事件。代办失败与超预算共用这一条路径。
+	*/
+	async failJobLocked(job, reason, event, data = {}) {
 		const now = nowIso();
 		for (const task of this.store.listTasks(job.id)) {
 			if (!isOpenTaskStatus(task.status)) continue;
-			this.cancelActive(task.id, "workflow budget exceeded");
+			if (task.claimant?.kind === "assistant") this.busyAssistants.delete(task.claimant.name);
+			this.cancelActive(task.id, reason);
 			await this.store.updateTask(task.id, (current) => ({
 				...current,
 				status: "cancelled",
+				error: reason,
 				finishedAt: now,
 				updatedAt: now
 			}));
-			await this.closeRunningAttempts(task.id, "cancelled", "workflow budget exceeded");
+			await this.closeRunningAttempts(task.id, "cancelled", reason);
 			this.dropSessionTask(task.id);
+			await this.appendEvent(job.id, "task/cancelled", {
+				taskId: task.id,
+				error: reason
+			});
 		}
-		const reason = `workflow exceeded its maxDurationHours budget (${job.definition.budgets.maxDurationHours}h)`;
 		await this.store.updateJob(job.id, (current) => ({
 			...current,
 			status: "failed",
@@ -5719,7 +5750,10 @@ var WorkflowEngine = class {
 			finishedAt: now,
 			updatedAt: now
 		}));
-		await this.appendEvent(job.id, "job/budget-exceeded", { error: reason });
+		await this.appendEvent(job.id, event, {
+			error: reason,
+			...data
+		});
 	}
 	/** 取一个运行中的作业，否则抛错。 */
 	requireRunningJob(jobId, allowTerminal = false) {
@@ -7254,7 +7288,6 @@ const string$1 = (params) => {
 };
 const integer = /^-?\d+$/;
 const number$1 = /^-?\d+(?:\.\d+)?$/;
-const boolean$1 = /^(?:true|false)$/i;
 const lowercase = /^[^A-Z]*$/;
 const uppercase = /^[^a-z]*$/;
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/checks.js
@@ -8048,24 +8081,6 @@ const $ZodNumber = /*@__PURE__*/ $constructor("$ZodNumber", (inst, def) => {
 const $ZodNumberFormat = /*@__PURE__*/ $constructor("$ZodNumberFormat", (inst, def) => {
 	$ZodCheckNumberFormat.init(inst, def);
 	$ZodNumber.init(inst, def);
-});
-const $ZodBoolean = /*@__PURE__*/ $constructor("$ZodBoolean", (inst, def) => {
-	$ZodType.init(inst, def);
-	inst._zod.pattern = boolean$1;
-	inst._zod.parse = (payload, _ctx) => {
-		if (def.coerce) try {
-			payload.value = Boolean(payload.value);
-		} catch (_) {}
-		const input = payload.value;
-		if (typeof input === "boolean") return payload;
-		payload.issues.push({
-			expected: "boolean",
-			code: "invalid_type",
-			input,
-			inst
-		});
-		return payload;
-	};
 });
 const $ZodUnknown = /*@__PURE__*/ $constructor("$ZodUnknown", (inst, def) => {
 	$ZodType.init(inst, def);
@@ -9280,13 +9295,6 @@ function _int(Class, params) {
 	});
 }
 // @__NO_SIDE_EFFECTS__
-function _boolean(Class, params) {
-	return new Class({
-		type: "boolean",
-		...normalizeParams(params)
-	});
-}
-// @__NO_SIDE_EFFECTS__
 function _unknown(Class) {
 	return new Class({ type: "unknown" });
 }
@@ -9833,9 +9841,6 @@ const numberProcessor = (schema, ctx, _json, _params) => {
 		} else json.exclusiveMaximum = exclusiveMaximum;
 	} else if (typeof maximum === "number") json.maximum = maximum;
 	if (typeof multipleOf === "number") json.multipleOf = multipleOf;
-};
-const booleanProcessor = (_schema, _ctx, json, _params) => {
-	json.type = "boolean";
 };
 const neverProcessor = (_schema, _ctx, json, _params) => {
 	json.not = {};
@@ -10516,14 +10521,6 @@ const ZodNumberFormat = /*@__PURE__*/ $constructor("ZodNumberFormat", (inst, def
 function int(params) {
 	return /* @__PURE__ */ _int(ZodNumberFormat, params);
 }
-const ZodBoolean = /*@__PURE__*/ $constructor("ZodBoolean", (inst, def) => {
-	$ZodBoolean.init(inst, def);
-	ZodType.init(inst, def);
-	inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
-});
-function boolean(params) {
-	return /* @__PURE__ */ _boolean(ZodBoolean, params);
-}
 const ZodUnknown = /*@__PURE__*/ $constructor("ZodUnknown", (inst, def) => {
 	$ZodUnknown.init(inst, def);
 	ZodType.init(inst, def);
@@ -11049,7 +11046,6 @@ const taskRecordSchema = object({
 	attemptIds: array(string()),
 	result: taskResultSchema.nullable(),
 	error: string().nullable(),
-	assistantBlocked: boolean(),
 	createdAt: string(),
 	startedAt: string().nullable(),
 	finishedAt: string().nullable(),

@@ -315,49 +315,20 @@ test.after(async () => {
   await fs.rm(stubRoot, { recursive: true, force: true })
 })
 
-test('POST /buka-workers/assistant：智能体可设 / 取消助理，机器人与内建标识符只读', async () => {
+test('POST /buka-workers/assistant 已删除；列表不再返回 assistant', async () => {
   const harness = await makeHarness()
   try {
-    const agent = { agent: { id: 'builder' } }
-    await harness.tool.execute({ id: 'writer' }, agent)
-
-    // 设为助理：响应带回完整条目，登记表落到 version 3。
-    const marked = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { id: 'writer', assistant: true },
-    })
-    assert.equal(marked.status, 200)
-    assert.equal(marked.body.ok, true)
-    assert.equal(marked.body.worker.assistant, true)
-    assert.equal(marked.body.worker.driver, 'agent')
-    const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
-    const writer = registry.workers.find((worker) => worker.id === 'writer')
-    assert.equal(writer.assistant, true)
-
-    // 取消助理。
-    const cleared = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { id: 'writer', assistant: false },
-    })
-    assert.equal(cleared.status, 200)
-    assert.equal(cleared.body.worker.assistant, false)
-
-    // 非布尔值 / 未知打工人。
-    const invalid = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { id: 'writer', assistant: 'yes' },
-    })
-    assert.equal(invalid.status, 400)
-    assert.equal(invalid.body.code, 'invalid-assistant')
-    const unknown = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { id: 'nobody', assistant: true },
-    })
-    assert.equal(unknown.status, 404)
-    assert.equal(unknown.body.code, 'unknown-worker')
-
-    // 内建机器人不能是助理。
-    const clock = await callRoute(harness.routes, '/buka-workers/assistant', {
-      body: { id: 'clock', assistant: true },
-    })
-    assert.equal(clock.status, 409)
-    assert.equal(clock.body.code, 'robot-worker')
+    assert.equal(
+      harness.routes.has('/buka-workers/assistant'),
+      false,
+      'the assistant route is not registered',
+    )
+    await harness.tool.execute({ id: 'writer' }, { agent: { id: 'builder' } })
+    const listed = await callRoute(harness.routes, '/buka-workers/list', { method: 'GET' })
+    assert.equal(listed.status, 200)
+    const writer = listed.body.workers.find((worker) => worker.id === 'writer')
+    assert.ok(writer, 'writer is registered')
+    assert.equal('assistant' in writer, false, 'the list has no assistant flag')
   } finally {
     await harness.cleanup()
   }
@@ -403,14 +374,14 @@ test('打工人路由：内建 clock 不可创建 / 删除 / 改名 / 改头像�
     assert.equal(avatar.status, 409)
     assert.equal(avatar.body.code, 'robot-worker')
 
-    // 列表包含 clock，带 driver / assistant，且没有目录状态。
+    // 列表包含 clock，带 driver / program，且没有目录状态。
     const listed = await callRoute(harness.routes, '/buka-workers/list', { method: 'GET' })
     assert.equal(listed.status, 200)
     const clock = listed.body.workers.find((worker) => worker.id === 'clock')
     assert.ok(clock, '列表里应有内建 clock')
     assert.equal(clock.driver, 'robot')
     assert.equal(clock.program, 'clock')
-    assert.equal(clock.assistant, false)
+    assert.equal('assistant' in clock, false)
     assert.equal(clock.exists, false)
     assert.equal(clock.mounted, false)
   } finally {

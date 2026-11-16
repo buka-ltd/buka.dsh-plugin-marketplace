@@ -12,7 +12,6 @@ import { MISSING_AVATAR_ID, renderAvatar } from '../avatars.ts'
 import { ClientModal, h } from '../element.ts'
 import { errorTextOf, formatBytes, formatTime } from '../format.ts'
 import {
-  claimantName,
   currentDefinition,
   currentJobDefinition,
   isHumanTask,
@@ -22,11 +21,10 @@ import {
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { attachmentUrl } from '../request.ts'
-import type { Attempt, JsonSchema, TaskDetail, TaskTypeDefinition } from '../types.ts'
+import type { Attempt, JsonSchema, TaskDetail } from '../types.ts'
 import { isRecord } from '../types.ts'
 import {
   ConfirmButton,
-  renderAssistant,
   renderAttachmentLink,
   renderDrawerHead,
   renderEmpty,
@@ -37,6 +35,7 @@ import {
   renderReadonlyValue,
   renderSection,
   renderStatusTag,
+  renderTaskActor,
 } from './parts.ts'
 import { renderTaskForm } from './task-form.ts'
 
@@ -84,7 +83,7 @@ export function renderTaskDrawer(page: AppContext): React.ReactElement | null {
   )
 }
 
-/** 头部第二行：岗位 · 入站通道 · 承办者。 */
+/** 头部第二行：岗位 · 入站通道 · 代办 / 执行者。 */
 function taskMeta(page: AppContext, task: TaskDetail): string {
   const { t } = page
   const position = task.positionLabel ?? task.position ?? ''
@@ -92,8 +91,7 @@ function taskMeta(page: AppContext, task: TaskDetail): string {
     typeof task.channelLabel === 'string' && task.channelLabel !== ''
       ? `${t('taskChannel')}: ${task.channelLabel}`
       : ''
-  const claimant = claimantName(page.state, task.claimant, t, task.position) || t('taskUnclaimed')
-  return [position, channel, claimant].filter((part) => part !== '').join(' · ')
+  return [position, channel, renderTaskActor(page, task)].filter((part) => part !== '').join(' · ')
 }
 
 /** 任务岗位对应的打工人头像。 */
@@ -200,7 +198,7 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
     ),
   )
 
-  elements.push(renderFold(t('taskDetailsTitle'), renderTaskDetails(page, task, typeDefinition)))
+  elements.push(renderFold(t('taskDetailsTitle'), renderTaskDetails(page, task)))
 
   return elements
 }
@@ -521,12 +519,8 @@ function resultBlock(label: string, content: React.ReactNode): React.ReactElemen
   )
 }
 
-/** 折叠区里的审计信息：类型 ID、助理与三个时间点。 */
-function renderTaskDetails(
-  page: AppContext,
-  task: TaskDetail,
-  typeDefinition: TaskTypeDefinition | null,
-): React.ReactElement {
+/** 折叠区里的审计信息：类型 ID、通道与三个时间点。 */
+function renderTaskDetails(page: AppContext, task: TaskDetail): React.ReactElement {
   const { t } = page
   const rows: Array<[string, React.ReactNode]> = []
   if (typeof task.type === 'string' && task.type !== '') {
@@ -537,13 +531,6 @@ function renderTaskDetails(
       t('taskChannel'),
       h('code', { className: 'buka-workflows-inlineCode' }, task.channel),
     ])
-  }
-  if (
-    isRecord(typeDefinition) &&
-    typeof typeDefinition.assistant === 'string' &&
-    typeDefinition.assistant !== ''
-  ) {
-    rows.push([t('taskTypeAssistant'), renderAssistant(page, typeDefinition.assistant)])
   }
   rows.push([t('taskCreatedAt'), formatTime(task.createdAt)])
   if (task.startedAt !== null && task.startedAt !== undefined) {

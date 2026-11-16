@@ -38,7 +38,6 @@ export function createWorkerBuildTool({
       avatar: string
       description: string
       createdAt: string
-      assistant: boolean
     }
     created: boolean
     updated: boolean
@@ -63,7 +62,7 @@ export function createWorkerBuildTool({
     name: WORKER_BUILD_TOOL_NAME,
     description:
       'Create or update one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ' +
-      `${avatars}. Workers created here are agents; the assistant flag starts false and can be turned on for an agent on the Workers page.`,
+      `${avatars}. Workers created here are agents.`,
     parameters: {
       id: {
         type: 'string',
@@ -123,12 +122,6 @@ export function createWorkerBuildTool({
             type: 'string',
             required: true,
             description: 'One-sentence description stored for the worker; empty when none was set.',
-          },
-          assistant: {
-            type: 'boolean',
-            required: true,
-            description:
-              'Whether the worker is marked as an assistant. Workers created by this tool are agents and start with false.',
           },
           created: {
             type: 'boolean',
@@ -229,7 +222,6 @@ export function createWorkerBuildTool({
         path: result.worker.path,
         avatar: result.worker.avatar,
         description: result.worker.description,
-        assistant: result.worker.assistant === true,
         created: result.created,
         updated: result.updated,
         renamed: result.renamed === true,

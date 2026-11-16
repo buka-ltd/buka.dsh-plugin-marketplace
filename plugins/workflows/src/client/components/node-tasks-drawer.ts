@@ -11,7 +11,6 @@ import { ClientModal, h } from '../element.ts'
 import { formatWaiting } from '../format.ts'
 import { fill } from '../i18n.ts'
 import {
-  claimantName,
   currentDefinition,
   currentJobDefinition,
   jobTasks,
@@ -21,7 +20,13 @@ import {
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import type { TaskSummary } from '../types.ts'
-import { renderDrawerHead, renderEmpty, renderExecutor, renderStatusTag } from './parts.ts'
+import {
+  renderDrawerHead,
+  renderEmpty,
+  renderExecutor,
+  renderStatusTag,
+  renderTaskActor,
+} from './parts.ts'
 
 /** 节点任务列表抽屉。 */
 export function renderNodeTasksDrawer(page: AppContext): React.ReactElement | null {
@@ -78,7 +83,7 @@ export function renderNodeTasksDrawer(page: AppContext): React.ReactElement | nu
 /** 一个任务行。 */
 function renderNodeTask(page: AppContext, task: TaskSummary): React.ReactElement {
   const { t, actions } = page
-  const claimant = claimantName(page.state, task.claimant, t, task.position)
+  const actor = renderTaskActor(page, task)
   const waiting =
     task.status === 'ready' || task.status === 'pending' ? formatWaiting(task.createdAt) : ''
   return h(
@@ -104,15 +109,12 @@ function renderNodeTask(page: AppContext, task: TaskSummary): React.ReactElement
       typeof task.resultSummary === 'string' && task.resultSummary !== ''
         ? h('span', { className: 'buka-workflows-taskCardSummary' }, task.resultSummary)
         : null,
-      claimant === '' && waiting === ''
+      actor === '' && waiting === ''
         ? null
         : h(
             'span',
             { className: 'buka-workflows-taskCardMeta' },
-            [
-              claimant === '' ? '' : `${t('taskClaimant')}: ${claimant}`,
-              waiting === '' ? '' : fill(t, 'boardCardWaiting', { duration: waiting }),
-            ]
+            [actor, waiting === '' ? '' : fill(t, 'boardCardWaiting', { duration: waiting })]
               .filter((part) => part !== '')
               .join(' · '),
           ),

@@ -54,7 +54,6 @@ export interface WorkerInfo {
   readonly driver: WorkerDriver
   /** 机器人的驱动 id（例如 `clock`）；智能体没有。 */
   readonly program?: string | undefined
-  readonly assistant: boolean
   readonly description?: string | undefined
   readonly avatar?: string | undefined
   /** 智能体的工作目录（附件相对路径的根）。 */
@@ -178,7 +177,12 @@ export interface TaskTypeDefinition {
    * 机器人没有会话与工具，静态后继只能由定义声明；创建的任务依赖刚完成的任务。
    */
   readonly creates?: readonly CreationDefinition[] | undefined
-  /** 仅人岗位：承担沟通的助理打工人标识符；null / 省略表示无助理。 */
+  /**
+   * 仅人岗位：承担沟通的助理打工人标识符；null / 省略表示无助理。
+   *
+   * 助理不是打工人身上的标记：这里点名谁，谁就在任务就绪后代办这张任务。
+   * 被点名的智能体没交出结果时整个作业失败（不做自动换人或人兜底）。
+   */
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
   readonly mode?: 'plan' | null | undefined
@@ -322,13 +326,6 @@ export interface TaskRecord {
   readonly result: TaskResult | null
   /** 技术失败原因（status=failed 时）。 */
   readonly error: string | null
-  /**
-   * 人任务：被点名的助理承办失败后置 true。
-   *
-   * 引擎据此不再自动重新派给同一个助理（v1 不自动换助理、不自动重试），
-   * 任务停在「待认领」由人兜底完成。
-   */
-  readonly assistantBlocked: boolean
   readonly createdAt: IsoTime
   readonly startedAt: IsoTime | null
   readonly finishedAt: IsoTime | null

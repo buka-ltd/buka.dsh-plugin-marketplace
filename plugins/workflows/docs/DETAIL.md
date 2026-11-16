@@ -17,7 +17,7 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 - **Result**: a summary text plus attachments. Results never drive the flow; they exist for whoever manages the job. A task's value is the follow-up tasks it creates.
 - **Channel**: a named dispatch route with an `id` and a human `label`, from one node to another, optionally limited to task types; back channels are explicit. Several channels may connect the same pair and their type whitelists may overlap; a task records the channel it took. A channel is a permission, not a pipe: the engine never reads the label.
 - **Start / end**: built-in nodes executed by the starter. The start node `content` is the job input the starter fills in, and its `next` list creates the initial tasks; the end node `content` is the final report, and the job only settles after the starter confirms receipt.
-- **Delivery rule**: chosen when the job is created — back to the starter (a session starter gets it delivered into that conversation, a human starter gets it as a board task), or to an assistant (named by worker identifier) acting as a secretary.
+- **Delivery rule**: chosen when the job is created — back to the starter (a session starter gets it delivered into that conversation, a human starter gets it as a board task), or to an assistant (an agent named by worker identifier) receiving it on the person's behalf.
 - **Job**: one workflow plus one input, pinned to a workflow version; numbering is per workflow. There are no cross-workflow jobs.
 - **Task**: a card on the board with seven states: pending / ready / running / completed / failed / blocked / cancelled. Every task except the start task records its inbound channel. Dependencies are explicit and the task graph is acyclic; each rework creates a new task record.
 - **Board**: rows are positions (including start / end), columns are queue / ready / running / done / exception.
@@ -62,10 +62,11 @@ Position labels, channel ids, job numbers, dependency lists and attachment lists
 ## Human tasks and assistants
 
 - A human task is an ordinary task from a human position. There is no "waiting for human" state; every task lives on the board.
+- An assistant is a **name on the workflow**, not a flag on a worker: a human task type names an `assistant` (an agent identifier) or `null`, and the delivery rule can name one for the final report. Validation only requires the identifier to exist and be an agent; any registered agent can be named, whether or not it was ever "marked" as an assistant.
 - A human task type names an `assistant` (an agent identifier) or `null`:
   - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets the whole task card (content, actions and their forms), talks to the person, and applies the action on their behalf.
   - `null`: the task waits in ready; the person claims it, picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything.
-- If the assistant fails the task returns to ready; no automatic switch, and the person can always finish it.
+- If the named assistant does not hand back a result (its session ends without submitting, the task times out, or the session cannot be resumed), the task fails and the job immediately fails: the other open tasks are cancelled with a written reason, and the job error names the task, the assistant and the cause. There is no automatic switch and the person cannot take over. Restarting failed jobs is not part of this stage (see #7 stage 2).
 
 ## Unavailable (derived state)
 
@@ -73,8 +74,8 @@ Workflows and jobs can enter a derived "unavailable" state: a worker identifier 
 
 - **Reference sources**: the executor of a position and the assistant of a task type in any workflow version; the pinned definition (position executors and task-type assistants) and the delivery assistant of a job. Legacy `name` values in v7 job snapshots are resolved as identifiers too.
 - **Workflow**: the list and detail show which identifier is missing, and the workflow cannot start a job. Saving a new definition still validates that identifiers exist (reading an existing definition does not validate; it only marks it unavailable).
-- **Job**: the job page marks it unavailable. A task whose executor is missing fails dispatch with an error that names the task, the position and the missing identifier; the task can be retried and other branches keep running. Human tasks whose assistant is missing stay claimable so a person can finish them.
-- **Difference from "disabled"**: disabled is a deliberate pause and existing jobs keep running; unavailable means a reference broke and must be rebound. History shows a placeholder avatar and "Deleted" for positions, tasks and claimants of deleted workers, keeping no tombstone records.
+- **Job**: the job page marks it unavailable. A task whose executor is missing fails dispatch with an error that names the task, the position and the missing identifier; the task can be retried and other branches keep running. Human tasks whose named assistant is missing are no longer dispatched automatically and stay claimable, so a person can finish them.
+- **Difference from "disabled"**: disabled is a deliberate pause and existing jobs keep running; unavailable means a reference broke and must be rebound. History shows a placeholder avatar and "Deleted" for positions, tasks and named assistants of deleted workers, keeping no tombstone records.
 
 Deleting a worker is a hard delete (registry entry, directory and workspace registration together), blocked only by running jobs that reference the identifier. The Workers delete dialog reads the impact through this plugin's read-only `ctx.bukaWorkflows.workerUsage(id)` service; when this plugin is not installed, workers treat it as having no job references.
 

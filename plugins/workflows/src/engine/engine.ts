@@ -182,7 +182,6 @@ function parseWorkerCatalog(raw: unknown): Map<string, WorkerInfo> {
       ...(typeof record.program === 'string' && record.program !== ''
         ? { program: record.program }
         : {}),
-      assistant: record.assistant === true,
       ...(typeof record.description === 'string' ? { description: record.description } : {}),
       ...(typeof record.avatar === 'string' ? { avatar: record.avatar } : {}),
       ...(typeof record.path === 'string' && record.path !== '' ? { path: record.path } : {}),
@@ -402,8 +401,9 @@ export class WorkflowEngine {
         availability: definitionAvailability(found.versionRecord.definition, workers),
       },
       graph: workflowGraph(found.versionRecord.definition, workers),
+      // 新建作业的「交给助理代收」候选：全部智能体（助理是点名，不是标记）。
       assistants: [...workers.values()]
-        .filter((worker) => worker.assistant && worker.driver === 'agent')
+        .filter((worker) => worker.driver === 'agent')
         .map((worker) => ({
           id: worker.id,
           name: worker.displayName,
@@ -526,7 +526,6 @@ export class WorkflowEngine {
           attemptIds: [],
           result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
           error: null,
-          assistantBlocked: false,
           createdAt: now,
           startedAt: now,
           finishedAt: now,
@@ -586,7 +585,7 @@ export class WorkflowEngine {
     }
   }
 
-  /** 校验交回方式：助理必须存在、是智能体、且标记为助理。 */
+  /** 校验交回方式：被点名的助理必须存在且是智能体（不看任何标记）。 */
   private resolveDelivery(
     _definition: WorkflowDefinition,
     delivery: DeliveryRule | undefined,
@@ -603,12 +602,6 @@ export class WorkflowEngine {
       throw new WorkflowError(
         'invalid-delivery',
         `assistant identifier "${worker.id}" must be an agent`,
-      )
-    }
-    if (!worker.assistant) {
-      throw new WorkflowError(
-        'invalid-delivery',
-        `worker identifier "${worker.id}" is not marked as an assistant in the Buka Workers plugin`,
       )
     }
     return { kind: 'assistant', id: worker.id }
@@ -1474,7 +1467,6 @@ export class WorkflowEngine {
         status: 'ready',
         error: null,
         claimant: null,
-        assistantBlocked: false,
         finishedAt: null,
         updatedAt: nowIso(),
       }))
@@ -1577,7 +1569,11 @@ export class WorkflowEngine {
     const job = this.store.getJob(jobId)
     if (job === undefined || job.status !== 'running') return
     for (const task of this.store.listTasks(jobId)) {
+      // 代办失败会立刻让作业失败并取消其余任务：后续的旧快照任务不再恢复。
+      const currentJob = this.store.getJob(jobId)
+      if (currentJob === undefined || currentJob.status !== 'running') break
       if (task.status !== 'running') continue
+      const assistant = task.claimant?.kind === 'assistant' ? task.claimant.name : null
       const attempt = this.store.listAttempts(task.id).find((entry) => entry.status === 'running')
       if (attempt !== undefined) {
         await this.store.updateAttempt(attempt.id, (current) => ({
@@ -1598,32 +1594,64 @@ export class WorkflowEngine {
         continue
       }
       if (attempt === undefined) {
-        await this.failTaskLocked(
-          jobId,
-          task.id,
-          'host restarted and the execution attempt was lost',
-        )
+        if (assistant === null) {
+          await this.failTaskLocked(
+            jobId,
+            task.id,
+            'host restarted and the execution attempt was lost',
+          )
+        } else {
+          this.busyAssistants.delete(assistant)
+          await this.failAssistantLocked(
+            jobId,
+            task,
+            assistant,
+            'host restarted and the execution attempt was lost',
+          )
+        }
         continue
       }
       const sessionId = attempt.sessionId
-      if (sessionId === null || executor.kind !== 'worker') {
-        await this.failTaskLocked(
-          jobId,
-          task.id,
-          'host restarted and the execution session was lost',
-        )
+      if (sessionId === null || (executor.kind !== 'worker' && assistant === null)) {
+        if (assistant === null) {
+          await this.failTaskLocked(
+            jobId,
+            task.id,
+            'host restarted and the execution session was lost',
+          )
+        } else {
+          this.busyAssistants.delete(assistant)
+          await this.failAssistantLocked(
+            jobId,
+            task,
+            assistant,
+            'host restarted and the execution session was lost',
+          )
+        }
         continue
       }
       const executorId = storedExecutorRef(executor) ?? ''
-      const resumed = await this.resumeAgentAttempt(jobId, task, attempt, executorId, sessionId)
+      const resumed = await this.resumeAgentAttempt(
+        jobId,
+        task,
+        attempt,
+        assistant ?? executorId,
+        sessionId,
+      )
       if (!resumed) {
-        if (task.claimant?.kind === 'assistant') {
-          await this.releaseAssistantLocked(jobId, task, 'assistant session could not be resumed')
-        } else {
+        if (assistant === null) {
           await this.failTaskLocked(
             jobId,
             task.id,
             'host restarted and the execution session could not be resumed',
+          )
+        } else {
+          this.busyAssistants.delete(assistant)
+          await this.failAssistantLocked(
+            jobId,
+            task,
+            assistant,
+            'host restarted and the assistant session could not be resumed',
           )
         }
       }
@@ -1795,7 +1823,7 @@ export class WorkflowEngine {
       const executor = task.assignee
       if (executor.kind === 'human') {
         const assistantName = this.assistantFor(job.definition, task.type)
-        if (assistantName === null || task.assistantBlocked) continue
+        if (assistantName === null) continue
         // 助理已不存在时不再自动派发：任务留在「待认领」，由人兜底完成；
         // 作业页按派生不可用标注，重新绑定助理后恢复自动承办。
         if (!workers.has(assistantName)) continue
@@ -2182,7 +2210,7 @@ export class WorkflowEngine {
       if (!snapshot.turnEnded) return false
       finish()
       if (input.kind === 'assistant') {
-        await this.releaseAssistantOutside(input.jobId, input.taskId, snapshot, input.worker)
+        await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker)
       } else {
         await this.failOutside(
           input.jobId,
@@ -2341,11 +2369,22 @@ export class WorkflowEngine {
       }
       this.active.delete(taskId)
       if (execution?.stopPoll != null) execution.stopPoll()
-      await this.failTaskLocked(
-        jobId,
-        taskId,
-        `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`,
-      )
+      const assistant = task.claimant?.kind === 'assistant' ? task.claimant.name : null
+      if (assistant === null) {
+        await this.failTaskLocked(
+          jobId,
+          taskId,
+          `task timed out after ${this.options.taskTimeoutMs}ms (worker: ${worker})`,
+        )
+      } else {
+        this.busyAssistants.delete(assistant)
+        await this.failAssistantLocked(
+          jobId,
+          task,
+          assistant,
+          `the task timed out after ${this.options.taskTimeoutMs}ms`,
+        )
+      }
       await this.recomputeLocked(jobId)
     })
   }
@@ -2368,49 +2407,68 @@ export class WorkflowEngine {
     }
   }
 
-  /** 助理失败（会话结束但未提交）：回到待认领。 */
-  private async releaseAssistantOutside(
+  /** 代办失败（会话结束未提交）：任务与整个作业一起失败。 */
+  private async failAssistantOutside(
     jobId: string,
     taskId: string,
     snapshot: TurnSnapshot,
-    worker: string,
+    assistant: string,
   ): Promise<void> {
     try {
       await this.store.runExclusive(jobId, async () => {
-        this.busyAssistants.delete(worker)
-        await this.releaseAssistantLocked(
+        this.busyAssistants.delete(assistant)
+        await this.failAssistantLocked(
           jobId,
           this.requireTask(jobId, taskId),
+          assistant,
           `assistant session ended without completing the task (stopReason: ${snapshot.stopReason ?? 'unknown'})`,
         )
         await this.recomputeLocked(jobId)
       })
     } catch (error) {
       this.logger?.warn?.(
-        `buka-workflows: could not release assistant task ${taskId}: ${describeError(error)}`,
+        `buka-workflows: could not fail the job for assistant task ${taskId}: ${describeError(error)}`,
       )
     }
   }
 
-  /** 助理失败后把任务放回「待认领」。 */
-  private async releaseAssistantLocked(
+  /** 代办失败的作业错误：写明是哪条任务、哪个代办者、什么原因。 */
+  private assistantFailureReason(
+    job: JobRecord,
+    task: TaskRecord,
+    assistant: string,
+    cause: string,
+  ): string {
+    const position = positionLabel(job.definition, task.position)
+    const type = taskTypeLabel(job.definition, task.type)
+    const worker =
+      assistant === '' ? '(unknown)' : `${this.workerDisplayName(assistant)} (${assistant})`
+    return (
+      `delegated task "${task.id}" (position "${position}" / ${task.position}, ` +
+      `type "${type}" / ${task.type}) failed: assistant ${worker} did not hand back a result: ${cause}`
+    )
+  }
+
+  /**
+   * 代办失败：任务标失败，整个作业进 `failed`，其余非终态任务取消。
+   *
+   * 被点名的智能体代办代表人的决策；没交出结果说明这个作业的结果不可信，
+   * 不再退回「待认领」让人接手（ADR 0022，取代 ADR 0010 第 6 条）。
+   */
+  private async failAssistantLocked(
     jobId: string,
     task: TaskRecord,
-    reason: string,
+    assistant: string,
+    cause: string,
   ): Promise<void> {
-    const now = nowIso()
-    const current = this.store.getTask(task.id)
-    if (current === undefined || current.status !== 'running') return
-    this.dropSessionTask(task.id)
-    await this.store.updateTask(task.id, (record) => ({
-      ...record,
-      status: 'ready',
-      claimant: null,
-      assistantBlocked: true,
-      updatedAt: now,
-    }))
-    await this.closeRunningAttempts(task.id, 'failed', reason)
-    await this.appendEvent(jobId, 'task/assistant-failed', { taskId: task.id, reason })
+    const job = this.store.getJob(jobId)
+    if (job === undefined || job.status !== 'running') return
+    const reason = this.assistantFailureReason(job, task, assistant, cause)
+    await this.failTaskLocked(jobId, task.id, reason)
+    await this.failJobLocked(job, reason, 'job/assistant-failed', {
+      taskId: task.id,
+      assistant,
+    })
   }
 
   /** 标记任务技术失败。 */
@@ -2604,20 +2662,36 @@ export class WorkflowEngine {
 
   /** 超预算：取消非终态任务，作业 failed。 */
   private async failJobForBudget(job: JobRecord): Promise<void> {
+    const reason = `workflow exceeded its maxDurationHours budget (${job.definition.budgets.maxDurationHours}h)`
+    await this.failJobLocked(job, reason, 'job/budget-exceeded')
+  }
+
+  /**
+   * 失败整个作业：取消所有非终态任务（写清终止原因），作业进 `failed`，
+   * 追加作业事件。代办失败与超预算共用这一条路径。
+   */
+  private async failJobLocked(
+    job: JobRecord,
+    reason: string,
+    event: string,
+    data: Record<string, unknown> = {},
+  ): Promise<void> {
     const now = nowIso()
     for (const task of this.store.listTasks(job.id)) {
       if (!isOpenTaskStatus(task.status)) continue
-      this.cancelActive(task.id, 'workflow budget exceeded')
+      if (task.claimant?.kind === 'assistant') this.busyAssistants.delete(task.claimant.name)
+      this.cancelActive(task.id, reason)
       await this.store.updateTask(task.id, (current) => ({
         ...current,
         status: 'cancelled',
+        error: reason,
         finishedAt: now,
         updatedAt: now,
       }))
-      await this.closeRunningAttempts(task.id, 'cancelled', 'workflow budget exceeded')
+      await this.closeRunningAttempts(task.id, 'cancelled', reason)
       this.dropSessionTask(task.id)
+      await this.appendEvent(job.id, 'task/cancelled', { taskId: task.id, error: reason })
     }
-    const reason = `workflow exceeded its maxDurationHours budget (${job.definition.budgets.maxDurationHours}h)`
     await this.store.updateJob(job.id, (current) => ({
       ...current,
       status: 'failed',
@@ -2625,7 +2699,7 @@ export class WorkflowEngine {
       finishedAt: now,
       updatedAt: now,
     }))
-    await this.appendEvent(job.id, 'job/budget-exceeded', { error: reason })
+    await this.appendEvent(job.id, event, { error: reason, ...data })
   }
 
   // ---------------------------------------------------------------------

@@ -1,13 +1,13 @@
 /**
  * 「打工人」页面的打工人相关 HTTP 路由。
  *
- * 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、助理标记、
+ * 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、
  * 改展示名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 /
  * 打开会话）都由浏览器一半走 DSH Client Service，这里只处理磁盘事实。
  *
  * 打工人按不可变标识符 `id` 寻址；`name` 只是可选展示名。创建时 `id` 必填，
  * 之后任何入口都不能改它。机器人（内建 clock）只读：创建 / 删除 / 改名 /
- * 改字段都会被拒绝，助理标记只对智能体开放。
+ * 改字段都会被拒绝。
  *
  * @module @buka/dsh-plugin-workers/routes/workers
  */
@@ -30,7 +30,6 @@ import {
   listWorkers,
   readWorkerRegistry,
   renameWorker,
-  setWorkerAssistant,
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
@@ -67,9 +66,6 @@ const MODELS_ROUTE = '/buka-workers/models'
 
 /** 页面给智能体设置新会话模型用的路由。 */
 const MODEL_ROUTE = '/buka-workers/model'
-
-/** 页面标记 / 取消助理（只有智能体可设）用的路由。 */
-const ASSISTANT_ROUTE = '/buka-workers/assistant'
 
 /** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = '/buka-workers/rename'
@@ -529,66 +525,6 @@ export function registerWorkerRoutes(
         },
       }),
     `buka-workers: POST ${MODEL_ROUTE}`,
-  )
-
-  webCtx.effect(
-    () =>
-      webCtx.webServer.register({
-        kind: 'exact',
-        path: ASSISTANT_ROUTE,
-        handler: async (req, res) => {
-          if (rejected(webCtx, req, res)) return
-          if (req.method !== 'POST') {
-            sendMethodNotAllowed(res, 'POST')
-            return
-          }
-          const body = await readJsonBody(req, res)
-          if (body === undefined) return
-
-          const id = typeof body?.id === 'string' ? body.id.trim() : ''
-          if (!isResolvableWorkerId(id)) {
-            sendError(res, 400, 'invalid-id', `打工人标识符不合法：${String(body?.id)}`)
-            return
-          }
-          const assistant = body?.assistant
-          if (typeof assistant !== 'boolean') {
-            sendError(res, 400, 'invalid-assistant', 'assistant 必须是布尔值')
-            return
-          }
-
-          try {
-            const result = await serializeRegistry(() =>
-              setWorkerAssistant({ file: registryFile, id, assistant }),
-            )
-            webCtx.logger?.info?.(
-              'buka-workers: 打工人 %s 的助理标记改为 %s',
-              id,
-              String(assistant),
-            )
-            sendJson(res, 200, { ok: true, worker: result.worker })
-          } catch (error) {
-            switch (errorCode(error)) {
-              case 'invalid-id':
-              case 'invalid-assistant':
-                sendError(res, 400, String(errorCode(error)), describeError(error))
-                return
-              case 'unknown-worker':
-                sendError(res, 404, 'unknown-worker', describeError(error))
-                return
-              case 'robot-worker':
-                sendError(res, 409, 'robot-worker', describeError(error))
-                return
-              case 'registry-unreadable':
-                sendError(res, 409, 'registry-unreadable', describeError(error))
-                return
-              default:
-                webCtx.logger?.warn?.('buka-workers: 修改助理标记失败：%s', describeError(error))
-                sendError(res, 500, 'assistant-failed', `修改助理标记失败：${describeError(error)}`)
-            }
-          }
-        },
-      }),
-    `buka-workers: POST ${ASSISTANT_ROUTE}`,
   )
 
   webCtx.effect(

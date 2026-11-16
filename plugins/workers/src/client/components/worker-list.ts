@@ -5,7 +5,7 @@
  * 一句职责与行内动作。整行点击进入详情，行内动作区自己挡住冒泡。
  *
  * 机器人（clock）只读：卡片展示驱动与职责，没有新会话 / 挂载 /
- * 删除 / 助理入口，也不进入配置视图。智能体可以标记 / 取消助理。
+ * 删除入口，也不进入配置视图。
  *
  * @module @buka/dsh-plugin-workers/client/components/worker-list
  */
@@ -38,7 +38,7 @@ import { MountedTag } from './common.ts'
 type WorkerActions = ReturnType<typeof createWorkerActions>
 
 /**
- * 一条打工人卡片：名称、驱动 / 助理 / skills / 挂载状态、职责与
+ * 一条打工人卡片：名称、驱动 / skills / 挂载状态、职责与
  * 动作与删除确认。机器人只读。
  *
  */
@@ -54,7 +54,7 @@ export function WorkerCard({
   actions: WorkerActions
 }): ReactElement {
   const { busy, mutating, corrupt, openDetail } = state
-  const { openWorker, mountWorker, openDeleteDialog, toggleAssistant } = workerActions
+  const { openWorker, mountWorker, openDeleteDialog } = workerActions
   const skills = skillsOf(worker)
   const robot = isRobotWorker(worker)
   const missing = !robot && worker.exists === false
@@ -98,22 +98,6 @@ export function WorkerCard({
               },
               busy === `mount:${worker.id}` ? t('mounting') : t('mount'),
             ),
-        h(
-          Button,
-          {
-            key: 'assistant',
-            variant: 'outline',
-            size: 'sm',
-            disabled: anyBusy || busy === `assistant:${worker.id}`,
-            'aria-label': `${worker.assistant === true ? t('clearAssistant') : t('setAssistant')} ${workerDisplayName(worker)}`,
-            onClick: () => toggleAssistant(worker),
-          },
-          busy === `assistant:${worker.id}`
-            ? t('saving')
-            : worker.assistant === true
-              ? t('clearAssistant')
-              : t('setAssistant'),
-        ),
         // 删除与其它行内动作共用同一套按钮（outline + sm + 危险色）。
         // 点它先打开确认弹窗，弹窗读完影响面才允许确认。
         h(
@@ -171,7 +155,6 @@ export function WorkerCard({
             workerIdentityLabel(worker),
           ),
           h(Tag, { tone: robot ? 'info' : 'neutral' }, robot ? t('driverRobot') : t('driverAgent')),
-          worker.assistant === true ? h(Tag, { tone: 'success' }, t('assistantBadge')) : null,
           robot ? null : h(MountedTag, { t, worker }),
           robot ? null : h(Tag, { tone: 'neutral' }, countBadge(skills.length, t)),
           missing ? h(Tag, { tone: 'warning' }, t('missingDir')) : null,
@@ -205,8 +188,7 @@ export function WorkerList({
   state: WorkersPageState
   actions: WorkerActions
 }): ReactElement {
-  const { corrupt, registry, list, data, workers, assistantOnly } = state
-  const visible = assistantOnly ? workers.filter((worker) => worker.assistant === true) : workers
+  const { corrupt, registry, list, data, workers } = state
   const corruptNotice = corrupt
     ? h(
         'p',
@@ -244,16 +226,12 @@ export function WorkerList({
       : null,
     data === null
       ? null
-      : visible.length === 0 && !list.loading && !corrupt
-        ? h(
-            'p',
-            { className: 'buka-workers-empty' },
-            assistantOnly ? t('assistantEmpty') : t('empty'),
-          )
+      : workers.length === 0 && !list.loading && !corrupt
+        ? h('p', { className: 'buka-workers-empty' }, t('empty'))
         : h(
             'ul',
             { className: 'buka-workers-cards' },
-            ...visible.map((worker) =>
+            ...workers.map((worker) =>
               h(WorkerCard, { t, worker, state, actions, key: worker.id }),
             ),
           ),

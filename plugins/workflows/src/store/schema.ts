@@ -163,7 +163,8 @@ const taskRecordSchema = z
     attemptIds: z.array(z.string()),
     result: taskResultSchema.nullable(),
     error: z.string().nullable(),
-    assistantBlocked: z.boolean(),
+    // 旧任务记录可能残留 `assistantBlocked`；它不是当前格式的一部分，
+    // 由 `.passthrough()` 接受并忽略。
     createdAt: z.string(),
     startedAt: z.string().nullable(),
     finishedAt: z.string().nullable(),

@@ -26,13 +26,12 @@ import {
   setWorkerModel,
 } from '../plugins/workers/src/worker-store.ts'
 
-test('workers service: summarizeWorker keeps orchestration fields and driver/assistant', () => {
+test('workers service: summarizeWorker keeps orchestration fields and driver/program', () => {
   const summary = summarizeWorker({
     id: 'writer',
     name: '',
     driver: 'agent',
     program: '',
-    assistant: true,
     path: '/tmp/writer',
     createdAt: '2026-01-01T00:00:00.000Z',
     exists: true,
@@ -48,7 +47,7 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/ass
   assert.equal(summary.displayName, 'writer')
   assert.equal(summary.driver, 'agent')
   assert.equal(summary.program, '')
-  assert.equal(summary.assistant, true)
+  assert.equal('assistant' in summary, false, 'the summary has no assistant flag')
   assert.equal(
     summary.avatar,
     defaultAvatarFor('writer'),
@@ -71,7 +70,6 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/ass
     name: 'clock',
     driver: 'robot',
     program: 'clock',
-    assistant: false,
     path: '',
     createdAt: '2026-11-12T00:00:00.000Z',
     exists: false,
@@ -84,7 +82,6 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/ass
   })
   assert.equal(clock.driver, 'robot')
   assert.equal(clock.program, 'clock')
-  assert.equal(clock.assistant, false)
 })
 
 test('workers service: readSessionOutcome returns the last assistant text and turn reason', () => {
@@ -421,7 +418,6 @@ test('workers service: list returns summarized registry workers including the bu
     assert.equal(writer.name, '写作助手')
     assert.equal(writer.displayName, '写作助手')
     assert.equal(writer.driver, 'agent')
-    assert.equal(writer.assistant, false)
     assert.equal(writer.description, '')
     assert.ok(typeof writer.avatar === 'string' && writer.avatar !== '')
     assert.equal(writer.agents.exists, true)
@@ -429,7 +425,6 @@ test('workers service: list returns summarized registry workers including the bu
     const clock = listed.workers.find((worker) => worker.id === 'clock')
     assert.equal(clock.driver, 'robot')
     assert.equal(clock.program, 'clock')
-    assert.equal(clock.assistant, false)
     assert.equal(clock.exists, false)
     assert.deepEqual(clock.skills, [])
   } finally {

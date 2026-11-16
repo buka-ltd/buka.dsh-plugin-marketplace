@@ -309,7 +309,6 @@ test('buildWorker：新建打工人写目录、登记、AGENTS.md、CLAUDE.md �
     assert.equal(result.updated, false)
     assert.equal(result.worker.name, '简报')
     assert.equal(result.worker.driver, 'agent')
-    assert.equal(result.worker.assistant, false, 'build 工具创建的智能体默认不是助理')
     assert.equal(result.worker.avatar, 'owl')
     assert.equal(result.agentsBytes, Buffer.byteLength(agents, 'utf8'))
     assert.equal(result.mounted, true)
@@ -589,7 +588,6 @@ function toolOutput(overrides = {}) {
     path: '/tmp/workers/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
-    assistant: false,
     created: true,
     updated: false,
     renamed: false,
@@ -618,7 +616,6 @@ function buildResult(overrides = {}) {
       avatar: 'owl',
       description: '把会议记录整理成三点结论',
       createdAt: '2026-01-01T00:00:00.000Z',
-      assistant: false,
     },
     created: true,
     updated: false,
@@ -662,8 +659,6 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
   assert.equal(tool.output.schema.properties.workspaceId.oneOf.length, 2)
   assert.equal(tool.output.schema.properties.renamed.type, 'boolean')
   assert.equal(tool.output.schema.properties.previousName.oneOf.length, 2)
-  assert.equal(tool.output.schema.properties.assistant.required, true)
-  assert.equal(tool.output.schema.properties.assistant.type, 'boolean')
 
   const agent = { id: 'root' }
   const output = await tool.execute({ id: 'writer', name: 'writer', agents: '# x' }, { agent })
@@ -675,7 +670,6 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
     path: '/tmp/workers/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
-    assistant: false,
     created: true,
     updated: false,
     renamed: false,
@@ -706,7 +700,6 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
     path: '/tmp/workers/writer',
     avatar: 'owl',
     description: '把会议记录整理成三点结论',
-    assistant: false,
     created: false,
     updated: true,
     renamed: false,
@@ -1146,7 +1139,6 @@ test('buildWorker：机器人只读，构建工具不能修改它', async () => 
           program: 'clock',
           createdAt: '2026-01-01T00:00:00.000Z',
           description: '到点完成任务',
-          assistant: false,
         },
       ],
     })

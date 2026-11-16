@@ -2,9 +2,10 @@
  * 打工人存储层的数据结构。
  *
  * 登记表是 version 4：每个打工人有不可变标识符 `id`（目录名与引用键）、可选
- * 展示名 `name`（空串表示未设置、显示标识符）、`driver`（agent / robot）与
- * `assistant` 标记。智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，
- * 没有目录，只登记 `program` id（稳定契约，v1 只有 `clock`）。
+ * 展示名 `name`（空串表示未设置、显示标识符）与 `driver`（agent / robot）。
+ * 智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，没有目录，只登记
+ * `program` id（稳定契约，v1 只有 `clock`）。助理不是打工人身上的标记，而是
+ * 工作流上的点名（见 workflows 的 ADR 0022）。
  *
  * @module @buka/dsh-plugin-workers/store/types
  */
@@ -44,8 +45,6 @@ export interface WorkerRecord {
   createdAt: string
   avatar: string
   description: string
-  /** 只有智能体可以是助理（人任务的承办者）。 */
-  assistant: boolean
   /** 智能体新会话使用的模型；没有配置时跟随宿主默认模型。机器人没有。 */
   model?: WorkerModelSelection | undefined
 }
@@ -62,7 +61,6 @@ export interface WorkerRecordInput {
   createdAt: string
   avatar?: string | undefined
   description?: string | undefined
-  assistant?: boolean | undefined
   model?: WorkerModelSelection | null | undefined
 }
 

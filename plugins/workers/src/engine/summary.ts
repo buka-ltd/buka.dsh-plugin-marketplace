@@ -13,9 +13,10 @@ import type { WorkerListEntry } from '../worker-store.ts'
  *
  * `id` 是不可变标识符（引用键），`name` 是可选展示名（空串表示未设置，展示时
  * 回退到 `id`）；两者都原样给出，让消费方自己决定显示哪个。`driver` /
- * `assistant` / `program` 是工作流的执行者契约：智能体可以开会话，机器人
- * （clock）由工作流按 `program` 驱动、不建会话。机器人没有目录，
- * `exists` / `mounted` 恒为 false，`skills` 为空。
+ * `program` 是工作流的执行者契约：智能体可以开会话，机器人（clock）由工作流
+ * 按 `program` 驱动、不建会话。机器人没有目录，`exists` / `mounted` 恒为
+ * false，`skills` 为空。助理不是这里的一个字段：它由工作流对人任务类型的
+ * 点名决定。
  *
  */
 export function summarizeWorker(worker: WorkerListEntry): Record<string, unknown> {
@@ -26,7 +27,6 @@ export function summarizeWorker(worker: WorkerListEntry): Record<string, unknown
     displayName: workerDisplayName(worker ?? {}),
     driver: worker?.driver === 'robot' ? 'robot' : 'agent',
     program: typeof worker?.program === 'string' ? worker.program : '',
-    assistant: worker?.assistant === true,
     path: worker?.path ?? '',
     createdAt: worker?.createdAt ?? null,
     avatar: resolveAvatar(worker?.avatar, worker?.id),

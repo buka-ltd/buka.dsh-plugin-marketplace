@@ -32,7 +32,6 @@ export const BUILTIN_WORKERS: ReadonlyArray<WorkerRecord> = Object.freeze([
     createdAt: '2026-11-12T00:00:00.000Z',
     avatar: '',
     description: '到点完成任务的定时打工人：任务 payload 带 until，到点后自动完成。',
-    assistant: false,
   },
 ])
 

@@ -18,6 +18,7 @@ import {
   assistantIdentity,
   describeMissingWorker,
   isWorkerMissing,
+  taskActor,
   workerIdentityText,
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
@@ -387,6 +388,30 @@ export function renderExecutor(page: AppContext, executor: Executor | null | und
 export function renderAssistant(page: AppContext, id: string): string {
   const label = workerIdentityText(assistantIdentity(page.state, id))
   return isWorkerMissing(page.state, id) ? `${label} · ${page.t('workerDeleted')}` : label
+}
+
+/**
+ * 任务「谁在办」：人任务说「代办：某人」/「待你办理」/「你在办理」，
+ * 打工人任务只给执行者。
+ */
+export function renderTaskActor(
+  page: AppContext,
+  task: { position?: string; type?: string; status?: string },
+): string {
+  const { t } = page
+  const actor = taskActor(page.state, task)
+  switch (actor.kind) {
+    case 'assistant':
+      return `${t('taskDelegatedTo')}: ${renderAssistant(page, actor.assistantId)}`
+    case 'waiting':
+      return t('taskWaitingForYou')
+    case 'handling':
+      return t('taskYouAreHandling')
+    case 'executor':
+      return actor.missing ? `${actor.text} · ${t('workerDeleted')}` : actor.text
+    default:
+      return ''
+  }
 }
 
 /** 字段类型 → 展示文本。 */

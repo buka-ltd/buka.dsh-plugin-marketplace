@@ -6,6 +6,7 @@
  * - 任务依赖完成才 `ready`；依赖被取消 / 阻塞时 `blocked`；
  * - 认领把 `ready` 变成 `running`；
  * - 技术失败进 `failed`，重试把同一个任务退回 `ready`（新增执行记录，历史保留）；
+- 代办失败的作业直接 `failed`，任务不退回 `ready`（ADR 0022）；
  * - 失败任务被用户放弃（取消）后，依赖它的任务 `blocked`；
  * - 业务「不通过」不是状态：结果里写 `result: "fail"`，由执行者再派新任务。
  *
@@ -47,8 +48,7 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]
   pending: ['ready', 'blocked', 'cancelled'],
   // ready -> completed：结束任务投递即完成；人可以直接兜底完成待认领任务。
   ready: ['running', 'completed', 'blocked', 'cancelled'],
-  // running -> ready：助理承办失败 / 会话丢失后回到「待认领」（不自动换助理）。
-  running: ['completed', 'failed', 'cancelled', 'ready'],
+  running: ['completed', 'failed', 'cancelled'],
   completed: [],
   failed: ['ready', 'cancelled'],
   blocked: ['cancelled'],

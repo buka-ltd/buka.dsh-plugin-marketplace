@@ -20,7 +20,6 @@ const SNAPSHOT = {
       name: '',
       driver: 'agent',
       program: '',
-      assistant: false,
       path: '/workers/writer',
       description: '写代码',
       mounted: true,
@@ -33,7 +32,6 @@ const SNAPSHOT = {
       name: '画家',
       driver: 'agent',
       program: '',
-      assistant: false,
       path: '/workers/painter',
       description: '',
       mounted: false,
@@ -46,7 +44,6 @@ const SNAPSHOT = {
       name: 'clock',
       driver: 'robot',
       program: 'clock',
-      assistant: false,
       path: '',
       description: '到点完成任务的定时打工人',
       mounted: false,
@@ -103,7 +100,6 @@ test('createWorkersListTool：工具名、输出 schema 与依赖校验', () => 
   assert.equal(workerProps.agentsFile.required, true)
   assert.equal(workerProps.driver.required, true)
   assert.deepEqual(workerProps.driver.enum, ['agent', 'robot'])
-  assert.equal(workerProps.assistant.required, true)
   assert.equal(workerProps.program.required, true)
 
   assert.throws(() => createWorkersListTool(), /defineTool is required/)
@@ -132,13 +128,13 @@ test('createWorkersListTool：默认输出包含技能清单，并把调用参�
   assert.deepEqual(result.workers[0].skills, [{ name: 'foo' }, { name: 'bar' }])
   assert.deepEqual(result.workers[1].skills, [])
   assert.equal(result.workers[1].description, '')
-  // 输出带 driver / assistant / program：工作流按 driver 分派，机器人没有会话。
+  // 输出带 driver / program：工作流按 driver 分派，机器人没有会话。
   assert.equal(result.workers[0].driver, 'agent')
-  assert.equal(result.workers[0].assistant, false)
+  assert.equal('assistant' in result.workers[0], false, 'no assistant flag in the output')
   assert.equal(result.workers[0].program, null)
   assert.equal(result.workers[2].driver, 'robot')
   assert.equal(result.workers[2].program, 'clock')
-  assert.equal(result.workers[2].assistant, false)
+  assert.equal('assistant' in result.workers[2], false)
 })
 
 test('createWorkersListTool：isSkillsVisible 为 false 时输出与渲染都不含技能清单', async () => {

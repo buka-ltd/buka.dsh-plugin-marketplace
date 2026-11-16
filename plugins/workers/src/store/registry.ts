@@ -4,11 +4,13 @@
  * 登记文件是插件唯一的打工人清单；写操作遇到损坏的登记文件必须拒绝，绝不覆盖
  * 用户文件。新建的打工人目录由 `agents.ts` 的 `ensureWorkerDirectory` 补模板。
  *
- * 格式为 version 4：每条打工人有不可变标识符 `id`、可选展示名 `name`、
- * `driver` / `assistant`。读 version 1 / 2 / 3 旧表时在内存里迁移：`id` 取
- * 旧条目的 `name`，`name` 置空；下一次写入落盘成 version 4。version 2 的
- * `driver: "program"` 读成 `"robot"`。内建机器人（clock）由 `BUILTIN_WORKERS`
- * 提供：读旧表时补到视图里，写回前由 `ensureBuiltinWorkers` 落盘一次。
+ * 格式为 version 4：每条打工人有不可变标识符 `id`、可选展示名 `name` 与
+ * `driver`。读 version 1 / 2 / 3 旧表时在内存里迁移：`id` 取旧条目的 `name`，
+ * `name` 置空；下一次写入落盘成 version 4。version 2 的 `driver: "program"`
+ * 读成 `"robot"`。旧表里可能残留 `assistant` 字段：它不是打工人身份的一部分，
+ * 读取时直接丢弃，写回时不再落盘（助理改为工作流上的点名）。内建机器人
+ * （clock）由 `BUILTIN_WORKERS` 提供：读旧表时补到视图里，写回前由
+ * `ensureBuiltinWorkers` 落盘一次。
  *
  * @module @buka/dsh-plugin-workers/store/registry
  */
@@ -116,7 +118,7 @@ export function normalizeWorkerNameInput(value: unknown): string {
  * - `driver` 缺失（version 1 旧条目）或取值写坏时按 `agent` 处理；
  *   version 2 的 `program` 取值迁移成 `robot`；
  * - 机器人条目必须有非空 `program` id，智能体条目必须有非空 `path`；
- * - `assistant` 只对智能体生效：机器人不能被标记成助理。
+ * - 旧表里的 `assistant` 字段直接丢弃，不进入记录。
  */
 function readEntry(entry: Record<string, unknown>, version: number): WorkerRecord | undefined {
   const legacy = version < WORKER_REGISTRY_VERSION
@@ -153,7 +155,6 @@ function readEntry(entry: Record<string, unknown>, version: number): WorkerRecor
       0,
       WORKER_DESCRIPTION_MAX_LENGTH,
     ),
-    assistant: driver === 'agent' && entry.assistant === true,
     ...(model === undefined ? {} : { model }),
   }
 }
@@ -165,7 +166,7 @@ function readEntry(entry: Record<string, unknown>, version: number): WorkerRecor
  * - agent 记录补 `path`、清空 `program`；robot 记录补 `program`、清空 `path`；
  * - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐），默认头像按
  *   标识符哈希，改名不会让头像漂移；
- * - 描述折叠空白并截断；`assistant` 只对 agent 生效。
+ * - 描述折叠空白并截断。
  */
 function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
   const driver: WorkerDriver = worker.driver === 'robot' ? 'robot' : 'agent'
@@ -183,7 +184,6 @@ function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
       0,
       WORKER_DESCRIPTION_MAX_LENGTH,
     ),
-    assistant: driver === 'agent' && worker.assistant === true,
     ...(model === undefined ? {} : { model }),
   }
 }
@@ -194,7 +194,7 @@ function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
  * - 文件不存在：`{ version: 4, workers: [], file }`（内建打工人由调用方合并）；
  * - 读不了 / 不是合法 JSON / 版本不可读 / `workers` 不是数组：`corrupt: true`
  *   且 `workers: []`（写操作必须据此拒绝，绝不覆盖原文件）；
- * - version 1 旧表按 `driver: "agent"`、`assistant: false` 迁移；
+ * - version 1 旧表按 `driver: "agent"` 迁移；
  *   version 2 的 `driver: "program"` 读成 `"robot"`；
  *   version 1 / 2 / 3 的旧名字迁移成 `id`，`name` 置空；
  * - 条目必须有能定位的 `id`（智能体还要有非空 `path`，机器人要有 `program`），
@@ -256,8 +256,8 @@ export async function readWorkerRegistry({ file }: { file?: string | undefined }
  * 原子写打工人登记表（临时文件 + rename，权限 0600）。
  *
  * 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。写入总是
- * 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` / `assistant`
- * 在这里补齐。
+ * 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` 在这里补齐，
+ * 旧表残留的 `assistant` 不落盘。
  *
  */
 export async function writeWorkerRegistry({
@@ -284,7 +284,6 @@ export async function writeWorkerRegistry({
           createdAt: worker.createdAt,
           avatar: worker.avatar,
           description: worker.description,
-          assistant: false,
         }
       }
       return {
@@ -295,7 +294,6 @@ export async function writeWorkerRegistry({
         createdAt: worker.createdAt,
         avatar: worker.avatar,
         description: worker.description,
-        assistant: worker.assistant,
         ...(worker.model === undefined ? {} : { model: worker.model }),
       }
     }),
@@ -368,15 +366,6 @@ export function invalidDescriptionError(description: unknown): Error & { code: s
     `打工人描述不合法：需要不超过 ${WORKER_DESCRIPTION_MAX_LENGTH} 个字符的单行文本（收到 ${String(description)}）`,
   )
   return Object.assign(error, { code: 'invalid-description' })
-}
-
-/**
- * 生成「助理标记不合法」错误。
- *
- */
-export function invalidAssistantError(assistant: unknown): Error & { code: string } {
-  const error = new Error(`助理标记不合法：需要布尔值（收到 ${String(assistant)}）`)
-  return Object.assign(error, { code: 'invalid-assistant' })
 }
 
 /**
@@ -512,7 +501,6 @@ export async function addWorker({
     createdAt: new Date().toISOString(),
     avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(workerId, used),
     description: cleanDescription,
-    assistant: false,
   }
   await writeWorkerRegistry({ file: registryFile, workers: [worker, ...registry.workers] })
   return { worker, created: true }
@@ -684,43 +672,6 @@ export async function setWorkerDescription({
   if (current.driver !== 'agent') throw robotWorkerError(workerId)
 
   const worker = { ...current, description: clean }
-  await writeWorkerRegistry({
-    file: registryFile,
-    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
-  })
-  return { worker }
-}
-
-/**
- * 设置 / 取消一个智能体的助理标记。
- *
- * 只有智能体可以是助理（人任务的承办者）；机器人只读，抛
- * `code = 'robot-worker'`。`assistant` 必须是布尔值，否则抛
- * `code = 'invalid-assistant'`。
- *
- */
-export async function setWorkerAssistant({
-  file,
-  id,
-  assistant,
-}: {
-  file?: string | undefined
-  id?: string | undefined
-  assistant?: unknown
-} = {}): Promise<{ worker: WorkerRecord }> {
-  const registryFile = requireRegistryFile(file)
-  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
-  if (typeof assistant !== 'boolean') throw invalidAssistantError(assistant)
-
-  const registry = await readWorkerRegistry({ file: registryFile })
-  if (registry.corrupt) throw registryUnreadableError(registryFile)
-
-  const workerId = id.trim()
-  const current = findWorker(registry, workerId)
-  if (current === undefined) throw unknownWorkerError(workerId)
-  if (current.driver !== 'agent') throw robotWorkerError(workerId)
-
-  const worker = { ...current, assistant }
   await writeWorkerRegistry({
     file: registryFile,
     workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),

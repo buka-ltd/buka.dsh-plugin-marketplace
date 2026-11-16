@@ -13,7 +13,6 @@ import { fill } from '../i18n.ts'
 import {
   type BoardRow,
   boardRows,
-  claimantName,
   currentDefinition,
   currentJobDefinition,
   currentStarter,
@@ -23,7 +22,7 @@ import {
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import type { TaskSummary } from '../types.ts'
-import { renderEmpty, renderExecutor, renderStatusTag } from './parts.ts'
+import { renderEmpty, renderExecutor, renderStatusTag, renderTaskActor } from './parts.ts'
 
 /** 看板列。 */
 const COLUMNS = [
@@ -202,7 +201,7 @@ function renderBoardCard(
   if (typeof task.attachmentCount === 'number' && task.attachmentCount > 0) {
     meta.push(fill(t, 'boardCardAttachments', { n: task.attachmentCount }))
   }
-  const claimant = claimantName(page.state, task.claimant, t, task.position)
+  const actor = renderTaskActor(page, task)
   if (task.status === 'ready' || task.status === 'pending') {
     const waiting = formatWaiting(task.createdAt)
     if (waiting !== '') meta.push(fill(t, 'boardCardWaiting', { duration: waiting }))
@@ -233,13 +232,7 @@ function renderBoardCard(
         ),
         compact ? renderStatusTag(t, task.status, 'task') : null,
       ),
-      claimant === ''
-        ? null
-        : h(
-            'span',
-            { className: 'buka-workflows-taskCardMeta' },
-            `${t('taskClaimant')}: ${claimant}`,
-          ),
+      actor === '' ? null : h('span', { className: 'buka-workflows-taskCardMeta' }, actor),
       summary === '' ? null : h('span', { className: 'buka-workflows-taskCardSummary' }, summary),
       meta.length === 0
         ? null

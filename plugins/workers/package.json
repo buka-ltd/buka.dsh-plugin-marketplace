@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-workers",
   "version": "1.0.0",
-  "description": "在侧边栏管理打工人：智能体 / 机器人两种驱动、助理标记、项目 skills 与 AGENTS.md；自动迁移旧 robots 插件的数据。",
+  "description": "在侧边栏管理打工人：每个打工人有不可变标识符、可选展示名、AGENTS.md 与项目 skills；智能体跑 DSH 会话，机器人是固定程序（v1 内建 clock）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

@@ -352,15 +352,6 @@ const zh = {
   openDetail: '打开详情',
   driverAgent: '智能体',
   driverRobot: '机器人',
-  assistantBadge: '助理',
-  setAssistant: '设为助理',
-  clearAssistant: '取消助理',
-  assistantSet: '已设为助理。',
-  assistantCleared: '已取消助理。',
-  assistantSaveFailed: '修改助理标记失败：',
-  filterAssistants: '只看助理',
-  showAllWorkers: '全部打工人',
-  assistantEmpty: '还没有标记为助理的打工人。',
   robotReadOnly: '机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
@@ -446,7 +437,6 @@ function worker(id, avatar, description = '', overrides = {}) {
     name: '',
     driver: 'agent',
     program: '',
-    assistant: false,
     path: `/Users/x/.cache/dsh-plugin-workers/workers/${id}`,
     avatar,
     description,
@@ -506,7 +496,6 @@ function listData() {
  *   renameSaving?: boolean,
  *   renameError?: string | null,
  *   tab?: string,
- *   assistantOnly?: boolean,
  * }} [options]
  * @returns {Array<any>}
  */
@@ -525,7 +514,6 @@ function states({
   modelSaving = false,
   modelError = null,
   tab = 'agents',
-  assistantOnly = false,
   deleteDialog = { target: null, impact: null, loading: false, error: null, saving: false },
 } = {}) {
   return [
@@ -570,7 +558,6 @@ function states({
     false, // installing
     { status: 'unavailable', repos: [] }, // favourites
     null, // notice
-    assistantOnly, // assistantOnly
   ]
 }
 
@@ -847,7 +834,6 @@ test('打工人页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
   // 没有新会话 / 挂载 / 删除 / 助理入口，也不显示目录缺失警告。
   assert.equal(list.texts.includes('新会话'), false)
   assert.equal(list.texts.includes('删除'), false)
-  assert.equal(list.texts.includes('设为助理'), false)
   assert.equal(list.texts.includes('目录缺失'), false)
 
   const card = findNode(
@@ -864,51 +850,20 @@ test('打工人页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
   assert.equal(title?.props?.disabled, true, 'program 卡片的标题按钮禁用')
 })
 
-test('打工人页：智能体可设 / 取消助理，并可按助理筛选', async () => {
+test('打工人页：列表与详情没有助理徽标、标记按钮或筛选', async () => {
   const client = await loadClient()
+  const tree = client.render(states({ data: listData() }))
+  const list = collect(tree)
+  assert.ok(list.texts.includes('智能体'), 'the agent driver tag still renders')
+  assert.equal(list.texts.includes('助理'), false, 'no assistant badge')
+  assert.equal(list.texts.includes('设为助理'), false, 'no make-assistant button')
+  assert.equal(list.texts.includes('取消助理'), false, 'no clear-assistant button')
+  assert.equal(list.texts.includes('只看助理'), false, 'no assistants-only filter')
 
-  // assistant=false：展示 Agent 驱动标签与「设为助理」入口。
-  let tree = client.render(states({ data: listData() }))
-  let list = collect(tree)
-  assert.ok(list.texts.includes('智能体'))
-  assert.equal(list.texts.includes('助理'), false)
-  const setButton = findNode(
-    tree,
-    (node) => node.type === 'button' && node.props?.['aria-label'] === '设为助理 writer',
-  )
-  assert.ok(setButton, '智能体有「设为助理」按钮')
-  assert.equal(setButton.props?.disabled, false)
-
-  // assistant=true：展示助理标签与「取消助理」入口。
-  const marked = listData()
-  marked.workers = [
-    worker('writer', 'panda', '写发布说明与测试报告', { assistant: true }),
-    clockWorker(),
-  ]
-  tree = client.render(states({ data: marked }))
-  list = collect(tree)
-  assert.ok(list.texts.includes('助理'))
-  const clearButton = findNode(
-    tree,
-    (node) => node.type === 'button' && node.props?.['aria-label'] === '取消助理 writer',
-  )
-  assert.ok(clearButton, 'agent 助理可以取消助理标记')
-
-  // 筛选按钮；助理筛选打开时只保留 assistant=true 的打工人。
-  tree = client.render(states({ data: marked, assistantOnly: true }))
-  list = collect(tree)
-  assert.ok(list.texts.includes('全部打工人'), '筛选打开时按钮切到「全部打工人」')
-  assert.ok(list.texts.includes('writer'))
-  assert.equal(list.texts.includes('clock'), false)
-
-  // 没有任何助理时给独立空状态，而不是「还没有打工人」。
-  tree = client.render(states({ data: listData(), assistantOnly: true }))
-  list = collect(tree)
-  assert.ok(list.texts.includes('还没有标记为助理的打工人。'))
-})
-
-test.after(() => {
-  rmSync(stubRoot, { recursive: true, force: true })
+  const detail = collect(client.render(states({ data: listData(), selectedId: 'writer' })))
+  assert.equal(detail.texts.includes('助理'), false, 'the detail page has no assistant badge')
+  assert.equal(detail.texts.includes('设为助理'), false)
+  assert.equal(detail.texts.includes('取消助理'), false)
 })
 
 test('打工人页：模型页签展示可选模型与当前选择', async () => {
@@ -1111,4 +1066,8 @@ test('删除弹窗：列出影响面、硬删说明，被 running 作业阻塞�
     (node) => node.type === 'button' && collect(node).texts.includes('永久删除'),
   )
   assert.equal(freeButton.props.disabled, false, 'unblocked deletion can be confirmed')
+})
+
+test.after(() => {
+  rmSync(stubRoot, { recursive: true, force: true })
 })

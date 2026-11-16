@@ -136,9 +136,6 @@ export function useWorkersState(props: { getService: GetService }) {
 
   /** Toast 文案；同一时刻只保留最后一条。 */
   const [notice, setNotice] = React.useState<Notice | null>(null)
-  /** 列表筛选：只看带 `assistant` 标记的打工人。 */
-  const [assistantOnly, setAssistantOnly] = React.useState(false)
-
   // 首次挂载与每次刷新（reloadKey 变化）都重新读 Host 的打工人登记表。
   React.useEffect(() => {
     let cancelled = false
@@ -390,8 +387,6 @@ export function useWorkersState(props: { getService: GetService }) {
     setFavourites,
     notice,
     setNotice,
-    assistantOnly,
-    setAssistantOnly,
     data,
     workers,
     registry,

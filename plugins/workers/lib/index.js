@@ -799,8 +799,7 @@ const BUILTIN_WORKERS = Object.freeze([{
 	program: CLOCK_WORKER_ID,
 	createdAt: "2026-11-12T00:00:00.000Z",
 	avatar: "",
-	description: "到点完成任务的定时打工人：任务 payload 带 until，到点后自动完成。",
-	assistant: false
+	description: "到点完成任务的定时打工人：任务 payload 带 until，到点后自动完成。"
 }]);
 /** 按标识符取内建机器人；不是内建打工人时返回 undefined。 */
 function builtinWorker(id) {
@@ -1365,7 +1364,7 @@ function normalizeWorkerNameInput(value) {
 * - `driver` 缺失（version 1 旧条目）或取值写坏时按 `agent` 处理；
 *   version 2 的 `program` 取值迁移成 `robot`；
 * - 机器人条目必须有非空 `program` id，智能体条目必须有非空 `path`；
-* - `assistant` 只对智能体生效：机器人不能被标记成助理。
+* - 旧表里的 `assistant` 字段直接丢弃，不进入记录。
 */
 function readEntry(entry, version) {
 	const legacy = version < 4;
@@ -1394,7 +1393,6 @@ function readEntry(entry, version) {
 		createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
 		avatar: typeof entry.avatar === "string" ? entry.avatar.trim() : "",
 		description: normalizeWorkerDescription(entry.description).slice(0, 500),
-		assistant: driver === "agent" && entry.assistant === true,
 		...model === void 0 ? {} : { model }
 	};
 }
@@ -1405,7 +1403,7 @@ function readEntry(entry, version) {
 * - agent 记录补 `path`、清空 `program`；robot 记录补 `program`、清空 `path`；
 * - `avatar` 总是落成具体预设 id（旧记录第一次写回时顺带补齐），默认头像按
 *   标识符哈希，改名不会让头像漂移；
-* - 描述折叠空白并截断；`assistant` 只对 agent 生效。
+* - 描述折叠空白并截断。
 */
 function normalizeRecord(worker) {
 	const driver = worker.driver === "robot" ? "robot" : "agent";
@@ -1420,7 +1418,6 @@ function normalizeRecord(worker) {
 		createdAt: worker.createdAt,
 		avatar: resolveAvatar(worker.avatar, id),
 		description: normalizeWorkerDescription(worker.description).slice(0, 500),
-		assistant: driver === "agent" && worker.assistant === true,
 		...model === void 0 ? {} : { model }
 	};
 }
@@ -1430,7 +1427,7 @@ function normalizeRecord(worker) {
 * - 文件不存在：`{ version: 4, workers: [], file }`（内建打工人由调用方合并）；
 * - 读不了 / 不是合法 JSON / 版本不可读 / `workers` 不是数组：`corrupt: true`
 *   且 `workers: []`（写操作必须据此拒绝，绝不覆盖原文件）；
-* - version 1 旧表按 `driver: "agent"`、`assistant: false` 迁移；
+* - version 1 旧表按 `driver: "agent"` 迁移；
 *   version 2 的 `driver: "program"` 读成 `"robot"`；
 *   version 1 / 2 / 3 的旧名字迁移成 `id`，`name` 置空；
 * - 条目必须有能定位的 `id`（智能体还要有非空 `path`，机器人要有 `program`），
@@ -1506,8 +1503,8 @@ async function readWorkerRegistry({ file } = {}) {
 * 原子写打工人登记表（临时文件 + rename，权限 0600）。
 *
 * 目录不存在会先建好；写入失败时清理临时文件，原登记文件保持不变。写入总是
-* 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` / `assistant`
-* 在这里补齐。
+* 落成当前版本（version 4），旧记录缺的 `id` / `name` / `driver` 在这里补齐，
+* 旧表残留的 `assistant` 不落盘。
 *
 */
 async function writeWorkerRegistry({ file, workers } = {}) {
@@ -1523,8 +1520,7 @@ async function writeWorkerRegistry({ file, workers } = {}) {
 				program: worker.program,
 				createdAt: worker.createdAt,
 				avatar: worker.avatar,
-				description: worker.description,
-				assistant: false
+				description: worker.description
 			};
 			return {
 				id: worker.id,
@@ -1534,7 +1530,6 @@ async function writeWorkerRegistry({ file, workers } = {}) {
 				createdAt: worker.createdAt,
 				avatar: worker.avatar,
 				description: worker.description,
-				assistant: worker.assistant,
 				...worker.model === void 0 ? {} : { model: worker.model }
 			};
 		})
@@ -1594,14 +1589,6 @@ function idTakenError(id) {
 function invalidDescriptionError(description) {
 	const error = /* @__PURE__ */ new Error(`打工人描述不合法：需要不超过 500 个字符的单行文本（收到 ${String(description)}）`);
 	return Object.assign(error, { code: "invalid-description" });
-}
-/**
-* 生成「助理标记不合法」错误。
-*
-*/
-function invalidAssistantError(assistant) {
-	const error = /* @__PURE__ */ new Error(`助理标记不合法：需要布尔值（收到 ${String(assistant)}）`);
-	return Object.assign(error, { code: "invalid-assistant" });
 }
 /**
 * 生成「机器人只读」错误。
@@ -1694,8 +1681,7 @@ async function addWorker({ workersDir, file, id, name, avatar, description } = {
 		program: "",
 		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
 		avatar: isAvatarId(avatar) ? avatar : pickDefaultAvatar(workerId, used),
-		description: cleanDescription,
-		assistant: false
+		description: cleanDescription
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
@@ -1835,34 +1821,6 @@ async function setWorkerDescription({ file, id, description } = {}) {
 	const worker = {
 		...current,
 		description: clean
-	};
-	await writeWorkerRegistry({
-		file: registryFile,
-		workers: registry.workers.map((entry) => entry.id === workerId ? worker : entry)
-	});
-	return { worker };
-}
-/**
-* 设置 / 取消一个智能体的助理标记。
-*
-* 只有智能体可以是助理（人任务的承办者）；机器人只读，抛
-* `code = 'robot-worker'`。`assistant` 必须是布尔值，否则抛
-* `code = 'invalid-assistant'`。
-*
-*/
-async function setWorkerAssistant({ file, id, assistant } = {}) {
-	const registryFile = requireRegistryFile(file);
-	if (!isResolvableWorkerId(id)) throw invalidIdError(id);
-	if (typeof assistant !== "boolean") throw invalidAssistantError(assistant);
-	const registry = await readWorkerRegistry({ file: registryFile });
-	if (registry.corrupt) throw registryUnreadableError$1(registryFile);
-	const workerId = id.trim();
-	const current = findWorker(registry, workerId);
-	if (current === void 0) throw unknownWorkerError(workerId);
-	if (current.driver !== "agent") throw robotWorkerError(workerId);
-	const worker = {
-		...current,
-		assistant
 	};
 	await writeWorkerRegistry({
 		file: registryFile,
@@ -2499,9 +2457,10 @@ async function renameWorker({ file, id, name } = {}) {
 * 打工人存储层的数据结构。
 *
 * 登记表是 version 4：每个打工人有不可变标识符 `id`（目录名与引用键）、可选
-* 展示名 `name`（空串表示未设置、显示标识符）、`driver`（agent / robot）与
-* `assistant` 标记。智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，
-* 没有目录，只登记 `program` id（稳定契约，v1 只有 `clock`）。
+* 展示名 `name`（空串表示未设置、显示标识符）与 `driver`（agent / robot）。
+* 智能体有目录、AGENTS.md 与项目 skills；机器人是固定程序，没有目录，只登记
+* `program` id（稳定契约，v1 只有 `clock`）。助理不是打工人身上的标记，而是
+* 工作流上的点名（见 workflows 的 ADR 0022）。
 *
 * @module @buka/dsh-plugin-workers/store/types
 */
@@ -3338,8 +3297,7 @@ async function buildWorker({ workersDir, file, id, name, avatar, description, ag
 			path: worker.path,
 			avatar: worker.avatar,
 			description: worker.description ?? "",
-			createdAt: worker.createdAt,
-			assistant: worker.assistant === true
+			createdAt: worker.createdAt
 		},
 		created,
 		updated,
@@ -3428,13 +3386,13 @@ async function revealDirectory(target) {
 /**
 * 「打工人」页面的打工人相关 HTTP 路由。
 *
-* 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、助理标记、
+* 负责登记表与目录的打工人管理接口：列表、创建、头像、描述、模型、
 * 改展示名、移除、写 AGENTS.md 与打开 Finder。工作区身份（挂载 / 删除注册 /
 * 打开会话）都由浏览器一半走 DSH Client Service，这里只处理磁盘事实。
 *
 * 打工人按不可变标识符 `id` 寻址；`name` 只是可选展示名。创建时 `id` 必填，
 * 之后任何入口都不能改它。机器人（内建 clock）只读：创建 / 删除 / 改名 /
-* 改字段都会被拒绝，助理标记只对智能体开放。
+* 改字段都会被拒绝。
 *
 * @module @buka/dsh-plugin-workers/routes/workers
 */
@@ -3450,8 +3408,6 @@ const DESCRIPTION_ROUTE = "/buka-workers/description";
 const MODELS_ROUTE = "/buka-workers/models";
 /** 页面给智能体设置新会话模型用的路由。 */
 const MODEL_ROUTE = "/buka-workers/model";
-/** 页面标记 / 取消助理（只有智能体可设）用的路由。 */
-const ASSISTANT_ROUTE = "/buka-workers/assistant";
 /** 页面改打工人展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = "/buka-workers/rename";
 /** 页面读取删除影响面（阻塞作业 / 受影响工作流 / 历史作业数）用的路由。 */
@@ -3797,60 +3753,6 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 		}
 	}), `buka-workers: POST ${MODEL_ROUTE}`);
-	webCtx.effect(() => webCtx.webServer.register({
-		kind: "exact",
-		path: ASSISTANT_ROUTE,
-		handler: async (req, res) => {
-			if (rejected(webCtx, req, res)) return;
-			if (req.method !== "POST") {
-				sendMethodNotAllowed(res, "POST");
-				return;
-			}
-			const body = await readJsonBody(req, res);
-			if (body === void 0) return;
-			const id = typeof body?.id === "string" ? body.id.trim() : "";
-			if (!isResolvableWorkerId(id)) {
-				sendError(res, 400, "invalid-id", `打工人标识符不合法：${String(body?.id)}`);
-				return;
-			}
-			const assistant = body?.assistant;
-			if (typeof assistant !== "boolean") {
-				sendError(res, 400, "invalid-assistant", "assistant 必须是布尔值");
-				return;
-			}
-			try {
-				const result = await serializeRegistry(() => setWorkerAssistant({
-					file: registryFile,
-					id,
-					assistant
-				}));
-				webCtx.logger?.info?.("buka-workers: 打工人 %s 的助理标记改为 %s", id, String(assistant));
-				sendJson(res, 200, {
-					ok: true,
-					worker: result.worker
-				});
-			} catch (error) {
-				switch (errorCode(error)) {
-					case "invalid-id":
-					case "invalid-assistant":
-						sendError(res, 400, String(errorCode(error)), describeError$1(error));
-						return;
-					case "unknown-worker":
-						sendError(res, 404, "unknown-worker", describeError$1(error));
-						return;
-					case "robot-worker":
-						sendError(res, 409, "robot-worker", describeError$1(error));
-						return;
-					case "registry-unreadable":
-						sendError(res, 409, "registry-unreadable", describeError$1(error));
-						return;
-					default:
-						webCtx.logger?.warn?.("buka-workers: 修改助理标记失败：%s", describeError$1(error));
-						sendError(res, 500, "assistant-failed", `修改助理标记失败：${describeError$1(error)}`);
-				}
-			}
-		}
-	}), `buka-workers: POST ${ASSISTANT_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: RENAME_ROUTE,
@@ -4364,9 +4266,10 @@ function seqOf(agent) {
 *
 * `id` 是不可变标识符（引用键），`name` 是可选展示名（空串表示未设置，展示时
 * 回退到 `id`）；两者都原样给出，让消费方自己决定显示哪个。`driver` /
-* `assistant` / `program` 是工作流的执行者契约：智能体可以开会话，机器人
-* （clock）由工作流按 `program` 驱动、不建会话。机器人没有目录，
-* `exists` / `mounted` 恒为 false，`skills` 为空。
+* `program` 是工作流的执行者契约：智能体可以开会话，机器人（clock）由工作流
+* 按 `program` 驱动、不建会话。机器人没有目录，`exists` / `mounted` 恒为
+* false，`skills` 为空。助理不是这里的一个字段：它由工作流对人任务类型的
+* 点名决定。
 *
 */
 function summarizeWorker(worker) {
@@ -4377,7 +4280,6 @@ function summarizeWorker(worker) {
 		displayName: workerDisplayName(worker ?? {}),
 		driver: worker?.driver === "robot" ? "robot" : "agent",
 		program: typeof worker?.program === "string" ? worker.program : "",
-		assistant: worker?.assistant === true,
 		path: worker?.path ?? "",
 		createdAt: worker?.createdAt ?? null,
 		avatar: resolveAvatar(worker?.avatar, worker?.id),
@@ -4403,7 +4305,7 @@ function summarizeWorker(worker) {
 * 能力（工作流插件与将来的编排器使用）：
 *
 * - `list()`：打工人登记表 + 目录状态 + 挂载状态 + 已装 skills，摘要里带
-*   `driver`（agent / robot）/ `assistant` / `program`；
+*   `driver`（agent / robot）/ `program`；
 * - `avatarMap()`：打工人标识符 → 预设头像 id（只读登记表，工作流节点图用它）；
 * - `dispatchSession(request)`：在打工人目录下**新开**一条会话并投递一段提示词，
 *   立即返回观测句柄；不在服务里等待这一轮结束，也不设默认超时；
@@ -5060,7 +4962,7 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 	const avatars = Array.isArray(avatarIds) && avatarIds.length > 0 ? avatarIds.join(", ") : "";
 	return defineTool({
 		name: WORKER_BUILD_TOOL_NAME,
-		description: `Create or update one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents; the assistant flag starts false and can be turned on for an agent on the Workers page.`,
+		description: `Create or update one worker of the Buka Workers plugin and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the worker-builder preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents.`,
 		parameters: {
 			id: {
 				type: "string",
@@ -5118,11 +5020,6 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 						type: "string",
 						required: true,
 						description: "One-sentence description stored for the worker; empty when none was set."
-					},
-					assistant: {
-						type: "boolean",
-						required: true,
-						description: "Whether the worker is marked as an assistant. Workers created by this tool are agents and start with false."
 					},
 					created: {
 						type: "boolean",
@@ -5197,7 +5094,6 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 				path: result.worker.path,
 				avatar: result.worker.avatar,
 				description: result.worker.description,
-				assistant: result.worker.assistant === true,
 				created: result.created,
 				updated: result.updated,
 				renamed: result.renamed === true,
@@ -5242,7 +5138,7 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 	if (typeof listWorkers !== "function") throw new TypeError("createWorkersListTool: listWorkers is required");
 	return defineTool({
 		name: WORKERS_LIST_TOOL_NAME,
-		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.",
+		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.",
 		parameters: {},
 		output: {
 			schema: {
@@ -5297,11 +5193,6 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 									required: true,
 									description: "How the worker runs: \"agent\" is a DSH session with a directory and skills, \"robot\" is a fixed program (no directory, no session; v1 only clock).",
 									enum: ["agent", "robot"]
-								},
-								assistant: {
-									type: "boolean",
-									required: true,
-									description: "Whether this agent is an assistant that can take over human tasks. Robots are never assistants."
 								},
 								program: {
 									required: true,
@@ -5364,7 +5255,6 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 							const program = typeof worker.program === "string" && worker.program !== "" ? `: ${worker.program}` : "";
 							parts.push(`program${program}`);
 						}
-						if (worker.assistant === true) parts.push("assistant");
 						if (Array.isArray(worker.skills)) {
 							const count = worker.skills.length;
 							parts.push(count === 1 ? "1 skill" : `${count} skills`);
@@ -5389,7 +5279,6 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 					path: worker.path,
 					description: worker.description ?? "",
 					driver: worker.driver === "robot" ? "robot" : "agent",
-					assistant: worker.assistant === true,
 					program: worker.driver === "robot" && worker.program !== "" ? worker.program : null,
 					mounted: worker.mounted,
 					workspaceId: worker.workspaceId,
@@ -5534,7 +5423,6 @@ function registerWorkerTools(ctx, deps) {
 * | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选打工人） |
 * | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
 * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
-* | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
 * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
 * | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
 * | `POST /buka-workers/remove` | 硬删登记条目 + 打工人目录 + 工作区注册；有 running 作业引用时 409 |
@@ -5558,7 +5446,7 @@ function registerWorkerTools(ctx, deps) {
 *
 * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
 * `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建
-* 机器人 clock 的 `driver` / `assistant` / `program`），`avatarMap()` 按标识符
+* 机器人 clock 的 `driver` / `program`），`avatarMap()` 按标识符
 * 给出打工人头像，
 * `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
 * 会话（不压缩）。工作流插件用它把每个任务交给一个打工人、并在节点图上画出

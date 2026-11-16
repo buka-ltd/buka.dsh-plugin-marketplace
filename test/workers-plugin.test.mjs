@@ -56,7 +56,6 @@ import {
   resolveWorkerRegistryFile,
   resolveWorkersDir,
   scanProjectSkills,
-  setWorkerAssistant,
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
@@ -404,7 +403,6 @@ test('打工人登记表：缺失按空表、原子写 0600', async () => {
       program: '',
       avatar: defaultAvatarFor(entry.id),
       description: '',
-      assistant: false,
     }))
     assert.deepEqual(await readWorkerRegistry({ file }), { version: 4, workers: written, file })
 
@@ -489,7 +487,6 @@ test('损坏的登记表：读返回 corrupt，写操作拒绝且不覆盖', asy
         createdAt: '2026-01-01T00:00:00.000Z',
         avatar: '',
         description: '',
-        assistant: false,
       },
     ])
   } finally {
@@ -650,7 +647,6 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     const byName = new Map(snapshot.workers.map((worker) => [worker.id, worker]))
 
     assert.equal(byName.get('writer').driver, 'agent')
-    assert.equal(byName.get('writer').assistant, false)
     assert.equal(byName.get('writer').exists, true)
     assert.equal(byName.get('writer').mounted, true)
     assert.equal(byName.get('writer').workspaceId, 'w-writer')
@@ -1129,7 +1125,6 @@ test('renameWorker：只改展示名，保留标识符、目录、头像与条�
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'rocket',
             description: '写代码',
-            assistant: false,
           },
         ],
       }),
@@ -1195,7 +1190,6 @@ test('renameWorker：同名 no-op、展示名可重复、旧标识符兼容、�
           program: 'clock',
           createdAt: '2026-01-01T00:00:00.000Z',
           description: '',
-          assistant: false,
         },
       ],
     })
@@ -1293,14 +1287,14 @@ test('预设打工人：只在登记表为空时种子一次，非空 / 损坏�
   }
 })
 
-test('登记表 version 1 → 4：读时迁移 driver/assistant 与 id/name，写时落盘新格式', async () => {
+test('登记表 version 1 → 4：读时迁移 driver 与 id/name，写时落盘新格式', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    // 旧表只有 name / path / createdAt：读时补 driver=agent、assistant=false。
+    // 旧表只有 name / path / createdAt：读时补 driver=agent。
     await writeFile(
       file,
       JSON.stringify({
@@ -1328,7 +1322,6 @@ test('登记表 version 1 → 4：读时迁移 driver/assistant 与 id/name，�
         createdAt: '2026-01-01T00:00:00.000Z',
         avatar: 'panda',
         description: '写发布说明',
-        assistant: false,
       },
     ])
 
@@ -1344,10 +1337,9 @@ test('登记表 version 1 → 4：读时迁移 driver/assistant 与 id/name，�
       createdAt: '2026-01-01T00:00:00.000Z',
       avatar: 'owl',
       description: '写发布说明',
-      assistant: false,
     })
 
-    // 写入方给旧形状（没有 driver / assistant）时也按 agent / false 补齐。
+    // 写入方给旧形状（没有 driver）时也按 agent 补齐。
     await writeWorkerRegistry({
       file,
       workers: [
@@ -1360,9 +1352,9 @@ test('登记表 version 1 → 4：读时迁移 driver/assistant 与 id/name，�
     })
     const plain = JSON.parse(await fs.readFile(file, 'utf8'))
     assert.equal(plain.workers[0].driver, 'agent')
-    assert.equal(plain.workers[0].assistant, false)
     assert.equal(plain.workers[0].program, undefined)
     assert.equal(plain.workers[0].path, path.join(workersDir, 'painter'))
+    assert.equal(plain.workers[0].assistant, undefined, 'assistant is not written back')
   } finally {
     await removeRoot(root)
   }
@@ -1389,7 +1381,6 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
         createdAt: BUILTIN_WORKERS[0].createdAt,
         avatar: defaultAvatarFor(CLOCK_WORKER_ID),
         description: BUILTIN_WORKERS[0].description,
-        assistant: false,
       },
     ])
 
@@ -1417,11 +1408,6 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
       () => setWorkerDescription({ file, id: 'clock', description: 'x' }),
       (error) => error.code === 'robot-worker',
     )
-    await assert.rejects(
-      () => setWorkerAssistant({ file, id: 'clock', assistant: true }),
-      (error) => error.code === 'robot-worker',
-    )
-
     // 展示名可以叫 clock；标识符不能变成 clock。
     await addWorker({ workersDir, file, id: 'writer' })
     const sameDisplayName = await renameWorker({ file, id: 'writer', name: 'clock' })
@@ -1437,38 +1423,44 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
   }
 })
 
-test('setWorkerAssistant：只有智能体可以标记 / 取消助理', async () => {
+test('登记表：旧记录里的 assistant 字段读取时丢弃、写回时消失', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    await addWorker({ workersDir, file, id: 'writer' })
-    const marked = await setWorkerAssistant({ file, id: 'writer', assistant: true })
-    assert.equal(marked.worker.assistant, true)
-    assert.equal(marked.worker.driver, 'agent')
-    assert.equal((await readWorkerRegistry({ file })).workers[0].assistant, true)
-
-    const cleared = await setWorkerAssistant({ file, id: 'writer', assistant: false })
-    assert.equal(cleared.worker.assistant, false)
-
-    await assert.rejects(
-      () => setWorkerAssistant({ file, id: 'writer', assistant: 'yes' }),
-      (error) => error.code === 'invalid-assistant',
+    // v4 旧记录带 assistant 字段：读出来的记录里没有它。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 4,
+        workers: [
+          {
+            id: 'writer',
+            name: '',
+            driver: 'agent',
+            path: path.join(workersDir, 'writer'),
+            createdAt: '2026-01-01T00:00:00.000Z',
+            avatar: 'panda',
+            description: '写发布说明',
+            assistant: true,
+          },
+        ],
+      }),
     )
-    await assert.rejects(
-      () => setWorkerAssistant({ file, id: 'nobody', assistant: true }),
-      (error) => error.code === 'unknown-worker',
-    )
+    const before = await readWorkerRegistry({ file })
+    assert.equal(before.workers.length, 1)
+    assert.equal('assistant' in before.workers[0], false, 'the field is dropped on read')
 
-    // 机器人不是 agent，不能是助理。
-    await ensureBuiltinWorkers({ file })
-    await assert.rejects(
-      () => setWorkerAssistant({ file, id: 'clock', assistant: true }),
-      (error) => error.code === 'robot-worker',
-    )
-    // 手工写坏的 program 条目即使带 assistant: true，读回来也归一成 false。
+    // 任意写入都落成不含 assistant 的 v4。
+    await setWorkerAvatar({ file, id: 'writer', avatar: 'owl' })
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'))
+    assert.equal(raw.version, 4)
+    assert.equal(raw.workers[0].avatar, 'owl')
+    assert.equal('assistant' in raw.workers[0], false, 'the field is not written back')
+
+    // v2 机器人记录同样丢弃该字段（即使值写坏）。
     await writeFile(
       file,
       JSON.stringify({
@@ -1484,7 +1476,9 @@ test('setWorkerAssistant：只有智能体可以标记 / 取消助理', async ()
         ],
       }),
     )
-    assert.equal((await readWorkerRegistry({ file })).workers[0].assistant, false)
+    const robot = (await readWorkerRegistry({ file })).workers[0]
+    assert.equal(robot.driver, 'robot')
+    assert.equal('assistant' in robot, false)
   } finally {
     await removeRoot(root)
   }
@@ -1532,7 +1526,6 @@ test('登记表 version 2 → 4：driver "program" 读成 "robot"，写回落盘
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'bee',
             description: '',
-            assistant: false,
           },
         ],
       }),
@@ -1572,7 +1565,6 @@ test('登记表 version 3 → 4：旧 name 变成 id，name 置空，旧 id 仍�
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'rocket',
             description: '写代码',
-            assistant: false,
           },
           {
             name: 'clock',
@@ -1581,7 +1573,6 @@ test('登记表 version 3 → 4：旧 name 变成 id，name 置空，旧 id 仍�
             createdAt: '2026-11-12T00:00:00.000Z',
             avatar: 'bee',
             description: '',
-            assistant: false,
           },
         ],
       }),
@@ -1640,7 +1631,6 @@ test('旧插件缓存迁移：目录、文件名、登记格式与路径一次�
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'panda',
             description: '旧记录',
-            assistant: false,
           },
           {
             name: 'clock',
@@ -1649,7 +1639,6 @@ test('旧插件缓存迁移：目录、文件名、登记格式与路径一次�
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'bee',
             description: '',
-            assistant: false,
           },
         ],
       }),
@@ -1715,7 +1704,6 @@ test('自定义 workersDir：同级 robots 目录与登记文件一起改名并�
             createdAt: '2026-01-01T00:00:00.000Z',
             avatar: 'panda',
             description: '',
-            assistant: false,
           },
         ],
       }),

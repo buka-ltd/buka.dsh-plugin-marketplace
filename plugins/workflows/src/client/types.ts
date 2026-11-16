@@ -328,7 +328,7 @@ export interface WorkflowDetail {
     start?: { label?: string }
     end?: { label?: string }
   }
-  /** 结束任务可以交给的助理（新建作业时选「交给助理」）。 */
+  /** 新建作业「交给助理代收」的候选：全部智能体（排除机器人）。 */
   assistants?: Array<{ id?: string; name?: string; description?: string; avatar?: string }>
   jobs?: JobSummary[]
 }

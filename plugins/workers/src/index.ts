@@ -15,7 +15,6 @@
  * | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选打工人） |
  * | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
  * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
- * | `POST /buka-workers/assistant` | 标记 / 取消智能体的助理身份（机器人只读） |
  * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
  * | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
  * | `POST /buka-workers/remove` | 硬删登记条目 + 打工人目录 + 工作区注册；有 running 作业引用时 409 |
@@ -39,7 +38,7 @@
  *
  * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
  * `lib/service.js`）：`list()` 列出打工人（每条带 `id` / `name`，以及内建
- * 机器人 clock 的 `driver` / `assistant` / `program`），`avatarMap()` 按标识符
+ * 机器人 clock 的 `driver` / `program`），`avatarMap()` 按标识符
  * 给出打工人头像，
  * `dispatchSession()` 新开一条会话并返回观测句柄，`openSession()` 只续接同一条
  * 会话（不压缩）。工作流插件用它把每个任务交给一个打工人、并在节点图上画出

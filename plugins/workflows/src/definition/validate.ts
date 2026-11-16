@@ -556,7 +556,12 @@ function readCreations(raw: unknown, path: string, issues: Issues): CreationDefi
   return creations
 }
 
-/** 解析助理字段；只对人岗位有效。 */
+/**
+ * 解析助理字段；只对人岗位有效。
+ *
+ * 助理是工作流上的点名：只要求标识符已登记且是智能体，不要求打工人身上带
+ * 任何标记（ADR 0022）。
+ */
 function readAssistant(
   raw: unknown,
   path: string,
@@ -589,13 +594,6 @@ function readAssistant(
     issues.add(
       path,
       `assistant identifier "${id}" of task type "${positionId}.${taskTypeId}" must be an agent, not a robot`,
-    )
-    return undefined
-  }
-  if (!worker.assistant) {
-    issues.add(
-      path,
-      `worker identifier "${id}" of task type "${positionId}.${taskTypeId}" is not marked as an assistant in the Buka Workers plugin`,
     )
     return undefined
   }

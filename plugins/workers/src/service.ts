@@ -4,7 +4,7 @@
  * 能力（工作流插件与将来的编排器使用）：
  *
  * - `list()`：打工人登记表 + 目录状态 + 挂载状态 + 已装 skills，摘要里带
- *   `driver`（agent / robot）/ `assistant` / `program`；
+ *   `driver`（agent / robot）/ `program`；
  * - `avatarMap()`：打工人标识符 → 预设头像 id（只读登记表，工作流节点图用它）；
  * - `dispatchSession(request)`：在打工人目录下**新开**一条会话并投递一段提示词，
  *   立即返回观测句柄；不在服务里等待这一轮结束，也不设默认超时；

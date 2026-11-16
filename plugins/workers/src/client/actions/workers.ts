@@ -20,7 +20,6 @@ import {
 } from '../api.ts'
 import {
   AGENTS_ROUTE,
-  ASSISTANT_ROUTE,
   CREATE_ROUTE,
   REMOVE_IMPACT_ROUTE,
   REMOVE_ROUTE,
@@ -357,29 +356,6 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     }
   }
 
-  /**
-   * 标记 / 取消助理：只有智能体可以设（机器人由服务端拒绝）。
-   *
-   */
-  async function toggleAssistant(worker: Worker) {
-    if (mutating || isRobotWorker(worker)) return
-    const next = worker.assistant !== true
-    setBusy(`assistant:${worker.id}`)
-    try {
-      const body = await requestJson(ASSISTANT_ROUTE, {
-        method: 'POST',
-        body: JSON.stringify({ id: worker.id, assistant: next }),
-      })
-      const saved = body?.worker?.assistant
-      patchWorker(worker.id, { assistant: typeof saved === 'boolean' ? saved : next })
-      flash('success', next ? t('assistantSet') : t('assistantCleared'))
-    } catch (failure) {
-      flash('error', `${t('assistantSaveFailed')} ${failureText(t, failure)}`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
   return {
     openWorker,
     revealWorker,
@@ -391,6 +367,5 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     closeDeleteDialog,
     confirmDeleteWorker,
     saveAgents,
-    toggleAssistant,
   }
 }

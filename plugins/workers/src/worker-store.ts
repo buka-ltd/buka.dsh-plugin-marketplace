@@ -78,7 +78,6 @@ export {
   normalizeWorkerNameInput,
   readWorkerRegistry,
   removeWorker,
-  setWorkerAssistant,
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,

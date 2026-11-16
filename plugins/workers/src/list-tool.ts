@@ -52,7 +52,7 @@ export function createWorkersListTool({
   return defineTool({
     name: WORKERS_LIST_TOOL_NAME,
     description:
-      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is an assistant (agents only: they take over human tasks), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, which are assistants, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills, editing AGENTS.md and setting the assistant flag remain user actions on the Workers page.',
+      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Skills are reported only to callers whose preset may see them. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the worker-builder preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.',
     parameters: {},
     output: {
       schema: {
@@ -103,12 +103,6 @@ export function createWorkersListTool({
                   description:
                     'How the worker runs: "agent" is a DSH session with a directory and skills, "robot" is a fixed program (no directory, no session; v1 only clock).',
                   enum: ['agent', 'robot'],
-                },
-                assistant: {
-                  type: 'boolean',
-                  required: true,
-                  description:
-                    'Whether this agent is an assistant that can take over human tasks. Robots are never assistants.',
                 },
                 program: {
                   required: true,
@@ -188,7 +182,6 @@ export function createWorkersListTool({
                       : ''
                   parts.push(`program${program}`)
                 }
-                if (worker.assistant === true) parts.push('assistant')
                 // 技能清单被隐藏时连数量也不展示：`skills: []` 与「不让看」是两件事。
                 if (Array.isArray(worker.skills)) {
                   const count = worker.skills.length
@@ -217,7 +210,6 @@ export function createWorkersListTool({
           path: string
           description: string
           driver: 'agent' | 'robot'
-          assistant: boolean
           program: string | null
           mounted: boolean
           workspaceId: string | null
@@ -229,7 +221,6 @@ export function createWorkersListTool({
           path: worker.path,
           description: worker.description ?? '',
           driver: worker.driver === 'robot' ? 'robot' : 'agent',
-          assistant: worker.assistant === true,
           program: worker.driver === 'robot' && worker.program !== '' ? worker.program : null,
           mounted: worker.mounted,
           workspaceId: worker.workspaceId,

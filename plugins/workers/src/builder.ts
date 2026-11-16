@@ -338,7 +338,6 @@ export async function buildWorker({
     avatar: string
     description: string
     createdAt: string
-    assistant: boolean
   }
   created: boolean
   updated: boolean
@@ -460,7 +459,6 @@ export async function buildWorker({
       avatar: worker.avatar,
       description: worker.description ?? '',
       createdAt: worker.createdAt,
-      assistant: worker.assistant === true,
     },
     created,
     updated,

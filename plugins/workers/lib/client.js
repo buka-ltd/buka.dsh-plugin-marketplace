@@ -338,7 +338,6 @@ window.__ModuleLoader__.load({
     		case "worker-in-use": return t("deleteBlockedByJobs");
     		case "outside-root": return t("errOutsideRoot");
     		case "workspace-unavailable": return t("errWorkspaceUnavailable");
-    		case "invalid-assistant": return t("errInvalidAssistant");
     		case "invalid-model": return t("errInvalidModel");
     		case "invalid-driver": return t("errInvalidDriver");
     		case "too-large": return t("errTooLarge");
@@ -452,7 +451,6 @@ window.__ModuleLoader__.load({
     const AVATAR_ROUTE = "/buka-workers/avatar";
     const DESCRIPTION_ROUTE = "/buka-workers/description";
     const MODELS_ROUTE = "/buka-workers/models";
-    const ASSISTANT_ROUTE = "/buka-workers/assistant";
     const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
     const REMOVE_ROUTE = "/buka-workers/remove";
     const AGENTS_ROUTE = "/buka-workers/agents";
@@ -1193,30 +1191,6 @@ window.__ModuleLoader__.load({
     			setAgentsSaving(false);
     		}
     	}
-    	/**
-    	* 标记 / 取消助理：只有智能体可以设（机器人由服务端拒绝）。
-    	*
-    	*/
-    	async function toggleAssistant(worker) {
-    		if (mutating || isRobotWorker(worker)) return;
-    		const next = worker.assistant !== true;
-    		setBusy(`assistant:${worker.id}`);
-    		try {
-    			const saved = (await requestJson(ASSISTANT_ROUTE, {
-    				method: "POST",
-    				body: JSON.stringify({
-    					id: worker.id,
-    					assistant: next
-    				})
-    			}))?.worker?.assistant;
-    			patchWorker(worker.id, { assistant: typeof saved === "boolean" ? saved : next });
-    			flash("success", next ? t("assistantSet") : t("assistantCleared"));
-    		} catch (failure) {
-    			flash("error", `${t("assistantSaveFailed")} ${failureText(t, failure)}`);
-    		} finally {
-    			setBusy(null);
-    		}
-    	}
     	return {
     		openWorker,
     		revealWorker,
@@ -1227,8 +1201,7 @@ window.__ModuleLoader__.load({
     		openDeleteDialog,
     		closeDeleteDialog,
     		confirmDeleteWorker,
-    		saveAgents,
-    		toggleAssistant
+    		saveAgents
     	};
     }
     // .build/workers/client/state.js
@@ -1345,8 +1318,6 @@ window.__ModuleLoader__.load({
     	});
     	/** Toast 文案；同一时刻只保留最后一条。 */
     	const [notice, setNotice] = react.default.useState(null);
-    	/** 列表筛选：只看带 `assistant` 标记的打工人。 */
-    	const [assistantOnly, setAssistantOnly] = react.default.useState(false);
     	react.default.useEffect(() => {
     		let cancelled = false;
     		setList((prev) => ({
@@ -1586,8 +1557,6 @@ window.__ModuleLoader__.load({
     		setFavourites,
     		notice,
     		setNotice,
-    		assistantOnly,
-    		setAssistantOnly,
     		data,
     		workers,
     		registry,
@@ -1768,7 +1737,7 @@ window.__ModuleLoader__.load({
     *
     */
     function PageHeader({ t, state, actions, detail }) {
-    	const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList, assistantOnly, setAssistantOnly } = state;
+    	const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } = state;
     	const { openCreateDialog, openWorker, revealWorker } = actions;
     	const { openAvatarDialog, openRenameDialog } = detail;
     	const robot = selectedWorker?.driver === "robot";
@@ -1790,15 +1759,6 @@ window.__ModuleLoader__.load({
     		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
     		onClick: reload
     	}, t("refresh")));
-    	const filterButton = selectedWorker === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workers-toolbarButton",
-    		"aria-pressed": assistantOnly === true,
-    		"aria-label": assistantOnly === true ? t("showAllWorkers") : t("filterAssistants"),
-    		disabled: mutating,
-    		onClick: () => setAssistantOnly(assistantOnly !== true)
-    	}, assistantOnly === true ? t("showAllWorkers") : t("filterAssistants")) : null;
     	const createButton = selectedWorker === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "primary",
     		size: "sm",
@@ -1863,7 +1823,7 @@ window.__ModuleLoader__.load({
     	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedWorker === null ? null : h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
     		t,
     		worker: selectedWorker
-    	}), selectedWorker.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null))), h("div", { className: "buka-workers-toolbar" }, detailActions, filterButton, refreshButton, createButton), selectedWorker === null ? null : h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	})))), h("div", { className: "buka-workers-toolbar" }, detailActions, refreshButton, createButton), selectedWorker === null ? null : h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-workers-tabList",
     		label: t("tabsLabel"),
@@ -2426,18 +2386,18 @@ window.__ModuleLoader__.load({
     * 一句职责与行内动作。整行点击进入详情，行内动作区自己挡住冒泡。
     *
     * 机器人（clock）只读：卡片展示驱动与职责，没有新会话 / 挂载 /
-    * 删除 / 助理入口，也不进入配置视图。智能体可以标记 / 取消助理。
+    * 删除入口，也不进入配置视图。
     *
     * @module @buka/dsh-plugin-workers/client/components/worker-list
     */
     /**
-    * 一条打工人卡片：名称、驱动 / 助理 / skills / 挂载状态、职责与
+    * 一条打工人卡片：名称、驱动 / skills / 挂载状态、职责与
     * 动作与删除确认。机器人只读。
     *
     */
     function WorkerCard({ t, worker, state, actions: workerActions }) {
     	const { busy, mutating, corrupt, openDetail } = state;
-    	const { openWorker, mountWorker, openDeleteDialog, toggleAssistant } = workerActions;
+    	const { openWorker, mountWorker, openDeleteDialog } = workerActions;
     	const skills = skillsOf(worker);
     	const robot = isRobotWorker(worker);
     	const missing = !robot && worker.exists === false;
@@ -2467,14 +2427,6 @@ window.__ModuleLoader__.load({
     			onClick: () => mountWorker(worker)
     		}, busy === `mount:${worker.id}` ? t("mounting") : t("mount")),
     		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			key: "assistant",
-    			variant: "outline",
-    			size: "sm",
-    			disabled: anyBusy || busy === `assistant:${worker.id}`,
-    			"aria-label": `${worker.assistant === true ? t("clearAssistant") : t("setAssistant")} ${workerDisplayName(worker)}`,
-    			onClick: () => toggleAssistant(worker)
-    		}, busy === `assistant:${worker.id}` ? t("saving") : worker.assistant === true ? t("clearAssistant") : t("setAssistant")),
-    		h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			key: "delete",
     			variant: "outline",
     			size: "sm",
@@ -2502,7 +2454,7 @@ window.__ModuleLoader__.load({
     			event.stopPropagation();
     			if (canOpen) openDetail(worker);
     		}
-    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.assistant === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "success" }, t("assistantBadge")) : null, robot ? null : h(MountedTag, {
+    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), robot ? null : h(MountedTag, {
     		t,
     		worker
     	}), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
@@ -2512,8 +2464,7 @@ window.__ModuleLoader__.load({
     }
     /** 列表页：登记文件提示、加载 / 失败 / 空状态与打工人卡片（不展示目录）。 */
     function WorkerList({ t, state, actions }) {
-    	const { corrupt, registry, list, data, workers, assistantOnly } = state;
-    	const visible = assistantOnly ? workers.filter((worker) => worker.assistant === true) : workers;
+    	const { corrupt, registry, list, data, workers } = state;
     	const corruptNotice = corrupt ? h("p", {
     		className: "buka-workers-notice",
     		role: "status"
@@ -2524,7 +2475,7 @@ window.__ModuleLoader__.load({
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "error" }), `${t("loadFailed")} ${list.error}`), list.loading && data === null ? h("p", {
     		className: "buka-workers-statusWithDot",
     		role: "status"
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")) : null, data === null ? null : visible.length === 0 && !list.loading && !corrupt ? h("p", { className: "buka-workers-empty" }, assistantOnly ? t("assistantEmpty") : t("empty")) : h("ul", { className: "buka-workers-cards" }, ...visible.map((worker) => h(WorkerCard, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loading")) : null, data === null ? null : workers.length === 0 && !list.loading && !corrupt ? h("p", { className: "buka-workers-empty" }, t("empty")) : h("ul", { className: "buka-workers-cards" }, ...workers.map((worker) => h(WorkerCard, {
     		t,
     		worker,
     		state,
@@ -2698,16 +2649,6 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "Not mounted",
     	driverAgent: "Agent",
     	driverRobot: "Robot",
-    	assistantBadge: "Assistant",
-    	setAssistant: "Make assistant",
-    	clearAssistant: "Stop being assistant",
-    	assistantSet: "This worker is now an assistant.",
-    	assistantCleared: "This worker is no longer an assistant.",
-    	assistantSaveFailed: "Could not change the assistant flag:",
-    	filterAssistants: "Assistants only",
-    	showAllWorkers: "All workers",
-    	assistantEmpty: "No worker is marked as an assistant yet.",
-    	robotReadOnly: "Robots are driven by the plugin: they have no directory and cannot be opened, edited or installed with skills.",
     	missingDir: "Missing directory",
     	missingDirHint: "This worker directory no longer exists. You can delete the record and create it again.",
     	missingDirDetail: "This worker directory no longer exists, so skills and AGENTS.md operations will fail.",
@@ -2788,8 +2729,6 @@ window.__ModuleLoader__.load({
     	errBuiltinWorker: "Built-in workers cannot be created, changed or removed.",
     	errOutsideRoot: "The worker directory is outside the worker root, so it was not deleted.",
     	errWorkspaceUnavailable: "The workspace registry is unavailable, so the worker could not be deleted safely. Refresh and try again.",
-    	errInvalidAssistant: "The assistant flag must be true or false.",
-    	errInvalidModel: "The model selection is invalid. Pick a provider and a model.",
     	errInvalidDriver: "Only agents can be created; robots are built into the plugin.",
     	errTooLarge: "AGENTS.md is larger than 512 KiB and cannot be saved.",
     	errInvalidContent: "The AGENTS.md content must be text.",
@@ -2888,16 +2827,6 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "未挂载",
     	driverAgent: "智能体",
     	driverRobot: "机器人",
-    	assistantBadge: "助理",
-    	setAssistant: "设为助理",
-    	clearAssistant: "取消助理",
-    	assistantSet: "已设为助理。",
-    	assistantCleared: "已取消助理。",
-    	assistantSaveFailed: "修改助理标记失败：",
-    	filterAssistants: "只看助理",
-    	showAllWorkers: "全部打工人",
-    	assistantEmpty: "还没有标记为助理的打工人。",
-    	robotReadOnly: "机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。",
     	missingDir: "目录缺失",
     	missingDirHint: "这个打工人目录已经不存在了，可以删除记录后重新创建。",
     	missingDirDetail: "这个打工人目录已经不存在了，skills 与 AGENTS.md 操作都会失败。",
@@ -2978,8 +2907,6 @@ window.__ModuleLoader__.load({
     	errBuiltinWorker: "内建打工人不可创建、修改或删除。",
     	errOutsideRoot: "打工人目录不在打工人根目录下，已拒绝删除。",
     	errWorkspaceUnavailable: "工作区注册服务不可用，无法安全删除这个打工人；请刷新后重试。",
-    	errInvalidAssistant: "助理标记必须是 true 或 false。",
-    	errInvalidModel: "模型选择不合法，请选择提供方与模型。",
     	errInvalidDriver: "只能创建智能体；机器人由插件内建。",
     	errTooLarge: "AGENTS.md 超过 512 KiB，无法保存。",
     	errInvalidContent: "AGENTS.md 内容必须是文本。",
@@ -3157,9 +3084,9 @@ window.__ModuleLoader__.load({
     *
     * 页面有两个视图，共用同一个标题行与工具栏：
     *
-    * - 列表视图：按 `driver` 展示驱动标签（agent / robot），智能体可标记
-    *   / 取消助理，列表可按助理筛选。整行点击（或点打工人名 / 键盘 Tab 到标题）
-    *   进入详情，行内动作是「新会话 / 挂载 / 设为助理 / 删除」。删除先摘掉工作区
+    * - 列表视图：按 `driver` 展示驱动标签（agent / robot）。整行点击（或点
+    *   打工人名 / 键盘 Tab 到标题）进入详情，行内动作是「新会话 / 挂载 / 删除」。
+    *   删除先摘掉工作区
     *   注册、再删插件记录，目录与文件保留；登记文件损坏时只允许刷新，新建/删除/
     *   挂载都会禁用。列表**不展示目录**（打工人根目录与各打工人路径都只在详情页
     *   出现）；每张卡片显示打工人的一行描述（工作流靠它决定是否选用该打工人）；
@@ -3167,7 +3094,7 @@ window.__ModuleLoader__.load({
     *   不可改）、可选展示名与描述后提交；列表与详情都显示「展示名 · 标识符」；
     *   全新安装时插件会自动补上「软件工程师」与「质量保障工程师」两个预设打工人。
     *   机器人（内建 clock）只读：卡片展示驱动与描述，没有新会话 / 挂载 /
-    *   删除 / 助理入口，也不能编辑 AGENTS.md 或安装 skills；
+    *   删除入口，也不能编辑 AGENTS.md 或安装 skills；
     * - 配置视图：标题左侧的返回按钮回到列表，右侧是「新会话 / 打开 Finder / 刷新」；
     *   打工人标题旁的铅笔按钮打开「重命名打工人」对话框：只改展示名，目录与工作区
     *   注册都不动，只同步工作区标题。正文用

@@ -97,10 +97,10 @@ class FakeDomain {
 
 /** 测试里的打工人登记表。 */
 const WORKER_ENTRIES = [
-  { id: '软件工程师', name: '', driver: 'agent', assistant: false, avatar: 'rocket' },
-  { id: '质量保障工程师', name: '', driver: 'agent', assistant: false, avatar: 'owl' },
-  { id: '沟通助理', name: '', driver: 'agent', assistant: true, avatar: 'panda' },
-  { id: 'clock', name: '', driver: 'robot', program: 'clock', assistant: false, avatar: 'bee' },
+  { id: '软件工程师', name: '', driver: 'agent', avatar: 'rocket' },
+  { id: '质量保障工程师', name: '', driver: 'agent', avatar: 'owl' },
+  { id: '沟通助理', name: '', driver: 'agent', avatar: 'panda' },
+  { id: 'clock', name: '', driver: 'robot', program: 'clock', avatar: 'bee' },
 ]
 
 /** 一个可操纵的 workers 句柄。 */
@@ -464,6 +464,34 @@ function assistantDefinition() {
   return definition
 }
 
+/** 人任务不再点名助理：人自己认领并点动作。 */
+function humanOnlyDefinition() {
+  const definition = assistantDefinition()
+  delete definition.positions[0].taskTypes[0].assistant
+  return definition
+}
+
+/** 人任务点名助理 + 一条并行的打工人分支：用来验证代办失败会取消其余任务。 */
+function assistantWithParallelDefinition() {
+  const definition = assistantDefinition()
+  definition.positions.push({
+    id: 'dev',
+    label: '研发',
+    executor: { kind: 'worker', id: '软件工程师' },
+    taskTypes: [
+      {
+        id: 'dev.work',
+        label: '开发',
+        content: { type: 'object', properties: {}, additionalProperties: true },
+      },
+    ],
+  })
+  definition.channels.push({ id: 'start.dev', label: '开发', from: 'start', to: 'dev' })
+  definition.channels.push({ id: 'dev.end', label: '交付', from: 'dev', to: 'end' })
+  definition.start.next.push({ channel: 'start.dev', type: 'dev.work', content: {} })
+  return definition
+}
+
 /** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
   return toV8({
@@ -678,7 +706,7 @@ test('engine: the start task id can be used as a storageDomain record key', asyn
   }
 })
 
-test('engine: the end task can be handed to an assistant acting as a secretary', async () => {
+test('engine: the end task can be handed to an assistant for delivery', async () => {
   const env = await setup(simpleDevDefinition())
   try {
     const job = await env.engine.createJobFromSession({
@@ -698,15 +726,15 @@ test('engine: the end task can be handed to an assistant acting as a secretary',
     })
     await env.engine.completeTaskFromSession({ sessionId: devSession, text: '', attachments: [] })
     await waitFor(() => env.workers.dispatched.length === 2)
-    const secretary = env.workers.dispatched[1]
-    assert.equal(secretary.request.worker, '沟通助理')
+    const delivery = env.workers.dispatched[1]
+    assert.equal(delivery.request.worker, '沟通助理')
     const end = taskAt(env.store, job.id, 'end')
     assert.equal(end.status, 'running')
     assert.equal(end.claimant.kind, 'worker')
-    assert.match(secretary.request.prompt, /最终报告/u)
+    assert.match(delivery.request.prompt, /最终报告/u)
 
     await env.engine.completeTaskFromSession({
-      sessionId: secretary.sessionId,
+      sessionId: delivery.sessionId,
       text: '已代收',
       attachments: [],
     })
@@ -716,7 +744,7 @@ test('engine: the end task can be handed to an assistant acting as a secretary',
   }
 })
 
-test('engine: the delivery assistant must exist and be marked as an assistant', async () => {
+test('engine: the delivery assistant must exist and be an agent', async () => {
   const env = await setup(simpleDevDefinition())
   try {
     await assert.rejects(
@@ -735,11 +763,21 @@ test('engine: the delivery assistant must exist and be marked as an assistant', 
           workflowId: env.workflowId,
           content: { requirement: 'x' },
           sessionId: 'starter-session',
-          delivery: { kind: 'assistant', id: '软件工程师' },
+          delivery: { kind: 'assistant', id: 'clock' },
         }),
-      /not marked as an assistant/u,
+      /must be an agent/u,
     )
     assert.equal(env.store.allJobs().length, 0)
+
+    // 未被任何标记「点过名」的智能体也可以被交回方式点名。
+    const accepted = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+      sessionId: 'starter-session',
+      delivery: { kind: 'assistant', id: '软件工程师' },
+    })
+    assert.equal(accepted.delivery.kind, 'assistant')
+    assert.equal(accepted.delivery.id, '软件工程师')
   } finally {
     await env.cleanup()
   }
@@ -815,7 +853,6 @@ test('engine: a v7 job snapshot stays readable and keeps advancing with name fal
       attemptIds: [],
       result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
       error: null,
-      assistantBlocked: false,
       createdAt: timestamp,
       startedAt: timestamp,
       finishedAt: timestamp,
@@ -836,7 +873,6 @@ test('engine: a v7 job snapshot stays readable and keeps advancing with name fal
       attemptIds: [],
       result: null,
       error: null,
-      assistantBlocked: false,
       createdAt: timestamp,
       startedAt: null,
       finishedAt: null,
@@ -1341,43 +1377,58 @@ test('engine: a named assistant takes a human task and completes it with an acti
   }
 })
 
-test('engine: a failed assistant returns the human task to 待认领 and a human can finish it', async () => {
-  const env = await setup(assistantDefinition())
+test('engine: a failed assistant fails the task and the job and cancels the other open tasks', async () => {
+  const env = await setup(assistantWithParallelDefinition())
   try {
     const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
-    await waitFor(() => env.workers.dispatched.length === 1)
-    env.workers.dispatched[0].handle.endTurn()
-    await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
+    await waitFor(() => env.workers.dispatched.length === 2)
+    const assistantDispatch = env.workers.dispatched.find(
+      (dispatch) => dispatch.request.worker === '沟通助理',
+    )
+    const workerDispatch = env.workers.dispatched.find(
+      (dispatch) => dispatch.request.worker === '软件工程师',
+    )
+    assert.ok(assistantDispatch, 'the named assistant gets the human task')
+    assert.ok(workerDispatch, 'the worker branch is running in parallel')
     const approve = taskAt(env.store, job.id, 'approve')
-    assert.equal(approve.assistantBlocked, true)
-    assert.equal(approve.claimant, null)
-    const attempts = env.store.listAttempts(approve.id)
-    assert.equal(attempts.length, 1)
-    assert.equal(attempts[0].status, 'failed')
+    const dev = taskAt(env.store, job.id, 'dev')
+    assert.equal(approve.status, 'running')
+    assert.equal(dev.status, 'running')
 
-    const claimed = await env.engine.claimTaskAsHuman(job.id, approve.id)
-    assert.equal(claimed.status, 'running')
-    const completed = await env.engine.completeTaskAsHuman({
-      jobId: job.id,
-      taskId: approve.id,
-      action: 'reject',
-      input: { note: '不通过' },
-      text: '人自己处理',
-      attachments: [],
-    })
-    assert.equal(completed.status, 'completed')
-    assert.deepEqual(completed.result.input, { note: '不通过' })
+    // 代办会话结束但没有提交结果：任务 failed、作业 failed、其它在跑任务 cancelled。
+    assistantDispatch.handle.endTurn()
+    await waitFor(() => env.store.getJob(job.id).status === 'failed')
+
+    const failedApprove = env.store.getTask(approve.id)
+    assert.equal(failedApprove.status, 'failed')
+    assert.equal(failedApprove.claimant.kind, 'assistant', 'the claimant stays on the record')
+    assert.match(failedApprove.error, /assistant 沟通助理/u, 'the task error names the assistant')
+    assert.match(failedApprove.error, /without completing the task/u)
+
+    const cancelledDev = env.store.getTask(dev.id)
+    assert.equal(cancelledDev.status, 'cancelled')
+    assert.match(cancelledDev.error, /delegated task/u, 'the cancellation carries the reason')
+    assert.equal(workerDispatch.handle.state.cancelled, true, 'the other session is cancelled')
+
+    const failedJob = env.store.getJob(job.id)
+    assert.match(failedJob.error, /delegated task/u)
+    assert.match(failedJob.error, /沟通助理/u, 'the job error names the assistant')
+    assert.match(failedJob.error, /without completing the task/u, 'the job error names the cause')
+
+    // 人不能接手已失败的代办任务。
+    await assert.rejects(
+      () => env.engine.claimTaskAsHuman(job.id, approve.id),
+      /job .* is failed|not running/u,
+    )
   } finally {
     await env.cleanup()
   }
 })
 
 test('engine: a human action creates the declared task only after validation', async () => {
-  const env = await setup(assistantDefinition())
+  const env = await setup(humanOnlyDefinition())
   try {
     const job = await env.engine.createJobFromHuman({ workflowId: env.workflowId, content: {} })
-    await waitFor(() => env.workers.dispatched.length === 1)
-    env.workers.dispatched[0].handle.endTurn()
     await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
     const approve = taskAt(env.store, job.id, 'approve')
 
@@ -1613,7 +1664,6 @@ test('engine: workflow detail resolves worker avatars even when the workers serv
       id: 'software-engineer',
       name: '软件工程师',
       driver: 'agent',
-      assistant: false,
       avatar: 'rocket',
     },
   ])
@@ -1676,8 +1726,8 @@ test('attachments: a task result attaches files and downstream tasks can read th
     await fs.writeFile(path.join(workspace, 'artifacts', 'report.txt'), 'hello attachment', 'utf8')
     // 打工人工作区指向临时目录（附件相对路径的根）。
     const workers = makeWorkers([
-      { id: '软件工程师', name: '', driver: 'agent', assistant: false, path: workspace },
-      { id: '质量保障工程师', name: '', driver: 'agent', assistant: false, path: workspace },
+      { id: '软件工程师', name: '', driver: 'agent', path: workspace },
+      { id: '质量保障工程师', name: '', driver: 'agent', path: workspace },
     ])
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-attach-'))
     try {
@@ -1888,7 +1938,6 @@ async function insertJobWithTasks(store, { id, seq, definition, tasks }) {
     attemptIds: [],
     result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
     error: null,
-    assistantBlocked: false,
     createdAt: timestamp,
     startedAt: timestamp,
     finishedAt: timestamp,
@@ -1904,7 +1953,6 @@ async function insertJobWithTasks(store, { id, seq, definition, tasks }) {
       attemptIds: [],
       result: null,
       error: null,
-      assistantBlocked: false,
       createdAt: timestamp,
       startedAt: null,
       finishedAt: null,

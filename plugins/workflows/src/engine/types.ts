@@ -19,7 +19,6 @@ export interface WorkerListEntryLike {
   readonly name?: unknown
   readonly driver?: unknown
   readonly program?: unknown
-  readonly assistant?: unknown
   readonly description?: unknown
   readonly avatar?: unknown
   readonly path?: unknown

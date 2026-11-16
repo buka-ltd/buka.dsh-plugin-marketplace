@@ -43,19 +43,8 @@ export function PageHeader({
   actions: ReturnType<typeof createWorkerActions>
   detail: ReturnType<typeof createDetailActions>
 }): ReactElement {
-  const {
-    selectedWorker,
-    mutating,
-    corrupt,
-    list,
-    busy,
-    tab,
-    reload,
-    switchTab,
-    backToList,
-    assistantOnly,
-    setAssistantOnly,
-  } = state
+  const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } =
+    state
   const { openCreateDialog, openWorker, revealWorker } = actions
   const { openAvatarDialog, openRenameDialog } = detail
   // 机器人只读：不提供新会话 / 打开目录 / 改名 / 换头像入口。
@@ -81,24 +70,6 @@ export function PageHeader({
       t('refresh'),
     ),
   )
-
-  // 列表视图的筛选：只看带 assistant 标记的打工人（机器人永远不是助理）。
-  const filterButton =
-    selectedWorker === null
-      ? h(
-          Button,
-          {
-            variant: 'outline',
-            size: 'sm',
-            className: 'buka-workers-toolbarButton',
-            'aria-pressed': assistantOnly === true,
-            'aria-label': assistantOnly === true ? t('showAllWorkers') : t('filterAssistants'),
-            disabled: mutating,
-            onClick: () => setAssistantOnly(assistantOnly !== true),
-          },
-          assistantOnly === true ? t('showAllWorkers') : t('filterAssistants'),
-        )
-      : null
 
   // 「创建打工人」常驻标题行，「刷新」右侧、同一尺寸；名称在对话框里填。
   const createButton =
@@ -237,20 +208,10 @@ export function PageHeader({
                 robot
                   ? h(Tag, { tone: 'info' }, t('driverRobot'))
                   : h(MountedTag, { t, worker: selectedWorker }),
-                selectedWorker.assistant === true
-                  ? h(Tag, { tone: 'success' }, t('assistantBadge'))
-                  : null,
               ),
         ),
       ),
-      h(
-        'div',
-        { className: 'buka-workers-toolbar' },
-        detailActions,
-        filterButton,
-        refreshButton,
-        createButton,
-      ),
+      h('div', { className: 'buka-workers-toolbar' }, detailActions, refreshButton, createButton),
       selectedWorker === null
         ? null
         : h(

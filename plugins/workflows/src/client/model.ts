@@ -9,7 +9,6 @@ import type {
   ActionDefinition,
   AttachmentMeta,
   ChannelDefinition,
-  Claimant,
   DeliveryRule,
   Executor,
   JobDetail,
@@ -563,89 +562,67 @@ export function taskCountsText(
   return parts.join(' · ')
 }
 
-/**
- * 承办者的展示名。
- *
- * @param claimant
- * @param t
- * @returns
- */
-export function claimantName(
-  state: PageState,
-  claimant: Claimant | null | undefined,
-  t: (key: string) => string,
-  positionId?: string | null,
-): string {
-  if (!isRecord(claimant)) return ''
-  const ref = typeof claimant.name === 'string' ? claimant.name : ''
-  if (ref === '') return typeof claimant.kind === 'string' ? t(actorKindKeySafe(claimant.kind)) : ''
-  if (claimant.kind === 'human') return ref
-  const displayName = displayNameOfWorker(state, ref, positionId)
-  const label =
-    displayName === null ? ref : workerIdentity({ id: ref, name: displayName }).displayName
-  // 承办的打工人已删除：保留引用键但明确标「已删除」，不伪造一个历史名称。
-  return isWorkerMissing(state, ref) ? `${label} · ${t('workerDeleted')}` : label
+/** 任务「谁在办」的展示口径（ADR 0022）。 */
+export type TaskActor =
+  | { readonly kind: 'assistant'; readonly assistantId: string }
+  | { readonly kind: 'waiting' }
+  | { readonly kind: 'handling' }
+  | { readonly kind: 'executor'; readonly text: string; readonly missing: boolean }
+  | { readonly kind: 'none' }
+
+/** 任务里「谁在办」判定用到的最小字段。 */
+export interface TaskActorInput {
+  position?: string
+  type?: string
+  status?: string
 }
 
 /**
- * 从当前作业 / 工作流定义里找一条打工人引用的展示名。
+ * 人任务点名的助理标识符：从任务类型定义取，没有点名时 null。
  *
  * @param state 页面状态
- * @param ref 标识符（可能来自 v7 快照的旧引用）
- * @param positionId 任务岗位，优先按岗位执行者匹配
- * @returns 展示名；找不到时 null
+ * @param task 任务
+ * @returns 助理标识符；没有点名时 null
  */
-function displayNameOfWorker(
-  state: PageState,
-  ref: string,
-  positionId?: string | null,
-): string | null {
+export function taskAssistantId(state: PageState, task: TaskActorInput): string | null {
+  const typeDefinition = taskTypeOf(state, task)
+  const assistant = typeDefinition?.assistant
+  return typeof assistant === 'string' && assistant.trim() !== '' ? assistant.trim() : null
+}
+
+/** 岗位执行者（当前作业定义 + 工作流定义合并后）。 */
+function positionExecutorOf(state: PageState, positionId: string): Executor | null {
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
-  const positions = positionsOf(definition)
-  if (typeof positionId === 'string' && positionId !== '') {
-    const position = positions.find((item) => item.id === positionId)
-    const identity = position === undefined ? null : identityOfExecutor(position.executor, ref)
-    if (identity !== null) return identity
-  }
-  for (const position of positions) {
-    const identity = identityOfExecutor(position.executor, ref)
-    if (identity !== null) return identity
-  }
-  const assistants = asArray<{ id?: string; name?: string }>(state.workflow.data?.assistants)
-  const found = assistants.find((assistant) => (assistant.id ?? assistant.name) === ref)
-  return found === undefined ? null : workerIdentity({ id: ref, name: found.name }).displayName
+  return positionsOf(definition).find((position) => position.id === positionId)?.executor ?? null
 }
 
 /**
- * 执行者是否就是这条引用；是的话返回它的展示名。
+ * 任务「谁在办」：人任务说代办 / 待你办理 / 你在办理，打工人任务只说执行者。
  *
- * @param executor 执行者
- * @param ref 引用
- * @returns 展示名；不匹配时 null
+ * 承办者（谁接走任务）不再展示；人任务的助理来自任务类型定义的点名。
+ *
+ * @param state 页面状态
+ * @param task 任务摘要或详情
+ * @returns 展示口径；开始 / 结束任务或无法解析时是 `none`
  */
-function identityOfExecutor(executor: Executor, ref: string): string | null {
+export function taskActor(state: PageState, task: TaskActorInput): TaskActor {
+  const position = typeof task.position === 'string' ? task.position : ''
+  if (position === '' || position === 'start' || position === 'end') return { kind: 'none' }
+  if (isHumanTask(state, task)) {
+    const assistantId = taskAssistantId(state, task)
+    if (assistantId !== null) return { kind: 'assistant', assistantId }
+    if (task.status === 'running') return { kind: 'handling' }
+    if (task.status === 'ready' || task.status === 'pending') return { kind: 'waiting' }
+    return { kind: 'none' }
+  }
+  const executor = positionExecutorOf(state, position)
+  if (executor === null || executor.kind !== 'worker') return { kind: 'none' }
+  const text = workerIdentityText(executor)
+  if (text === '') return { kind: 'none' }
   const identity = workerIdentity(executor)
-  if (identity.id !== ref && identity.displayName !== ref) return null
-  return identity.displayName === '' ? null : identity.displayName
-}
-
-/**
- * 承办者种类 → 词典 key（避免 format 与 model 相互依赖的重复）。
- *
- * @param kind
- * @returns
- */
-function actorKindKeySafe(kind: string): string {
-  switch (kind) {
-    case 'worker':
-      return 'actorWorker'
-    case 'human':
-      return 'actorHuman'
-    case 'assistant':
-      return 'actorAssistant'
-    default:
-      return 'unknown'
-  }
+  const missing =
+    executor.missing === true || (identity.id !== '' && isWorkerMissing(state, identity.id))
+  return { kind: 'executor', text, missing }
 }
 
 /**
