@@ -98,7 +98,7 @@ export interface JsonSchema {
   oneOf?: JsonSchema[]
 }
 
-/** 一条「创建任务」的声明（人任务的动作里用）。 */
+/** 一条「创建任务」的声明（人任务的动作与机器人的完成后创建共用）。 */
 export interface CreationDefinition {
   channel?: string
   type?: string
@@ -122,6 +122,8 @@ export interface TaskTypeDefinition {
   /** 任务内容的格式约束。 */
   content?: JsonSchema
   actions?: ActionDefinition[]
+  /** 仅机器人岗位：任务完成后创建的后续任务。 */
+  creates?: CreationDefinition[]
   assistant?: string | null
   mode?: string | null
 }

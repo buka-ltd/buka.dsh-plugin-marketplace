@@ -208,7 +208,7 @@ function definitionTabs(
             : h(
                 'div',
                 { className: 'buka-workflows-typeList' },
-                ...position.taskTypes.map((type) => renderTaskType(page, type)),
+                ...position.taskTypes.map((type) => renderTaskType(page, type, definition, labels)),
               ),
         ),
       },
@@ -401,10 +401,16 @@ function selectionKey(selection: NonNullable<AppContext['state']['definitionSele
 }
 
 /** 一个任务类型：一张卡片，标题 + 说明 + 输入 / 产出两行契约。 */
-function renderTaskType(page: AppContext, type: TaskTypeDefinition): React.ReactElement {
+function renderTaskType(
+  page: AppContext,
+  type: TaskTypeDefinition,
+  definition: WorkflowDefinition,
+  labels: Map<string, string>,
+): React.ReactElement {
   const { t } = page
   const id = typeof type.id === 'string' ? type.id : ''
   const actions = Array.isArray(type.actions) ? type.actions : []
+  const creates = Array.isArray(type.creates) ? type.creates : []
   return h(
     'article',
     { key: id === '' ? (type.label ?? 'type') : id, className: 'buka-workflows-typeCard' },
@@ -449,6 +455,28 @@ function renderTaskType(page: AppContext, type: TaskTypeDefinition): React.React
                 action.label ?? String(action.id ?? ''),
               ),
             ),
+          ),
+        ),
+    creates.length === 0
+      ? null
+      : contractLine(
+          t('taskTypeCreates'),
+          h(
+            'div',
+            { className: 'buka-workflows-tagRow' },
+            ...creates.map((creation, index) => {
+              const typeId = typeof creation.type === 'string' ? creation.type : ''
+              const target =
+                typeId === '' || typeId === 'end'
+                  ? t('endTaskTitle')
+                  : (labels.get(typeId) ?? typeId)
+              const channel = channelOf(definition, creation.channel ?? '')
+              return h(
+                Tag,
+                { key: `${creation.channel ?? ''}-${typeId}-${index}`, tone: 'neutral' },
+                channel === null ? target : `${target} · ${channel.label}`,
+              )
+            }),
           ),
         ),
   )

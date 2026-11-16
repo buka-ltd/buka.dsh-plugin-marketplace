@@ -789,6 +789,40 @@ test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
   assert.doesNotMatch(text, /原始 schema/u, 'no raw schema dump')
 })
 
+test('定义抽屉：机器人任务类型显示完成后创建', async () => {
+  const client = await loadClient()
+  const definition = {
+    ...DEFINITION,
+    positions: DEFINITION.positions.map((position) =>
+      position.id === 'dev'
+        ? {
+            ...position,
+            executor: { kind: 'worker', name: 'clock', driver: 'robot' },
+            taskTypes: position.taskTypes.map((type) => ({
+              ...type,
+              creates: [{ channel: 'dev.qa', type: 'qa.verify', content: {} }],
+            })),
+          }
+        : position,
+    ),
+  }
+  const { tree } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: {
+      status: 'ready',
+      data: { ...WORKFLOW_DETAIL, workflow: { ...WORKFLOW_DETAIL.workflow, definition } },
+      error: null,
+    },
+    definitionSelection: { kind: 'position', id: 'dev' },
+  })
+  const drawer = drawerOf(tree)
+  assert.ok(drawer !== null, 'the definition drawer renders')
+  const text = textOf(drawer)
+  assert.match(text, /完成后创建/u, 'the creates row is labelled')
+  assert.match(text, /验证/u, 'the created task type label is shown')
+  assert.match(text, /提测/u, 'the channel label is shown')
+})
+
 test('定义抽屉：通道显示发送方、接收方与允许的任务类型', async () => {
   const client = await loadClient()
   const { tree } = render(client, {

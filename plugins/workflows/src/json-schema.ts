@@ -387,11 +387,12 @@ export function resolveSchemaPath(schema: JsonSchema, segments: readonly string[
  *
  * @param schema 声明的 schema
  * @param data 待校验的值
+ * @param rootLabel 顶层取的名字（错误信息里的根路径）；默认 `payload`
  * @returns 可读问题列表；空数组表示通过
  */
-export function schemaProblems(schema: JsonSchema, data: unknown): string[] {
+export function schemaProblems(schema: JsonSchema, data: unknown, rootLabel = 'payload'): string[] {
   const problems: string[] = []
-  checkValue(schema, data, '', problems, 0)
+  checkValue(schema, data, '', problems, 0, rootLabel)
   return problems
 }
 
@@ -403,6 +404,7 @@ export function schemaProblems(schema: JsonSchema, data: unknown): string[] {
  * @param path 出错时使用的路径前缀
  * @param problems 问题列表
  * @param depth 当前递归深度
+ * @param rootLabel 顶层取的名字
  * @returns 无返回值
  */
 function checkValue(
@@ -411,14 +413,15 @@ function checkValue(
   path: string,
   problems: string[],
   depth: number,
+  rootLabel: string,
 ): void {
   if (depth > MAX_CHECK_DEPTH) return
-  const label = path === '' ? 'payload' : path
+  const label = path === '' ? rootLabel : path
 
   if (Array.isArray(schema.oneOf)) {
     const matched = schema.oneOf.some((branch) => {
       const branchProblems: string[] = []
-      checkValue(branch, value, path, branchProblems, depth + 1)
+      checkValue(branch, value, path, branchProblems, depth + 1, rootLabel)
       return branchProblems.length === 0
     })
     if (!matched) problems.push(`${label}: does not match any oneOf variant`)
@@ -456,7 +459,7 @@ function checkValue(
       }
       for (const [name, child] of Object.entries(properties)) {
         if (!Object.hasOwn(value, name)) continue
-        checkValue(child, value[name], joinPath(path, name), problems, depth + 1)
+        checkValue(child, value[name], joinPath(path, name), problems, depth + 1, rootLabel)
       }
       return
     }
@@ -467,7 +470,14 @@ function checkValue(
       }
       if (isPlainObject(schema.items)) {
         value.forEach((item, index) => {
-          checkValue(schema.items as JsonSchema, item, `${path}[${index}]`, problems, depth + 1)
+          checkValue(
+            schema.items as JsonSchema,
+            item,
+            `${path}[${index}]`,
+            problems,
+            depth + 1,
+            rootLabel,
+          )
         })
       }
       return

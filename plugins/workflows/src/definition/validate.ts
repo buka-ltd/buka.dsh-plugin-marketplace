@@ -27,6 +27,7 @@ import type {
 } from '../domain/types.ts'
 import type { JsonSchema } from '../json-schema.ts'
 import { isPlainObject, parseJsonSchema, resolveSchemaPath } from '../json-schema.ts'
+import { isKnownProgram, normalizeProgramId, programRequiredContent } from '../program/contracts.ts'
 import { containsTemplate, inspectPayload } from './payload.ts'
 
 /** 校验入参。 */
@@ -103,6 +104,7 @@ export function validateWorkflowDefinition(
   const endContent = end?.content
   checkStartRoutes(start, positionById, typeById, channelById, endContent, issues)
   checkActions(positions, positionById, typeById, channelById, endContent, issues)
+  checkRobotCreates(positions, positionById, typeById, channelById, endContent, issues)
 
   if (issues.failed) return { ok: false, issues: issues.list }
   if (name === null || budgets === null || start === null || end === null) {
@@ -274,10 +276,18 @@ function readExecutor(
     issues.add(`${path}.name`, 'must be a non-empty worker name')
     return null
   }
-  if (!workers.has(name)) {
+  const worker = workers.get(name)
+  if (worker === undefined) {
     issues.add(
       `${path}.name`,
       `unknown worker "${name}": register it with the Buka Workers plugin first`,
+    )
+    return null
+  }
+  if (worker.driver === 'robot' && !isKnownProgram(worker.program)) {
+    issues.add(
+      `${path}.name`,
+      `robot "${name}" uses program "${normalizeProgramId(worker.program)}", which no installed plugin provides`,
     )
     return null
   }
@@ -339,6 +349,7 @@ function readTaskType(
   const content = readSchema(entry.content, `${path}.content`, issues, 'value')
   const human = executor?.kind === 'human'
   const actions = readActions(entry.actions, `${path}.actions`, human, issues)
+  const creates = readRobotCreates(entry.creates, `${path}.creates`, executor, workers, issues)
   const assistant = readAssistant(
     entry.assistant,
     `${path}.assistant`,
@@ -349,15 +360,97 @@ function readTaskType(
   )
   const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues)
   if (label === null) return null
-  return {
+  const taskType: TaskTypeDefinition = {
     id,
     label,
     ...(definition === null || definition === '' ? {} : { definition }),
     ...(content === null ? {} : { content }),
     ...(actions === undefined ? {} : { actions }),
+    ...(creates === undefined ? {} : { creates }),
     ...(assistant === undefined ? {} : { assistant }),
     ...(mode === undefined ? {} : { mode }),
   }
+  // content 写坏了已经报过错，不再叠一条「缺 content schema」。
+  if (content !== null || entry.content === undefined || entry.content === null) {
+    checkRobotContent(taskType, path, executor, workers, issues)
+  }
+  return taskType
+}
+
+/**
+ * 机器人岗位的任务类型必须覆盖程序声明的内容契约。
+ *
+ * 契约属于程序（见 `program/contracts.ts`）；这里只检查作者声明的 `content`
+ * schema 是否覆盖了程序要求的必填字段，实际内容在创建任务与执行前再校验。
+ * `oneOf` 联合类型不在这里猜，交给运行期校验。
+ */
+function checkRobotContent(
+  taskType: TaskTypeDefinition,
+  path: string,
+  executor: ExecutorSpec | null,
+  workers: ReadonlyMap<string, WorkerInfo>,
+  issues: Issues,
+): void {
+  if (executor === null || executor.kind !== 'worker') return
+  const worker = workers.get(executor.name)
+  if (worker === undefined || worker.driver !== 'robot') return
+  const program = normalizeProgramId(worker.program)
+  const required = programRequiredContent(program)
+  if (required.length === 0) return
+  const fields = required.map((name) => `"${name}"`).join(', ')
+  const schema = taskType.content
+  if (schema === undefined) {
+    issues.add(
+      `${path}.content`,
+      `robot "${worker.name}" (program "${program}") needs task content: declare a content schema with required ${fields}`,
+    )
+    return
+  }
+  if (Array.isArray(schema.oneOf)) return
+  if (schema.type !== 'object') {
+    issues.add(
+      `${path}.content.type`,
+      `must be "object": robot "${worker.name}" (program "${program}") reads task content fields ${fields}`,
+    )
+    return
+  }
+  const declared = new Set(Array.isArray(schema.required) ? schema.required : [])
+  const missing = required.filter((name) => !declared.has(name))
+  if (missing.length > 0) {
+    issues.add(
+      `${path}.content.required`,
+      `must include ${missing.map((name) => `"${name}"`).join(', ')}: robot "${worker.name}" (program "${program}") needs it`,
+    )
+  }
+}
+
+/** 执行者是不是机器人（登记表里 driver 为 robot）。 */
+function isRobotExecutor(
+  executor: ExecutorSpec | null,
+  workers: ReadonlyMap<string, WorkerInfo>,
+): boolean {
+  if (executor === null || executor.kind !== 'worker') return false
+  return workers.get(executor.name)?.driver === 'robot'
+}
+
+/**
+ * 解析机器人任务类型的「完成后创建」。
+ *
+ * 只有机器人岗位能声明：agent 任务用 `buka_task_create` 动态创建，人任务用动作。
+ */
+function readRobotCreates(
+  raw: unknown,
+  path: string,
+  executor: ExecutorSpec | null,
+  workers: ReadonlyMap<string, WorkerInfo>,
+  issues: Issues,
+): readonly CreationDefinition[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (!isRobotExecutor(executor, workers)) {
+    issues.add(path, 'creates are only valid on robot positions')
+    return undefined
+  }
+  return readCreations(raw, path, issues) ?? undefined
 }
 
 /** 解析 schema 字段；任务内容允许非对象顶层，表单与作业输入要求对象。 */
@@ -719,6 +812,32 @@ function checkActions(
             { positionById, typeById, channelById, issues },
           )
         }
+      }
+    }
+  }
+}
+
+/** 校验机器人任务类型的「完成后创建」。 */
+function checkRobotCreates(
+  positions: readonly PositionDefinition[],
+  positionById: ReadonlyMap<string, PositionDefinition>,
+  typeById: ReadonlyMap<string, TaskTypeDefinition>,
+  channelById: ReadonlyMap<string, ChannelDefinition>,
+  endContent: JsonSchema | undefined,
+  issues: Issues,
+): void {
+  for (const position of positions) {
+    for (const taskType of position.taskTypes) {
+      for (const [index, creation] of (taskType.creates ?? []).entries()) {
+        checkCreation(
+          creation,
+          `positions.${position.id}.taskTypes.${taskType.id}.creates[${index}]`,
+          position.id,
+          taskType.content,
+          undefined,
+          endContent,
+          { positionById, typeById, channelById, issues },
+        )
       }
     }
   }

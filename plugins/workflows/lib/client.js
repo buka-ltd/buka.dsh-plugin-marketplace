@@ -343,6 +343,7 @@ window.__ModuleLoader__.load({
     	taskTypesEmpty: "This position declares no task types.",
     	taskTypeContent: "Content",
     	taskTypeActions: "Actions",
+    	taskTypeCreates: "Creates",
     	taskTypeAssistant: "Assistant",
     	taskTypeModePlan: "Plan",
     	taskTypeUnset: "—",
@@ -598,6 +599,7 @@ window.__ModuleLoader__.load({
     	taskTypesEmpty: "这个岗位没有声明任务类型。",
     	taskTypeContent: "任务内容",
     	taskTypeActions: "动作",
+    	taskTypeCreates: "完成后创建",
     	taskTypeAssistant: "助理",
     	taskTypeModePlan: "计划",
     	taskTypeUnset: "—",
@@ -2288,7 +2290,7 @@ window.__ModuleLoader__.load({
     		return [{
     			id: "types",
     			label: t("positionTaskTypes"),
-    			content: h("div", { className: "buka-workflows-drawerStack" }, h("h3", { className: "buka-workflows-sectionTitle" }, t("positionTaskTypes")), position.taskTypes.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("taskTypesEmpty")) : h("div", { className: "buka-workflows-typeList" }, ...position.taskTypes.map((type) => renderTaskType(page, type))))
+    			content: h("div", { className: "buka-workflows-drawerStack" }, h("h3", { className: "buka-workflows-sectionTitle" }, t("positionTaskTypes")), position.taskTypes.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("taskTypesEmpty")) : h("div", { className: "buka-workflows-typeList" }, ...position.taskTypes.map((type) => renderTaskType(page, type, definition, labels))))
     		}];
     	}
     	if (selection.kind === "start" || selection.kind === "end") {
@@ -2369,10 +2371,11 @@ window.__ModuleLoader__.load({
     	return selection.kind === "position" || selection.kind === "channel" ? `${selection.kind}:${selection.id}` : selection.kind;
     }
     /** 一个任务类型：一张卡片，标题 + 说明 + 输入 / 产出两行契约。 */
-    function renderTaskType(page, type) {
+    function renderTaskType(page, type, definition, labels) {
     	const { t } = page;
     	const id = typeof type.id === "string" ? type.id : "";
     	const actions = Array.isArray(type.actions) ? type.actions : [];
+    	const creates = Array.isArray(type.creates) ? type.creates : [];
     	return h("article", {
     		key: id === "" ? type.label ?? "type" : id,
     		className: "buka-workflows-typeCard"
@@ -2384,7 +2387,15 @@ window.__ModuleLoader__.load({
     	}) : null, h("div", { className: "buka-workflows-contractStack is-tight" }, contractLine(t("taskTypeContent"), contractOrDash(page, type.content))), actions.length === 0 ? null : contractLine(t("taskTypeActions"), h("div", { className: "buka-workflows-tagRow" }, ...actions.map((action) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
     		key: String(action.id ?? action.label),
     		tone: "neutral"
-    	}, action.label ?? String(action.id ?? ""))))));
+    	}, action.label ?? String(action.id ?? ""))))), creates.length === 0 ? null : contractLine(t("taskTypeCreates"), h("div", { className: "buka-workflows-tagRow" }, ...creates.map((creation, index) => {
+    		const typeId = typeof creation.type === "string" ? creation.type : "";
+    		const target = typeId === "" || typeId === "end" ? t("endTaskTitle") : labels.get(typeId) ?? typeId;
+    		const channel = channelOf(definition, creation.channel ?? "");
+    		return h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
+    			key: `${creation.channel ?? ""}-${typeId}-${index}`,
+    			tone: "neutral"
+    		}, channel === null ? target : `${target} · ${channel.label}`);
+    	}))));
     }
     /** 契约的一行：左侧短标签，右侧字段标签。 */
     function contractLine(label, content) {

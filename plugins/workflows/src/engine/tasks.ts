@@ -35,6 +35,7 @@ import type {
   WorkerInfo,
   WorkflowDefinition,
 } from '../domain/types.ts'
+import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
 import { WorkflowError } from './types.ts'
 
 /** 创建任务的入参。 */
@@ -119,6 +120,27 @@ export function resolveExecutor(
 }
 
 /**
+ * 按机器人的内容契约校验任务内容。
+ *
+ * 契约属于程序本身（见 `program/contracts.ts`）；任务类型声明的 schema 是作者
+ * 视角的格式约束，两者都不通过就拒绝创建。
+ *
+ * @param assignee 任务钉住的执行者
+ * @param content 渲染后的任务内容
+ * @throws `WorkflowError('invalid-content')` 内容不满足机器人契约
+ */
+export function assertRobotContent(assignee: StoredExecutor, content: JsonValue): void {
+  if (assignee.kind !== 'worker' || assignee.driver !== 'robot') return
+  const problems = programContentProblems(assignee.program, content)
+  if (problems.length === 0) return
+  const program = normalizeProgramId(assignee.program)
+  throw new WorkflowError(
+    'invalid-content',
+    `content does not match robot "${assignee.name}" (program "${program}"): ${problems.join('; ')}`,
+  )
+}
+
+/**
  * 判断一个任务在加入新依赖后依赖图是否成环。
  *
  * 新任务的依赖只能指向已创建任务，所以只需检查已有任务的依赖闭包；但如果已有
@@ -194,6 +216,8 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
       `content does not match task type "${taskType.id}": ${problems.join('; ')}`,
     )
   }
+  const assignee = resolveExecutor(definition, position, job, workers)
+  assertRobotContent(assignee, content)
 
   // 依赖：存在、同作业、不重复、不是自己、无环、预算。
   const taskId = newTaskId()
@@ -245,7 +269,7 @@ export function buildCreatedTask(input: CreateTaskInput): CreateTaskResult {
     deps: dependencyIds,
     status: ready ? 'ready' : 'pending',
     createdBy: { taskId: creator.id, position: creator.position },
-    assignee: resolveExecutor(definition, position, job, workers),
+    assignee,
     claimant: null,
     attemptIds: [],
     result: null,
@@ -452,6 +476,8 @@ export function buildInitialTasks(input: {
     }
     const parsed = renderCreation(definition, 'start', creation, { content: startTask.content })
     const now = nowIso()
+    const assignee = resolveExecutor(definition, parsed.position, job, workers)
+    assertRobotContent(assignee, parsed.content)
     const task: TaskRecord = {
       id: newTaskId(),
       jobId: job.id,
@@ -462,7 +488,7 @@ export function buildInitialTasks(input: {
       deps: [START_TASK_ID],
       status: 'ready',
       createdBy: { taskId: startTask.id, position: 'start' },
-      assignee: resolveExecutor(definition, parsed.position, job, workers),
+      assignee,
       claimant: null,
       attemptIds: [],
       result: null,

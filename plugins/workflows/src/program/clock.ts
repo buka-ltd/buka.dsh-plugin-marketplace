@@ -8,6 +8,7 @@
  */
 
 import type { JsonValue } from '../domain/types.ts'
+import type { JsonSchema } from '../json-schema.ts'
 
 /** 内建 `clock` 驱动 id；与 workers 登记表里的 program id 一致。 */
 export const CLOCK_PROGRAM_ID = 'clock'
@@ -21,6 +22,13 @@ export interface ProgramRunResult {
 /** program 驱动接口；未来可注册更多。 */
 export interface ProgramDriver {
   readonly id: string
+  /**
+   * 这个程序接收的任务内容契约；省略表示不限。
+   *
+   * 保存工作流时要求挂该程序的任务类型声明 `content` schema 覆盖必填字段，
+   * 创建任务与执行前再按它校验实际内容（见 `program/contracts.ts`）。
+   */
+  readonly content?: JsonSchema | undefined
   /**
    * 执行一个 program 任务。
    *
@@ -79,9 +87,20 @@ function sleep(delayMs: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-/** 内建 clock 驱动。 */
+/** 内建 clock 驱动；任务内容只有一个必填的 `until`。 */
 export const clockDriver: ProgramDriver = {
   id: CLOCK_PROGRAM_ID,
+  content: {
+    type: 'object',
+    description: 'Task content for the clock robot: when the task should complete.',
+    properties: {
+      until: {
+        type: 'string',
+        description: 'ISO 8601 timestamp, for example 2026-11-16T09:00:00+08:00.',
+      },
+    },
+    required: ['until'],
+  },
   async run({ content, signal }) {
     const until = clockUntil(content)
     if (until === null) {

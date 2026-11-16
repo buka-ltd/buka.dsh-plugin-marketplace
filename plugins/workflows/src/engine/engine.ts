@@ -35,6 +35,7 @@ import type {
   AttachmentRecord,
   AttemptRecord,
   Claimant,
+  CreationDefinition,
   DeliveryRule,
   JobRecord,
   JsonValue,
@@ -49,6 +50,7 @@ import type {
 import { type JsonSchema, schemaProblems } from '../json-schema.ts'
 import type { ResolvedOptions } from '../options.ts'
 import { programDriver } from '../program/clock.ts'
+import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 import {
   canRetryDelivery,
@@ -1191,13 +1193,14 @@ export class WorkflowEngine {
       }
     }
     const workers = await this.workers()
-    const tasks = this.store.listTasks(job.id)
-    const creations = (action?.creates ?? []).map((creation) =>
-      renderCreation(job.definition, task.position, creation, {
-        content: task.content,
-        input: form,
-      }),
-    )
+    // 先渲染、校验动作声明的全部创建；任何一条不合法都不改任务状态。
+    const rendered = this.renderDeclaredLocked({
+      definition: job.definition,
+      from: task.position,
+      creations: action?.creates ?? [],
+      content: task.content,
+      input: form,
+    })
     let prepared = task
     if (task.status === 'ready') {
       const now = nowIso()
@@ -1224,29 +1227,7 @@ export class WorkflowEngine {
         updatedAt: now,
       }))
     }
-    let known = tasks
-    for (const parsed of creations) {
-      const created = buildCreatedTask({
-        job,
-        creator: prepared,
-        channel: parsed.channel.id,
-        type: parsed.taskType.id,
-        content: parsed.content,
-        deps: [prepared.id],
-        tasks: known,
-        workers,
-      })
-      await this.store.insertTask(created.task)
-      known = [...known, created.task]
-      await this.appendEvent(job.id, 'task/created', {
-        taskId: created.task.id,
-        position: created.task.position,
-        type: created.task.type,
-        channel: created.task.channel,
-        deps: created.task.deps,
-        createdBy: prepared.id,
-      })
-    }
+    await this.insertDeclaredLocked({ job, creator: prepared, rendered, workers })
     return await this.completeTaskLocked(job, prepared, {
       text: input.text,
       attachments: input.attachments,
@@ -1255,6 +1236,66 @@ export class WorkflowEngine {
       ...(action === undefined ? {} : { action: { id: action.id, label: action.label } }),
       ...(action?.input === undefined ? {} : { input: form }),
     })
+  }
+
+  /**
+   * 渲染一组创建声明（不落盘）。
+   *
+   * 人任务动作与机器人任务完成后共用：先一次性渲染、校验全部声明，任何一条
+   * 不合法都不落盘，调用方可以据此保持任务状态不变。
+   */
+  private renderDeclaredLocked(input: {
+    readonly definition: WorkflowDefinition
+    readonly from: string
+    readonly creations: readonly CreationDefinition[]
+    readonly content: JsonValue
+    readonly input?: JsonValue | undefined
+  }): Array<ReturnType<typeof renderCreation>> {
+    return input.creations.map((creation) =>
+      renderCreation(input.definition, input.from, creation, {
+        content: input.content,
+        ...(input.input === undefined ? {} : { input: input.input }),
+      }),
+    )
+  }
+
+  /**
+   * 落盘一组已经渲染好的创建，并写入创建事件。
+   *
+   * 创建的任务依赖 `creator`。
+   */
+  private async insertDeclaredLocked(input: {
+    readonly job: JobRecord
+    readonly creator: TaskRecord
+    readonly rendered: ReadonlyArray<ReturnType<typeof renderCreation>>
+    readonly workers: ReadonlyMap<string, WorkerInfo>
+  }): Promise<TaskRecord[]> {
+    let known = this.store.listTasks(input.job.id)
+    const created: TaskRecord[] = []
+    for (const parsed of input.rendered) {
+      const built = buildCreatedTask({
+        job: input.job,
+        creator: input.creator,
+        channel: parsed.channel.id,
+        type: parsed.taskType.id,
+        content: parsed.content,
+        deps: [input.creator.id],
+        tasks: known,
+        workers: input.workers,
+      })
+      await this.store.insertTask(built.task)
+      known = [...known, built.task]
+      created.push(built.task)
+      await this.appendEvent(input.job.id, 'task/created', {
+        taskId: built.task.id,
+        position: built.task.position,
+        type: built.task.type,
+        channel: built.task.channel,
+        deps: built.task.deps,
+        createdBy: input.creator.id,
+      })
+    }
+    return created
   }
 
   /**
@@ -1980,9 +2021,20 @@ export class WorkflowEngine {
   ): Promise<void> {
     const task = this.store.getTask(taskId)
     if (task === undefined || task.status !== 'running') return
-    const driver = programDriver(programId === '' ? 'clock' : programId)
+    const program = normalizeProgramId(programId)
+    const driver = programDriver(program)
     if (driver === undefined) {
-      await this.failOutside(jobId, taskId, `unknown robot driver "${programId}"`)
+      await this.failOutside(jobId, taskId, `unknown robot driver "${program}"`)
+      return
+    }
+    // 旧作业或手改数据可能绕过创建时的校验，执行前再按程序契约检查一次。
+    const problems = programContentProblems(program, task.content)
+    if (problems.length > 0) {
+      await this.failOutside(
+        jobId,
+        taskId,
+        `robot program "${program}" cannot run this task: ${problems.join('; ')}`,
+      )
       return
     }
     const job = this.store.getJob(jobId)
@@ -2003,9 +2055,21 @@ export class WorkflowEngine {
       const result = await driver.run({ content: task.content, signal: controller.signal })
       await this.store.runExclusive(jobId, async () => {
         this.active.delete(taskId)
+        const currentJob = this.store.getJob(jobId)
         const current = this.store.getTask(taskId)
-        if (current === undefined || current.status !== 'running') return
-        await this.completeTaskLocked(job, current, {
+        if (currentJob === undefined || current === undefined || current.status !== 'running')
+          return
+        // 机器人的静态后继：先渲染、再创建（依赖这张任务），最后完成任务并调度。
+        const workers = await this.workers()
+        const taskType = this.taskTypeOf(currentJob.definition, current.type)
+        const rendered = this.renderDeclaredLocked({
+          definition: currentJob.definition,
+          from: current.position,
+          creations: taskType?.creates ?? [],
+          content: current.content,
+        })
+        await this.insertDeclaredLocked({ job: currentJob, creator: current, rendered, workers })
+        await this.completeTaskLocked(currentJob, current, {
           text: result.text,
           attachments: [],
           workspace: undefined,

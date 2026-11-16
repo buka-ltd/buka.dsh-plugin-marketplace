@@ -32,6 +32,7 @@ import {
   TERMINAL_JOB_STATUSES,
   TERMINAL_TASK_STATUSES,
 } from '../plugins/workflows/src/domain/status.ts'
+import { assertRobotContent, buildInitialTasks } from '../plugins/workflows/src/engine/tasks.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
 import { toV7 } from './workflows-fixture-v7.mjs'
 
@@ -763,8 +764,9 @@ test('definition: rejects budget and end contract errors', () => {
   }
 })
 
-test('definition: workers are valid executors', () => {
-  const definition = {
+/** clock 机器人工作流：开始 → 等待（clock）→ 结束；任务内容带 `until`。 */
+function sampleClockDefinition() {
+  return {
     version: 7,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
@@ -802,7 +804,263 @@ test('definition: workers are valid executors', () => {
       { id: 'wait.end', label: '等待结束', from: 'wait', to: 'end' },
     ],
   }
+}
+
+/** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
+function robotCreatesDefinition() {
+  return {
+    version: 7,
+    name: '到点执行',
+    budgets: { maxTasks: 10, maxDurationHours: 24 },
+    start: {
+      content: {
+        type: 'object',
+        properties: { until: { type: 'string' } },
+        required: ['until'],
+      },
+      next: [
+        { channel: 'start.wait', type: 'wait.until', content: { until: '{{content.until}}' } },
+      ],
+    },
+    end: { content: { type: 'object' } },
+    positions: [
+      {
+        id: 'wait',
+        label: '等待',
+        executor: { kind: 'worker', name: 'clock' },
+        taskTypes: [
+          {
+            id: 'wait.until',
+            label: '等待到点',
+            content: {
+              type: 'object',
+              properties: { until: { type: 'string' } },
+              required: ['until'],
+            },
+            creates: [
+              { channel: 'wait.run', type: 'run.task', content: { note: '{{content.until}}' } },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'run',
+        label: '执行',
+        executor: { kind: 'human' },
+        taskTypes: [
+          {
+            id: 'run.task',
+            label: '执行',
+            content: {
+              type: 'object',
+              properties: { note: { type: 'string' } },
+              required: ['note'],
+            },
+          },
+          { id: 'run.other', label: '另一个任务', content: { type: 'object' } },
+        ],
+      },
+    ],
+    channels: [
+      { id: 'start.wait', label: '开始等待', from: 'start', to: 'wait' },
+      { id: 'wait.run', label: '到点执行', from: 'wait', to: 'run' },
+      { id: 'run.end', label: '完成', from: 'run', to: 'end' },
+    ],
+  }
+}
+
+test('definition: workers are valid executors', () => {
+  expectOk(validateWorkflowDefinition(sampleClockDefinition(), { workers: sampleWorkers() }))
+})
+
+test('definition: robot positions must cover the program content contract', () => {
+  const workers = sampleWorkers()
+  const cases = [
+    [
+      (d) => delete d.positions[0].taskTypes[0].content,
+      /positions\[0\]\.taskTypes\[0\]\.content$/,
+      /robot "clock" \(program "clock"\) needs task content.*"until"/,
+    ],
+    [
+      (d) => {
+        d.positions[0].taskTypes[0].content = {
+          type: 'object',
+          properties: { until: { type: 'string' } },
+        }
+      },
+      /positions\[0\]\.taskTypes\[0\]\.content\.required/,
+      /must include "until"/,
+    ],
+    [
+      (d) => {
+        d.positions[0].taskTypes[0].content = { type: 'string' }
+      },
+      /positions\[0\]\.taskTypes\[0\]\.content\.type/,
+      /must be "object"/,
+    ],
+  ]
+  for (const [change, pathPattern, messagePattern] of cases) {
+    const definition = sampleClockDefinition()
+    change(definition)
+    expectIssue(validateWorkflowDefinition(definition, { workers }), pathPattern, messagePattern)
+  }
+})
+
+test('definition: robot executors must use a known program', () => {
+  const workers = new Map([
+    ...sampleWorkers(),
+    ['brokenbot', { name: 'brokenbot', driver: 'robot', program: 'nope', assistant: false }],
+  ])
+  const definition = sampleClockDefinition()
+  definition.positions[0].executor = { kind: 'worker', name: 'brokenbot' }
+  expectIssue(
+    validateWorkflowDefinition(definition, { workers }),
+    /positions\[0\]\.executor\.name/,
+    /program "nope"/,
+  )
+})
+
+test('definition: robot task types may declare creates', () => {
+  const definition = expectOk(
+    validateWorkflowDefinition(robotCreatesDefinition(), { workers: sampleWorkers() }),
+  )
+  const wait = findPosition(definition, 'wait')
+  assert.equal(wait?.taskTypes[0].creates?.[0]?.channel, 'wait.run')
+  assert.equal(wait?.taskTypes[0].creates?.[0]?.type, 'run.task')
+})
+
+test('definition: creates are only valid on robot positions', () => {
+  const definition = robotCreatesDefinition()
+  definition.positions[1].taskTypes[0].creates = [{ channel: 'run.end', content: {} }]
+  expectIssue(
+    validateWorkflowDefinition(definition, { workers: sampleWorkers() }),
+    /positions\[1\]\.taskTypes\[0\]\.creates$/,
+    /only valid on robot positions/,
+  )
+})
+
+test('definition: rejects invalid robot creates', () => {
+  const workers = sampleWorkers()
+  const cases = [
+    [
+      (d) => (d.positions[0].taskTypes[0].creates[0].channel = 'nope'),
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.channel/,
+      /unknown channel/,
+    ],
+    [
+      (d) => (d.positions[0].taskTypes[0].creates[0].channel = 'run.end'),
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.channel/,
+      /starts at "run"/,
+    ],
+    [
+      (d) => (d.positions[0].taskTypes[0].creates[0].type = 'nope'),
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.type/,
+      /not a task type of position "run"/,
+    ],
+    [
+      (d) => {
+        d.channels.find((channel) => channel.id === 'wait.run').types = ['run.other']
+      },
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.type/,
+      /does not allow task type/,
+    ],
+    [
+      (d) => {
+        d.positions[0].taskTypes[0].creates[0].content = { note: '{{input.note}}' }
+      },
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.content/,
+      /cannot be resolved/,
+    ],
+    [
+      (d) => {
+        d.positions[0].taskTypes[0].creates[0].content = {}
+      },
+      /positions\.wait\.taskTypes\.wait\.until\.creates\[0\]\.content\.note/,
+      /missing required field/,
+    ],
+  ]
+  for (const [change, pathPattern, messagePattern] of cases) {
+    const definition = robotCreatesDefinition()
+    change(definition)
+    expectIssue(validateWorkflowDefinition(definition, { workers }), pathPattern, messagePattern)
+  }
+})
+
+test('definition: robot creates may target the end node', () => {
+  const definition = robotCreatesDefinition()
+  definition.positions[0].taskTypes[0].creates = [{ channel: 'wait.end', content: {} }]
+  definition.channels.push({ id: 'wait.end', label: '到点结束', from: 'wait', to: 'end' })
   expectOk(validateWorkflowDefinition(definition, { workers: sampleWorkers() }))
+})
+
+test('engine: robot content contract validates content directly', () => {
+  const clock = { kind: 'worker', name: 'clock', driver: 'robot', program: 'clock' }
+  assert.doesNotThrow(() => assertRobotContent(clock, { until: '2030-01-01T00:00:00Z' }))
+  assert.throws(() => assertRobotContent(clock, {}), /missing required field/)
+  assert.throws(() => assertRobotContent(clock, 'tomorrow'), /expected object/)
+  assert.doesNotThrow(() =>
+    assertRobotContent({ kind: 'worker', name: '软件工程师', driver: 'agent' }, {}),
+  )
+})
+
+test('engine: robot tasks are checked against the program content contract', () => {
+  const workers = sampleWorkers()
+  const definition = sampleClockDefinition()
+  // 手改数据 / 旧作业可能绕过保存校验：任务类型没要求 until 时创建任务必须被拒。
+  definition.positions[0].taskTypes[0].content = {
+    type: 'object',
+    properties: { until: { type: 'string' } },
+  }
+  definition.start.next = [{ channel: 'start.wait', type: 'wait.until', content: {} }]
+  const startTask = {
+    id: START_TASK_ID,
+    jobId: 'job-clock',
+    position: 'start',
+    type: 'start',
+    channel: null,
+    content: {},
+    deps: [],
+    status: 'completed',
+    createdBy: null,
+    assignee: { kind: 'human' },
+    claimant: null,
+    attemptIds: [],
+    result: null,
+    error: null,
+    assistantBlocked: false,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    startedAt: null,
+    finishedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  }
+  const job = {
+    id: 'job-clock',
+    seq: 1,
+    workflowId: 'wf-clock',
+    workflowVersion: 1,
+    workflowName: '定时等待',
+    workflowDescription: '',
+    definition,
+    status: 'running',
+    starter: { kind: 'human' },
+    input: {},
+    delivery: { kind: 'starter' },
+    inputSummary: '',
+    error: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    finishedAt: null,
+  }
+  assert.throws(
+    () => buildInitialTasks({ job, startTask, tasks: [startTask], workers }),
+    /robot "clock".*until/,
+  )
+  definition.start.next = [
+    { channel: 'start.wait', type: 'wait.until', content: { until: '2030-01-01T00:00:00Z' } },
+  ]
+  const [task] = buildInitialTasks({ job, startTask, tasks: [startTask], workers })
+  assert.equal(task.assignee.program, 'clock')
+  assert.deepEqual(task.content, { until: '2030-01-01T00:00:00Z' })
 })
 
 // ---------------------------------------------------------------------------

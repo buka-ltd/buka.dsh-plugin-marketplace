@@ -527,6 +527,70 @@ function clockDefinition() {
   })
 }
 
+/** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
+function robotCreatesDefinition(change) {
+  const definition = {
+    version: 7,
+    name: '到点执行',
+    budgets: { maxTasks: 10, maxDurationHours: 24 },
+    start: {
+      content: {
+        type: 'object',
+        properties: { until: { type: 'string' } },
+        required: ['until'],
+      },
+      next: [
+        { channel: 'start.wait', type: 'wait.until', content: { until: '{{content.until}}' } },
+      ],
+    },
+    end: { content: { type: 'object' } },
+    positions: [
+      {
+        id: 'wait',
+        label: '等待',
+        executor: { kind: 'worker', name: 'clock' },
+        taskTypes: [
+          {
+            id: 'wait.until',
+            label: '等待到点',
+            content: {
+              type: 'object',
+              properties: { until: { type: 'string' } },
+              required: ['until'],
+            },
+            creates: [
+              { channel: 'wait.run', type: 'run.task', content: { note: '{{content.until}}' } },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'run',
+        label: '执行',
+        executor: { kind: 'human' },
+        taskTypes: [
+          {
+            id: 'run.task',
+            label: '执行',
+            content: {
+              type: 'object',
+              properties: { note: { type: 'string' } },
+              required: ['note'],
+            },
+          },
+        ],
+      },
+    ],
+    channels: [
+      { id: 'start.wait', label: '开始等待', from: 'start', to: 'wait' },
+      { id: 'wait.run', label: '到点执行', from: 'wait', to: 'run' },
+      { id: 'run.end', label: '完成', from: 'run', to: 'end' },
+    ],
+  }
+  if (typeof change === 'function') change(definition)
+  return definition
+}
+
 /** 预算装不下的定义：maxTasks=1 但 start.next 有两条初始任务。 */
 function overBudgetDefinition() {
   const definition = simpleDevDefinition()
@@ -1315,6 +1379,80 @@ test('engine: clock program tasks complete without a session', async () => {
     const stored = env.store.getTask(wait.id)
     assert.match(stored.result.text, /clock 到点/u)
     assert.equal(stored.claimant.kind, 'worker')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a robot creates the declared follow-up task when it finishes', async () => {
+  const env = await setup(robotCreatesDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { until: new Date(Date.now() - 1000).toISOString() },
+    })
+    const wait = taskAt(env.store, job.id, 'wait')
+    await waitFor(() => env.store.getTask(wait.id).status === 'completed')
+    await waitFor(() => taskAt(env.store, job.id, 'run')?.status === 'ready')
+    const run = taskAt(env.store, job.id, 'run')
+    assert.equal(run.status, 'ready', 'the follow-up task is ready once the robot finished')
+    assert.deepEqual(run.deps, [wait.id], 'the follow-up depends on the finished robot task')
+    assert.equal(run.createdBy.taskId, wait.id)
+    assert.deepEqual(
+      run.content,
+      { note: wait.content.until },
+      'the content template read the robot task',
+    )
+    assert.equal(env.workers.dispatched.length, 0, 'no session was created')
+    assert.equal(env.store.getJob(job.id).status, 'running', 'the human task still waits')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a robot may create the end task', async () => {
+  const env = await setup(
+    robotCreatesDefinition((definition) => {
+      definition.positions[0].taskTypes[0].creates = [{ channel: 'wait.end', content: {} }]
+      definition.channels.push({ id: 'wait.end', label: '到点结束', from: 'wait', to: 'end' })
+    }),
+  )
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { until: new Date(Date.now() - 1000).toISOString() },
+    })
+    const wait = taskAt(env.store, job.id, 'wait')
+    await waitFor(() => env.store.getTask(wait.id).status === 'completed')
+    await waitFor(() => taskAt(env.store, job.id, 'end')?.status === 'ready')
+    const end = taskAt(env.store, job.id, 'end')
+    assert.equal(end.status, 'ready', 'the human starter gets the end task on the board')
+    assert.deepEqual(end.deps, [wait.id])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a failing robot creation fails the robot task and creates nothing', async () => {
+  const env = await setup(
+    robotCreatesDefinition((definition) => {
+      definition.positions[1].taskTypes[0].content = {
+        type: 'object',
+        properties: { note: { type: 'number' } },
+        required: ['note'],
+      }
+    }),
+  )
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { until: new Date(Date.now() - 1000).toISOString() },
+    })
+    const wait = taskAt(env.store, job.id, 'wait')
+    await waitFor(() => env.store.getTask(wait.id).status === 'failed')
+    const failed = env.store.getTask(wait.id)
+    assert.match(failed.error, /program task failed/u)
+    assert.equal(taskAt(env.store, job.id, 'run'), undefined, 'no follow-up task was left behind')
   } finally {
     await env.cleanup()
   }

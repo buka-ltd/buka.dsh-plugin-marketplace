@@ -235,6 +235,7 @@ export function jobDefinition(
         ...(taskType.definition === undefined ? {} : { definition: taskType.definition }),
         ...(taskType.content === undefined ? {} : { content: taskType.content }),
         ...(taskType.actions === undefined ? {} : { actions: taskType.actions }),
+        ...(taskType.creates === undefined ? {} : { creates: taskType.creates }),
         ...(taskType.assistant === undefined ? {} : { assistant: taskType.assistant }),
         ...(taskType.mode === undefined ? {} : { mode: taskType.mode }),
       })),

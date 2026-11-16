@@ -9,7 +9,9 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 - **Task type**: the contract a position declares:
   - **definition**: preset information written by the orchestrator — what this kind of task is, what to do, facts about external systems (for example each service's pipeline); the executor reads it;
   - **content schema**: the format of the task content a creator must supply;
-  - for human positions: **actions**, an optional assistant, and an optional plan mode.
+  - for human positions: **actions**, an optional assistant, and an optional plan mode;
+  - a robot position's task types must also declare a `content` schema that covers the program's input contract (v1's clock reads an object with a required `until`): saving the workflow checks the declaration, and task creation plus execution re-check the actual content;
+  - a robot position's **creates**: creation declarations the engine executes when the robot finishes a task; each created task depends on the finished task and its content template may only use `{{content.*}}`. This is how a clock wait hands off to real work.
 - **Task content**: the concrete thing a creator writes for one task, as a string or an object; the engine validates it against the task type content schema, so a bad creator is rejected at creation time instead of failing the executor.
 - **Action**: a button on a human task type — a name, an optional form (input schema), and a set of creations (which channel, which task type, which content template). A click-only action has no form; one action may create several tasks, or none.
 - **Result**: a summary text plus attachments. Results never drive the flow; they exist for whoever manages the job. A task's value is the follow-up tasks it creates.

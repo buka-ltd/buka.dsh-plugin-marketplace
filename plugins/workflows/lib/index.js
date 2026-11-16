@@ -1069,11 +1069,12 @@ function resolveSchemaPath(schema, segments) {
 *
 * @param schema 声明的 schema
 * @param data 待校验的值
+* @param rootLabel 顶层取的名字（错误信息里的根路径）；默认 `payload`
 * @returns 可读问题列表；空数组表示通过
 */
-function schemaProblems(schema, data) {
+function schemaProblems(schema, data, rootLabel = "payload") {
 	const problems = [];
-	checkValue(schema, data, "", problems, 0);
+	checkValue(schema, data, "", problems, 0, rootLabel);
 	return problems;
 }
 /**
@@ -1084,15 +1085,16 @@ function schemaProblems(schema, data) {
 * @param path 出错时使用的路径前缀
 * @param problems 问题列表
 * @param depth 当前递归深度
+* @param rootLabel 顶层取的名字
 * @returns 无返回值
 */
-function checkValue(schema, value, path, problems, depth) {
+function checkValue(schema, value, path, problems, depth, rootLabel) {
 	if (depth > MAX_CHECK_DEPTH) return;
-	const label = path === "" ? "payload" : path;
+	const label = path === "" ? rootLabel : path;
 	if (Array.isArray(schema.oneOf)) {
 		if (!schema.oneOf.some((branch) => {
 			const branchProblems = [];
-			checkValue(branch, value, path, branchProblems, depth + 1);
+			checkValue(branch, value, path, branchProblems, depth + 1, rootLabel);
 			return branchProblems.length === 0;
 		})) problems.push(`${label}: does not match any oneOf variant`);
 		return;
@@ -1124,7 +1126,7 @@ function checkValue(schema, value, path, problems, depth) {
 			}
 			for (const [name, child] of Object.entries(properties)) {
 				if (!Object.hasOwn(value, name)) continue;
-				checkValue(child, value[name], joinPath(path, name), problems, depth + 1);
+				checkValue(child, value[name], joinPath(path, name), problems, depth + 1, rootLabel);
 			}
 			return;
 		}
@@ -1134,7 +1136,7 @@ function checkValue(schema, value, path, problems, depth) {
 				return;
 			}
 			if (isPlainObject$1(schema.items)) value.forEach((item, index) => {
-				checkValue(schema.items, item, `${path}[${index}]`, problems, depth + 1);
+				checkValue(schema.items, item, `${path}[${index}]`, problems, depth + 1, rootLabel);
 			});
 			return;
 		case "string":
@@ -1176,6 +1178,155 @@ function actualType(value) {
 	if (Array.isArray(value)) return "array";
 	if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
 	return typeof value;
+}
+// .build/workflows/program/clock.js
+/**
+* 机器人驱动：v1 只有内建 `clock`。
+*
+* `clock` 任务在任务内容里带 `until`（ISO 时间）；到点完成，不建会话、不占
+* 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
+*
+* @module @buka/dsh-plugin-workflows/program/clock
+*/
+/** 内建 `clock` 驱动 id；与 workers 登记表里的 program id 一致。 */
+const CLOCK_PROGRAM_ID = "clock";
+/** Node `setTimeout` 的最大延迟；超过时分段计时。 */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+/**
+* 解析任务内容里的 `until`。
+*
+* @param content 任务内容
+* @returns 时间戳（毫秒）；不合法时是 null
+*/
+function clockUntil(content) {
+	if (content === null || typeof content !== "object" || Array.isArray(content)) return null;
+	const raw = content.until;
+	if (typeof raw !== "string" || raw.trim() === "") return null;
+	const parsed = Date.parse(raw);
+	return Number.isNaN(parsed) ? null : parsed;
+}
+/**
+* 等一段时间；`AbortSignal` 取消时 reject。
+*
+* @param delayMs 延迟毫秒
+* @param signal 取消信号
+* @returns 无返回值
+*/
+function sleep(delayMs, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) {
+			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
+			return;
+		}
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, Math.min(delayMs, MAX_TIMER_DELAY_MS));
+		timer.unref?.();
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
+		};
+		signal.addEventListener?.("abort", onAbort, { once: true });
+	});
+}
+/** v1 可用的 program 驱动表。 */
+const PROGRAM_DRIVERS = /* @__PURE__ */ new Map([[CLOCK_PROGRAM_ID, {
+	id: CLOCK_PROGRAM_ID,
+	content: {
+		type: "object",
+		description: "Task content for the clock robot: when the task should complete.",
+		properties: { until: {
+			type: "string",
+			description: "ISO 8601 timestamp, for example 2026-11-16T09:00:00+08:00."
+		} },
+		required: ["until"]
+	},
+	async run({ content, signal }) {
+		const until = clockUntil(content);
+		if (until === null) throw new Error("clock task content must contain an ISO timestamp \"until\"");
+		while (Date.now() < until) {
+			if (signal.aborted) throw new Error("clock task was cancelled");
+			await sleep(until - Date.now(), signal);
+		}
+		return { text: `clock 到点：${(/* @__PURE__ */ new Date()).toISOString()}` };
+	}
+}]]);
+/**
+* 取一个 program 驱动。
+*
+* @param programId 驱动 id
+* @returns 驱动；未知时是 undefined
+*/
+function programDriver(programId) {
+	return PROGRAM_DRIVERS.get(programId);
+}
+// .build/workflows/program/contracts.js
+/**
+* 机器人（program）的内容契约。
+*
+* 契约属于程序本身，不写进工作流定义，也不进任务记录：
+*
+* - **保存工作流**：挂机器人的任务类型必须声明 `content` schema，并覆盖程序要求的
+*   必填字段（`programRequiredContent`）；
+* - **创建任务**：渲染后的任务内容按同一份 schema 校验，不合法直接拒绝；
+* - **执行前**：再校验一次，兜住旧作业与手改数据。
+*
+* @module @buka/dsh-plugin-workflows/program/contracts
+*/
+/**
+* 归一 program id：登记表缺 `program` 时按内建 clock 处理（与引擎执行一致）。
+*
+* @param program 打工人登记表里的 program 字段
+* @returns program id
+*/
+function normalizeProgramId(program) {
+	const id = typeof program === "string" ? program.trim() : "";
+	return id === "" ? CLOCK_PROGRAM_ID : id;
+}
+/**
+* 判断一个程序是否由本插件注册。
+*
+* @param program program id
+* @returns 已注册时为 true
+*/
+function isKnownProgram(program) {
+	return programDriver(normalizeProgramId(program)) !== void 0;
+}
+/**
+* 一个程序接收的任务内容契约。
+*
+* @param program program id（可省略，按 clock 处理）
+* @returns 契约 schema；未知程序或驱动不声明契约时是 undefined
+*/
+function programContentSchema(program) {
+	return programDriver(normalizeProgramId(program))?.content;
+}
+/**
+* 程序要求任务内容必须提供的顶层字段。
+*
+* 只读顶层 `required`；`oneOf` 联合类型的必填字段交给创建 / 执行前的完整校验，
+* 保存时不猜，避免把合法定义挡在外面。
+*
+* @param program program id
+* @returns 必填字段名；没有契约时是空数组
+*/
+function programRequiredContent(program) {
+	const schema = programContentSchema(program);
+	if (schema === void 0 || Array.isArray(schema.oneOf)) return [];
+	return Array.isArray(schema.required) ? [...schema.required] : [];
+}
+/**
+* 按程序的契约校验任务内容。
+*
+* @param program program id
+* @param content 渲染后的任务内容
+* @returns 可读问题；空数组表示通过
+*/
+function programContentProblems(program, content) {
+	const schema = programContentSchema(program);
+	if (schema === void 0) return [];
+	return schemaProblems(schema, content, "content");
 }
 // .build/workflows/template.js
 /**
@@ -1491,6 +1642,7 @@ function validateWorkflowDefinition(raw, options) {
 	const endContent = end?.content;
 	checkStartRoutes(start, positionById, typeById, channelById, endContent, issues);
 	checkActions(positions, positionById, typeById, channelById, endContent, issues);
+	checkRobotCreates(positions, positionById, typeById, channelById, endContent, issues);
 	if (issues.failed) return {
 		ok: false,
 		issues: issues.list
@@ -1623,8 +1775,13 @@ function readExecutor(raw, path, workers, issues) {
 		issues.add(`${path}.name`, "must be a non-empty worker name");
 		return null;
 	}
-	if (!workers.has(name)) {
+	const worker = workers.get(name);
+	if (worker === void 0) {
 		issues.add(`${path}.name`, `unknown worker "${name}": register it with the Buka Workers plugin first`);
+		return null;
+	}
+	if (worker.driver === "robot" && !isKnownProgram(worker.program)) {
+		issues.add(`${path}.name`, `robot "${name}" uses program "${normalizeProgramId(worker.program)}", which no installed plugin provides`);
 		return null;
 	}
 	return {
@@ -1667,18 +1824,69 @@ function readTaskType(entry, path, positionId, executor, workers, seenTypes, iss
 	const content = readSchema(entry.content, `${path}.content`, issues, "value");
 	const human = executor?.kind === "human";
 	const actions = readActions(entry.actions, `${path}.actions`, human, issues);
+	const creates = readRobotCreates(entry.creates, `${path}.creates`, executor, workers, issues);
 	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, executor, workers, issues);
 	const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues);
 	if (label === null) return null;
-	return {
+	const taskType = {
 		id,
 		label,
 		...definition === null || definition === "" ? {} : { definition },
 		...content === null ? {} : { content },
 		...actions === void 0 ? {} : { actions },
+		...creates === void 0 ? {} : { creates },
 		...assistant === void 0 ? {} : { assistant },
 		...mode === void 0 ? {} : { mode }
 	};
+	if (content !== null || entry.content === void 0 || entry.content === null) checkRobotContent(taskType, path, executor, workers, issues);
+	return taskType;
+}
+/**
+* 机器人岗位的任务类型必须覆盖程序声明的内容契约。
+*
+* 契约属于程序（见 `program/contracts.ts`）；这里只检查作者声明的 `content`
+* schema 是否覆盖了程序要求的必填字段，实际内容在创建任务与执行前再校验。
+* `oneOf` 联合类型不在这里猜，交给运行期校验。
+*/
+function checkRobotContent(taskType, path, executor, workers, issues) {
+	if (executor === null || executor.kind !== "worker") return;
+	const worker = workers.get(executor.name);
+	if (worker === void 0 || worker.driver !== "robot") return;
+	const program = normalizeProgramId(worker.program);
+	const required = programRequiredContent(program);
+	if (required.length === 0) return;
+	const fields = required.map((name) => `"${name}"`).join(", ");
+	const schema = taskType.content;
+	if (schema === void 0) {
+		issues.add(`${path}.content`, `robot "${worker.name}" (program "${program}") needs task content: declare a content schema with required ${fields}`);
+		return;
+	}
+	if (Array.isArray(schema.oneOf)) return;
+	if (schema.type !== "object") {
+		issues.add(`${path}.content.type`, `must be "object": robot "${worker.name}" (program "${program}") reads task content fields ${fields}`);
+		return;
+	}
+	const declared = new Set(Array.isArray(schema.required) ? schema.required : []);
+	const missing = required.filter((name) => !declared.has(name));
+	if (missing.length > 0) issues.add(`${path}.content.required`, `must include ${missing.map((name) => `"${name}"`).join(", ")}: robot "${worker.name}" (program "${program}") needs it`);
+}
+/** 执行者是不是机器人（登记表里 driver 为 robot）。 */
+function isRobotExecutor(executor, workers) {
+	if (executor === null || executor.kind !== "worker") return false;
+	return workers.get(executor.name)?.driver === "robot";
+}
+/**
+* 解析机器人任务类型的「完成后创建」。
+*
+* 只有机器人岗位能声明：agent 任务用 `buka_task_create` 动态创建，人任务用动作。
+*/
+function readRobotCreates(raw, path, executor, workers, issues) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (!isRobotExecutor(executor, workers)) {
+		issues.add(path, "creates are only valid on robot positions");
+		return;
+	}
+	return readCreations(raw, path, issues) ?? void 0;
 }
 /** 解析 schema 字段；任务内容允许非对象顶层，表单与作业输入要求对象。 */
 function readSchema(raw, path, issues, root = "object") {
@@ -1942,6 +2150,15 @@ function checkStartRoutes(start, positionById, typeById, channelById, endContent
 /** 校验所有人任务类型上的动作。 */
 function checkActions(positions, positionById, typeById, channelById, endContent, issues) {
 	for (const position of positions) for (const taskType of position.taskTypes) for (const [index, action] of (taskType.actions ?? []).entries()) for (const [creationIndex, creation] of action.creates.entries()) checkCreation(creation, `positions.${position.id}.taskTypes.${taskType.id}.actions[${index}].creates[${creationIndex}]`, position.id, taskType.content, action.input, endContent, {
+		positionById,
+		typeById,
+		channelById,
+		issues
+	});
+}
+/** 校验机器人任务类型的「完成后创建」。 */
+function checkRobotCreates(positions, positionById, typeById, channelById, endContent, issues) {
+	for (const position of positions) for (const taskType of position.taskTypes) for (const [index, creation] of (taskType.creates ?? []).entries()) checkCreation(creation, `positions.${position.id}.taskTypes.${taskType.id}.creates[${index}]`, position.id, taskType.content, void 0, endContent, {
 		positionById,
 		typeById,
 		channelById,
@@ -2428,79 +2645,6 @@ function assertJobTransition(jobId, from, to) {
 	if (canTransitionJob(from, to)) return;
 	throw new Error(`job ${jobId}: illegal status transition ${from} -> ${to}`);
 }
-// .build/workflows/program/clock.js
-/**
-* 机器人驱动：v1 只有内建 `clock`。
-*
-* `clock` 任务在任务内容里带 `until`（ISO 时间）；到点完成，不建会话、不占
-* 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
-*
-* @module @buka/dsh-plugin-workflows/program/clock
-*/
-/** 内建 `clock` 驱动 id；与 workers 登记表里的 program id 一致。 */
-const CLOCK_PROGRAM_ID = "clock";
-/** Node `setTimeout` 的最大延迟；超过时分段计时。 */
-const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-/**
-* 解析任务内容里的 `until`。
-*
-* @param content 任务内容
-* @returns 时间戳（毫秒）；不合法时是 null
-*/
-function clockUntil(content) {
-	if (content === null || typeof content !== "object" || Array.isArray(content)) return null;
-	const raw = content.until;
-	if (typeof raw !== "string" || raw.trim() === "") return null;
-	const parsed = Date.parse(raw);
-	return Number.isNaN(parsed) ? null : parsed;
-}
-/**
-* 等一段时间；`AbortSignal` 取消时 reject。
-*
-* @param delayMs 延迟毫秒
-* @param signal 取消信号
-* @returns 无返回值
-*/
-function sleep(delayMs, signal) {
-	return new Promise((resolve, reject) => {
-		if (signal.aborted) {
-			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
-			return;
-		}
-		const timer = setTimeout(() => {
-			signal.removeEventListener("abort", onAbort);
-			resolve();
-		}, Math.min(delayMs, MAX_TIMER_DELAY_MS));
-		timer.unref?.();
-		const onAbort = () => {
-			clearTimeout(timer);
-			reject(/* @__PURE__ */ new Error("clock task was cancelled"));
-		};
-		signal.addEventListener?.("abort", onAbort, { once: true });
-	});
-}
-/** v1 可用的 program 驱动表。 */
-const PROGRAM_DRIVERS = /* @__PURE__ */ new Map([[CLOCK_PROGRAM_ID, {
-	id: CLOCK_PROGRAM_ID,
-	async run({ content, signal }) {
-		const until = clockUntil(content);
-		if (until === null) throw new Error("clock task content must contain an ISO timestamp \"until\"");
-		while (Date.now() < until) {
-			if (signal.aborted) throw new Error("clock task was cancelled");
-			await sleep(until - Date.now(), signal);
-		}
-		return { text: `clock 到点：${(/* @__PURE__ */ new Date()).toISOString()}` };
-	}
-}]]);
-/**
-* 取一个 program 驱动。
-*
-* @param programId 驱动 id
-* @returns 驱动；未知时是 undefined
-*/
-function programDriver(programId) {
-	return PROGRAM_DRIVERS.get(programId);
-}
 // .build/workflows/engine/prompt.js
 /**
 * 任务执行上下文组装。
@@ -2809,6 +2953,7 @@ function jobDefinition(definition, workers) {
 				...taskType.definition === void 0 ? {} : { definition: taskType.definition },
 				...taskType.content === void 0 ? {} : { content: taskType.content },
 				...taskType.actions === void 0 ? {} : { actions: taskType.actions },
+				...taskType.creates === void 0 ? {} : { creates: taskType.creates },
 				...taskType.assistant === void 0 ? {} : { assistant: taskType.assistant },
 				...taskType.mode === void 0 ? {} : { mode: taskType.mode }
 			}))
@@ -3089,6 +3234,23 @@ function resolveExecutor(definition, positionId, job, workers) {
 	};
 }
 /**
+* 按机器人的内容契约校验任务内容。
+*
+* 契约属于程序本身（见 `program/contracts.ts`）；任务类型声明的 schema 是作者
+* 视角的格式约束，两者都不通过就拒绝创建。
+*
+* @param assignee 任务钉住的执行者
+* @param content 渲染后的任务内容
+* @throws `WorkflowError('invalid-content')` 内容不满足机器人契约
+*/
+function assertRobotContent(assignee, content) {
+	if (assignee.kind !== "worker" || assignee.driver !== "robot") return;
+	const problems = programContentProblems(assignee.program, content);
+	if (problems.length === 0) return;
+	const program = normalizeProgramId(assignee.program);
+	throw new WorkflowError("invalid-content", `content does not match robot "${assignee.name}" (program "${program}"): ${problems.join("; ")}`);
+}
+/**
 * 判断一个任务在加入新依赖后依赖图是否成环。
 *
 * 新任务的依赖只能指向已创建任务，所以只需检查已有任务的依赖闭包；但如果已有
@@ -3137,6 +3299,8 @@ function buildCreatedTask(input) {
 	if (!channelAllowsType(channel, taskType.id)) throw new WorkflowError("type-not-allowed", `channel "${channel.id}" (${channel.from} -> ${channel.to}) does not allow task type "${taskType.id}"`);
 	const problems = contentProblems(taskType, content);
 	if (problems.length > 0) throw new WorkflowError("invalid-content", `content does not match task type "${taskType.id}": ${problems.join("; ")}`);
+	const assignee = resolveExecutor(definition, position, job, workers);
+	assertRobotContent(assignee, content);
 	const taskId = newTaskId();
 	const dependencyIds = [];
 	for (const dependency of deps) {
@@ -3165,7 +3329,7 @@ function buildCreatedTask(input) {
 				taskId: creator.id,
 				position: creator.position
 			},
-			assignee: resolveExecutor(definition, position, job, workers),
+			assignee,
 			claimant: null,
 			attemptIds: [],
 			result: null,
@@ -3298,6 +3462,8 @@ function buildInitialTasks(input) {
 		if (tasks.length + 1 > definition.budgets.maxTasks) throw new WorkflowError("budget-exceeded", `workflow budget maxTasks=${definition.budgets.maxTasks} would be exceeded by initial task ${index}`);
 		const parsed = renderCreation(definition, "start", creation, { content: startTask.content });
 		const now = nowIso();
+		const assignee = resolveExecutor(definition, parsed.position, job, workers);
+		assertRobotContent(assignee, parsed.content);
 		const task = {
 			id: newTaskId(),
 			jobId: job.id,
@@ -3311,7 +3477,7 @@ function buildInitialTasks(input) {
 				taskId: startTask.id,
 				position: "start"
 			},
-			assignee: resolveExecutor(definition, parsed.position, job, workers),
+			assignee,
 			claimant: null,
 			attemptIds: [],
 			result: null,
@@ -4163,11 +4329,13 @@ var WorkflowEngine = class {
 			if (problems.length > 0) throw new WorkflowError("invalid-input", `input does not match the action contract: ${problems.join("; ")}`);
 		}
 		const workers = await this.workers();
-		const tasks = this.store.listTasks(job.id);
-		const creations = (action?.creates ?? []).map((creation) => renderCreation(job.definition, task.position, creation, {
+		const rendered = this.renderDeclaredLocked({
+			definition: job.definition,
+			from: task.position,
+			creations: action?.creates ?? [],
 			content: task.content,
 			input: form
-		}));
+		});
 		let prepared = task;
 		if (task.status === "ready") {
 			const now = nowIso();
@@ -4198,29 +4366,12 @@ var WorkflowEngine = class {
 				updatedAt: now
 			}));
 		}
-		let known = tasks;
-		for (const parsed of creations) {
-			const created = buildCreatedTask({
-				job,
-				creator: prepared,
-				channel: parsed.channel.id,
-				type: parsed.taskType.id,
-				content: parsed.content,
-				deps: [prepared.id],
-				tasks: known,
-				workers
-			});
-			await this.store.insertTask(created.task);
-			known = [...known, created.task];
-			await this.appendEvent(job.id, "task/created", {
-				taskId: created.task.id,
-				position: created.task.position,
-				type: created.task.type,
-				channel: created.task.channel,
-				deps: created.task.deps,
-				createdBy: prepared.id
-			});
-		}
+		await this.insertDeclaredLocked({
+			job,
+			creator: prepared,
+			rendered,
+			workers
+		});
 		return await this.completeTaskLocked(job, prepared, {
 			text: input.text,
 			attachments: input.attachments,
@@ -4232,6 +4383,51 @@ var WorkflowEngine = class {
 			} },
 			...action?.input === void 0 ? {} : { input: form }
 		});
+	}
+	/**
+	* 渲染一组创建声明（不落盘）。
+	*
+	* 人任务动作与机器人任务完成后共用：先一次性渲染、校验全部声明，任何一条
+	* 不合法都不落盘，调用方可以据此保持任务状态不变。
+	*/
+	renderDeclaredLocked(input) {
+		return input.creations.map((creation) => renderCreation(input.definition, input.from, creation, {
+			content: input.content,
+			...input.input === void 0 ? {} : { input: input.input }
+		}));
+	}
+	/**
+	* 落盘一组已经渲染好的创建，并写入创建事件。
+	*
+	* 创建的任务依赖 `creator`。
+	*/
+	async insertDeclaredLocked(input) {
+		let known = this.store.listTasks(input.job.id);
+		const created = [];
+		for (const parsed of input.rendered) {
+			const built = buildCreatedTask({
+				job: input.job,
+				creator: input.creator,
+				channel: parsed.channel.id,
+				type: parsed.taskType.id,
+				content: parsed.content,
+				deps: [input.creator.id],
+				tasks: known,
+				workers: input.workers
+			});
+			await this.store.insertTask(built.task);
+			known = [...known, built.task];
+			created.push(built.task);
+			await this.appendEvent(input.job.id, "task/created", {
+				taskId: built.task.id,
+				position: built.task.position,
+				type: built.task.type,
+				channel: built.task.channel,
+				deps: built.task.deps,
+				createdBy: input.creator.id
+			});
+		}
+		return created;
 	}
 	/**
 	* 取消一条任务。
@@ -4815,13 +5011,18 @@ var WorkflowEngine = class {
 	async launchProgram(jobId, taskId, attemptId, programId) {
 		const task = this.store.getTask(taskId);
 		if (task === void 0 || task.status !== "running") return;
-		const driver = programDriver(programId === "" ? "clock" : programId);
+		const program = normalizeProgramId(programId);
+		const driver = programDriver(program);
 		if (driver === void 0) {
-			await this.failOutside(jobId, taskId, `unknown robot driver "${programId}"`);
+			await this.failOutside(jobId, taskId, `unknown robot driver "${program}"`);
 			return;
 		}
-		const job = this.store.getJob(jobId);
-		if (job === void 0) return;
+		const problems = programContentProblems(program, task.content);
+		if (problems.length > 0) {
+			await this.failOutside(jobId, taskId, `robot program "${program}" cannot run this task: ${problems.join("; ")}`);
+			return;
+		}
+		if (this.store.getJob(jobId) === void 0) return;
 		const controller = new AbortController();
 		this.active.set(taskId, {
 			jobId,
@@ -4841,9 +5042,24 @@ var WorkflowEngine = class {
 			});
 			await this.store.runExclusive(jobId, async () => {
 				this.active.delete(taskId);
+				const currentJob = this.store.getJob(jobId);
 				const current = this.store.getTask(taskId);
-				if (current === void 0 || current.status !== "running") return;
-				await this.completeTaskLocked(job, current, {
+				if (currentJob === void 0 || current === void 0 || current.status !== "running") return;
+				const workers = await this.workers();
+				const taskType = this.taskTypeOf(currentJob.definition, current.type);
+				const rendered = this.renderDeclaredLocked({
+					definition: currentJob.definition,
+					from: current.position,
+					creations: taskType?.creates ?? [],
+					content: current.content
+				});
+				await this.insertDeclaredLocked({
+					job: currentJob,
+					creator: current,
+					rendered,
+					workers
+				});
+				await this.completeTaskLocked(currentJob, current, {
 					text: result.text,
 					attachments: [],
 					workspace: void 0,
@@ -11128,6 +11344,10 @@ const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
         { "id": "dev.implement", "label": "开发",
           "definition": "<what this kind of task is and what to do; preset facts live here>",
           "content": <JSON Schema object: the task content the creator must supply>,
+          "creates": [   // robot positions only: tasks created when this task finishes
+            { "channel": "<channel id from this position>", "type": "<task type id>",
+              "content": { "field": "{{content.until}}" } }
+          ],
           "assistant": "<assistant worker>" | null, "mode": "plan" | null,
           "actions": [   // human positions only
             { "id": "pass", "label": "通过",
@@ -11144,7 +11364,7 @@ const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
 /**
 * 注册全部工作流工具。
 *

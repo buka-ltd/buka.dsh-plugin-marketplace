@@ -150,6 +150,12 @@ export interface TaskTypeDefinition {
   readonly content?: JsonSchema | undefined
   /** 仅人岗位：人可以点的动作。 */
   readonly actions?: readonly ActionDefinition[] | undefined
+  /**
+   * 仅机器人岗位：这个任务完成后引擎创建的后续任务。
+   *
+   * 机器人没有会话与工具，静态后继只能由定义声明；创建的任务依赖刚完成的任务。
+   */
+  readonly creates?: readonly CreationDefinition[] | undefined
   /** 仅人岗位：承担沟通的助理打工人名；null / 省略表示无助理。 */
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
