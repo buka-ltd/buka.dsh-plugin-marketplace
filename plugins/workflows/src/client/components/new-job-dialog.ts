@@ -9,7 +9,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import React from 'react'
 
 import { ClientModal, h } from '../element.ts'
-import { currentDefinition } from '../model.ts'
+import { currentDefinition, workerIdentity, workerIdentityText } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { renderJsonFallback, renderSchemaFields, schemaFields } from '../schema.ts'
 import type { JsonSchema } from '../types.ts'
@@ -24,9 +24,13 @@ export function renderNewJobDialog(page: AppContext): React.ReactElement {
     ? (definition.start.content as JsonSchema)
     : null
   const hasFields = schemaFields(contentSchema).length > 0
-  const assistants = asArray<{ name?: string; description?: string }>(
+  const assistants = asArray<{ id?: string; name?: string; description?: string }>(
     state.workflow.data?.assistants,
-  ).filter((assistant) => typeof assistant.name === 'string' && assistant.name !== '')
+  ).filter(
+    (assistant) =>
+      (typeof assistant.id === 'string' && assistant.id !== '') ||
+      (typeof assistant.name === 'string' && assistant.name !== ''),
+  )
 
   const contentSection = h(
     'section',
@@ -67,13 +71,14 @@ export function renderNewJobDialog(page: AppContext): React.ReactElement {
             actions.setNewJobDelivery(event.target.value),
         },
         h('option', { value: 'starter' }, t('newJobDeliveryStarter')),
-        ...assistants.map((assistant) =>
-          h(
+        ...assistants.map((assistant) => {
+          const identity = workerIdentity(assistant)
+          return h(
             'option',
-            { key: assistant.name, value: `assistant:${assistant.name}` },
-            `${t('newJobDeliveryAssistant')} · ${assistant.name}`,
-          ),
-        ),
+            { key: identity.id, value: `assistant:${identity.id}` },
+            `${t('newJobDeliveryAssistant')} · ${workerIdentityText(assistant)}`,
+          )
+        }),
       ),
     ),
   )

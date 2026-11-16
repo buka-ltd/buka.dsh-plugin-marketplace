@@ -34,29 +34,29 @@ import {
 } from '../plugins/workflows/src/domain/status.ts'
 import { assertRobotContent, buildInitialTasks } from '../plugins/workflows/src/engine/tasks.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
-import { toV7 } from './workflows-fixture-v7.mjs'
+import { toV7, toV8 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // fixture：spec §5.7 的「研发交付」工作流与 workers 登记
 // ---------------------------------------------------------------------------
 
-/** workers 目录：四个 agent、一个助理、一个 program（clock）。 */
+/** workers 目录：四个 agent、一个助理、一个 program（clock）；键是标识符。 */
 function sampleWorkers() {
   return new Map(
     [
-      { name: '产品经理', driver: 'agent', assistant: false },
-      { name: '软件工程师', driver: 'agent', assistant: false },
-      { name: '质量保障工程师', driver: 'agent', assistant: false },
-      { name: '发布工程师', driver: 'agent', assistant: false },
-      { name: '沟通助理', driver: 'agent', assistant: true },
-      { name: 'clock', driver: 'robot', program: 'clock', assistant: false },
-    ].map((worker) => [worker.name, worker]),
+      { id: '产品经理', name: '', driver: 'agent', assistant: false },
+      { id: '软件工程师', name: '', driver: 'agent', assistant: false },
+      { id: '质量保障工程师', name: '', driver: 'agent', assistant: false },
+      { id: '发布工程师', name: '', driver: 'agent', assistant: false },
+      { id: '沟通助理', name: '', driver: 'agent', assistant: true },
+      { id: 'clock', name: '', driver: 'robot', program: 'clock', assistant: false },
+    ].map((worker) => [worker.id, worker]),
   )
 }
 
 /** 研发交付定义（v6；approve 补了一条到 deploy 的通道，满足「每个岗位都能到达 end」）。 */
-function sampleDefinition() {
-  return toV7({
+function sampleSource() {
+  return {
     version: 6,
     name: '研发交付',
     description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
@@ -99,7 +99,7 @@ function sampleDefinition() {
       {
         id: 'need',
         label: '需求',
-        executor: { kind: 'worker', name: '产品经理' },
+        executor: { kind: 'worker', id: '产品经理' },
         taskTypes: [
           {
             id: 'need.analyze',
@@ -260,7 +260,17 @@ function sampleDefinition() {
       },
       { id: 'deploy.end', label: '交付', from: 'deploy', to: 'end' },
     ],
-  })
+  }
+}
+
+/** 研发交付 v8 定义。 */
+function sampleDefinition() {
+  return toV8(sampleSource())
+}
+
+/** 研发交付 v7 旧定义（作业快照兼容测试用）。 */
+function legacyDefinition() {
+  return toV7(sampleSource())
 }
 
 // ---------------------------------------------------------------------------
@@ -447,10 +457,10 @@ test('domain: terminal helpers', () => {
 // 定义校验
 // ---------------------------------------------------------------------------
 
-test('definition: accepts the v7 研发交付 reference workflow', () => {
+test('definition: accepts the v8 研发交付 reference workflow', () => {
   const result = validateWorkflowDefinition(sampleDefinition(), { workers: sampleWorkers() })
   const definition = expectOk(result)
-  assert.equal(definition.version, 7)
+  assert.equal(definition.version, 8)
   assert.equal(definition.name, '研发交付')
   assert.equal(definition.positions.length, 5)
   assert.equal(definition.channels.length, 9)
@@ -458,7 +468,7 @@ test('definition: accepts the v7 研发交付 reference workflow', () => {
   assert.equal(definition.start.next.length, 1)
   assert.equal(definition.start.next[0].channel, 'start.need')
   assert.deepEqual(definition.start.next[0].content, { focus: '{{content.requirement}}' })
-  assert.equal(findPosition(definition, 'dev')?.executor.name, '软件工程师')
+  assert.equal(findPosition(definition, 'dev')?.executor.id, '软件工程师')
   assert.equal(findTaskType(definition, 'qa.verify')?.label, '验证')
   assert.equal(findChannel(definition, 'qa.dev.rework')?.back, true)
   assert.equal(findChannel(definition, 'qa.dev.rework')?.label, '返工')
@@ -490,7 +500,7 @@ test('definition: allows parallel channels between the same pair and overlapping
 test('definition: rejects structural and identity errors', () => {
   const workers = sampleWorkers()
   const cases = [
-    [mutate((d) => (d.version = 6)), /^version$/, /must be 7/],
+    [mutate((d) => (d.version = 7)), /^version$/, /must be 8/],
     [mutate((d) => (d.positions = [])), /^positions$/, /non-empty array/],
     [
       mutate((d) => d.positions.push(clone(d.positions[0]))),
@@ -506,10 +516,10 @@ test('definition: rejects structural and identity errors', () => {
     ],
     [
       mutate((d) => {
-        d.positions[0].executor = { kind: 'worker', name: '不存在' }
+        d.positions[0].executor = { kind: 'worker', id: '不存在' }
       }),
-      /positions\[0\]\.executor\.name/,
-      /unknown worker/,
+      /positions\[0\]\.executor\.id/,
+      /unknown worker identifier/,
     ],
     [
       mutate((d) => {
@@ -539,6 +549,13 @@ test('definition: rejects structural and identity errors', () => {
       }),
       /positions\[1\]\.taskTypes\[0\]\.assistant/,
       /only valid on human positions/,
+    ],
+    [
+      mutate((d) => {
+        d.positions[3].taskTypes[0].assistant = '不存在'
+      }),
+      /positions\[3\]\.taskTypes\[0\]\.assistant/,
+      /unknown assistant worker identifier/,
     ],
     [
       mutate((d) => {
@@ -670,7 +687,7 @@ test('definition: rejects channel, cycle and reachability errors', () => {
         d.positions.push({
           id: 'orphan',
           label: '孤儿',
-          executor: { kind: 'worker', name: '产品经理' },
+          executor: { kind: 'worker', id: '产品经理' },
           taskTypes: [{ id: 'orphan.task', label: '孤儿任务' }],
         })
         d.channels.push({ id: 'orphan.end', label: '孤儿交付', from: 'orphan', to: 'end' })
@@ -767,7 +784,7 @@ test('definition: rejects budget and end contract errors', () => {
 /** clock 机器人工作流：开始 → 等待（clock）→ 结束；任务内容带 `until`。 */
 function sampleClockDefinition() {
   return {
-    version: 7,
+    version: 8,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
     start: {
@@ -785,7 +802,7 @@ function sampleClockDefinition() {
       {
         id: 'wait',
         label: '等待',
-        executor: { kind: 'worker', name: 'clock' },
+        executor: { kind: 'worker', id: 'clock' },
         taskTypes: [
           {
             id: 'wait.until',
@@ -809,7 +826,7 @@ function sampleClockDefinition() {
 /** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
 function robotCreatesDefinition() {
   return {
-    version: 7,
+    version: 8,
     name: '到点执行',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -827,7 +844,7 @@ function robotCreatesDefinition() {
       {
         id: 'wait',
         label: '等待',
-        executor: { kind: 'worker', name: 'clock' },
+        executor: { kind: 'worker', id: 'clock' },
         taskTypes: [
           {
             id: 'wait.until',
@@ -909,13 +926,16 @@ test('definition: robot positions must cover the program content contract', () =
 test('definition: robot executors must use a known program', () => {
   const workers = new Map([
     ...sampleWorkers(),
-    ['brokenbot', { name: 'brokenbot', driver: 'robot', program: 'nope', assistant: false }],
+    [
+      'brokenbot',
+      { id: 'brokenbot', name: '', driver: 'robot', program: 'nope', assistant: false },
+    ],
   ])
   const definition = sampleClockDefinition()
-  definition.positions[0].executor = { kind: 'worker', name: 'brokenbot' }
+  definition.positions[0].executor = { kind: 'worker', id: 'brokenbot' }
   expectIssue(
     validateWorkflowDefinition(definition, { workers }),
-    /positions\[0\]\.executor\.name/,
+    /positions\[0\]\.executor\.id/,
     /program "nope"/,
   )
 })
@@ -994,12 +1014,12 @@ test('definition: robot creates may target the end node', () => {
 })
 
 test('engine: robot content contract validates content directly', () => {
-  const clock = { kind: 'worker', name: 'clock', driver: 'robot', program: 'clock' }
+  const clock = { kind: 'worker', id: 'clock', driver: 'robot', program: 'clock' }
   assert.doesNotThrow(() => assertRobotContent(clock, { until: '2030-01-01T00:00:00Z' }))
   assert.throws(() => assertRobotContent(clock, {}), /missing required field/)
   assert.throws(() => assertRobotContent(clock, 'tomorrow'), /expected object/)
   assert.doesNotThrow(() =>
-    assertRobotContent({ kind: 'worker', name: '软件工程师', driver: 'agent' }, {}),
+    assertRobotContent({ kind: 'worker', id: '软件工程师', driver: 'agent' }, {}),
   )
 })
 
@@ -1053,7 +1073,7 @@ test('engine: robot tasks are checked against the program content contract', () 
   }
   assert.throws(
     () => buildInitialTasks({ job, startTask, tasks: [startTask], workers }),
-    /robot "clock".*until/,
+    /robot identifier "clock".*until/,
   )
   definition.start.next = [
     { channel: 'start.wait', type: 'wait.until', content: { until: '2030-01-01T00:00:00Z' } },
@@ -1272,11 +1292,11 @@ test('store: init rejects mismatched keys and backfills the job sequence', async
   }
 })
 
-test('store: init normalizes legacy robot executor and claimant kinds', async () => {
+test('store: init migrates v7 workflow definitions to v8 and normalizes legacy kinds', async () => {
   const dataDir = await makeDataDir()
   try {
     const domain = new FakeDomain()
-    const definition = sampleDefinition()
+    const definition = legacyDefinition()
     // 术语改名前的作业快照：岗位执行者写成 kind "robot"，承办者也一样。
     definition.positions[0].executor = { kind: 'robot', name: '产品经理' }
     await domain.table('workflows').put('wf-1', {
@@ -1284,8 +1304,11 @@ test('store: init normalizes legacy robot executor and claimant kinds', async ()
       name: '研发交付',
       description: '',
       status: 'active',
-      latestVersion: 1,
-      versions: { 1: { version: 1, definition, createdAt: 't' } },
+      latestVersion: 2,
+      versions: {
+        1: { version: 1, definition, createdAt: 't' },
+        2: { version: 2, definition: clone(definition), createdAt: 't2' },
+      },
       jobSeq: 0,
       createdAt: 't',
       updatedAt: 't',
@@ -1328,7 +1351,32 @@ test('store: init normalizes legacy robot executor and claimant kinds', async ()
       updatedAt: 't',
     })
 
-    await new WorkflowStore({ domain, dataDir }).init()
+    const logged = []
+    await new WorkflowStore({
+      domain,
+      dataDir,
+      logger: { info: (message) => logged.push(message) },
+    }).init()
+
+    // 工作流定义：name 改名为 id，值不变；assistant 值原样保留。
+    const migrated = domain.table('workflows').get('wf-1')
+    for (const version of ['1', '2']) {
+      const stored = migrated.versions[version].definition
+      assert.equal(stored.version, 8)
+      assert.deepEqual(stored.positions[0].executor, { kind: 'worker', id: '产品经理' })
+      assert.equal(stored.positions[3].taskTypes[0].assistant, '沟通助理')
+    }
+    assert.ok(
+      logged.some((message) =>
+        /migrated 2 workflow definition\(s\) to v8 \(1 workflow\(s\)\)/u.test(message),
+      ),
+      `migration count should be logged, got: ${logged.join('\n')}`,
+    )
+
+    // 作业快照不迁移：仍是 v7，执行者保留 name（术语归一后 kind 为 worker）。
+    const jobDefinition = domain.table('jobs').get('job-1').definition
+    assert.equal(jobDefinition.version, 7)
+    assert.deepEqual(jobDefinition.positions[0].executor, { kind: 'worker', name: '产品经理' })
 
     assert.deepEqual(domain.table('tasks').get('task-1').assignee, {
       kind: 'worker',
@@ -1340,10 +1388,19 @@ test('store: init normalizes legacy robot executor and claimant kinds', async ()
       name: '产品经理',
       sessionId: null,
     })
-    assert.equal(domain.table('jobs').get('job-1').definition.positions[0].executor.kind, 'worker')
+
+    // 幂等：再次打开不写回、不再汇报条数。
+    const writes = domain.table('workflows').writeCount
+    const secondLog = []
+    await new WorkflowStore({
+      domain,
+      dataDir,
+      logger: { info: (message) => secondLog.push(message) },
+    }).init()
+    assert.equal(domain.table('workflows').writeCount, writes)
     assert.equal(
-      domain.table('workflows').get('wf-1').versions['1'].definition.positions[0].executor.kind,
-      'worker',
+      secondLog.some((message) => message.includes('to v8')),
+      false,
     )
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true })

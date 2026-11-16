@@ -25,6 +25,7 @@ import type { JsonSchema, TaskTypeDefinition, WorkflowDefinition } from '../type
 import {
   ClampedText,
   DrawerTabs,
+  renderAssistant,
   renderContractFields,
   renderDrawerHead,
   renderExecutor,
@@ -423,7 +424,11 @@ function renderTaskType(
         'span',
         { className: 'buka-workflows-typeTags' },
         typeof type.assistant === 'string' && type.assistant !== ''
-          ? h(Tag, { tone: 'neutral' }, `${t('taskTypeAssistant')} · ${type.assistant}`)
+          ? h(
+              Tag,
+              { tone: 'neutral' },
+              `${t('taskTypeAssistant')} · ${renderAssistant(page, type.assistant)}`,
+            )
           : null,
         type.mode === 'plan' ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
       ),

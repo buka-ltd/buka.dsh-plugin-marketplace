@@ -11,6 +11,7 @@
  * @module @buka/dsh-plugin-workflows/store
  */
 
+import { workerRef } from '../domain/identity.ts'
 import { newWorkflowId, nowIso } from '../domain/ids.ts'
 import type {
   AttachmentRecord,
@@ -79,15 +80,19 @@ function normalizeStoredExecutor(executor: StoredExecutor): StoredExecutor {
   const legacy = executor as { kind?: string }
   if (legacy.kind !== 'robot') return executor
   const record = executor as unknown as {
-    name: string
+    id?: string
+    name?: string
     driver?: string
     program?: string
     avatar?: string
   }
   const driver = record.driver === 'robot' || record.driver === 'program' ? 'robot' : 'agent'
+  const id = typeof record.id === 'string' && record.id !== '' ? record.id : undefined
+  const name = typeof record.name === 'string' && record.name !== '' ? record.name : undefined
   return {
     kind: 'worker',
-    name: record.name,
+    ...(id === undefined ? {} : { id }),
+    ...(name === undefined ? {} : { name }),
     driver,
     ...(record.program === undefined ? {} : { program: record.program }),
     ...(record.avatar === undefined ? {} : { avatar: record.avatar }),
@@ -100,7 +105,7 @@ function normalizeClaimant(claimant: Claimant | null): Claimant | null {
   return { ...claimant, kind: 'worker' }
 }
 
-/** 把定义快照里岗位执行者的 `kind: "robot"` 归一成 `worker`。 */
+/** 把定义快照里岗位执行者的 `kind: "robot"` 归一成 `worker`（不改版本与引用字段）。 */
 function normalizeDefinitionExecutors(definition: WorkflowDefinition): WorkflowDefinition {
   // 容错：单测和手工数据里可能有缺 definition / positions 的记录。
   if (
@@ -112,14 +117,64 @@ function normalizeDefinitionExecutors(definition: WorkflowDefinition): WorkflowD
   }
   let changed = false
   const positions = definition.positions.map((position) => {
-    if ((position.executor as { kind?: string }).kind !== 'robot') return position
+    const executor = position.executor as { kind?: string; id?: string; name?: string }
+    if (executor.kind !== 'robot') return position
     changed = true
+    const id = typeof executor.id === 'string' && executor.id !== '' ? executor.id : undefined
+    const name =
+      typeof executor.name === 'string' && executor.name !== '' ? executor.name : undefined
     return {
       ...position,
-      executor: { kind: 'worker' as const, name: (position.executor as { name: string }).name },
+      executor: {
+        kind: 'worker' as const,
+        ...(id === undefined ? {} : { id }),
+        ...(name === undefined ? {} : { name }),
+      },
     }
   })
   return changed ? { ...definition, positions } : definition
+}
+
+/**
+ * 把 v7 工作流定义升到 v8：岗位执行者的 `name` 改名为 `id`，值不变。
+ *
+ * 老打工人的标识符就是它当时登记的名字，所以这里只是字段改名；任务类型
+ * `assistant` 的值与交回方式本来就是引用键，不需要转换。迁移幂等：v8 定义
+ * 原样返回，不产生写入。
+ */
+function migrateWorkflowDefinitionToV8(definition: WorkflowDefinition): WorkflowDefinition {
+  if (definition === null || typeof definition !== 'object') return definition
+  if ((definition as { version?: unknown }).version !== 7) return definition
+  const record = definition as unknown as {
+    version: number
+    positions?: Array<{
+      executor?: { kind?: string; id?: string; name?: string }
+      [key: string]: unknown
+    }>
+    [key: string]: unknown
+  }
+  if (!Array.isArray(record.positions)) {
+    return { ...definition, version: 8 } as WorkflowDefinition
+  }
+  const positions = record.positions.map((position) => {
+    const executor = position.executor
+    if (
+      executor === null ||
+      executor === undefined ||
+      (executor.kind !== 'worker' && executor.kind !== 'robot')
+    ) {
+      return position
+    }
+    const id = workerRef(executor)
+    return {
+      ...position,
+      executor: {
+        kind: 'worker' as const,
+        ...(id === null ? {} : { id }),
+      },
+    }
+  })
+  return { ...record, version: 8, positions } as unknown as WorkflowDefinition
 }
 
 /** 创建一条工作流记录的入参。 */
@@ -177,23 +232,40 @@ export class WorkflowStore {
       jobs += 1
     }
 
+    if (tasks > 0 || jobs > 0) {
+      this.logger?.info?.(
+        `buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s))`,
+      )
+    }
+  }
+
+  /**
+   * 把 workflows 表里 v7 的定义快照升到 v8：执行者的 `name` 改名成 `id`。
+   *
+   * 作业快照（jobs.definition）保持 v7 形状，读取时按旧字段兜底；这里只动
+   * 工作流定义。迁移幂等：v8 定义不产生写入，重复打开不再汇报条数。
+   */
+  private async migrateWorkflowDefinitionsToV8(): Promise<void> {
     let workflows = 0
+    let definitions = 0
     for (const [id, record] of this.domain.table('workflows').entries()) {
       let changed = false
       const versions: Record<string, WorkflowVersionRecord> = {}
       for (const [version, snapshot] of Object.entries(record.versions)) {
-        const definition = normalizeDefinitionExecutors(snapshot.definition)
-        if (definition !== snapshot.definition) changed = true
+        const definition = migrateWorkflowDefinitionToV8(snapshot.definition)
+        if (definition !== snapshot.definition) {
+          changed = true
+          definitions += 1
+        }
         versions[version] = { ...snapshot, definition }
       }
       if (!changed) continue
       await this.domain.table('workflows').update(id, (current) => ({ ...current, versions }))
       workflows += 1
     }
-
-    if (tasks > 0 || jobs > 0 || workflows > 0) {
+    if (definitions > 0) {
       this.logger?.info?.(
-        `buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s), ${workflows} workflow(s))`,
+        `buka-workflows: migrated ${definitions} workflow definition(s) to v8 (${workflows} workflow(s))`,
       )
     }
   }
@@ -219,6 +291,7 @@ export class WorkflowStore {
       }
     }
     await this.normalizeLegacyWorkerKinds()
+    await this.migrateWorkflowDefinitionsToV8()
     // 旧版本把新建工作流保存为 draft，要求人工激活；现在新建即启用。
     // 这里把遗留草稿一次性归一为启用，且只做一次幂等更新。
     let promoted = 0

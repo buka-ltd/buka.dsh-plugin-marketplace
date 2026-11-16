@@ -4,12 +4,12 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 
 ## Model
 
-- **Workflow**: a persistent definition with versions; an orchestrator preset saves it with `buka_workflow_save`, and it is usable immediately. The page reviews it and can disable / re-enable it. Only the current definition version (v7) is valid; older workflows are tagged "needs upgrade" and cannot start jobs.
-- **Position**: a graph node (besides the built-in start / end) that shows the shape of the flow. One position has one executor — a person or a worker (agent / robot). A position only carries a name and an optional note; it contributes no text to the execution prompt.
+- **Workflow**: a persistent definition with versions; an orchestrator preset saves it with `buka_workflow_save`, and it is usable immediately. The page reviews it and can disable / re-enable it. Only the current definition version (v8) is valid; v7 definitions are migrated to v8 when the store opens, and any other version is tagged "needs upgrade" and cannot start jobs.
+- **Position**: a graph node (besides the built-in start / end) that shows the shape of the flow. One position has one executor — a person or a worker (agent / robot) referenced by the worker's immutable identifier. A position only carries a name and an optional note; it contributes no text to the execution prompt.
 - **Task type**: the contract a position declares:
   - **definition**: preset information written by the orchestrator — what this kind of task is, what to do, facts about external systems (for example each service's pipeline); the executor reads it;
   - **content schema**: the format of the task content a creator must supply;
-  - for human positions: **actions**, an optional assistant, and an optional plan mode;
+  - for human positions: **actions**, an optional assistant (named by worker identifier), and an optional plan mode;
   - a robot position's task types must also declare a `content` schema that covers the program's input contract (v1's clock reads an object with a required `until`): saving the workflow checks the declaration, and task creation plus execution re-check the actual content;
   - a robot position's **creates**: creation declarations the engine executes when the robot finishes a task; each created task depends on the finished task and its content template may only use `{{content.*}}`. This is how a clock wait hands off to real work.
 - **Task content**: the concrete thing a creator writes for one task, as a string or an object; the engine validates it against the task type content schema, so a bad creator is rejected at creation time instead of failing the executor.
@@ -17,7 +17,7 @@ Persistent workflows with a job board. A workflow is a **position graph**; a job
 - **Result**: a summary text plus attachments. Results never drive the flow; they exist for whoever manages the job. A task's value is the follow-up tasks it creates.
 - **Channel**: a named dispatch route with an `id` and a human `label`, from one node to another, optionally limited to task types; back channels are explicit. Several channels may connect the same pair and their type whitelists may overlap; a task records the channel it took. A channel is a permission, not a pipe: the engine never reads the label.
 - **Start / end**: built-in nodes executed by the starter. The start node `content` is the job input the starter fills in, and its `next` list creates the initial tasks; the end node `content` is the final report, and the job only settles after the starter confirms receipt.
-- **Delivery rule**: chosen when the job is created — back to the starter (a session starter gets it delivered into that conversation, a human starter gets it as a board task), or to an assistant acting as a secretary.
+- **Delivery rule**: chosen when the job is created — back to the starter (a session starter gets it delivered into that conversation, a human starter gets it as a board task), or to an assistant (named by worker identifier) acting as a secretary.
 - **Job**: one workflow plus one input, pinned to a workflow version; numbering is per workflow. There are no cross-workflow jobs.
 - **Task**: a card on the board with seven states: pending / ready / running / completed / failed / blocked / cancelled. Every task except the start task records its inbound channel. Dependencies are explicit and the task graph is acyclic; each rework creates a new task record.
 - **Board**: rows are positions (including start / end), columns are queue / ready / running / done / exception.
@@ -62,8 +62,8 @@ Position labels, channel ids, job numbers, dependency lists and attachment lists
 ## Human tasks and assistants
 
 - A human task is an ordinary task from a human position. There is no "waiting for human" state; every task lives on the board.
-- A human task type names an `assistant` (an agent) or `null`:
-  - named assistant: when the task is ready the engine starts that assistant's session; the assistant gets the whole task card (content, actions and their forms), talks to the person, and applies the action on their behalf.
+- A human task type names an `assistant` (an agent identifier) or `null`:
+  - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets the whole task card (content, actions and their forms), talks to the person, and applies the action on their behalf.
   - `null`: the task waits in ready; the person claims it, picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything.
 - If the assistant fails the task returns to ready; no automatic switch, and the person can always finish it.
 
@@ -85,7 +85,7 @@ Sidebar "Workflows" has one path: **workflow list → workflow → job**.
 
 - **Workflow list**: name, version and job count. Disabled workflows stay in the list, greyed out and sorted last; workflows on an old definition version carry a "needs upgrade" tag.
 - **Workflow page** has two tabs:
-  - **Jobs** (default): filter by all / running / completed / problems; cards show the input summary, task progress and claimable count; jobs pinned to an old definition version carry an "old version" tag and cannot be opened.
+  - **Jobs** (default): filter by all / running / completed / problems; cards show the input summary, task progress and claimable count; jobs pinned to a v7 snapshot carry an "old version" tag but stay readable and keep running.
   - **Structure**: an interactive top-down layered graph. Select a position for its executor, note and task types, start / end for their content contracts, or a channel for its sender, receiver and allowed task types. The drawer header carries the node identity, contract fields render as compact chips, and the structural summary and budgets sit at the top, with full contracts folded away; the legend stays pinned to the bottom of the canvas.
 - **Job page** has four tabs:
   - **Overview** (default): job input, final report, starter and error.
@@ -98,7 +98,7 @@ Sidebar "Workflows" has one path: **workflow list → workflow → job**.
 
 - Requires `@buka/dsh-plugin-workers` for worker registration and task sessions, and `ctx.storageDomain` (shipped by the base composition).
 - Workflows / jobs / tasks / attempts / attachment metadata live in the `buka_workflow` domain; large texts and attachment files live under `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`.
-- **Version policy**: only the current definition version (v7) is valid and nothing is converted on open. Workflows on an old version stay in the list with a "needs upgrade" tag and cannot start jobs; upgrading means rewriting the definition in the current format from the orchestrator. Jobs pinned to an old version are read-only and cannot be opened.
+- **Version policy**: the current definition version is v8. v7 workflow definitions are migrated to v8 when the store opens (the executor `name` field becomes `id`, the value is unchanged); the migration is idempotent. Workflows on any other version stay in the list with a "needs upgrade" tag and cannot start jobs; upgrading means rewriting the definition in the current format from the orchestrator. Job snapshots are not migrated: v7 jobs keep the old `name` fields and stay readable and resumable.
 
 ## Configuration
 
@@ -108,7 +108,7 @@ See `src/options.ts` for the data directory, orchestrator presets, orchestrator 
 
 - `src/domain/**`: types, state machines, ids.
 - `src/store/**`: storageDomain tables, per-job queue, job directories.
-- `src/definition/**`: workflow v7 validation and task content templates.
+- `src/definition/**`: workflow v8 validation and task content templates.
 - `src/engine/**`: scheduling, executors, settlement, recovery.
 - `src/tools/**`, `src/commands/**`: model tools and the `/job` command.
 - `src/routes/**`: page read / action routes.

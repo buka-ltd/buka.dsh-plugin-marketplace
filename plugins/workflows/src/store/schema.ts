@@ -28,7 +28,8 @@ import type {
  * 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的
  * `init`）；version 2 把执行者 / 承办者的 `kind: "robot"` 改成 `worker`、
  * driver `program` 改成 `robot`，version 3 把定义升到 v5 / v6 并给任务补
- * `channel`；旧版本记录仍可读取，打开后由 `init` 归一 / 升级。
+ * `channel`；v7 工作流定义在 `init` 里升到 v8（执行者 `name` 改名为 `id`），
+ * 作业快照保持 v7 形状。旧版本记录仍可读取，打开后由 `init` 归一 / 升级。
  */
 export const WORKFLOW_DOMAIN_VERSION = 3
 
@@ -51,9 +52,10 @@ const taskStatusSchema = z.enum([
   'cancelled',
 ])
 
-/** 执行者：打工人或人。 */
+/** 执行者：打工人或人；v8 写 `id`，v7 作业快照写 `name`。 */
 const workerExecutorShape = {
-  name: z.string(),
+  id: z.string().optional(),
+  name: z.string().optional(),
   driver: z.enum(['agent', 'robot', 'program']),
   program: z.string().optional(),
   avatar: z.string().optional(),

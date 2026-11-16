@@ -202,7 +202,7 @@ function renderBoardCard(
   if (typeof task.attachmentCount === 'number' && task.attachmentCount > 0) {
     meta.push(fill(t, 'boardCardAttachments', { n: task.attachmentCount }))
   }
-  const claimant = claimantName(task.claimant, t)
+  const claimant = claimantName(page.state, task.claimant, t, task.position)
   if (task.status === 'ready' || task.status === 'pending') {
     const waiting = formatWaiting(task.createdAt)
     if (waiting !== '') meta.push(fill(t, 'boardCardWaiting', { duration: waiting }))

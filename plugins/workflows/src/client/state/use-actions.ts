@@ -382,7 +382,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
 
       const delivery =
         draft.delivery.startsWith('assistant:') && draft.delivery.length > 'assistant:'.length
-          ? { kind: 'assistant', name: draft.delivery.slice('assistant:'.length) }
+          ? { kind: 'assistant', id: draft.delivery.slice('assistant:'.length) }
           : { kind: 'starter' }
 
       setState((now) => ({

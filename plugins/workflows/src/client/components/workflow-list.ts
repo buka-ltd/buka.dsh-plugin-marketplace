@@ -9,7 +9,7 @@ import { h } from '../element.ts'
 import { formatTime } from '../format.ts'
 import { fill } from '../i18n.ts'
 import type { AppContext } from '../page-context.ts'
-import type { WorkflowSummary } from '../types.ts'
+import { DEFINITION_VERSION, type WorkflowSummary } from '../types.ts'
 import { renderEmpty, renderFailure, renderLoading } from './parts.ts'
 
 /** 工作流列表视图。 */
@@ -48,7 +48,8 @@ function renderWorkflowCard(page: AppContext, workflow: WorkflowSummary): React.
   const { t, actions } = page
   const retired = workflow.status === 'retired'
   const outdated =
-    typeof workflow.definitionVersion === 'number' && workflow.definitionVersion !== 7
+    typeof workflow.definitionVersion === 'number' &&
+    workflow.definitionVersion !== DEFINITION_VERSION
   return h(
     'li',
     { key: workflow.id },

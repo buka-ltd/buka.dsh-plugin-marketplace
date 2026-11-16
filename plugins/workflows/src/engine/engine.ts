@@ -23,6 +23,7 @@ import {
   visibleTaskIds,
 } from '../attachments/index.ts'
 import { contentIssues, findTaskType, validateWorkflowDefinition } from '../definition/validate.ts'
+import { deliveryWorkerRef, storedExecutorRef } from '../domain/identity.ts'
 import { newAttemptId, newJobId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import {
   assertJobTransition,
@@ -47,6 +48,7 @@ import type {
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
+import { DEFINITION_VERSION } from '../domain/types.ts'
 import { type JsonSchema, schemaProblems } from '../json-schema.ts'
 import type { ResolvedOptions } from '../options.ts'
 import { programDriver } from '../program/clock.ts'
@@ -54,6 +56,7 @@ import { normalizeProgramId, programContentProblems } from '../program/contracts
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 import {
   canRetryDelivery,
+  deliveryView,
   jobDefinition,
   jobSummary,
   taskDetail,
@@ -82,6 +85,15 @@ const RESULT_PREVIEW_BYTES = 4096
 
 /** 打工人登记表缓存时间。 */
 const WORKER_CACHE_MS = 5000
+
+/**
+ * 作业快照仍可读的版本范围。
+ *
+ * v7 快照不迁移：执行者 / 交回方式里的 `name` 按旧字段兜底；v8 是当前格式。
+ */
+function isSupportedJobDefinitionVersion(version: number): boolean {
+  return version >= 7 && version <= DEFINITION_VERSION
+}
 
 /** 一次等待中的执行。 */
 interface ActiveExecution {
@@ -139,11 +151,21 @@ function parseWorkerCatalog(raw: unknown): Map<string, WorkerInfo> {
     if (entry === null || typeof entry !== 'object') continue
     const record = entry as Record<string, unknown>
     const name = typeof record.name === 'string' ? record.name.trim() : ''
-    if (name === '') continue
+    // v8 登记表按 id 引用；兼容旧服务形状：没有 id 时退回 name。
+    const id = typeof record.id === 'string' && record.id.trim() !== '' ? record.id.trim() : name
+    if (id === '') continue
+    const displayName =
+      typeof record.displayName === 'string' && record.displayName.trim() !== ''
+        ? record.displayName.trim()
+        : name !== ''
+          ? name
+          : id
     // 旧版 workers 服务把固定程序驱动写成 program；新版写成 robot。两者都按机器人处理。
     const driver = record.driver === 'robot' || record.driver === 'program' ? 'robot' : 'agent'
-    catalog.set(name, {
+    catalog.set(id, {
+      id,
       name,
+      displayName,
       driver,
       ...(typeof record.program === 'string' && record.program !== ''
         ? { program: record.program }
@@ -264,7 +286,7 @@ export class WorkflowEngine {
     return this.catalog
   }
 
-  /** 取打工人登记表（按名字）。 */
+  /** 取打工人登记表（按标识符）。 */
   private async workers(): Promise<Map<string, WorkerInfo>> {
     return await this.refreshWorkers()
   }
@@ -361,7 +383,8 @@ export class WorkflowEngine {
       assistants: [...workers.values()]
         .filter((worker) => worker.assistant && worker.driver === 'agent')
         .map((worker) => ({
-          name: worker.name,
+          id: worker.id,
+          name: worker.displayName,
           ...(worker.description === undefined ? {} : { description: worker.description }),
           ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
         })),
@@ -545,20 +568,24 @@ export class WorkflowEngine {
     workers: ReadonlyMap<string, WorkerInfo>,
   ): DeliveryRule {
     if (delivery === undefined || delivery.kind === 'starter') return { kind: 'starter' }
-    const worker = workers.get(delivery.name)
+    const id = deliveryWorkerRef(delivery)
+    const worker = id === null ? undefined : workers.get(id)
     if (worker === undefined) {
-      throw new WorkflowError('invalid-delivery', `unknown assistant "${delivery.name}"`)
+      throw new WorkflowError('invalid-delivery', `unknown assistant identifier "${id ?? ''}"`)
     }
     if (worker.driver !== 'agent') {
-      throw new WorkflowError('invalid-delivery', `assistant "${delivery.name}" must be an agent`)
+      throw new WorkflowError(
+        'invalid-delivery',
+        `assistant identifier "${worker.id}" must be an agent`,
+      )
     }
     if (!worker.assistant) {
       throw new WorkflowError(
         'invalid-delivery',
-        `worker "${delivery.name}" is not marked as an assistant in the Buka Workers plugin`,
+        `worker identifier "${worker.id}" is not marked as an assistant in the Buka Workers plugin`,
       )
     }
-    return { kind: 'assistant', name: worker.name }
+    return { kind: 'assistant', id: worker.id }
   }
 
   /** 取一个可启动的工作流：必须存在、未停用、且定义是当前版本。 */
@@ -574,7 +601,7 @@ export class WorkflowEngine {
         `workflow "${found.record.name}" is not enabled; enable it before starting a job`,
       )
     }
-    if (found.versionRecord.definition.version !== 7) {
+    if (found.versionRecord.definition.version !== DEFINITION_VERSION) {
       throw new WorkflowError(
         'definition-outdated',
         `workflow "${found.record.name}" is not on the current definition version; ask the orchestrator to rewrite it before starting a job`,
@@ -633,8 +660,8 @@ export class WorkflowEngine {
   async jobDetail(jobId: string): Promise<Record<string, unknown> | null> {
     const job = this.store.getJob(jobId)
     if (job === undefined) return null
-    // 旧版本定义的作业只留在列表里（带「旧版本」标记），不提供详情。
-    if (job.definition.version !== 7) return null
+    // v7 快照继续可读、可推进；更早的版本只留在列表里。
+    if (!isSupportedJobDefinitionVersion(job.definition.version)) return null
     const workers = await this.workers()
     const tasks = this.store.listTasks(jobId)
     return {
@@ -647,7 +674,7 @@ export class WorkflowEngine {
         workflowVersion: job.workflowVersion,
         starter: job.starter,
         input: job.input,
-        delivery: job.delivery,
+        delivery: deliveryView(job.delivery, workers),
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
         error: job.error,
@@ -1041,7 +1068,10 @@ export class WorkflowEngine {
         )
       }
       const claimant = task.claimant
-      const createdBy = claimant?.name ?? '执行者'
+      const createdBy =
+        claimant === null || claimant.kind === 'human'
+          ? (claimant?.name ?? '执行者')
+          : this.workerDisplayName(claimant.name)
       const updated =
         task.assignee.kind === 'human'
           ? await this.completeHumanTaskLocked(job, task, {
@@ -1430,10 +1460,13 @@ export class WorkflowEngine {
 
   /** 重启恢复：重建调度、续接 running 任务、补算 clock、重试交付。 */
   private async recover(): Promise<void> {
-    // 旧版本定义的作业不参与恢复：它们只读、且随时可能被清掉。
+    // 更早版本定义的作业不参与恢复；v7 快照继续恢复与推进。
     const jobs = this.store
       .allJobs()
-      .filter((job) => job.status === 'running' && job.definition.version === 7)
+      .filter(
+        (job) =>
+          job.status === 'running' && isSupportedJobDefinitionVersion(job.definition.version),
+      )
     for (const job of jobs) {
       try {
         await this.store.runExclusive(job.id, async () => {
@@ -1489,7 +1522,8 @@ export class WorkflowEngine {
         )
         continue
       }
-      const resumed = await this.resumeAgentAttempt(jobId, task, attempt, executor.name, sessionId)
+      const executorId = storedExecutorRef(executor) ?? ''
+      const resumed = await this.resumeAgentAttempt(jobId, task, attempt, executorId, sessionId)
       if (!resumed) {
         if (task.claimant?.kind === 'assistant') {
           await this.releaseAssistantLocked(jobId, task, 'assistant session could not be resumed')
@@ -1649,7 +1683,7 @@ export class WorkflowEngine {
           if (launch !== null) launches.push(launch)
           continue
         }
-        // 交给秘书：按普通智能体任务派发，由它代收。
+        // 交给助理：按普通智能体任务派发，由它代收。
         if (busyPositions.has('end')) continue
         const launch = await this.claimAgentTask(job, task, tasks)
         if (launch !== null) {
@@ -1779,7 +1813,7 @@ export class WorkflowEngine {
     await this.claimTaskRecord(
       job,
       task,
-      { kind: 'worker', name: task.assignee.name, sessionId: null },
+      { kind: 'worker', name: storedExecutorRef(task.assignee) ?? '', sessionId: null },
       attempt.id,
     )
     return {
@@ -1787,7 +1821,7 @@ export class WorkflowEngine {
       jobId: job.id,
       taskId: task.id,
       attemptId: attempt.id,
-      worker: task.assignee.name,
+      worker: storedExecutorRef(task.assignee) ?? '',
       prompt,
       planMode: taskType.mode === 'plan',
     }
@@ -1838,7 +1872,7 @@ export class WorkflowEngine {
       task,
       {
         kind: 'worker',
-        name: task.assignee.kind === 'worker' ? task.assignee.name : programId,
+        name: storedExecutorRef(task.assignee) ?? programId,
         sessionId: null,
       },
       attempt.id,
@@ -2073,7 +2107,8 @@ export class WorkflowEngine {
           text: result.text,
           attachments: [],
           workspace: undefined,
-          createdBy: current.claimant?.name ?? programId,
+          createdBy:
+            current.claimant === null ? programId : this.workerDisplayName(current.claimant.name),
         })
         await this.recomputeLocked(jobId)
       })
@@ -2471,9 +2506,18 @@ export class WorkflowEngine {
     return undefined
   }
 
+  /** 打工人标识符 → 展示名（登记表查不到时退回标识符）。 */
+  private workerDisplayName(id: string): string {
+    const worker = this.catalog.get(id)
+    return worker === undefined ? id : worker.displayName
+  }
+
   /** 任务执行者的工作区（打工人目录）。 */
   private workspaceFor(task: TaskRecord): string | undefined {
-    if (task.assignee.kind === 'worker') return this.catalog.get(task.assignee.name)?.path
+    if (task.assignee.kind === 'worker') {
+      const id = storedExecutorRef(task.assignee)
+      return id === null ? undefined : this.catalog.get(id)?.path
+    }
     if (task.claimant !== null && task.claimant.kind === 'assistant') {
       return this.catalog.get(task.claimant.name)?.path
     }

@@ -9,7 +9,7 @@ import { formatTime } from '../format.ts'
 import { fill } from '../i18n.ts'
 import { filterJobs, sortJobs } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
-import type { JobFilter, JobSummary } from '../types.ts'
+import { DEFINITION_VERSION, type JobFilter, type JobSummary } from '../types.ts'
 import { renderEmptyAction, renderFailure, renderLoading, renderStatusTag } from './parts.ts'
 
 /** 筛选定义。 */
@@ -43,7 +43,7 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
 
   const outdated =
     typeof state.workflow.data?.workflow?.definition?.version === 'number' &&
-    state.workflow.data?.workflow?.definition?.version !== 7
+    state.workflow.data?.workflow?.definition?.version !== DEFINITION_VERSION
   const newJobAction =
     retired || outdated || workflowId === ''
       ? null
@@ -111,7 +111,10 @@ export function renderWorkflowJobs(page: AppContext): React.ReactElement {
 /** 一张作业卡片。 */
 function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): React.ReactElement {
   const { t, actions } = page
-  const legacy = typeof job.definitionVersion === 'number' && job.definitionVersion !== 7
+  // v7 快照仍是受支持的旧格式：带「旧版本」标记，但可以打开、推进。
+  const oldVersion =
+    typeof job.definitionVersion === 'number' && job.definitionVersion !== DEFINITION_VERSION
+  const legacy = typeof job.definitionVersion === 'number' && job.definitionVersion < 7
   const total = Object.values(job.taskCounts ?? {}).reduce(
     (sum, value) => sum + (typeof value === 'number' ? value : 0),
     0,
@@ -159,7 +162,7 @@ function renderJobCard(page: AppContext, workflowId: string, job: JobSummary): R
         h(
           'span',
           { className: 'buka-workflows-cardTags' },
-          legacy ? h('span', { className: 'buka-workflows-tag' }, t('jobLegacy')) : null,
+          oldVersion ? h('span', { className: 'buka-workflows-tag' }, t('jobLegacy')) : null,
           renderStatusTag(t, job.status, 'job'),
         ),
       ),

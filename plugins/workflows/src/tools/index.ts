@@ -85,9 +85,9 @@ function sessionIdOf(context: { agent?: { id?: unknown } }): string {
 }
 
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
 {
-  "version": 7, "name": "...", "description": "...",
+  "version": 8, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
     "content": <JSON Schema object: what the starter fills in>,
@@ -99,7 +99,7 @@ const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
   "end": { "content": <JSON Schema object: the final report> },
   "positions": [
     { "id": "dev", "label": "研发", "note": "<optional note for whoever maintains this flow>",
-      "executor": { "kind": "worker", "name": "<registered worker>" } | { "kind": "human" },
+      "executor": { "kind": "worker", "id": "<worker identifier>" } | { "kind": "human" },
       "taskTypes": [
         { "id": "dev.implement", "label": "开发",
           "definition": "<what this kind of task is and what to do; preset facts live here>",
@@ -108,7 +108,7 @@ const DEFINITION_HELP = `Workflow definition (v7) JSON shape:
             { "channel": "<channel id from this position>", "type": "<task type id>",
               "content": { "field": "{{content.until}}" } }
           ],
-          "assistant": "<assistant worker>" | null, "mode": "plan" | null,
+          "assistant": "<assistant worker identifier>" | null, "mode": "plan" | null,
           "actions": [   // human positions only
             { "id": "pass", "label": "通过",
               "input": <JSON Schema object: the form the human fills, optional>,
@@ -146,12 +146,12 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
   register(
     defineTool({
       name: 'buka_workflow_save',
-      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v7 definition; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v8 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
           type: 'json',
           required: true,
-          description: 'The complete workflow v6 definition object.',
+          description: 'The complete workflow v8 definition object.',
         },
         id: { type: 'string', description: 'Existing workflow id; omit to create a new workflow.' },
       },
@@ -279,7 +279,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
         delivery: {
           type: 'json',
           description:
-            'How the end task comes back: {"kind":"starter"} (default) or {"kind":"assistant","name":"<assistant worker>"}.',
+            'How the end task comes back: {"kind":"starter"} (default) or {"kind":"assistant","id":"<assistant worker identifier>"}.',
         },
       },
       output: {

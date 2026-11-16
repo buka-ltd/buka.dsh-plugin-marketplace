@@ -14,6 +14,7 @@ import {
   statusTone,
   workflowStatusKey,
 } from '../format.ts'
+import { assistantIdentity, workerIdentityText } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { schemaFields } from '../schema.ts'
 import type { Executor, JsonSchema, Translate } from '../types.ts'
@@ -325,14 +326,19 @@ export function renderSection(
   )
 }
 
-/** 执行者展示：打工人 / 人 + 名字。 */
+/** 执行者展示：打工人 / 人 + 「展示名 · 标识符」。 */
 export function renderExecutor(page: AppContext, executor: Executor | null | undefined): string {
   const { t } = page
   if (!isRecord(executor)) return t('taskTypeUnset')
   if (executor.kind === 'human') return t('actorHuman')
   const kind = executor.kind === 'worker' ? t('actorWorker') : t('taskTypeUnset')
-  const name = typeof executor.name === 'string' && executor.name !== '' ? executor.name : ''
-  return name === '' ? kind : `${kind} · ${name}`
+  const label = workerIdentityText(executor)
+  return label === '' ? kind : `${kind} · ${label}`
+}
+
+/** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符。 */
+export function renderAssistant(page: AppContext, id: string): string {
+  return workerIdentityText(assistantIdentity(page.state, id))
 }
 
 /** 字段类型 → 展示文本。 */

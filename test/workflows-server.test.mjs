@@ -19,7 +19,7 @@ import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
-import { toV7 } from './workflows-fixture-v7.mjs'
+import { toV8 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // 内存版 storageDomain
@@ -97,10 +97,10 @@ class FakeDomain {
 
 /** 测试里的打工人登记表。 */
 const WORKER_ENTRIES = [
-  { name: '软件工程师', driver: 'agent', assistant: false, avatar: 'rocket' },
-  { name: '质量保障工程师', driver: 'agent', assistant: false, avatar: 'owl' },
-  { name: '沟通助理', driver: 'agent', assistant: true, avatar: 'panda' },
-  { name: 'clock', driver: 'robot', program: 'clock', assistant: false, avatar: 'bee' },
+  { id: '软件工程师', name: '', driver: 'agent', assistant: false, avatar: 'rocket' },
+  { id: '质量保障工程师', name: '', driver: 'agent', assistant: false, avatar: 'owl' },
+  { id: '沟通助理', name: '', driver: 'agent', assistant: true, avatar: 'panda' },
+  { id: 'clock', name: '', driver: 'robot', program: 'clock', assistant: false, avatar: 'bee' },
 ]
 
 /** 一个可操纵的 workers 句柄。 */
@@ -204,7 +204,7 @@ async function waitFor(check, timeoutMs = 1500) {
 
 /** 简单定义：start → dev(agent) → end。 */
 function simpleDevDefinition() {
-  return toV7({
+  return toV8({
     version: 6,
     name: '简单研发',
     budgets: { maxTasks: 20, maxDurationHours: 24 },
@@ -243,7 +243,7 @@ function simpleDevDefinition() {
       {
         id: 'dev',
         label: '研发',
-        executor: { kind: 'worker', name: '软件工程师' },
+        executor: { kind: 'worker', id: '软件工程师' },
         taskTypes: [
           {
             id: 'dev.implement',
@@ -272,7 +272,7 @@ function simpleDevDefinition() {
 
 /** 研发 + 测试：dev → qa（验证）→ dev（返工，回边）→ end。 */
 function reviewDefinition() {
-  return toV7({
+  return toV8({
     version: 6,
     name: '研发与验证',
     budgets: { maxTasks: 40, maxDurationHours: 24 },
@@ -311,7 +311,7 @@ function reviewDefinition() {
       {
         id: 'dev',
         label: '研发',
-        executor: { kind: 'worker', name: '软件工程师' },
+        executor: { kind: 'worker', id: '软件工程师' },
         taskTypes: [
           {
             id: 'dev.implement',
@@ -343,7 +343,7 @@ function reviewDefinition() {
       {
         id: 'qa',
         label: '测试',
-        executor: { kind: 'worker', name: '质量保障工程师' },
+        executor: { kind: 'worker', id: '质量保障工程师' },
         taskTypes: [
           {
             id: 'qa.verify',
@@ -385,7 +385,7 @@ function reviewDefinition() {
 
 /** 人岗位 + 助理：start → approve(human) → end。 */
 function assistantDefinition() {
-  const definition = toV7({
+  const definition = toV8({
     version: 6,
     name: '发布审批',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
@@ -466,7 +466,7 @@ function assistantDefinition() {
 
 /** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
-  return toV7({
+  return toV8({
     version: 6,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
@@ -501,7 +501,7 @@ function clockDefinition() {
       {
         id: 'wait',
         label: '等待',
-        executor: { kind: 'worker', name: 'clock' },
+        executor: { kind: 'worker', id: 'clock' },
         taskTypes: [
           {
             id: 'wait.until',
@@ -530,7 +530,7 @@ function clockDefinition() {
 /** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
 function robotCreatesDefinition(change) {
   const definition = {
-    version: 7,
+    version: 8,
     name: '到点执行',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -548,7 +548,7 @@ function robotCreatesDefinition(change) {
       {
         id: 'wait',
         label: '等待',
-        executor: { kind: 'worker', name: 'clock' },
+        executor: { kind: 'worker', id: 'clock' },
         taskTypes: [
           {
             id: 'wait.until',
@@ -639,7 +639,8 @@ async function setup(definition) {
     workflowId: workflow.id,
     async cleanup() {
       engine.dispose()
-      await fs.rm(dataDir, { recursive: true, force: true })
+      // 作业事件是异步追加的：给删除留几次重试，避免和 appendFile 抢目录。
+      await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
     },
   }
 }
@@ -684,7 +685,7 @@ test('engine: the end task can be handed to an assistant acting as a secretary',
       workflowId: env.workflowId,
       content: { requirement: '发布需求' },
       sessionId: 'starter-session',
-      delivery: { kind: 'assistant', name: '沟通助理' },
+      delivery: { kind: 'assistant', id: '沟通助理' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const devSession = env.workers.dispatched[0].sessionId
@@ -724,7 +725,7 @@ test('engine: the delivery assistant must exist and be marked as an assistant', 
           workflowId: env.workflowId,
           content: { requirement: 'x' },
           sessionId: 'starter-session',
-          delivery: { kind: 'assistant', name: '不存在' },
+          delivery: { kind: 'assistant', id: '不存在' },
         }),
       /unknown assistant/u,
     )
@@ -734,13 +735,154 @@ test('engine: the delivery assistant must exist and be marked as an assistant', 
           workflowId: env.workflowId,
           content: { requirement: 'x' },
           sessionId: 'starter-session',
-          delivery: { kind: 'assistant', name: '软件工程师' },
+          delivery: { kind: 'assistant', id: '软件工程师' },
         }),
       /not marked as an assistant/u,
     )
     assert.equal(env.store.allJobs().length, 0)
   } finally {
     await env.cleanup()
+  }
+})
+
+test('engine: saving a definition rejects an unregistered worker identifier', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const definition = simpleDevDefinition()
+    definition.positions[0].executor = { kind: 'worker', id: '未登记' }
+    await assert.rejects(
+      () => env.engine.saveWorkflow({ definition }),
+      /unknown worker identifier "未登记"/u,
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a v7 job snapshot stays readable and keeps advancing with name fallbacks', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-legacy-'))
+  const domain = new FakeDomain()
+  const store = new WorkflowStore({ domain, dataDir })
+  await store.init()
+  const workers = makeWorkers()
+  const delivery = makeDelivery()
+  const engine = new WorkflowEngine({
+    ctx: {},
+    store,
+    options: makeOptions(dataDir),
+    logger: undefined,
+    workers: () => workers,
+    delivery,
+  })
+  try {
+    // v7 快照：定义里执行者与交回方式都只有 name（不迁移）。
+    const definition = simpleDevDefinition()
+    definition.version = 7
+    definition.positions[0].executor = { kind: 'worker', name: '软件工程师' }
+    const timestamp = new Date().toISOString()
+    const job = {
+      id: 'job-legacy',
+      seq: 1,
+      workflowId: 'wf-legacy',
+      workflowVersion: 1,
+      workflowName: '简单研发',
+      workflowDescription: '',
+      definition,
+      status: 'running',
+      starter: { kind: 'human' },
+      input: { requirement: '旧作业' },
+      delivery: { kind: 'assistant', name: '沟通助理' },
+      inputSummary: '旧作业',
+      error: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      finishedAt: null,
+    }
+    await store.ensureJobDirectories(job.id)
+    await store.insertJob(job)
+    await store.insertTask({
+      id: START_TASK_ID,
+      jobId: job.id,
+      position: 'start',
+      type: 'start',
+      channel: null,
+      content: { requirement: '旧作业' },
+      deps: [],
+      status: 'completed',
+      createdBy: null,
+      assignee: { kind: 'human' },
+      claimant: { kind: 'human', name: '本地用户', sessionId: null },
+      attemptIds: [],
+      result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
+      error: null,
+      assistantBlocked: false,
+      createdAt: timestamp,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      updatedAt: timestamp,
+    })
+    await store.insertTask({
+      id: 'task-legacy-dev',
+      jobId: job.id,
+      position: 'dev',
+      type: 'dev.implement',
+      channel: 'start.dev',
+      content: { requirement: '旧作业' },
+      deps: [START_TASK_ID],
+      status: 'pending',
+      createdBy: { taskId: START_TASK_ID, position: 'start' },
+      assignee: { kind: 'worker', name: '软件工程师', driver: 'agent', avatar: 'rocket' },
+      claimant: null,
+      attemptIds: [],
+      result: null,
+      error: null,
+      assistantBlocked: false,
+      createdAt: timestamp,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: timestamp,
+    })
+
+    await engine.start()
+    await waitFor(() => workers.dispatched.length === 1)
+    assert.equal(
+      workers.dispatched[0].request.worker,
+      '软件工程师',
+      'the old assignee name resolves as the identifier',
+    )
+    const devSession = workers.dispatched[0].sessionId
+
+    const detail = await engine.jobDetail(job.id)
+    assert.ok(detail !== null, 'v7 job snapshots stay readable')
+    assert.equal(detail.definition.version, 7)
+    assert.equal(detail.job.delivery.id, '沟通助理', 'delivery.name is read as the identifier')
+
+    await engine.createTaskFromTarget({
+      sessionId: devSession,
+      target: 'end',
+      content: { summary: '旧作业完成' },
+      deps: [],
+    })
+    await engine.completeTaskFromSession({
+      sessionId: devSession,
+      text: '开发完成',
+      attachments: [],
+    })
+    await waitFor(() => workers.dispatched.length === 2)
+    assert.equal(
+      workers.dispatched[1].request.worker,
+      '沟通助理',
+      'the old delivery name resolves to the assistant',
+    )
+    await engine.completeTaskFromSession({
+      sessionId: workers.dispatched[1].sessionId,
+      text: '已代收',
+      attachments: [],
+    })
+    await waitFor(() => store.getJob(job.id).status === 'completed')
+  } finally {
+    engine.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
   }
 })
 
@@ -1466,7 +1608,15 @@ test('engine: workflow detail resolves worker avatars even when the workers serv
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-avatar-'))
   const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
   await store.init()
-  const workers = makeWorkers()
+  const workers = makeWorkers([
+    {
+      id: 'software-engineer',
+      name: '软件工程师',
+      driver: 'agent',
+      assistant: false,
+      avatar: 'rocket',
+    },
+  ])
   const delivery = makeDelivery()
   const options = makeOptions(dataDir)
   let workersReady = true
@@ -1481,7 +1631,9 @@ test('engine: workflow detail resolves worker avatars even when the workers serv
       delivery,
     })
     await engine.start()
-    const workflow = await engine.saveWorkflow({ definition: simpleDevDefinition() })
+    const definition = simpleDevDefinition()
+    definition.positions[0].executor = { kind: 'worker', id: 'software-engineer' }
+    const workflow = await engine.saveWorkflow({ definition })
     await engine.setWorkflowActive(workflow.id, true)
     engine.dispose()
 
@@ -1501,6 +1653,12 @@ test('engine: workflow detail resolves worker avatars even when the workers serv
     const detail = await engine.readWorkflowDetail(workflow.id)
     const positions = detail?.graph?.positions ?? []
     assert.equal(positions[0]?.executor?.avatar, 'rocket', 'the worker avatar reaches the graph')
+    assert.equal(
+      positions[0]?.executor?.id,
+      'software-engineer',
+      'the identifier reaches the graph',
+    )
+    assert.equal(positions[0]?.executor?.name, '软件工程师', 'the display name reaches the graph')
   } finally {
     engine?.dispose()
     await fs.rm(dataDir, { recursive: true, force: true })
@@ -1518,8 +1676,8 @@ test('attachments: a task result attaches files and downstream tasks can read th
     await fs.writeFile(path.join(workspace, 'artifacts', 'report.txt'), 'hello attachment', 'utf8')
     // 打工人工作区指向临时目录（附件相对路径的根）。
     const workers = makeWorkers([
-      { name: '软件工程师', driver: 'agent', assistant: false, path: workspace },
-      { name: '质量保障工程师', driver: 'agent', assistant: false, path: workspace },
+      { id: '软件工程师', name: '', driver: 'agent', assistant: false, path: workspace },
+      { id: '质量保障工程师', name: '', driver: 'agent', assistant: false, path: workspace },
     ])
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-attach-'))
     try {

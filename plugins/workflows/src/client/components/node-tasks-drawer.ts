@@ -76,7 +76,7 @@ export function renderNodeTasksDrawer(page: AppContext): React.ReactElement | nu
 /** 一个任务行。 */
 function renderNodeTask(page: AppContext, task: TaskSummary): React.ReactElement {
   const { t, actions } = page
-  const claimant = claimantName(task.claimant, t)
+  const claimant = claimantName(page.state, task.claimant, t, task.position)
   const waiting =
     task.status === 'ready' || task.status === 'pending' ? formatWaiting(task.createdAt) : ''
   return h(

@@ -1,8 +1,9 @@
 /**
- * 工作流 v7 定义校验。
+ * 工作流 v8 定义校验。
  *
- * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录，
- * 这样 `buka_workflow_save` 用 workers 服务的登记表，单测用固定目录。
+ * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录（按
+ * 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
+ * 固定目录。
  *
  * 校验分两步：先解析出规范化定义，再跑跨节点规则（通道、可达性、动作、模板引用）。
  * 错误带定位路径，尽量一次返回全部问题；结构缺得太多时提前返回。
@@ -10,6 +11,7 @@
  * @module @buka/dsh-plugin-workflows/definition/validate
  */
 
+import { executorRef } from '../domain/identity.ts'
 import type {
   ActionDefinition,
   BudgetDefinition,
@@ -65,7 +67,7 @@ class Issues {
 }
 
 /**
- * 校验一份工作流 v7 定义。
+ * 校验一份工作流 v8 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
  * @param options 打工人目录
@@ -81,7 +83,7 @@ export function validateWorkflowDefinition(
     return { ok: false, issues: issues.list }
   }
 
-  if (raw.version !== 7) issues.add('version', 'must be 7')
+  if (raw.version !== 8) issues.add('version', 'must be 8')
   const name = readName(raw, 'name', '', issues)
   const description = readOptionalString(raw, 'description', 'description', issues) ?? ''
   const budgets = readBudgets(raw.budgets, issues)
@@ -114,7 +116,7 @@ export function validateWorkflowDefinition(
   return {
     ok: true,
     definition: {
-      version: 7,
+      version: 8,
       name,
       ...(description === '' ? {} : { description }),
       budgets,
@@ -206,7 +208,7 @@ function readPositions(
     if (id === null) continue
     const label = readName(entry, 'label', path, issues)
     const note = readOptionalString(entry, 'note', `${path}.note`, issues)
-    const executor = readExecutor(entry.executor, `${path}.executor`, workers, issues)
+    const executor = readExecutor(entry.executor, `${path}.executor`, id, workers, issues)
     const taskTypes = readTaskTypes(
       entry.taskTypes,
       `${path}.taskTypes`,
@@ -259,11 +261,12 @@ function readPositionId(
 function readExecutor(
   raw: unknown,
   path: string,
+  positionId: string,
   workers: ReadonlyMap<string, WorkerInfo>,
   issues: Issues,
 ): ExecutorSpec | null {
   if (!isPlainObject(raw)) {
-    issues.add(path, 'must be { kind: "worker", name } or { kind: "human" }')
+    issues.add(path, 'must be { kind: "worker", id } or { kind: "human" }')
     return null
   }
   if (raw.kind === 'human') return { kind: 'human' }
@@ -271,27 +274,27 @@ function readExecutor(
     issues.add(`${path}.kind`, 'must be "worker" or "human"')
     return null
   }
-  const name = typeof raw.name === 'string' ? raw.name.trim() : ''
-  if (name === '') {
-    issues.add(`${path}.name`, 'must be a non-empty worker name')
+  const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+  if (id === '') {
+    issues.add(`${path}.id`, 'must be a non-empty worker identifier')
     return null
   }
-  const worker = workers.get(name)
+  const worker = workers.get(id)
   if (worker === undefined) {
     issues.add(
-      `${path}.name`,
-      `unknown worker "${name}": register it with the Buka Workers plugin first`,
+      `${path}.id`,
+      `unknown worker identifier "${id}" for position "${positionId}": register it with the Buka Workers plugin first`,
     )
     return null
   }
   if (worker.driver === 'robot' && !isKnownProgram(worker.program)) {
     issues.add(
-      `${path}.name`,
-      `robot "${name}" uses program "${normalizeProgramId(worker.program)}", which no installed plugin provides`,
+      `${path}.id`,
+      `robot identifier "${id}" of position "${positionId}" uses program "${normalizeProgramId(worker.program)}", which no installed plugin provides`,
     )
     return null
   }
-  return { kind: 'worker', name }
+  return { kind: 'worker', id }
 }
 
 /** 解析一个岗位的任务类型列表。 */
@@ -354,6 +357,7 @@ function readTaskType(
     entry.assistant,
     `${path}.assistant`,
     positionId,
+    id,
     executor,
     workers,
     issues,
@@ -392,7 +396,8 @@ function checkRobotContent(
   issues: Issues,
 ): void {
   if (executor === null || executor.kind !== 'worker') return
-  const worker = workers.get(executor.name)
+  const id = executorRef(executor)
+  const worker = id === null ? undefined : workers.get(id)
   if (worker === undefined || worker.driver !== 'robot') return
   const program = normalizeProgramId(worker.program)
   const required = programRequiredContent(program)
@@ -402,7 +407,7 @@ function checkRobotContent(
   if (schema === undefined) {
     issues.add(
       `${path}.content`,
-      `robot "${worker.name}" (program "${program}") needs task content: declare a content schema with required ${fields}`,
+      `robot "${worker.id}" (program "${program}") needs task content: declare a content schema with required ${fields}`,
     )
     return
   }
@@ -410,7 +415,7 @@ function checkRobotContent(
   if (schema.type !== 'object') {
     issues.add(
       `${path}.content.type`,
-      `must be "object": robot "${worker.name}" (program "${program}") reads task content fields ${fields}`,
+      `must be "object": robot "${worker.id}" (program "${program}") reads task content fields ${fields}`,
     )
     return
   }
@@ -419,7 +424,7 @@ function checkRobotContent(
   if (missing.length > 0) {
     issues.add(
       `${path}.content.required`,
-      `must include ${missing.map((name) => `"${name}"`).join(', ')}: robot "${worker.name}" (program "${program}") needs it`,
+      `must include ${missing.map((name) => `"${name}"`).join(', ')}: robot "${worker.id}" (program "${program}") needs it`,
     )
   }
 }
@@ -430,7 +435,8 @@ function isRobotExecutor(
   workers: ReadonlyMap<string, WorkerInfo>,
 ): boolean {
   if (executor === null || executor.kind !== 'worker') return false
-  return workers.get(executor.name)?.driver === 'robot'
+  const id = executorRef(executor)
+  return id === null ? false : workers.get(id)?.driver === 'robot'
 }
 
 /**
@@ -555,6 +561,7 @@ function readAssistant(
   raw: unknown,
   path: string,
   positionId: string,
+  taskTypeId: string,
   executor: ExecutorSpec | null,
   workers: ReadonlyMap<string, WorkerInfo>,
   issues: Issues,
@@ -566,27 +573,33 @@ function readAssistant(
   }
   if (raw === null) return null
   if (typeof raw !== 'string' || raw.trim() === '') {
-    issues.add(path, 'must be a worker name or null')
+    issues.add(path, 'must be a worker identifier or null')
     return undefined
   }
-  const name = raw.trim()
-  const worker = workers.get(name)
+  const id = raw.trim()
+  const worker = workers.get(id)
   if (worker === undefined) {
     issues.add(
       path,
-      `unknown assistant worker "${name}": register it with the Buka Workers plugin first`,
+      `unknown assistant worker identifier "${id}" for task type "${positionId}.${taskTypeId}": register it with the Buka Workers plugin first`,
     )
     return undefined
   }
   if (worker.driver !== 'agent') {
-    issues.add(path, `assistant "${name}" must be an agent, not a robot`)
+    issues.add(
+      path,
+      `assistant identifier "${id}" of task type "${positionId}.${taskTypeId}" must be an agent, not a robot`,
+    )
     return undefined
   }
   if (!worker.assistant) {
-    issues.add(path, `worker "${name}" is not marked as an assistant in the Buka Workers plugin`)
+    issues.add(
+      path,
+      `worker identifier "${id}" of task type "${positionId}.${taskTypeId}" is not marked as an assistant in the Buka Workers plugin`,
+    )
     return undefined
   }
-  return name
+  return id
 }
 
 /** 解析 plan 模式；只对智能体有效。 */
@@ -608,7 +621,8 @@ function readMode(
     issues.add(path, 'mode "plan" is only valid for agent positions')
     return undefined
   }
-  const worker = workers.get(executor.name)
+  const executorId = executorRef(executor)
+  const worker = executorId === null ? undefined : workers.get(executorId)
   if (worker === undefined || worker.driver !== 'agent') {
     issues.add(`${ownerPath}.executor`, 'mode "plan" requires an agent executor')
     return undefined

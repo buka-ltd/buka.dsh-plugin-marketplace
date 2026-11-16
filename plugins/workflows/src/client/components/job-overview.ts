@@ -13,9 +13,11 @@ import { errorTextOf, formatBytes, formatTime } from '../format.ts'
 import {
   currentDefinition,
   currentJobDefinition,
+  deliveryIdentity,
   endTaskSummary,
   jobTasks,
   mergedDefinition,
+  workerIdentityText,
 } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
 import { attachmentUrl } from '../request.ts'
@@ -105,7 +107,7 @@ export function renderJobOverview(page: AppContext): React.ReactElement {
           [
             t('overviewDelivery'),
             job.delivery?.kind === 'assistant'
-              ? `${t('newJobDeliveryAssistant')} · ${job.delivery.name ?? ''}`
+              ? `${t('newJobDeliveryAssistant')} · ${workerIdentityText(deliveryIdentity(job.delivery))}`
               : t('newJobDeliveryStarter'),
           ],
           [t('jobCreatedAt'), formatTime(job.createdAt)],

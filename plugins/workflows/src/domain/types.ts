@@ -1,5 +1,5 @@
 /**
- * 工作流 v7 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
+ * 工作流 v8 的领域类型：定义、作业、任务、执行记录、附件，以及主体与角色。
  *
  * 本模块是纯类型与常量，不 import 任何运行时依赖（除 `json-schema.ts` 的类型），
  * 便于被校验、存储、引擎、路由与单测共同引用。
@@ -45,7 +45,12 @@ export type WorkerDriver = 'agent' | 'robot'
 
 /** workers 登记表里本插件用到的一条打工人信息（由 workers 服务提供）。 */
 export interface WorkerInfo {
+  /** 不可变标识符；工作流定义与作业快照按它引用打工人。 */
+  readonly id: string
+  /** 可选展示名；空串表示未设置。 */
   readonly name: string
+  /** 已算好的展示名：name 非空用 name，否则用 id。 */
+  readonly displayName: string
   readonly driver: WorkerDriver
   /** 机器人的驱动 id（例如 `clock`）；智能体没有。 */
   readonly program?: string | undefined
@@ -61,16 +66,28 @@ export interface WorkerCatalog {
   readonly workers: readonly WorkerInfo[]
 }
 
-/** 岗位执行者：人，或登记表里的打工人。 */
+/**
+ * 岗位执行者：人，或登记表里的打工人。
+ *
+ * v8 用 `id`（不可变标识符）引用打工人；`name` 只出现在 v7 作业快照里，
+ * 读取时按 `id ?? name` 兜底，不再写入。
+ */
 export type ExecutorSpec =
-  | { readonly kind: 'worker'; readonly name: string }
+  | {
+      readonly kind: 'worker'
+      readonly id?: string | undefined
+      readonly name?: string | undefined
+    }
   | { readonly kind: 'human' }
 
 /** 任务创建时钉住的执行者：打工人额外记录 driver，避免之后登记表变化影响已创建的作业。 */
 export type StoredExecutor =
   | {
       readonly kind: 'worker'
-      readonly name: string
+      /** v8 新建任务写标识符。 */
+      readonly id?: string | undefined
+      /** 仅 v7 作业快照：当时存的标识符。 */
+      readonly name?: string | undefined
       readonly driver: WorkerDriver
       readonly program?: string | undefined
       readonly avatar?: string | undefined
@@ -98,11 +115,16 @@ export type Starter =
  * 结束任务的交回方式，由发起人在创建作业时决定。
  *
  * - `starter`：交回发起人本人——会话发起时投递进那个会话，人发起时落在看板上；
- * - `assistant`：交给一个助理打工人代收。
+ * - `assistant`：交给一个助理打工人代收；v8 用 `id` 引用，`name` 只出现在
+ *   v7 作业快照里，读取时按 `id ?? name` 兜底。
  */
 export type DeliveryRule =
   | { readonly kind: 'starter' }
-  | { readonly kind: 'assistant'; readonly name: string }
+  | {
+      readonly kind: 'assistant'
+      readonly id?: string | undefined
+      readonly name?: string | undefined
+    }
 
 /**
  * 一条「创建任务」的声明：沿哪条通道、创建哪个任务类型、任务内容怎么来。
@@ -156,7 +178,7 @@ export interface TaskTypeDefinition {
    * 机器人没有会话与工具，静态后继只能由定义声明；创建的任务依赖刚完成的任务。
    */
   readonly creates?: readonly CreationDefinition[] | undefined
-  /** 仅人岗位：承担沟通的助理打工人名；null / 省略表示无助理。 */
+  /** 仅人岗位：承担沟通的助理打工人标识符；null / 省略表示无助理。 */
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
   readonly mode?: 'plan' | null | undefined
@@ -205,9 +227,9 @@ export interface BudgetDefinition {
   readonly maxDurationHours: number
 }
 
-/** 工作流 v7 定义。 */
+/** 工作流 v8 定义。 */
 export interface WorkflowDefinition {
-  readonly version: 7
+  readonly version: 8
   readonly name: string
   /** 列表里的摘要；不是给执行者看的。 */
   readonly description?: string | undefined
@@ -219,7 +241,7 @@ export interface WorkflowDefinition {
 }
 
 /** 定义格式的当前版本；其它版本一律视为「待升级」。 */
-export const DEFINITION_VERSION = 7 as const
+export const DEFINITION_VERSION = 8 as const
 
 /** 工作流定义的一个版本快照。 */
 export interface WorkflowVersionRecord {

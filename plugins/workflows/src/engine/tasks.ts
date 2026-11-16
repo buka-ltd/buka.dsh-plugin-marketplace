@@ -23,6 +23,7 @@ import {
   findPosition,
   findTaskType,
 } from '../definition/validate.ts'
+import { deliveryWorkerRef, executorRef, storedExecutorRef } from '../domain/identity.ts'
 import { newTaskId, nowIso, START_TASK_ID } from '../domain/ids.ts'
 import type {
   ChannelDefinition,
@@ -49,7 +50,7 @@ export interface CreateTaskInput {
   readonly content: JsonValue
   readonly deps: readonly string[]
   readonly tasks: readonly TaskRecord[]
-  /** 打工人登记表（按名字）；机器人带 driver/program。 */
+  /** 打工人登记表（按标识符）；机器人带 driver/program。 */
   readonly workers: ReadonlyMap<string, WorkerInfo>
 }
 
@@ -63,7 +64,7 @@ export interface CreateTaskResult {
 /**
  * 解析节点执行者，构造任务记录里钉住的执行者。
  *
- * 开始 / 结束任务的执行者都是发起人；结束任务选了「交给秘书」时是那个助理。
+ * 开始 / 结束任务的执行者都是发起人；结束任务选了「交给助理」时是那个助理。
  *
  * @param definition 定义
  * @param positionId 岗位 id
@@ -79,16 +80,17 @@ export function resolveExecutor(
 ): StoredExecutor {
   if (positionId === 'start' || positionId === 'end') {
     if (positionId === 'end' && job.delivery.kind === 'assistant') {
-      const worker = workers.get(job.delivery.name)
+      const deliveryId = deliveryWorkerRef(job.delivery)
+      const worker = deliveryId === null ? undefined : workers.get(deliveryId)
       if (worker === undefined) {
         throw new WorkflowError(
           'unknown-worker',
-          `the delivery assistant "${job.delivery.name}" is not registered`,
+          `the delivery assistant identifier "${deliveryId ?? ''}" is not registered`,
         )
       }
       return {
         kind: 'worker',
-        name: worker.name,
+        id: worker.id,
         driver: worker.driver,
         ...(worker.program === undefined ? {} : { program: worker.program }),
         ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
@@ -103,16 +105,17 @@ export function resolveExecutor(
     throw new WorkflowError('unknown-position', `unknown position "${positionId}"`)
   }
   if (position.executor.kind === 'human') return { kind: 'human' }
-  const worker = workers.get(position.executor.name)
+  const executorId = executorRef(position.executor)
+  const worker = executorId === null ? undefined : workers.get(executorId)
   if (worker === undefined) {
     throw new WorkflowError(
       'unknown-worker',
-      `position "${positionId}" uses worker "${position.executor.name}", which is not registered`,
+      `position "${positionId}" uses worker identifier "${executorId ?? ''}", which is not registered`,
     )
   }
   return {
     kind: 'worker',
-    name: worker.name,
+    id: worker.id,
     driver: worker.driver,
     ...(worker.program === undefined ? {} : { program: worker.program }),
     ...(worker.avatar === undefined ? {} : { avatar: worker.avatar }),
@@ -134,9 +137,10 @@ export function assertRobotContent(assignee: StoredExecutor, content: JsonValue)
   const problems = programContentProblems(assignee.program, content)
   if (problems.length === 0) return
   const program = normalizeProgramId(assignee.program)
+  const id = storedExecutorRef(assignee) ?? ''
   throw new WorkflowError(
     'invalid-content',
-    `content does not match robot "${assignee.name}" (program "${program}"): ${problems.join('; ')}`,
+    `content does not match robot identifier "${id}" (program "${program}"): ${problems.join('; ')}`,
   )
 }
 

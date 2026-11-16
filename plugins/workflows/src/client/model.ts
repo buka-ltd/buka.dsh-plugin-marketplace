@@ -9,6 +9,7 @@ import type {
   AttachmentMeta,
   ChannelDefinition,
   Claimant,
+  DeliveryRule,
   Executor,
   JobDetail,
   JobSummary,
@@ -24,6 +25,84 @@ import type {
   WorkflowDetail,
 } from './types.ts'
 import { asArray, isRecord } from './types.ts'
+
+/** 一条打工人引用的展示身份：标识符 + 展示名。 */
+export interface WorkerIdentity {
+  /** 不可变标识符；空串表示没有引用。 */
+  id: string
+  /** 展示名；名称为空时与 id 相同。 */
+  displayName: string
+}
+
+/**
+ * 读取打工人引用的身份；同时容忍 v8 的 `id` 与 v7 快照的 `name`。
+ *
+ * @param ref 执行者、交回方式或助理
+ * @returns 标识符与展示名
+ */
+export function workerIdentity(
+  ref:
+    | { id?: string | undefined; name?: string | undefined; displayName?: string | undefined }
+    | null
+    | undefined,
+): WorkerIdentity {
+  const id =
+    typeof ref?.id === 'string' && ref.id !== ''
+      ? ref.id
+      : typeof ref?.name === 'string'
+        ? ref.name
+        : ''
+  const displayName =
+    typeof ref?.displayName === 'string' && ref.displayName !== ''
+      ? ref.displayName
+      : typeof ref?.name === 'string' && ref.name !== ''
+        ? ref.name
+        : id
+  return { id, displayName }
+}
+
+/**
+ * 展示「展示名 · 标识符」；名称为空（等于标识符）时只显示标识符。
+ *
+ * @param ref 打工人引用
+ * @returns 展示文本；没有引用时是空串
+ */
+export function workerIdentityText(
+  ref:
+    | { id?: string | undefined; name?: string | undefined; displayName?: string | undefined }
+    | null
+    | undefined,
+): string {
+  const identity = workerIdentity(ref)
+  if (identity.id === '') return ''
+  return identity.displayName === identity.id
+    ? identity.id
+    : `${identity.displayName} · ${identity.id}`
+}
+
+/**
+ * 助理引用 → 展示身份；展示名来自工作流详情里的助理列表。
+ *
+ * @param state 页面状态
+ * @param id 助理标识符
+ * @returns 展示身份
+ */
+export function assistantIdentity(state: PageState, id: string): WorkerIdentity {
+  const assistants = asArray<{ id?: string; name?: string }>(state.workflow.data?.assistants)
+  const found = assistants.find((assistant) => (assistant.id ?? assistant.name) === id)
+  return workerIdentity({ id, name: found?.name })
+}
+
+/**
+ * 结束任务的交回方式 → 展示身份。
+ *
+ * @param delivery 交回方式
+ * @returns 展示身份；交回发起人或没有助理时 id 为空
+ */
+export function deliveryIdentity(delivery: DeliveryRule | null | undefined): WorkerIdentity {
+  if (!isRecord(delivery) || delivery.kind !== 'assistant') return { id: '', displayName: '' }
+  return workerIdentity(delivery)
+}
 
 /** 归一化后的岗位：id 一定有值。 */
 export interface PositionView {
@@ -62,7 +141,7 @@ export function currentDefinition(state: PageState): WorkflowDefinition | null {
   const detail = state.workflow.data
   const definition = detail?.workflow?.definition
   if (!isRecord(definition)) return null
-  // 定义快照只存打工人名字；avatar / driver 在 graph 投影里，展示前合并回来。
+  // 定义快照只存打工人标识符；展示名 / avatar / driver 在 graph 投影里，展示前合并回来。
   const executors = new Map<string, Executor>()
   for (const position of detail?.graph?.positions ?? []) {
     if (typeof position.id === 'string' && isRecord(position.executor)) {
@@ -432,13 +511,59 @@ export function taskCountsText(
  * @returns
  */
 export function claimantName(
+  state: PageState,
   claimant: Claimant | null | undefined,
   t: (key: string) => string,
+  positionId?: string | null,
 ): string {
   if (!isRecord(claimant)) return ''
-  const name = typeof claimant.name === 'string' ? claimant.name : ''
-  if (name !== '') return name
-  return typeof claimant.kind === 'string' ? t(actorKindKeySafe(claimant.kind)) : ''
+  const ref = typeof claimant.name === 'string' ? claimant.name : ''
+  if (ref === '') return typeof claimant.kind === 'string' ? t(actorKindKeySafe(claimant.kind)) : ''
+  if (claimant.kind === 'human') return ref
+  const displayName = displayNameOfWorker(state, ref, positionId)
+  return displayName === null ? ref : workerIdentity({ id: ref, name: displayName }).displayName
+}
+
+/**
+ * 从当前作业 / 工作流定义里找一条打工人引用的展示名。
+ *
+ * @param state 页面状态
+ * @param ref 标识符（可能来自 v7 快照的旧引用）
+ * @param positionId 任务岗位，优先按岗位执行者匹配
+ * @returns 展示名；找不到时 null
+ */
+function displayNameOfWorker(
+  state: PageState,
+  ref: string,
+  positionId?: string | null,
+): string | null {
+  const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
+  const positions = positionsOf(definition)
+  if (typeof positionId === 'string' && positionId !== '') {
+    const position = positions.find((item) => item.id === positionId)
+    const identity = position === undefined ? null : identityOfExecutor(position.executor, ref)
+    if (identity !== null) return identity
+  }
+  for (const position of positions) {
+    const identity = identityOfExecutor(position.executor, ref)
+    if (identity !== null) return identity
+  }
+  const assistants = asArray<{ id?: string; name?: string }>(state.workflow.data?.assistants)
+  const found = assistants.find((assistant) => (assistant.id ?? assistant.name) === ref)
+  return found === undefined ? null : workerIdentity({ id: ref, name: found.name }).displayName
+}
+
+/**
+ * 执行者是否就是这条引用；是的话返回它的展示名。
+ *
+ * @param executor 执行者
+ * @param ref 引用
+ * @returns 展示名；不匹配时 null
+ */
+function identityOfExecutor(executor: Executor, ref: string): string | null {
+  const identity = workerIdentity(executor)
+  if (identity.id !== ref && identity.displayName !== ref) return null
+  return identity.displayName === '' ? null : identity.displayName
 }
 
 /**

@@ -16,7 +16,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { toV7 } from './workflows-fixture-v7.mjs'
+import { toV8 } from './workflows-fixture-v7.mjs'
 
 const CLIENT_DIR = path.resolve('plugins/workflows/src/client')
 
@@ -254,7 +254,7 @@ function render(client, patch) {
 }
 
 /** 工作流定义。 */
-const DEFINITION = toV7({
+const DEFINITION = toV8({
   version: 6,
   name: '研发交付',
   description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
@@ -332,7 +332,7 @@ const DEFINITION = toV7({
         {
           id: 'approve.release',
           label: '批准发布',
-          assistant: '沟通助理',
+          assistant: 'secretary',
           payload: { type: 'object', properties: { summary: { type: 'string' } } },
           output: {
             type: 'object',
@@ -387,6 +387,7 @@ const WORKFLOW_DETAIL = {
     status: 'active',
     definition: DEFINITION,
   },
+  assistants: [{ id: 'secretary', name: '沟通助理', avatar: 'panda' }],
   graph: {
     positions: DEFINITION.positions.map((position) => ({
       id: position.id,
@@ -619,6 +620,14 @@ test('工作流列表：停用的工作流灰显并排在后面', async () => {
           status: 'retired',
           jobCount: 2,
         },
+        {
+          id: 'wf-3',
+          name: '旧格式',
+          version: 4,
+          definitionVersion: 7,
+          status: 'active',
+          jobCount: 0,
+        },
       ],
       error: null,
     },
@@ -628,6 +637,7 @@ test('工作流列表：停用的工作流灰显并排在后面', async () => {
   assert.match(text, /内容审核/u)
   assert.match(text, /已停用/u)
   assert.match(text, /12 个作业/u)
+  assert.match(text, /待升级/u, 'definition version 7 is not the current v8')
   assert.ok(classes.includes('is-disabled'), 'retired card is greyed out')
   assert.ok(
     text.indexOf('研发交付') < text.indexOf('内容审核'),
@@ -845,6 +855,59 @@ test('定义抽屉：通道显示发送方、接收方与允许的任务类型',
   assert.match(text, /开发/u, 'the allowed task type is listed')
 })
 
+test('客户端展示：执行者与助理显示「展示名 · 标识符」', async () => {
+  const client = await loadClient()
+  const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
+    position.id === 'qa'
+      ? { ...position, executor: { kind: 'worker', id: 'qa-engineer', name: '质量保障工程师' } }
+      : position,
+  )
+  const withGraph = {
+    ...WORKFLOW_DETAIL,
+    graph: { ...WORKFLOW_DETAIL.graph, positions: graphPositions },
+  }
+  const { texts } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: withGraph, error: null },
+    definitionSelection: { kind: 'position', id: 'qa' },
+  })
+  const text = texts.join(' ')
+  assert.match(
+    text,
+    /打工人 · 质量保障工程师 · qa-engineer/u,
+    'executor shows display name and identifier',
+  )
+
+  const approve = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: withGraph, error: null },
+    definitionSelection: { kind: 'position', id: 'approve' },
+  })
+  assert.match(
+    approve.texts.join(' '),
+    /助理 · 沟通助理 · secretary/u,
+    'assistant shows display name and identifier',
+  )
+})
+
+test('作业列表：v7 快照带「旧版本」标记，但仍可打开', async () => {
+  const client = await loadClient()
+  const workflow = {
+    ...WORKFLOW_DETAIL,
+    jobs: [{ ...WORKFLOW_DETAIL.jobs[0], definitionVersion: 7 }],
+  }
+  const { tree, texts, classes } = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+    workflow: { status: 'ready', data: workflow, error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /旧版本/u)
+  assert.ok(!classes.includes('is-disabled'), 'a v7 job stays openable')
+
+  clickButton(tree, '作业 #7')
+  assert.equal(harness.updates[0].route.kind, 'job')
+})
+
 test('作业概览：需求、结构化输入、最终交付物与启动信息', async () => {
   const client = await loadClient()
   const { texts } = render(client, {
@@ -1040,6 +1103,7 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
     })
     const text = texts.join(' ')
     assert.match(text, /接下来做什么/u)
+    assert.match(text, /沟通助理 · secretary/u, 'the assistant is shown by name and id')
 
     const approved = findBy(
       tree,
@@ -1076,6 +1140,15 @@ test('新建作业：需求在前、结构化输入按契约渲染', async () =>
     (node) => node.props?.id === 'buka-workflows-newjob-content-requirement',
   )
   assert.ok(requirement !== null, 'the start content schema renders the job input form')
+  const assistantOption = findBy(
+    tree,
+    (node) => node.type === 'option' && node.props?.value === 'assistant:secretary',
+  )
+  assert.ok(
+    assistantOption !== null,
+    'the delivery option uses the assistant identifier as its value',
+  )
+  assert.equal(textOf(assistantOption), '交给我的助理 · 沟通助理 · secretary')
   const submit = findBy(
     tree,
     (node) => typeof node.props?.onClick === 'function' && textOf(node).includes('启动作业'),

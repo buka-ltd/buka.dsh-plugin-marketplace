@@ -59,6 +59,9 @@ export const LIVE_REFRESH_MS = 1500
 /** 没有运行中作业时的刷新间隔。 */
 export const REFRESH_MS = 5000
 
+/** 当前工作流定义格式；与宿主 `DEFINITION_VERSION` 保持一致。 */
+export const DEFINITION_VERSION = 8
+
 /** 工作流状态。 */
 export type WorkflowStatus = 'draft' | 'active' | 'retired'
 
@@ -75,9 +78,12 @@ export type TaskStatus =
   | 'blocked'
   | 'cancelled'
 
-/** 岗位执行者：打工人或人。 */
+/** 岗位执行者：打工人或人；v8 用 `id` 引用，`name` 是展示名或 v7 快照的旧引用。 */
 export interface Executor {
   kind?: string
+  /** 打工人标识符。 */
+  id?: string
+  /** 展示名；旧快照里也可能是当时的标识符。 */
   name?: string
   /** 打工人头像 id（Host 若给出就画）。 */
   avatar?: string
@@ -124,6 +130,7 @@ export interface TaskTypeDefinition {
   actions?: ActionDefinition[]
   /** 仅机器人岗位：任务完成后创建的后续任务。 */
   creates?: CreationDefinition[]
+  /** 仅人岗位：点名的助理打工人标识符。 */
   assistant?: string | null
   mode?: string | null
 }
@@ -300,8 +307,8 @@ export interface WorkflowDetail {
     start?: { label?: string }
     end?: { label?: string }
   }
-  /** 结束任务可以交给的助理（新建作业时选「交给秘书」）。 */
-  assistants?: Array<{ name?: string; description?: string; avatar?: string }>
+  /** 结束任务可以交给的助理（新建作业时选「交给助理」）。 */
+  assistants?: Array<{ id?: string; name?: string; description?: string; avatar?: string }>
   jobs?: JobSummary[]
 }
 
@@ -379,8 +386,8 @@ export interface Notice {
   seq: number
 }
 
-/** 交回方式：交回发起人，或交给某个助理。 */
-export type DeliveryRule = { kind?: string; name?: string }
+/** 交回方式：交回发起人，或交给某个助理；v8 用 `id`，旧快照用 `name`。 */
+export type DeliveryRule = { kind?: string; id?: string; name?: string }
 
 /** 人任务表单的草稿。 */
 export interface TaskFormState {
@@ -397,7 +404,7 @@ export interface NewJobState {
   open: boolean
   /** 发起人填的任务内容（按 start.content schema 渲染）。 */
   content: Record<string, string>
-  /** `starter` 或 `assistant:<name>`。 */
+  /** `starter` 或 `assistant:<id>`。 */
   delivery: string
   error: string | null
   submitting: boolean

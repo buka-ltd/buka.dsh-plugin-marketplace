@@ -9,10 +9,12 @@
 
 import { clipUtf8 } from '../attachments/index.ts'
 import { findChannel } from '../definition/validate.ts'
+import { deliveryWorkerRef, executorRef } from '../domain/identity.ts'
 import { TASK_STATUSES } from '../domain/status.ts'
 import type {
   AttachmentRecord,
   AttemptRecord,
+  DeliveryRule,
   JobRecord,
   PositionDefinition,
   TaskRecord,
@@ -26,17 +28,49 @@ import { positionLabel, taskTypeLabel } from './prompt.ts'
 /** 摘要文本上限。 */
 const SUMMARY_BYTES = 240
 
-/** 把打工人登记里的 driver / avatar 补到执行者上（只用于展示）。 */
+/**
+ * 把打工人登记里的展示名 / driver / avatar 补到执行者上（只用于展示）。
+ *
+ * 旧作业快照只有 `name`（当时的标识符）；这里统一投影出 `id`，并优先用登记
+ * 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值，交给页面兜底。
+ */
 function executorView(
   executor: PositionDefinition['executor'],
   workers: ReadonlyMap<string, WorkerInfo> | undefined,
 ): Record<string, unknown> {
-  if (executor.kind === 'human' || workers === undefined) return executor
-  const worker = workers.get(executor.name)
+  if (executor.kind === 'human') return executor
+  const id = executorRef(executor)
+  const worker = id === null ? undefined : workers?.get(id)
   return {
     ...executor,
-    ...(worker === undefined ? {} : { driver: worker.driver }),
+    ...(id === null ? {} : { id }),
+    ...(worker === undefined ? {} : { name: worker.displayName, driver: worker.driver }),
     ...(worker?.avatar === undefined ? {} : { avatar: worker.avatar }),
+  }
+}
+
+/**
+ * 交回方式的展示投影：助理用展示名覆盖 `name`，保留 `id` 供页面消歧。
+ *
+ * @param delivery 钉住的交回方式
+ * @param workers 打工人登记表
+ * @returns 契约形状的交回方式
+ */
+export function deliveryView(
+  delivery: DeliveryRule,
+  workers?: ReadonlyMap<string, WorkerInfo>,
+): Record<string, unknown> {
+  if (delivery.kind !== 'assistant') return delivery
+  const id = deliveryWorkerRef(delivery)
+  const worker = id === null ? undefined : workers?.get(id)
+  return {
+    kind: 'assistant',
+    ...(id === null ? {} : { id }),
+    ...(worker === undefined
+      ? delivery.name === undefined
+        ? {}
+        : { name: delivery.name }
+      : { name: worker.displayName }),
   }
 }
 

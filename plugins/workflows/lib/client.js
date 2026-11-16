@@ -1161,6 +1161,525 @@ window.__ModuleLoader__.load({
     	if (mode === "preview" || mode === "inline") params.set("mode", mode);
     	return `${ATTACHMENT_ROUTE}?${params.toString()}`;
     }
+    // .build/workflows/client/model.js
+    /**
+    * 页面数据模型：把 Host 返回的定义快照 / 任务记录收口成看板与流程图直接消费的形状。
+    *
+    * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
+    */
+    /**
+    * 读取打工人引用的身份；同时容忍 v8 的 `id` 与 v7 快照的 `name`。
+    *
+    * @param ref 执行者、交回方式或助理
+    * @returns 标识符与展示名
+    */
+    function workerIdentity(ref) {
+    	const id = typeof ref?.id === "string" && ref.id !== "" ? ref.id : typeof ref?.name === "string" ? ref.name : "";
+    	return {
+    		id,
+    		displayName: typeof ref?.displayName === "string" && ref.displayName !== "" ? ref.displayName : typeof ref?.name === "string" && ref.name !== "" ? ref.name : id
+    	};
+    }
+    /**
+    * 展示「展示名 · 标识符」；名称为空（等于标识符）时只显示标识符。
+    *
+    * @param ref 打工人引用
+    * @returns 展示文本；没有引用时是空串
+    */
+    function workerIdentityText(ref) {
+    	const identity = workerIdentity(ref);
+    	if (identity.id === "") return "";
+    	return identity.displayName === identity.id ? identity.id : `${identity.displayName} · ${identity.id}`;
+    }
+    /**
+    * 助理引用 → 展示身份；展示名来自工作流详情里的助理列表。
+    *
+    * @param state 页面状态
+    * @param id 助理标识符
+    * @returns 展示身份
+    */
+    function assistantIdentity(state, id) {
+    	return workerIdentity({
+    		id,
+    		name: asArray(state.workflow.data?.assistants).find((assistant) => (assistant.id ?? assistant.name) === id)?.name
+    	});
+    }
+    /**
+    * 结束任务的交回方式 → 展示身份。
+    *
+    * @param delivery 交回方式
+    * @returns 展示身份；交回发起人或没有助理时 id 为空
+    */
+    function deliveryIdentity(delivery) {
+    	if (!isRecord(delivery) || delivery.kind !== "assistant") return {
+    		id: "",
+    		displayName: ""
+    	};
+    	return workerIdentity(delivery);
+    }
+    /** 取当前工作流详情里的定义快照；执行者补上打工人登记里的展示字段。 */
+    function currentDefinition(state) {
+    	const detail = state.workflow.data;
+    	const definition = detail?.workflow?.definition;
+    	if (!isRecord(definition)) return null;
+    	const executors = /* @__PURE__ */ new Map();
+    	for (const position of detail?.graph?.positions ?? []) if (typeof position.id === "string" && isRecord(position.executor)) executors.set(position.id, position.executor);
+    	if (executors.size === 0) return definition;
+    	const positions = asArray(definition.positions).map((position) => typeof position.id === "string" && executors.has(position.id) ? {
+    		...position,
+    		executor: executors.get(position.id)
+    	} : position);
+    	return {
+    		...definition,
+    		positions
+    	};
+    }
+    /** 取当前作业绑定的定义快照（任务类型的唯一来源）。 */
+    function currentJobDefinition(state) {
+    	const detail = state.job.data;
+    	if (detail === null) return null;
+    	const definition = detail.definition;
+    	if (!isRecord(definition)) return null;
+    	return definition;
+    }
+    /** 把定义里的岗位归一化。 */
+    function positionsOf(definition) {
+    	const list = asArray(definition?.positions);
+    	const out = [];
+    	for (const position of list) {
+    		const id = typeof position?.id === "string" ? position.id : "";
+    		if (id === "") continue;
+    		out.push({
+    			id,
+    			label: typeof position.label === "string" && position.label !== "" ? position.label : id,
+    			note: typeof position.note === "string" ? position.note : "",
+    			executor: isRecord(position.executor) ? position.executor : {},
+    			taskTypes: asArray(position.taskTypes)
+    		});
+    	}
+    	return out;
+    }
+    /** 把定义里的通道归一化。 */
+    function channelsOf(definition) {
+    	return asArray(definition?.channels).filter((channel) => typeof channel?.id === "string" && channel.id !== "" && typeof channel.from === "string" && channel.from !== "" && typeof channel.to === "string" && channel.to !== "").map((channel) => ({
+    		id: channel.id,
+    		label: typeof channel.label === "string" && channel.label !== "" ? channel.label : channel.id,
+    		from: channel.from,
+    		to: channel.to,
+    		types: asArray(channel.types).filter((type) => typeof type === "string"),
+    		back: channel.back === true
+    	}));
+    }
+    /** 按 id 找通道；找不到时返回 null。 */
+    function channelOf(definition, channelId) {
+    	if (typeof channelId !== "string" || channelId === "") return null;
+    	return channelsOf(definition).find((channel) => channel.id === channelId) ?? null;
+    }
+    /** 岗位标签；开始 / 结束用内建文案。 */
+    function positionLabel(definition, positionId, builtin) {
+    	if (positionId === "start") return builtin.start;
+    	if (positionId === "end") return builtin.end;
+    	const found = positionsOf(definition).find((position) => position.id === positionId);
+    	return found === void 0 ? String(positionId ?? "") : found.label;
+    }
+    /**
+    * 展开所有任务类型（跨岗位）并记下所属岗位。
+    *
+    * @param definition
+    * @returns
+    */
+    function allTaskTypes(definition) {
+    	const out = [];
+    	for (const position of positionsOf(definition)) for (const type of position.taskTypes) if (typeof type?.id === "string" && type.id !== "") out.push({
+    		position,
+    		type
+    	});
+    	return out;
+    }
+    /**
+    * 找任务类型定义。作业详情精简版可能不含 `taskTypes`，此时回退到工作流完整定义。
+    *
+    * @param jobDefinition 作业详情里的定义
+    * @param workflowDefinition 工作流完整定义（可选）
+    * @param positionId 岗位 id
+    * @param typeId 任务类型 id
+    * @returns
+    */
+    function findTaskType(jobDefinition, workflowDefinition, positionId, typeId) {
+    	for (const definition of [jobDefinition, workflowDefinition]) {
+    		if (definition === null) continue;
+    		const position = positionsOf(definition).find((item) => item.id === positionId);
+    		if (position === void 0) continue;
+    		const found = position.taskTypes.find((type) => type.id === typeId);
+    		if (found !== void 0) return found;
+    	}
+    	return null;
+    }
+    /** 任务是否属于「人岗位」。 */
+    function isHumanPosition(definition, positionId) {
+    	const position = positionsOf(definition).find((item) => item.id === positionId);
+    	return position !== void 0 && position.executor.kind === "human";
+    }
+    /**
+    * 人任务类型里的一个动作。
+    *
+    * @param type 任务类型定义
+    * @param actionId 动作 id
+    * @returns 动作；不存在时 null
+    */
+    function actionOf(type, actionId) {
+    	if (type === null || actionId === null) return null;
+    	return (Array.isArray(type.actions) ? type.actions : []).find((action) => action.id === actionId) ?? null;
+    }
+    /** 当前作业里的任务；没有详情时给空数组。 */
+    function jobTasks(state) {
+    	const tasks = state.job.data?.tasks;
+    	return Array.isArray(tasks) ? tasks.filter((task) => typeof task?.id === "string") : [];
+    }
+    /** 当前作业的发起人（开始 / 结束任务的执行者）；没有作业时为 null。 */
+    function currentStarter(state) {
+    	return state.job.data?.job?.starter ?? null;
+    }
+    /**
+    * 发起人的展示文本：人（页面启动）或会话。
+    *
+    * @param starter
+    * @param t
+    * @returns 未知发起人时返回空串
+    */
+    function starterText(starter, t) {
+    	if (!isRecord(starter)) return "";
+    	return starter.kind === "session" ? t("starterSession") : t("starterHuman");
+    }
+    /**
+    * 任务摘要的展示顺序：创建时间升序，同一时间按 id 稳定排序。
+    *
+    * @param tasks
+    * @returns
+    */
+    function sortTasks(tasks) {
+    	return [...tasks].sort((left, right) => {
+    		const leftTime = typeof left.createdAt === "string" ? left.createdAt : "";
+    		const rightTime = typeof right.createdAt === "string" ? right.createdAt : "";
+    		if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+    		return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    	});
+    }
+    /**
+    * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
+    *
+    * 内建开始 / 结束任务的执行者是同一个发起人，因此合并成一行；岗位行只放
+    * 定义里仍存在的岗位，契约外任务由调用方补行。
+    *
+    * @param definition
+    * @param tasks
+    * @param builtin
+    * @returns
+    */
+    function boardRows(definition, tasks, builtin) {
+    	const positions = positionsOf(definition);
+    	const known = new Set(positions.map((position) => position.id));
+    	const starterTasks = sortTasks(tasks.filter((task) => task.position === "start" || task.position === "end"));
+    	const rows = [{
+    		id: "starter",
+    		kind: "starter",
+    		label: builtin.starter,
+    		executor: null,
+    		tasks: starterTasks
+    	}, ...positions.map((position) => ({
+    		id: position.id,
+    		kind: "position",
+    		label: position.label,
+    		executor: position.executor,
+    		tasks: sortTasks(tasks.filter((task) => task.position === position.id))
+    	}))];
+    	const extras = tasks.filter((task) => task.position !== "start" && task.position !== "end" && (typeof task.position !== "string" || !known.has(task.position)));
+    	for (const task of sortTasks(extras)) {
+    		const id = typeof task.position === "string" ? task.position : "(unknown)";
+    		let row = rows.find((item) => item.id === id);
+    		if (row === void 0) {
+    			row = {
+    				id,
+    				kind: "position",
+    				label: id,
+    				executor: null,
+    				tasks: []
+    			};
+    			rows.push(row);
+    		}
+    		row.tasks.push(task);
+    	}
+    	return rows;
+    }
+    /**
+    * 承办者的展示名。
+    *
+    * @param claimant
+    * @param t
+    * @returns
+    */
+    function claimantName(state, claimant, t, positionId) {
+    	if (!isRecord(claimant)) return "";
+    	const ref = typeof claimant.name === "string" ? claimant.name : "";
+    	if (ref === "") return typeof claimant.kind === "string" ? t(actorKindKeySafe(claimant.kind)) : "";
+    	if (claimant.kind === "human") return ref;
+    	const displayName = displayNameOfWorker(state, ref, positionId);
+    	return displayName === null ? ref : workerIdentity({
+    		id: ref,
+    		name: displayName
+    	}).displayName;
+    }
+    /**
+    * 从当前作业 / 工作流定义里找一条打工人引用的展示名。
+    *
+    * @param state 页面状态
+    * @param ref 标识符（可能来自 v7 快照的旧引用）
+    * @param positionId 任务岗位，优先按岗位执行者匹配
+    * @returns 展示名；找不到时 null
+    */
+    function displayNameOfWorker(state, ref, positionId) {
+    	const positions = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state)));
+    	if (typeof positionId === "string" && positionId !== "") {
+    		const position = positions.find((item) => item.id === positionId);
+    		const identity = position === void 0 ? null : identityOfExecutor(position.executor, ref);
+    		if (identity !== null) return identity;
+    	}
+    	for (const position of positions) {
+    		const identity = identityOfExecutor(position.executor, ref);
+    		if (identity !== null) return identity;
+    	}
+    	const found = asArray(state.workflow.data?.assistants).find((assistant) => (assistant.id ?? assistant.name) === ref);
+    	return found === void 0 ? null : workerIdentity({
+    		id: ref,
+    		name: found.name
+    	}).displayName;
+    }
+    /**
+    * 执行者是否就是这条引用；是的话返回它的展示名。
+    *
+    * @param executor 执行者
+    * @param ref 引用
+    * @returns 展示名；不匹配时 null
+    */
+    function identityOfExecutor(executor, ref) {
+    	const identity = workerIdentity(executor);
+    	if (identity.id !== ref && identity.displayName !== ref) return null;
+    	return identity.displayName === "" ? null : identity.displayName;
+    }
+    /**
+    * 承办者种类 → 词典 key（避免 format 与 model 相互依赖的重复）。
+    *
+    * @param kind
+    * @returns
+    */
+    function actorKindKeySafe(kind) {
+    	switch (kind) {
+    		case "worker": return "actorWorker";
+    		case "human": return "actorHuman";
+    		case "assistant": return "actorAssistant";
+    		default: return "unknown";
+    	}
+    }
+    /**
+    * 作业详情里的 `definition` 与工作流定义合并（作业精简版缺 taskTypes 时回退）。
+    *
+    * @param jobDefinition
+    * @param workflowDefinition
+    * @returns
+    */
+    function mergedDefinition(jobDefinition, workflowDefinition) {
+    	if (jobDefinition === null) return workflowDefinition;
+    	if (workflowDefinition === null) return jobDefinition;
+    	const byId = new Map(positionsOf(jobDefinition).map((position) => [position.id, position]));
+    	const merged = positionsOf(workflowDefinition).map((position) => {
+    		const fromJob = byId.get(position.id);
+    		return {
+    			id: position.id,
+    			label: fromJob?.label ?? position.label,
+    			note: position.note,
+    			executor: fromJob !== void 0 && Object.keys(fromJob.executor).length > 0 ? fromJob.executor : position.executor,
+    			taskTypes: position.taskTypes
+    		};
+    	});
+    	const jobChannels = Array.isArray(jobDefinition.channels) ? jobDefinition.channels : [];
+    	const start = workflowDefinition.start ?? jobDefinition.start;
+    	const end = workflowDefinition.end ?? jobDefinition.end;
+    	return {
+    		...workflowDefinition,
+    		positions: merged,
+    		...jobChannels.length > 0 ? { channels: jobChannels } : workflowDefinition.channels !== void 0 ? { channels: workflowDefinition.channels } : {},
+    		...start !== void 0 ? { start } : {},
+    		...end !== void 0 ? { end } : {}
+    	};
+    }
+    /**
+    * 任务详情里「是不是人任务」。
+    *
+    * @param state
+    * @param task
+    * @returns
+    */
+    function isHumanTask(state, task) {
+    	return isHumanPosition(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), task?.position);
+    }
+    /**
+    * 任务详情对应的任务类型定义（抽屉展示 assistant / mode / 产出 schema）。
+    *
+    * @param state
+    * @param task
+    * @returns
+    */
+    function taskTypeOf(state, task) {
+    	return findTaskType(currentJobDefinition(state), currentDefinition(state), task?.position, task?.type);
+    }
+    /**
+    * 任务进度：节点卡片与作业列表共用。
+    *
+    * @param tasks
+    * @returns
+    */
+    function taskProgress(tasks) {
+    	const progress = {
+    		done: 0,
+    		total: tasks.length,
+    		running: 0,
+    		ready: 0,
+    		failed: 0,
+    		pending: 0
+    	};
+    	for (const task of tasks) switch (task.status) {
+    		case "completed":
+    			progress.done += 1;
+    			break;
+    		case "running":
+    			progress.running += 1;
+    			break;
+    		case "ready":
+    			progress.ready += 1;
+    			break;
+    		case "failed":
+    		case "blocked":
+    			progress.failed += 1;
+    			break;
+    		case "cancelled": break;
+    		default: progress.pending += 1;
+    	}
+    	return progress;
+    }
+    /**
+    * 实时流程里哪些通道已经被走过：任务记录自己走过的通道 id。
+    *
+    * @param tasks
+    * @returns 通道 id 的集合
+    */
+    function takenChannels(tasks) {
+    	const taken = /* @__PURE__ */ new Set();
+    	for (const task of tasks) if (typeof task.channel === "string" && task.channel !== "") taken.add(task.channel);
+    	return taken;
+    }
+    /**
+    * 结束任务（最终交付物的来源）。
+    *
+    * @param tasks
+    * @returns
+    */
+    function endTaskSummary(tasks) {
+    	return tasks.find((task) => task.position === "end") ?? null;
+    }
+    /**
+    * 作业列表筛选。
+    *
+    * @param jobs
+    * @param filter
+    * @returns
+    */
+    function filterJobs(jobs, filter) {
+    	return jobs.filter((job) => {
+    		switch (filter) {
+    			case "running": return job.status === "running";
+    			case "completed": return job.status === "completed";
+    			case "problem": return job.status === "failed" || job.status === "cancelled";
+    			default: return true;
+    		}
+    	});
+    }
+    /**
+    * 作业列表排序：运行中优先，其次编号倒序。
+    *
+    * @param jobs
+    * @returns
+    */
+    function sortJobs(jobs) {
+    	return [...jobs].sort((left, right) => {
+    		const leftRunning = left.status === "running" ? 0 : 1;
+    		const rightRunning = right.status === "running" ? 0 : 1;
+    		if (leftRunning !== rightRunning) return leftRunning - rightRunning;
+    		const leftSeq = typeof left.seq === "number" ? left.seq : 0;
+    		const rightSeq = typeof right.seq === "number" ? right.seq : 0;
+    		if (leftSeq !== rightSeq) return rightSeq - leftSeq;
+    		const leftTime = typeof left.updatedAt === "string" ? left.updatedAt : "";
+    		return (typeof right.updatedAt === "string" ? right.updatedAt : "").localeCompare(leftTime);
+    	});
+    }
+    /**
+    * 任务类型 id → 展示名。
+    *
+    * @param definition
+    * @returns
+    */
+    function taskTypeLabels(definition) {
+    	const labels = /* @__PURE__ */ new Map();
+    	for (const { type } of allTaskTypes(definition)) if (typeof type.id === "string") labels.set(type.id, type.label ?? type.id);
+    	return labels;
+    }
+    /**
+    * 资产池：附件按来源任务分组；结束任务产出的组排在最前。
+    *
+    * @param attachments
+    * @param tasks
+    * @param definition
+    * @param builtin
+    * @returns
+    */
+    function assetGroups(attachments, tasks, definition, builtin) {
+    	const byTask = /* @__PURE__ */ new Map();
+    	for (const task of tasks) byTask.set(task.id, task);
+    	const positionLabels = new Map(positionsOf(definition).map((position) => [position.id, position.label]));
+    	const groups = /* @__PURE__ */ new Map();
+    	for (const attachment of attachments) {
+    		const taskId = typeof attachment.sourceTaskId === "string" && attachment.sourceTaskId !== "" ? attachment.sourceTaskId : "";
+    		const task = taskId === "" ? null : byTask.get(taskId) ?? null;
+    		const key = taskId === "" ? "__unlinked" : taskId;
+    		let group = groups.get(key);
+    		if (group === void 0) {
+    			const position = typeof task?.position === "string" ? task.position : "";
+    			const builtinLabel = position === "start" ? builtin.start : position === "end" ? builtin.end : "";
+    			const positionLabel = builtinLabel !== "" ? "" : position === "" ? "" : positionLabels.get(position) ?? position;
+    			group = {
+    				key,
+    				taskId,
+    				label: builtinLabel !== "" ? builtinLabel : task === null ? "" : task.typeLabel ?? task.type ?? taskId,
+    				positionLabel,
+    				final: position === "end",
+    				items: []
+    			};
+    			groups.set(key, group);
+    		}
+    		group.items.push(attachment);
+    	}
+    	const sorted = [...groups.values()].sort((left, right) => {
+    		if (left.final !== right.final) return left.final ? -1 : 1;
+    		if (left.key === "__unlinked") return 1;
+    		if (right.key === "__unlinked") return -1;
+    		return 0;
+    	});
+    	for (const group of sorted) group.items.sort((left, right) => {
+    		const leftTime = typeof left.createdAt === "string" ? left.createdAt : "";
+    		const rightTime = typeof right.createdAt === "string" ? right.createdAt : "";
+    		return leftTime.localeCompare(rightTime);
+    	});
+    	return sorted;
+    }
     // .build/workflows/client/schema.js
     /**
     * 受限 JSON Schema → 表单：人任务产出、页面启动作业的原始 / 结构化输入共用。
@@ -1541,14 +2060,18 @@ window.__ModuleLoader__.load({
     function renderSection(title, children, extra) {
     	return h("section", { className: "buka-workflows-section" }, h("div", { className: "buka-workflows-sectionHead" }, h("h3", { className: "buka-workflows-sectionTitle" }, title), extra ?? null), children);
     }
-    /** 执行者展示：打工人 / 人 + 名字。 */
+    /** 执行者展示：打工人 / 人 + 「展示名 · 标识符」。 */
     function renderExecutor(page, executor) {
     	const { t } = page;
     	if (!isRecord(executor)) return t("taskTypeUnset");
     	if (executor.kind === "human") return t("actorHuman");
     	const kind = executor.kind === "worker" ? t("actorWorker") : t("taskTypeUnset");
-    	const name = typeof executor.name === "string" && executor.name !== "" ? executor.name : "";
-    	return name === "" ? kind : `${kind} · ${name}`;
+    	const label = workerIdentityText(executor);
+    	return label === "" ? kind : `${kind} · ${label}`;
+    }
+    /** 助理引用展示：展示名 · 标识符；名称未知时只显示标识符。 */
+    function renderAssistant(page, id) {
+    	return workerIdentityText(assistantIdentity(page.state, id));
     }
     /** 字段类型 → 展示文本。 */
     function schemaTypeLabel(schema) {
@@ -1753,433 +2276,6 @@ window.__ModuleLoader__.load({
     		"aria-hidden": true
     	}, preset.emoji);
     }
-    // .build/workflows/client/model.js
-    /**
-    * 页面数据模型：把 Host 返回的定义快照 / 任务记录收口成看板与流程图直接消费的形状。
-    *
-    * 服务端只给「岗位、通道、任务」，坐标与分组都在客户端算（见 `graph/layout.ts`）。
-    */
-    /** 取当前工作流详情里的定义快照；执行者补上打工人登记里的展示字段。 */
-    function currentDefinition(state) {
-    	const detail = state.workflow.data;
-    	const definition = detail?.workflow?.definition;
-    	if (!isRecord(definition)) return null;
-    	const executors = /* @__PURE__ */ new Map();
-    	for (const position of detail?.graph?.positions ?? []) if (typeof position.id === "string" && isRecord(position.executor)) executors.set(position.id, position.executor);
-    	if (executors.size === 0) return definition;
-    	const positions = asArray(definition.positions).map((position) => typeof position.id === "string" && executors.has(position.id) ? {
-    		...position,
-    		executor: executors.get(position.id)
-    	} : position);
-    	return {
-    		...definition,
-    		positions
-    	};
-    }
-    /** 取当前作业绑定的定义快照（任务类型的唯一来源）。 */
-    function currentJobDefinition(state) {
-    	const detail = state.job.data;
-    	if (detail === null) return null;
-    	const definition = detail.definition;
-    	if (!isRecord(definition)) return null;
-    	return definition;
-    }
-    /** 把定义里的岗位归一化。 */
-    function positionsOf(definition) {
-    	const list = asArray(definition?.positions);
-    	const out = [];
-    	for (const position of list) {
-    		const id = typeof position?.id === "string" ? position.id : "";
-    		if (id === "") continue;
-    		out.push({
-    			id,
-    			label: typeof position.label === "string" && position.label !== "" ? position.label : id,
-    			note: typeof position.note === "string" ? position.note : "",
-    			executor: isRecord(position.executor) ? position.executor : {},
-    			taskTypes: asArray(position.taskTypes)
-    		});
-    	}
-    	return out;
-    }
-    /** 把定义里的通道归一化。 */
-    function channelsOf(definition) {
-    	return asArray(definition?.channels).filter((channel) => typeof channel?.id === "string" && channel.id !== "" && typeof channel.from === "string" && channel.from !== "" && typeof channel.to === "string" && channel.to !== "").map((channel) => ({
-    		id: channel.id,
-    		label: typeof channel.label === "string" && channel.label !== "" ? channel.label : channel.id,
-    		from: channel.from,
-    		to: channel.to,
-    		types: asArray(channel.types).filter((type) => typeof type === "string"),
-    		back: channel.back === true
-    	}));
-    }
-    /** 按 id 找通道；找不到时返回 null。 */
-    function channelOf(definition, channelId) {
-    	if (typeof channelId !== "string" || channelId === "") return null;
-    	return channelsOf(definition).find((channel) => channel.id === channelId) ?? null;
-    }
-    /** 岗位标签；开始 / 结束用内建文案。 */
-    function positionLabel(definition, positionId, builtin) {
-    	if (positionId === "start") return builtin.start;
-    	if (positionId === "end") return builtin.end;
-    	const found = positionsOf(definition).find((position) => position.id === positionId);
-    	return found === void 0 ? String(positionId ?? "") : found.label;
-    }
-    /**
-    * 展开所有任务类型（跨岗位）并记下所属岗位。
-    *
-    * @param definition
-    * @returns
-    */
-    function allTaskTypes(definition) {
-    	const out = [];
-    	for (const position of positionsOf(definition)) for (const type of position.taskTypes) if (typeof type?.id === "string" && type.id !== "") out.push({
-    		position,
-    		type
-    	});
-    	return out;
-    }
-    /**
-    * 找任务类型定义。作业详情精简版可能不含 `taskTypes`，此时回退到工作流完整定义。
-    *
-    * @param jobDefinition 作业详情里的定义
-    * @param workflowDefinition 工作流完整定义（可选）
-    * @param positionId 岗位 id
-    * @param typeId 任务类型 id
-    * @returns
-    */
-    function findTaskType(jobDefinition, workflowDefinition, positionId, typeId) {
-    	for (const definition of [jobDefinition, workflowDefinition]) {
-    		if (definition === null) continue;
-    		const position = positionsOf(definition).find((item) => item.id === positionId);
-    		if (position === void 0) continue;
-    		const found = position.taskTypes.find((type) => type.id === typeId);
-    		if (found !== void 0) return found;
-    	}
-    	return null;
-    }
-    /** 任务是否属于「人岗位」。 */
-    function isHumanPosition(definition, positionId) {
-    	const position = positionsOf(definition).find((item) => item.id === positionId);
-    	return position !== void 0 && position.executor.kind === "human";
-    }
-    /**
-    * 人任务类型里的一个动作。
-    *
-    * @param type 任务类型定义
-    * @param actionId 动作 id
-    * @returns 动作；不存在时 null
-    */
-    function actionOf(type, actionId) {
-    	if (type === null || actionId === null) return null;
-    	return (Array.isArray(type.actions) ? type.actions : []).find((action) => action.id === actionId) ?? null;
-    }
-    /** 当前作业里的任务；没有详情时给空数组。 */
-    function jobTasks(state) {
-    	const tasks = state.job.data?.tasks;
-    	return Array.isArray(tasks) ? tasks.filter((task) => typeof task?.id === "string") : [];
-    }
-    /** 当前作业的发起人（开始 / 结束任务的执行者）；没有作业时为 null。 */
-    function currentStarter(state) {
-    	return state.job.data?.job?.starter ?? null;
-    }
-    /**
-    * 发起人的展示文本：人（页面启动）或会话。
-    *
-    * @param starter
-    * @param t
-    * @returns 未知发起人时返回空串
-    */
-    function starterText(starter, t) {
-    	if (!isRecord(starter)) return "";
-    	return starter.kind === "session" ? t("starterSession") : t("starterHuman");
-    }
-    /**
-    * 任务摘要的展示顺序：创建时间升序，同一时间按 id 稳定排序。
-    *
-    * @param tasks
-    * @returns
-    */
-    function sortTasks(tasks) {
-    	return [...tasks].sort((left, right) => {
-    		const leftTime = typeof left.createdAt === "string" ? left.createdAt : "";
-    		const rightTime = typeof right.createdAt === "string" ? right.createdAt : "";
-    		if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
-    		return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
-    	});
-    }
-    /**
-    * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
-    *
-    * 内建开始 / 结束任务的执行者是同一个发起人，因此合并成一行；岗位行只放
-    * 定义里仍存在的岗位，契约外任务由调用方补行。
-    *
-    * @param definition
-    * @param tasks
-    * @param builtin
-    * @returns
-    */
-    function boardRows(definition, tasks, builtin) {
-    	const positions = positionsOf(definition);
-    	const known = new Set(positions.map((position) => position.id));
-    	const starterTasks = sortTasks(tasks.filter((task) => task.position === "start" || task.position === "end"));
-    	const rows = [{
-    		id: "starter",
-    		kind: "starter",
-    		label: builtin.starter,
-    		executor: null,
-    		tasks: starterTasks
-    	}, ...positions.map((position) => ({
-    		id: position.id,
-    		kind: "position",
-    		label: position.label,
-    		executor: position.executor,
-    		tasks: sortTasks(tasks.filter((task) => task.position === position.id))
-    	}))];
-    	const extras = tasks.filter((task) => task.position !== "start" && task.position !== "end" && (typeof task.position !== "string" || !known.has(task.position)));
-    	for (const task of sortTasks(extras)) {
-    		const id = typeof task.position === "string" ? task.position : "(unknown)";
-    		let row = rows.find((item) => item.id === id);
-    		if (row === void 0) {
-    			row = {
-    				id,
-    				kind: "position",
-    				label: id,
-    				executor: null,
-    				tasks: []
-    			};
-    			rows.push(row);
-    		}
-    		row.tasks.push(task);
-    	}
-    	return rows;
-    }
-    /**
-    * 承办者的展示名。
-    *
-    * @param claimant
-    * @param t
-    * @returns
-    */
-    function claimantName(claimant, t) {
-    	if (!isRecord(claimant)) return "";
-    	const name = typeof claimant.name === "string" ? claimant.name : "";
-    	if (name !== "") return name;
-    	return typeof claimant.kind === "string" ? t(actorKindKeySafe(claimant.kind)) : "";
-    }
-    /**
-    * 承办者种类 → 词典 key（避免 format 与 model 相互依赖的重复）。
-    *
-    * @param kind
-    * @returns
-    */
-    function actorKindKeySafe(kind) {
-    	switch (kind) {
-    		case "worker": return "actorWorker";
-    		case "human": return "actorHuman";
-    		case "assistant": return "actorAssistant";
-    		default: return "unknown";
-    	}
-    }
-    /**
-    * 作业详情里的 `definition` 与工作流定义合并（作业精简版缺 taskTypes 时回退）。
-    *
-    * @param jobDefinition
-    * @param workflowDefinition
-    * @returns
-    */
-    function mergedDefinition(jobDefinition, workflowDefinition) {
-    	if (jobDefinition === null) return workflowDefinition;
-    	if (workflowDefinition === null) return jobDefinition;
-    	const byId = new Map(positionsOf(jobDefinition).map((position) => [position.id, position]));
-    	const merged = positionsOf(workflowDefinition).map((position) => {
-    		const fromJob = byId.get(position.id);
-    		return {
-    			id: position.id,
-    			label: fromJob?.label ?? position.label,
-    			note: position.note,
-    			executor: fromJob !== void 0 && Object.keys(fromJob.executor).length > 0 ? fromJob.executor : position.executor,
-    			taskTypes: position.taskTypes
-    		};
-    	});
-    	const jobChannels = Array.isArray(jobDefinition.channels) ? jobDefinition.channels : [];
-    	const start = workflowDefinition.start ?? jobDefinition.start;
-    	const end = workflowDefinition.end ?? jobDefinition.end;
-    	return {
-    		...workflowDefinition,
-    		positions: merged,
-    		...jobChannels.length > 0 ? { channels: jobChannels } : workflowDefinition.channels !== void 0 ? { channels: workflowDefinition.channels } : {},
-    		...start !== void 0 ? { start } : {},
-    		...end !== void 0 ? { end } : {}
-    	};
-    }
-    /**
-    * 任务详情里「是不是人任务」。
-    *
-    * @param state
-    * @param task
-    * @returns
-    */
-    function isHumanTask(state, task) {
-    	return isHumanPosition(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), task?.position);
-    }
-    /**
-    * 任务详情对应的任务类型定义（抽屉展示 assistant / mode / 产出 schema）。
-    *
-    * @param state
-    * @param task
-    * @returns
-    */
-    function taskTypeOf(state, task) {
-    	return findTaskType(currentJobDefinition(state), currentDefinition(state), task?.position, task?.type);
-    }
-    /**
-    * 任务进度：节点卡片与作业列表共用。
-    *
-    * @param tasks
-    * @returns
-    */
-    function taskProgress(tasks) {
-    	const progress = {
-    		done: 0,
-    		total: tasks.length,
-    		running: 0,
-    		ready: 0,
-    		failed: 0,
-    		pending: 0
-    	};
-    	for (const task of tasks) switch (task.status) {
-    		case "completed":
-    			progress.done += 1;
-    			break;
-    		case "running":
-    			progress.running += 1;
-    			break;
-    		case "ready":
-    			progress.ready += 1;
-    			break;
-    		case "failed":
-    		case "blocked":
-    			progress.failed += 1;
-    			break;
-    		case "cancelled": break;
-    		default: progress.pending += 1;
-    	}
-    	return progress;
-    }
-    /**
-    * 实时流程里哪些通道已经被走过：任务记录自己走过的通道 id。
-    *
-    * @param tasks
-    * @returns 通道 id 的集合
-    */
-    function takenChannels(tasks) {
-    	const taken = /* @__PURE__ */ new Set();
-    	for (const task of tasks) if (typeof task.channel === "string" && task.channel !== "") taken.add(task.channel);
-    	return taken;
-    }
-    /**
-    * 结束任务（最终交付物的来源）。
-    *
-    * @param tasks
-    * @returns
-    */
-    function endTaskSummary(tasks) {
-    	return tasks.find((task) => task.position === "end") ?? null;
-    }
-    /**
-    * 作业列表筛选。
-    *
-    * @param jobs
-    * @param filter
-    * @returns
-    */
-    function filterJobs(jobs, filter) {
-    	return jobs.filter((job) => {
-    		switch (filter) {
-    			case "running": return job.status === "running";
-    			case "completed": return job.status === "completed";
-    			case "problem": return job.status === "failed" || job.status === "cancelled";
-    			default: return true;
-    		}
-    	});
-    }
-    /**
-    * 作业列表排序：运行中优先，其次编号倒序。
-    *
-    * @param jobs
-    * @returns
-    */
-    function sortJobs(jobs) {
-    	return [...jobs].sort((left, right) => {
-    		const leftRunning = left.status === "running" ? 0 : 1;
-    		const rightRunning = right.status === "running" ? 0 : 1;
-    		if (leftRunning !== rightRunning) return leftRunning - rightRunning;
-    		const leftSeq = typeof left.seq === "number" ? left.seq : 0;
-    		const rightSeq = typeof right.seq === "number" ? right.seq : 0;
-    		if (leftSeq !== rightSeq) return rightSeq - leftSeq;
-    		const leftTime = typeof left.updatedAt === "string" ? left.updatedAt : "";
-    		return (typeof right.updatedAt === "string" ? right.updatedAt : "").localeCompare(leftTime);
-    	});
-    }
-    /**
-    * 任务类型 id → 展示名。
-    *
-    * @param definition
-    * @returns
-    */
-    function taskTypeLabels(definition) {
-    	const labels = /* @__PURE__ */ new Map();
-    	for (const { type } of allTaskTypes(definition)) if (typeof type.id === "string") labels.set(type.id, type.label ?? type.id);
-    	return labels;
-    }
-    /**
-    * 资产池：附件按来源任务分组；结束任务产出的组排在最前。
-    *
-    * @param attachments
-    * @param tasks
-    * @param definition
-    * @param builtin
-    * @returns
-    */
-    function assetGroups(attachments, tasks, definition, builtin) {
-    	const byTask = /* @__PURE__ */ new Map();
-    	for (const task of tasks) byTask.set(task.id, task);
-    	const positionLabels = new Map(positionsOf(definition).map((position) => [position.id, position.label]));
-    	const groups = /* @__PURE__ */ new Map();
-    	for (const attachment of attachments) {
-    		const taskId = typeof attachment.sourceTaskId === "string" && attachment.sourceTaskId !== "" ? attachment.sourceTaskId : "";
-    		const task = taskId === "" ? null : byTask.get(taskId) ?? null;
-    		const key = taskId === "" ? "__unlinked" : taskId;
-    		let group = groups.get(key);
-    		if (group === void 0) {
-    			const position = typeof task?.position === "string" ? task.position : "";
-    			const builtinLabel = position === "start" ? builtin.start : position === "end" ? builtin.end : "";
-    			const positionLabel = builtinLabel !== "" ? "" : position === "" ? "" : positionLabels.get(position) ?? position;
-    			group = {
-    				key,
-    				taskId,
-    				label: builtinLabel !== "" ? builtinLabel : task === null ? "" : task.typeLabel ?? task.type ?? taskId,
-    				positionLabel,
-    				final: position === "end",
-    				items: []
-    			};
-    			groups.set(key, group);
-    		}
-    		group.items.push(attachment);
-    	}
-    	const sorted = [...groups.values()].sort((left, right) => {
-    		if (left.final !== right.final) return left.final ? -1 : 1;
-    		if (left.key === "__unlinked") return 1;
-    		if (right.key === "__unlinked") return -1;
-    		return 0;
-    	});
-    	for (const group of sorted) group.items.sort((left, right) => {
-    		const leftTime = typeof left.createdAt === "string" ? left.createdAt : "";
-    		const rightTime = typeof right.createdAt === "string" ? right.createdAt : "";
-    		return leftTime.localeCompare(rightTime);
-    	});
-    	return sorted;
-    }
     // .build/workflows/client/components/definition-drawer.js
     /**
     * 结构图的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
@@ -2379,7 +2475,7 @@ window.__ModuleLoader__.load({
     	return h("article", {
     		key: id === "" ? type.label ?? "type" : id,
     		className: "buka-workflows-typeCard"
-    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${type.assistant}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
+    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
     		text: type.definition,
     		className: "buka-workflows-typeDesc",
     		expandLabel: t("expandText"),
@@ -2523,7 +2619,7 @@ window.__ModuleLoader__.load({
     	if (Array.isArray(task.deps) && task.deps.length > 0) meta.push(fill(t, "boardCardDeps", { n: task.deps.length }));
     	if (typeof task.attemptCount === "number" && task.attemptCount > 1) meta.push(fill(t, "boardCardAttempts", { n: task.attemptCount }));
     	if (typeof task.attachmentCount === "number" && task.attachmentCount > 0) meta.push(fill(t, "boardCardAttachments", { n: task.attachmentCount }));
-    	const claimant = claimantName(task.claimant, t);
+    	const claimant = claimantName(page.state, task.claimant, t, task.position);
     	if (task.status === "ready" || task.status === "pending") {
     		const waiting = formatWaiting(task.createdAt);
     		if (waiting !== "") meta.push(fill(t, "boardCardWaiting", { duration: waiting }));
@@ -3198,7 +3294,7 @@ window.__ModuleLoader__.load({
     	}, t("overviewOpenFinalTask"))), renderSection(t("overviewStarter"), h("div", { className: "buka-workflows-overviewCard" }, renderKv([
     		[t("overviewWorkflow"), `${job.workflowName ?? job.workflowId ?? ""}${typeof job.workflowVersion === "number" ? ` · v${job.workflowVersion}` : ""}`],
     		[t("starter"), starter === null ? t("taskTypeUnset") : starter.kind === "session" ? t("starterSession") : t("starterHuman")],
-    		[t("overviewDelivery"), job.delivery?.kind === "assistant" ? `${t("newJobDeliveryAssistant")} · ${job.delivery.name ?? ""}` : t("newJobDeliveryStarter")],
+    		[t("overviewDelivery"), job.delivery?.kind === "assistant" ? `${t("newJobDeliveryAssistant")} · ${workerIdentityText(deliveryIdentity(job.delivery))}` : t("newJobDeliveryStarter")],
     		[t("jobCreatedAt"), formatTime(job.createdAt)],
     		[t("jobUpdatedAt"), formatTime(job.updatedAt)]
     	]), starter !== null && starter.kind === "session" && typeof starter.sessionId === "string" && starter.sessionId !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -3272,7 +3368,7 @@ window.__ModuleLoader__.load({
     	const definition = currentDefinition(state);
     	const contentSchema = isRecord(definition?.start?.content) ? definition.start.content : null;
     	const hasFields = schemaFields(contentSchema).length > 0;
-    	const assistants = asArray(state.workflow.data?.assistants).filter((assistant) => typeof assistant.name === "string" && assistant.name !== "");
+    	const assistants = asArray(state.workflow.data?.assistants).filter((assistant) => typeof assistant.id === "string" && assistant.id !== "" || typeof assistant.name === "string" && assistant.name !== "");
     	const contentSection = h("section", {
     		key: "content",
     		className: "buka-workflows-dialogSection"
@@ -3289,10 +3385,13 @@ window.__ModuleLoader__.load({
     		className: "buka-workflows-select",
     		value: dialog.delivery,
     		onChange: (event) => actions.setNewJobDelivery(event.target.value)
-    	}, h("option", { value: "starter" }, t("newJobDeliveryStarter")), ...assistants.map((assistant) => h("option", {
-    		key: assistant.name,
-    		value: `assistant:${assistant.name}`
-    	}, `${t("newJobDeliveryAssistant")} · ${assistant.name}`)))));
+    	}, h("option", { value: "starter" }, t("newJobDeliveryStarter")), ...assistants.map((assistant) => {
+    		const identity = workerIdentity(assistant);
+    		return h("option", {
+    			key: identity.id,
+    			value: `assistant:${identity.id}`
+    		}, `${t("newJobDeliveryAssistant")} · ${workerIdentityText(assistant)}`);
+    	}))));
     	const body = [
     		h("p", {
     			key: "hint",
@@ -3358,7 +3457,7 @@ window.__ModuleLoader__.load({
     /** 一个任务行。 */
     function renderNodeTask(page, task) {
     	const { t, actions } = page;
-    	const claimant = claimantName(task.claimant, t);
+    	const claimant = claimantName(page.state, task.claimant, t, task.position);
     	const waiting = task.status === "ready" || task.status === "pending" ? formatWaiting(task.createdAt) : "";
     	return h("li", { key: task.id }, h("button", {
     		type: "button",
@@ -3457,7 +3556,7 @@ window.__ModuleLoader__.load({
     	return [
     		task.positionLabel ?? task.position ?? "",
     		typeof task.channelLabel === "string" && task.channelLabel !== "" ? `${t("taskChannel")}: ${task.channelLabel}` : "",
-    		claimantName(task.claimant, t) || t("taskUnclaimed")
+    		claimantName(page.state, task.claimant, t, task.position) || t("taskUnclaimed")
     	].filter((part) => part !== "").join(" · ");
     }
     /** 任务岗位对应的打工人头像。 */
@@ -3636,7 +3735,7 @@ window.__ModuleLoader__.load({
     	const rows = [];
     	if (typeof task.type === "string" && task.type !== "") rows.push([t("taskType"), h("code", { className: "buka-workflows-inlineCode" }, task.type)]);
     	if (typeof task.channel === "string" && task.channel !== "") rows.push([t("taskChannel"), h("code", { className: "buka-workflows-inlineCode" }, task.channel)]);
-    	if (isRecord(typeDefinition) && typeof typeDefinition.assistant === "string" && typeDefinition.assistant !== "") rows.push([t("taskTypeAssistant"), typeDefinition.assistant]);
+    	if (isRecord(typeDefinition) && typeof typeDefinition.assistant === "string" && typeDefinition.assistant !== "") rows.push([t("taskTypeAssistant"), renderAssistant(page, typeDefinition.assistant)]);
     	rows.push([t("taskCreatedAt"), formatTime(task.createdAt)]);
     	if (task.startedAt !== null && task.startedAt !== void 0) rows.push([t("taskStartedAt"), formatTime(task.startedAt)]);
     	if (task.finishedAt !== null && task.finishedAt !== void 0) rows.push([t("taskFinishedAt"), formatTime(task.finishedAt)]);
@@ -3774,7 +3873,7 @@ window.__ModuleLoader__.load({
     		problem: jobs.filter((job) => job.status === "failed" || job.status === "cancelled").length
     	};
     	const visible = sortJobs(filterJobs(jobs, state.jobFilter));
-    	const outdated = typeof state.workflow.data?.workflow?.definition?.version === "number" && state.workflow.data?.workflow?.definition?.version !== 7;
+    	const outdated = typeof state.workflow.data?.workflow?.definition?.version === "number" && state.workflow.data?.workflow?.definition?.version !== 8;
     	const newJobAction = retired || outdated || workflowId === "" ? null : h("button", {
     		key: "new-job-empty",
     		type: "button",
@@ -3802,7 +3901,8 @@ window.__ModuleLoader__.load({
     /** 一张作业卡片。 */
     function renderJobCard(page, workflowId, job) {
     	const { t, actions } = page;
-    	const legacy = typeof job.definitionVersion === "number" && job.definitionVersion !== 7;
+    	const oldVersion = typeof job.definitionVersion === "number" && job.definitionVersion !== 8;
+    	const legacy = typeof job.definitionVersion === "number" && job.definitionVersion < 7;
     	const total = Object.values(job.taskCounts ?? {}).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0);
     	const done = typeof job.taskCounts?.completed === "number" ? job.taskCounts.completed : 0;
     	const ready = typeof job.taskCounts?.ready === "number" ? job.taskCounts.ready : 0;
@@ -3824,7 +3924,7 @@ window.__ModuleLoader__.load({
     		disabled: legacy,
     		title: legacy ? t("jobLegacyHint") : void 0,
     		onClick: legacy ? void 0 : () => actions.openJob(workflowId, job.id)
-    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("span", { className: "buka-workflows-cardTitle" }, job.inputSummary ?? job.id)), h("span", { className: "buka-workflows-cardTags" }, legacy ? h("span", { className: "buka-workflows-tag" }, t("jobLegacy")) : null, renderStatusTag(t, job.status, "job"))), h("span", { className: "buka-workflows-meta" }, parts.join(" · ")), total > 0 ? h("span", {
+    	}, h("span", { className: "buka-workflows-cardHead" }, h("span", { className: "buka-workflows-cardTitleGroup" }, h("span", { className: "buka-workflows-seq" }, fill(t, "jobSeq", { seq: job.seq ?? 0 })), h("span", { className: "buka-workflows-cardTitle" }, job.inputSummary ?? job.id)), h("span", { className: "buka-workflows-cardTags" }, oldVersion ? h("span", { className: "buka-workflows-tag" }, t("jobLegacy")) : null, renderStatusTag(t, job.status, "job"))), h("span", { className: "buka-workflows-meta" }, parts.join(" · ")), total > 0 ? h("span", {
     		className: "buka-workflows-progress",
     		"aria-hidden": true
     	}, h("span", {
@@ -3853,7 +3953,7 @@ window.__ModuleLoader__.load({
     function renderWorkflowCard(page, workflow) {
     	const { t, actions } = page;
     	const retired = workflow.status === "retired";
-    	const outdated = typeof workflow.definitionVersion === "number" && workflow.definitionVersion !== 7;
+    	const outdated = typeof workflow.definitionVersion === "number" && workflow.definitionVersion !== 8;
     	return h("li", { key: workflow.id }, h("button", {
     		type: "button",
     		className: `buka-workflows-card${retired ? " is-disabled" : ""}`,
@@ -4400,7 +4500,7 @@ window.__ModuleLoader__.load({
     			}
     			const delivery = draft.delivery.startsWith("assistant:") && draft.delivery.length > 10 ? {
     				kind: "assistant",
-    				name: draft.delivery.slice(10)
+    				id: draft.delivery.slice(10)
     			} : { kind: "starter" };
     			setState((now) => ({
     				...now,

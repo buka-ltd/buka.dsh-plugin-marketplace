@@ -1,8 +1,9 @@
 /**
- * 测试夹具：把 v6 形状的定义折成 v7（只做结构与命名，不猜语义）。
+ * 测试夹具：把 v6 形状的定义折成 v8（只做结构与命名，不猜语义）。
  *
  * 引擎 / 页面测试关心的是「岗位、通道、任务、结果」，不是定义怎么搬家；
- * 定义校验本身的测试直接写 v7 字面量。
+ * 定义校验本身的测试直接写 v8 字面量。`toV7` 只用来构造旧作业快照，验证
+ * 读取时的 `name` 兜底。
  *
  * @module test/workflows-fixture-v7
  */
@@ -18,16 +19,17 @@ function swap(value) {
 }
 
 /**
- * 把 v6 定义折成 v7。
+ * 把 v6 定义折成 v8 / v7。
  *
  * @param {Record<string, unknown>} v6 v6 形状的定义
- * @returns {Record<string, unknown>} v7 定义
+ * @param {7 | 8} version 目标定义版本
+ * @returns {Record<string, unknown>} 目标定义
  */
-export function toV7(v6) {
+function convert(v6, version) {
   const start = v6.start ?? {}
   const task = start.task ?? {}
   return {
-    version: 7,
+    version,
     name: v6.name,
     ...(v6.description === undefined ? {} : { description: v6.description }),
     budgets: v6.budgets,
@@ -42,6 +44,16 @@ export function toV7(v6) {
     end: v6.end?.task?.payload === undefined ? {} : { content: v6.end.task.payload },
     positions: (v6.positions ?? []).map((position) => ({
       ...position,
+      ...(version >= 8 && position.executor?.kind === 'worker'
+        ? {
+            executor: {
+              kind: 'worker',
+              ...(position.executor.id === undefined && position.executor.name === undefined
+                ? {}
+                : { id: position.executor.id ?? position.executor.name }),
+            },
+          }
+        : {}),
       taskTypes: (position.taskTypes ?? []).map((type) => ({
         id: type.id,
         label: type.label,
@@ -53,4 +65,24 @@ export function toV7(v6) {
     })),
     channels: v6.channels,
   }
+}
+
+/**
+ * 把 v6 定义折成 v8。
+ *
+ * @param {Record<string, unknown>} v6 v6 形状的定义
+ * @returns {Record<string, unknown>} v8 定义
+ */
+export function toV8(v6) {
+  return convert(v6, 8)
+}
+
+/**
+ * 把 v6 定义折成 v7（只用于旧作业快照兼容测试）。
+ *
+ * @param {Record<string, unknown>} v6 v6 形状的定义
+ * @returns {Record<string, unknown>} v7 定义
+ */
+export function toV7(v6) {
+  return convert(v6, 7)
 }

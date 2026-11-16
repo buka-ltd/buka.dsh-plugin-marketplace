@@ -26,6 +26,7 @@ import type { Attempt, JsonSchema, TaskDetail, TaskTypeDefinition } from '../typ
 import { isRecord } from '../types.ts'
 import {
   ConfirmButton,
+  renderAssistant,
   renderAttachmentLink,
   renderDrawerHead,
   renderEmpty,
@@ -91,7 +92,7 @@ function taskMeta(page: AppContext, task: TaskDetail): string {
     typeof task.channelLabel === 'string' && task.channelLabel !== ''
       ? `${t('taskChannel')}: ${task.channelLabel}`
       : ''
-  const claimant = claimantName(task.claimant, t) || t('taskUnclaimed')
+  const claimant = claimantName(page.state, task.claimant, t, task.position) || t('taskUnclaimed')
   return [position, channel, claimant].filter((part) => part !== '').join(' · ')
 }
 
@@ -541,7 +542,7 @@ function renderTaskDetails(
     typeof typeDefinition.assistant === 'string' &&
     typeDefinition.assistant !== ''
   ) {
-    rows.push([t('taskTypeAssistant'), typeDefinition.assistant])
+    rows.push([t('taskTypeAssistant'), renderAssistant(page, typeDefinition.assistant)])
   }
   rows.push([t('taskCreatedAt'), formatTime(task.createdAt)])
   if (task.startedAt !== null && task.startedAt !== undefined) {
