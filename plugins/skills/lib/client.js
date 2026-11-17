@@ -312,6 +312,8 @@ window.__ModuleLoader__.load({
     const REPOS_ROUTE = "/buka-skills/repos";
     const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
     const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
+    const CHECK_ROUTE = "/buka-skills/check";
+    const UPDATE_ROUTE = "/buka-skills/update";
     /**
     * 取错误上的 `code` 字段（Host 的失败响应带它）。
     */
@@ -671,6 +673,10 @@ window.__ModuleLoader__.load({
     	const [reloadKey, setReloadKey] = react.default.useState(0);
     	const [notice, setNotice] = react.default.useState(null);
     	const [busy, setBusy] = react.default.useState(null);
+    	const [checking, setChecking] = react.default.useState(false);
+    	const [updating, setUpdating] = react.default.useState(false);
+    	const [checkResults, setCheckResults] = react.default.useState({});
+    	const [checkMessage, setCheckMessage] = react.default.useState(null);
     	const [confirming, setConfirming] = react.default.useState(null);
     	const [source, setSource] = react.default.useState("");
     	const [note, setNote] = react.default.useState("");
@@ -742,6 +748,7 @@ window.__ModuleLoader__.load({
     	const repos = Array.isArray(savedData?.repos) ? savedData.repos : [];
     	const storeCorrupt = savedData !== null && savedData.corrupt === true;
     	const loading = tab === "installed" ? installed.loading : saved.loading;
+    	const hasUpdates = Object.values(checkResults).some((entry) => entry.status === "update");
     	const installedRepos = react.default.useMemo(() => {
     		const keys = /* @__PURE__ */ new Set();
     		for (const skill of skills) for (const value of [skill.npxSource, skill.npxSourceUrl]) {
@@ -854,9 +861,8 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 探测一个仓库的类型（npx skills / Claude Code 市场 / 不可用）。Host 只拉
-    	* tree（必要时再拉 marketplace.json），比展开轻得多，所以收藏页打开后可以
-    	* 对所有可列出的收藏各发一次。
+    	* 探测一个仓库的类型（npx 仓库 / 不可用）。Host 只读仓库树，比展开轻得多，
+    	* 所以收藏页打开后可以对所有可列出的收藏各发一次。
     	*
     	* 「不可用」是正常结论而不是错误：Host 返回 `repo-unavailable` 时转成
     	* `{ kind: 'unavailable' }` 的 ready 数据，让卡片显示「不可用」徽标，不弹
@@ -971,6 +977,59 @@ window.__ModuleLoader__.load({
     			flash("error", `${t("failed")} ${messageOf(failure)}`);
     		} finally {
     			setBusy(null);
+    		}
+    	}
+    	/**
+    	* 把 Host 返回的检查结果按已安装行的键索引：Host 只给名字，页面用
+    	* `skillKeyOf()` 与目录名 / 展示名两个来源匹配。
+    	*/
+    	function indexCheckResults(results) {
+    		const indexed = {};
+    		for (const result of results) {
+    			const wanted = skillKeyOf(result.name);
+    			if (wanted === "") continue;
+    			const entry = skills.find((one) => skillKeyOf(one.name) === wanted || skillKeyOf(one.id) === wanted);
+    			if (entry !== void 0) indexed[entryKey(entry)] = result;
+    		}
+    		return indexed;
+    	}
+    	/**
+    	* 检查全局 skill 的更新；结果只影响「已安装」面板的状态标记与提示。
+    	*/
+    	async function checkUpdates() {
+    		if (checking || updating) return;
+    		setChecking(true);
+    		setCheckMessage(null);
+    		try {
+    			const body = await requestJson(CHECK_ROUTE);
+    			setCheckResults(indexCheckResults(Array.isArray(body.results) ? body.results : []));
+    			setCheckMessage(typeof body.message === "string" ? body.message : null);
+    		} catch (failure) {
+    			flash("error", `${t("checkFailed")} ${messageOf(failure)}`);
+    		} finally {
+    			setChecking(false);
+    		}
+    	}
+    	/**
+    	* 应用可用的更新：Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+    	*/
+    	async function updateSkills() {
+    		if (checking || updating) return;
+    		setUpdating(true);
+    		setCheckMessage(null);
+    		try {
+    			const body = await requestJson(UPDATE_ROUTE, { method: "POST" });
+    			const failed = Array.isArray(body.failed) ? body.failed.length : 0;
+    			const message = typeof body.message === "string" && body.message !== "" ? body.message : failed > 0 ? t("updateFailed") : t("statusUpToDate");
+    			flash(failed > 0 ? "error" : "success", message);
+    			await refreshInstalled();
+    			const checked = await requestJson(CHECK_ROUTE);
+    			setCheckResults(indexCheckResults(Array.isArray(checked.results) ? checked.results : []));
+    			setCheckMessage(typeof checked.message === "string" ? checked.message : null);
+    		} catch (failure) {
+    			flash("error", `${t("updateFailed")} ${messageOf(failure)}`);
+    		} finally {
+    			setUpdating(false);
     		}
     	}
     	/**
@@ -1268,6 +1327,13 @@ window.__ModuleLoader__.load({
     		notice,
     		setNotice,
     		busy,
+    		checking,
+    		updating,
+    		checkResults,
+    		checkMessage,
+    		hasUpdates,
+    		checkUpdates,
+    		updateSkills,
     		confirming,
     		setConfirming,
     		source,
@@ -1313,10 +1379,12 @@ window.__ModuleLoader__.load({
     }
     // .build/skills/client/components/installed-panel.js
     /**
-    * 「已安装」面板：两个全局根下的 skill 卡片、lockfile 提示与卸载入口。
+    * 「已安装」面板：两个全局根下的 skill 卡片、检查 / 更新入口、lockfile 提示
+    * 与卸载按钮。
     *
-    * 每条 skill 右侧的卸载按钮与二次确认都在这里渲染；数据与动作由页面状态
-    * （`useSkillsPageState`）提供。
+    * 检查结果按 `update` / `modified` / `up-to-date` / `unsupported-source` /
+    * `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用按钮。数据与动作由
+    * 页面状态（`useSkillsPageState`）提供。
     *
     * @module @buka/dsh-plugin-skills/client/components/installed-panel
     */
@@ -1340,6 +1408,34 @@ window.__ModuleLoader__.load({
     		text: source === "" ? t("badgeNpx") : source,
     		tone: "info"
     	};
+    }
+    /**
+    * 检查结果 → 行内状态标签；没有结果（还没检查、手工安装）时不显示。
+    */
+    function statusTagOf(result, t) {
+    	switch (result?.status) {
+    		case "update": return {
+    			text: t("statusUpdate"),
+    			tone: "info"
+    		};
+    		case "modified": return {
+    			text: t("statusModified"),
+    			tone: "warning"
+    		};
+    		case "up-to-date": return {
+    			text: t("statusUpToDate"),
+    			tone: "success"
+    		};
+    		case "unsupported-source": return {
+    			text: t("statusUnsupported"),
+    			tone: "warning"
+    		};
+    		case "failed": return {
+    			text: t("statusFailed"),
+    			tone: "warning"
+    		};
+    		default: return null;
+    	}
     }
     /**
     * 一行右侧的操作区：卸载 / 二次确认 / 进行中。
@@ -1382,13 +1478,15 @@ window.__ModuleLoader__.load({
     * @param state 页面状态与动作
     */
     function renderInstalled(state) {
-    	const { t, skills, busy, confirming, setConfirming, uninstall, installed, installedData } = state;
+    	const { t, skills, busy, checking, updating, checkResults, checkMessage, hasUpdates, checkUpdates, updateSkills, confirming, setConfirming, uninstall, installed, installedData } = state;
+    	const anyCheckBusy = checking || updating;
     	const rows = skills.map((entry) => {
     		const source = sourceTagOf(entry, t);
+    		const status = statusTagOf(checkResults[entryKey(entry)], t);
     		return h("li", {
     			className: "buka-skills-card",
     			key: `${entry.scope}:${entry.id}`
-    		}, h("div", { className: "buka-skills-cardHead" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, h("span", { className: "buka-skills-cardTitle" }, entry.name), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text)), h("div", { className: "buka-skills-titleActions" }, rowActions(entry, {
+    		}, h("div", { className: "buka-skills-cardHead" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, h("span", { className: "buka-skills-cardTitle" }, entry.name), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text), status === null ? null : h(Tag, { tone: status.tone }, status.text)), h("div", { className: "buka-skills-titleActions" }, rowActions(entry, {
     			busy,
     			confirming,
     			t,
@@ -1398,7 +1496,28 @@ window.__ModuleLoader__.load({
     		}))), typeof entry.description === "string" && entry.description !== "" ? h("div", { className: "buka-skills-cardDesc" }, entry.description) : null, confirming === entryKey(entry) ? h("p", { className: "buka-skills-hint" }, entry.managedByNpx === true ? t("confirmNpx") : t("confirmLocal")) : null));
     	});
     	const rootsTip = installedData !== null && Array.isArray(installedData.roots) && installedData.roots.length > 0 ? h("p", { className: "buka-skills-meta" }, installedData.roots.map((root) => root.path).join(" · ")) : null;
-    	return h("div", { className: "buka-skills-panel" }, installed.error === null ? null : h("p", {
+    	return h("div", { className: "buka-skills-panel" }, h("div", { className: "buka-skills-panelActions" }, checkMessage === null ? null : h("p", {
+    		className: "buka-skills-meta",
+    		role: "status"
+    	}, checkMessage), h(Button, {
+    		variant: "outline",
+    		size: "sm",
+    		icon: checking ? h(StateDot, {
+    			state: "ongoing",
+    			size: 13
+    		}) : h(IconRefreshOutlineRegular, { size: 13 }),
+    		disabled: anyCheckBusy,
+    		onClick: () => void checkUpdates()
+    	}, checking ? t("checkingUpdates") : t("checkUpdates")), h(Button, {
+    		variant: "primary",
+    		size: "sm",
+    		icon: updating ? h(StateDot, {
+    			state: "ongoing",
+    			size: 13
+    		}) : void 0,
+    		disabled: anyCheckBusy || !hasUpdates,
+    		onClick: () => void updateSkills()
+    	}, updating ? t("updatingSkills") : t("updateSkills"))), installed.error === null ? null : h("p", {
     		className: "buka-skills-failure",
     		role: "alert"
     	}, h(StateDot, { state: "error" }), `${t("loadFailed")} ${installed.error}`), installed.loading && installedData === null ? h("p", {
@@ -1555,12 +1674,16 @@ window.__ModuleLoader__.load({
     			role: "status"
     		}, h(StateDot, { state: "ongoing" }), t("treeLoading")) : null;
     		if (state.data === null) return failure ?? loading;
+    		const warning = typeof state.data.warning === "string" && state.data.warning !== "" ? h("p", {
+    			className: "buka-skills-notice",
+    			role: "status"
+    		}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("treeRefreshWarning")} ${state.data.warning}`)) : null;
     		const root = Array.isArray(state.data.root) ? state.data.root : [];
     		const body = root.length === 0 ? h("p", { className: "buka-skills-status buka-skills-treeStatus" }, t("treeEmpty")) : h("ul", {
     			className: "buka-skills-tree",
     			"aria-busy": state.status === "loading" ? true : void 0
     		}, ...root.map((node) => renderTreeNode(repo, node)));
-    		return h("div", { className: "buka-skills-treeArea" }, failure, body);
+    		return h("div", { className: "buka-skills-treeArea" }, failure, warning, body);
     	}
     	/**
     	* 一个节点右侧的三个安装入口，目录与 skill 叶子共用。
@@ -1656,7 +1779,7 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skills/client/components/saved-panel
     */
     /**
-    * 收藏卡片标题行的仓库类型徽标：npx skills / Claude Code 市场 / 不可用。
+    * 收藏卡片标题行的仓库类型徽标：npx skills / 不可用。
     *
     * kind 由 Host 给出：展开后拿到的完整结果与轻量探测都带它。两处都没有
     * （还没探测完、探测失败）时不显示徽标，也不渲染占位的「…」。
@@ -1669,10 +1792,6 @@ window.__ModuleLoader__.load({
     		case "npx-skills": return {
     			text: t("kindNpx"),
     			tone: "neutral"
-    		};
-    		case "claude-code-marketplace": return {
-    			text: t("kindMarketplace"),
-    			tone: "info"
     		};
     		case "unavailable": return {
     			text: t("kindUnavailable"),
@@ -1695,6 +1814,7 @@ window.__ModuleLoader__.load({
     		const installedAlready = installedRepos.has(repo.id);
     		const expanded = expandedRepos[repo.id] === true;
     		const kindTag = kindTagOf(trees[repo.id]?.data?.kind ?? probes[repo.id]?.data?.kind, t);
+    		const warning = probes[repo.id]?.data?.warning ?? trees[repo.id]?.data?.warning;
     		return h("li", {
     			className: "buka-skills-card",
     			key: repo.id
@@ -1717,7 +1837,10 @@ window.__ModuleLoader__.load({
     			"aria-label": `${t("removeRepo")} ${repo.source}`,
     			onClick: () => removeRepo(repo),
     			disabled: removing !== null
-    		}, t("removeRepo")))), typeof repo.note === "string" && repo.note !== "" ? h("div", { className: "buka-skills-cardDesc" }, repo.note) : null, expanded && listable ? renderTree(repo) : null));
+    		}, t("removeRepo")))), typeof repo.note === "string" && repo.note !== "" ? h("div", { className: "buka-skills-cardDesc" }, repo.note) : null, typeof warning === "string" && warning !== "" ? h("p", {
+    			className: "buka-skills-notice",
+    			role: "status"
+    		}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("treeRefreshWarning")} ${warning}`)) : null, expanded && listable ? renderTree(repo) : null));
     	});
     	return h("div", { className: "buka-skills-panel" }, saved.error === null ? null : h("p", {
     		className: "buka-skills-failure",
@@ -2022,11 +2145,22 @@ window.__ModuleLoader__.load({
     	treeNotFound: "Repository not found or not accessible.",
     	treeRateLimited: "GitHub API rate limit reached. Try again later.",
     	treeUnsupported: "Package names and web links cannot list skills.",
-    	treeUnavailable: "This repository is neither an npx skills repository nor a Claude Code marketplace.",
+    	treeUnavailable: "No installable skills found: expected SKILL.md files under the repository root \"skills/\".",
     	treeGitUnavailable: "Git is not installed or not on PATH, so git repositories cannot be read.",
+    	treeRefreshWarning: "Could not refresh the local clone; showing the cached copy:",
     	kindNpx: "npx skills",
-    	kindMarketplace: "Claude Code marketplace",
     	kindUnavailable: "unavailable",
+    	checkUpdates: "Check for updates",
+    	checkingUpdates: "Checking…",
+    	updateSkills: "Update",
+    	updatingSkills: "Updating…",
+    	statusUpdate: "update available",
+    	statusModified: "local changes",
+    	statusUpToDate: "up to date",
+    	statusUnsupported: "source unavailable",
+    	statusFailed: "check failed",
+    	checkFailed: "Could not check for updates:",
+    	updateFailed: "Update failed:",
     	retry: "Retry"
     };
     /** 简体中文文案。 */
@@ -2110,11 +2244,22 @@ window.__ModuleLoader__.load({
     	treeNotFound: "仓库不存在或无权访问。",
     	treeRateLimited: "GitHub 接口限流，稍后再试。",
     	treeUnsupported: "包名和网页链接不能列出 skills。",
-    	treeUnavailable: "这个仓库不可用：既不是 npx skills 仓库，也不是 Claude Code marketplace。",
+    	treeUnavailable: "没有找到可安装的 skill：需要仓库根 skills/ 下的 SKILL.md。",
     	treeGitUnavailable: "没有找到 git（不在 PATH 上），无法读取 git 仓库。",
+    	treeRefreshWarning: "刷新本地克隆失败，当前显示的是缓存副本：",
     	kindNpx: "npx skills",
-    	kindMarketplace: "Claude Code 市场",
     	kindUnavailable: "不可用",
+    	checkUpdates: "检查更新",
+    	checkingUpdates: "检查中…",
+    	updateSkills: "更新",
+    	updatingSkills: "更新中…",
+    	statusUpdate: "有更新",
+    	statusModified: "本地已修改",
+    	statusUpToDate: "已是最新",
+    	statusUnsupported: "来源不可用",
+    	statusFailed: "检查失败",
+    	checkFailed: "检查更新失败：",
+    	updateFailed: "更新失败：",
     	retry: "重试"
     };
     // .build/skills/client/styles.js
@@ -2146,6 +2291,8 @@ window.__ModuleLoader__.load({
     @media (width<=372px){.buka-skills-tabList{min-width:0}}
     .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:32px 0 48px}
     .buka-skills-panel{display:flex;flex-direction:column;gap:24px}
+    .buka-skills-panelActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+    .buka-skills-panelActions>.buka-skills-meta{flex:1 1 auto}
     .buka-skills-status,.buka-skills-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
     .buka-skills-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
     .buka-skills-failure{color:var(--dsw-alias-state-error-primary);align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}
@@ -2224,20 +2371,21 @@ window.__ModuleLoader__.load({
     *
     * 页面顶部只有两个 Tab，不放说明文字：
     *
-    * - 「已安装」：两个全局 skills 根目录下现有的 skill，标注哪些由 npx skills
-    *   管理，并提供按来源选择的卸载入口；
-    * - 「收藏」：用户自己记下的 npx skills 来源（`owner/repo`、GitHub/GitLab 等
-    *   git 地址、本地绝对路径或包名），用于以后 `npx skills add` 时随手取用；
-    *   点标题打开仓库，卡片右侧的「删除」按钮与已安装列表的卸载按钮同款
-    *   （outline + 危险色）。来源既可以是 npx skills 仓库，也可以是 Claude Code
-    *   marketplace 仓库：打开收藏页后会对每个可列出 skills 的收藏静默探测仓库
-    *   类型（`probe=1`，只读 tree，不阻塞列表），标题行标出「npx skills」
-    *   「Claude Code 市场」或「不可用」。展开后的每个 skill 右侧有三个入口：
-    *   「全局安装」「安装到打工人」「安装到工作区」。后两个打开对话框，分别列出
-    *   `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册工作区；
-    *   只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾图标）。
-    *   目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个 skill
-    *   交给 Host 逐个安装，已装过的跳过。
+    * - 「已安装」：两个全局 skills 根目录下现有的 skill，标注哪些由 skills 库
+    *   管理，并提供检查 / 更新与按来源选择的卸载入口；检查结果按
+    *   `update` / `modified` / `up-to-date` / `unsupported-source` / `failed`
+    *   在行内标出；
+    * - 「收藏」：用户自己记下的 skill 来源（`owner/repo`、GitHub/GitLab 等 git
+    *   地址、本地绝对路径或包名），用于以后安装时随手取用；点标题打开仓库，
+    *   卡片右侧的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。
+    *   来源只认仓库根 `skills/` 下（任意层级）的 SKILL.md：打开收藏页后会对
+    *   每个可列出 skills 的收藏静默探测仓库类型（`probe=1`，只读仓库树，不阻塞
+    *   列表），标题行标出「npx skills」或「不可用」。展开后的每个 skill 右侧有
+    *   三个入口：「全局安装」「安装到打工人」「安装到工作区」。后两个打开对话框，
+    *   分别列出 `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
+    *   工作区；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾
+    *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个
+    *   skill 交给 Host 逐个安装，已装过的跳过。
     *
     * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
     * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
