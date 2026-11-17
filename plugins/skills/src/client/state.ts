@@ -15,6 +15,7 @@
 import React from 'react'
 
 import {
+  CHECK_ROUTE,
   errorCode,
   INSTALL_ROUTE,
   LIST_ROUTE,
@@ -25,6 +26,7 @@ import {
   requestJson,
   TARGETS_ROUTE,
   UNINSTALL_ROUTE,
+  UPDATE_ROUTE,
 } from './api.ts'
 import type { PageTab } from './constants.ts'
 import type { Translate } from './dictionary.ts'
@@ -49,11 +51,14 @@ import type {
   RepoTreeData,
   SavedRepo,
   SavedSnapshot,
+  SkillCheckEntry,
+  SkillCheckSnapshot,
   SkillGroupInstallSnapshot,
   SkillsPageState,
   SkillTreeDir,
   SkillTreeLeaf,
   SkillTreeSelection,
+  SkillUpdateSnapshot,
   TargetDialog,
   TargetDialogKind,
   TreeState,
@@ -81,6 +86,11 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const [reloadKey, setReloadKey] = React.useState(0)
   const [notice, setNotice] = React.useState<Notice | null>(null)
   const [busy, setBusy] = React.useState<string | null>(null)
+  // 检查 / 更新的状态：结果按已安装行的键（scope:id）存，行内直接显示状态标记。
+  const [checking, setChecking] = React.useState(false)
+  const [updating, setUpdating] = React.useState(false)
+  const [checkResults, setCheckResults] = React.useState<Record<string, SkillCheckEntry>>({})
+  const [checkMessage, setCheckMessage] = React.useState<string | null>(null)
   const [confirming, setConfirming] = React.useState<string | null>(null)
   const [source, setSource] = React.useState('')
   const [note, setNote] = React.useState('')
@@ -116,8 +126,8 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const [collapsedDirs, setCollapsedDirs] = React.useState<Record<string, Record<string, true>>>(
     restored?.collapsedDirs ?? {},
   )
-  // 每个可列出 skills 的收藏的仓库类型探测结果（npx skills / Claude Code
-  // 市场 / 不可用），只用来渲染标题行的徽标。纯页面状态、不进 localStorage：
+  // 每个可列出 skills 的收藏的仓库类型探测结果（npx 仓库 / 不可用），
+  // 只用来渲染标题行的徽标。纯页面状态、不进 localStorage：
   // 重开 DSH 重新探测一次即可。删除收藏时由下面的 prune 一起清掉。
   const [probes, setProbes] = React.useState<Record<string, ProbeState>>({})
 
@@ -156,6 +166,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const repos: SavedRepo[] = Array.isArray(savedData?.repos) ? savedData.repos : []
   const storeCorrupt = savedData !== null && savedData.corrupt === true
   const loading = tab === 'installed' ? installed.loading : saved.loading
+  const hasUpdates = Object.values(checkResults).some((entry) => entry.status === 'update')
 
   // 已安装的 skill 来自哪些仓库：收藏行据此标「已安装」。
   const installedRepos = React.useMemo(() => {
@@ -221,7 +232,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }, [tab, savedData])
 
   // 切到「收藏」Tab 后静默探测每个可列出 skills 的收藏的仓库类型：这是
-  // 轻量请求（Host 只拉 tree，必要时拉 marketplace.json），不阻塞列表渲染，
+  // 轻量请求（Host 只读仓库树 / 本地克隆），不阻塞列表渲染，
   // 结果只影响标题行的徽标。已经探测过（含探测中、探测失败）的卡片不重复
   // 发请求，想强制重探走顶部「刷新」。
   React.useEffect(() => {
@@ -272,9 +283,8 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 探测一个仓库的类型（npx skills / Claude Code 市场 / 不可用）。Host 只拉
-   * tree（必要时再拉 marketplace.json），比展开轻得多，所以收藏页打开后可以
-   * 对所有可列出的收藏各发一次。
+   * 探测一个仓库的类型（npx 仓库 / 不可用）。Host 只读仓库树，比展开轻得多，
+   * 所以收藏页打开后可以对所有可列出的收藏各发一次。
    *
    * 「不可用」是正常结论而不是错误：Host 返回 `repo-unavailable` 时转成
    * `{ kind: 'unavailable' }` 的 ready 数据，让卡片显示「不可用」徽标，不弹
@@ -368,6 +378,70 @@ function useSkillsPageState(t: Translate): SkillsPageState {
       flash('error', `${t('failed')} ${messageOf(failure)}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  /**
+   * 把 Host 返回的检查结果按已安装行的键索引：Host 只给名字，页面用
+   * `skillKeyOf()` 与目录名 / 展示名两个来源匹配。
+   */
+  function indexCheckResults(results: SkillCheckEntry[]): Record<string, SkillCheckEntry> {
+    const indexed: Record<string, SkillCheckEntry> = {}
+    for (const result of results) {
+      const wanted = skillKeyOf(result.name)
+      if (wanted === '') continue
+      const entry = skills.find(
+        (one) => skillKeyOf(one.name) === wanted || skillKeyOf(one.id) === wanted,
+      )
+      if (entry !== undefined) indexed[entryKey(entry)] = result
+    }
+    return indexed
+  }
+
+  /**
+   * 检查全局 skill 的更新；结果只影响「已安装」面板的状态标记与提示。
+   */
+  async function checkUpdates(): Promise<void> {
+    if (checking || updating) return
+    setChecking(true)
+    setCheckMessage(null)
+    try {
+      const body = await requestJson<SkillCheckSnapshot>(CHECK_ROUTE)
+      setCheckResults(indexCheckResults(Array.isArray(body.results) ? body.results : []))
+      setCheckMessage(typeof body.message === 'string' ? body.message : null)
+    } catch (failure) {
+      flash('error', `${t('checkFailed')} ${messageOf(failure)}`)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  /**
+   * 应用可用的更新：Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+   */
+  async function updateSkills(): Promise<void> {
+    if (checking || updating) return
+    setUpdating(true)
+    setCheckMessage(null)
+    try {
+      const body = await requestJson<SkillUpdateSnapshot>(UPDATE_ROUTE, { method: 'POST' })
+      const failed = Array.isArray(body.failed) ? body.failed.length : 0
+      const message =
+        typeof body.message === 'string' && body.message !== ''
+          ? body.message
+          : failed > 0
+            ? t('updateFailed')
+            : t('statusUpToDate')
+      flash(failed > 0 ? 'error' : 'success', message)
+      await refreshInstalled()
+      // 更新后重新检查一次，让状态标记与磁盘上的新版本一致。
+      const checked = await requestJson<SkillCheckSnapshot>(CHECK_ROUTE)
+      setCheckResults(indexCheckResults(Array.isArray(checked.results) ? checked.results : []))
+      setCheckMessage(typeof checked.message === 'string' ? checked.message : null)
+    } catch (failure) {
+      flash('error', `${t('updateFailed')} ${messageOf(failure)}`)
+    } finally {
+      setUpdating(false)
     }
   }
 
@@ -680,6 +754,13 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     notice,
     setNotice,
     busy,
+    checking,
+    updating,
+    checkResults,
+    checkMessage,
+    hasUpdates,
+    checkUpdates,
+    updateSkills,
     confirming,
     setConfirming,
     source,

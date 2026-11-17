@@ -27,6 +27,8 @@ const CSS = `
 @media (width<=372px){.buka-skills-tabList{min-width:0}}
 .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:32px 0 48px}
 .buka-skills-panel{display:flex;flex-direction:column;gap:24px}
+.buka-skills-panelActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.buka-skills-panelActions>.buka-skills-meta{flex:1 1 auto}
 .buka-skills-status,.buka-skills-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
 .buka-skills-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .buka-skills-failure{color:var(--dsw-alias-state-error-primary);align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}

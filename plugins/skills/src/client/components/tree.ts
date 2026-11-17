@@ -23,6 +23,7 @@ import {
   IconCheckOutlineRegular,
   IconChevronRightOutlineRegular,
   IconDownloadOutlineRegular,
+  IconWarningOutlineRegular,
   StateDot,
 } from '../primitives.ts'
 import type {
@@ -168,6 +169,16 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
           )
         : null
     if (state.data === null) return failure ?? loading
+    // 刷新本地克隆失败时内容仍是旧克隆：错误提示放在树上方，不替换已看到的内容。
+    const warning =
+      typeof state.data.warning === 'string' && state.data.warning !== ''
+        ? h(
+            'p',
+            { className: 'buka-skills-notice', role: 'status' },
+            h(IconWarningOutlineRegular, { size: 16 }),
+            h('span', null, `${t('treeRefreshWarning')} ${state.data.warning}`),
+          )
+        : null
     const root = Array.isArray(state.data.root) ? state.data.root : []
     const body =
       root.length === 0
@@ -181,7 +192,7 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
             },
             ...root.map((node) => renderTreeNode(repo, node)),
           )
-    return h('div', { className: 'buka-skills-treeArea' }, failure, body)
+    return h('div', { className: 'buka-skills-treeArea' }, failure, warning, body)
   }
 
   /**
