@@ -10,6 +10,10 @@
  * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
  * 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
  *
+ * 派发时三段拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
+ * 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
+ * prompt 文件仍保存完整文本。
+ *
  * 同时负责结束任务的投递文本。
  *
  * @module @buka/dsh-plugin-workflows/engine/prompt
@@ -113,12 +117,44 @@ function joinSections(sections: ReadonlyArray<string | null>): string {
  * @returns prompt 文本
  */
 export function buildExecutionPrompt(input: ExecutionPromptInput): string {
+  return buildExecutionPromptSections(input).prompt
+}
+
+/**
+ * 执行提示的拆分结果。
+ *
+ * 三段内容的作者不同，投递身份也不同：规则由插件生成、内容可能来自表单或上游
+ * agent，两者都走非用户来源的上下文；只有流程维护者写的定义按用户身份投递，
+ * 这样定义里的 `/skill-name` 才会被宿主识别。
+ */
+export interface ExecutionPromptSections {
+  /** 规则 + 任务内容：用 `inject` 投递，来源不是 `user`。 */
+  readonly context: string
+  /** 任务类型的定义：用 `followup` 以用户身份投递；没有定义时是 null。 */
+  readonly userPrompt: string | null
+  /** 完整文本（规则 + 定义 + 内容）：落盘与排查用，顺序与旧版一致。 */
+  readonly prompt: string
+}
+
+/**
+ * 按作者拆分执行提示。
+ *
+ * @param input 任务、岗位与任务类型
+ * @returns 完整文本、上下文段与用户提示段
+ */
+export function buildExecutionPromptSections(input: ExecutionPromptInput): ExecutionPromptSections {
   const { taskType, task } = input
-  return joinSections([
-    BASELINE_RULES,
-    textSection('任务类型的定义', taskType.definition),
-    contentSection(task.content),
-  ])
+  const definition = typeof taskType.definition === 'string' ? taskType.definition.trim() : ''
+  const content = contentSection(task.content)
+  return {
+    context: joinSections([BASELINE_RULES, content]),
+    userPrompt: definition === '' ? null : definition,
+    prompt: joinSections([
+      BASELINE_RULES,
+      definition === '' ? null : `## 任务类型的定义\n${definition}`,
+      content,
+    ]),
+  }
 }
 
 /**

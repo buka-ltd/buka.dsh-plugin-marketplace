@@ -79,7 +79,7 @@ import { appendJobEvent } from './events.ts'
 import {
   buildAssistantPrompt,
   buildEndDeliveryText,
-  buildExecutionPrompt,
+  buildExecutionPromptSections,
   positionLabel,
   taskTypeLabel,
 } from './prompt.ts'
@@ -130,6 +130,11 @@ type Launch =
       readonly attemptId: string
       readonly worker: string
       readonly prompt: string
+      /**
+       * 任务类型的定义：以用户身份提示投递。助理任务与没有定义的 agent 任务是
+       * null（保持原样 / 退化成单条 followup）。
+       */
+      readonly userPrompt: string | null
       readonly planMode: boolean
     }
   | {
@@ -2233,7 +2238,8 @@ export class WorkflowEngine {
       )
       return null
     }
-    const prompt = buildExecutionPrompt({ task, taskType })
+    const sections = buildExecutionPromptSections({ task, taskType })
+    const prompt = sections.prompt
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
     const promptFile = await this.store
       .writeText(job.id, 'prompts', attempt.id, prompt)
@@ -2254,6 +2260,7 @@ export class WorkflowEngine {
       attemptId: attempt.id,
       worker: storedExecutorRef(task.assignee) ?? '',
       prompt,
+      userPrompt: sections.userPrompt,
       planMode: taskType.mode === 'plan',
     }
   }
@@ -2287,6 +2294,8 @@ export class WorkflowEngine {
       attemptId: attempt.id,
       worker: assistantName,
       prompt,
+      // 助理任务保持原样：一条完整提示词，不拆用户消息。
+      userPrompt: null,
       planMode: false,
     }
   }
@@ -2367,6 +2376,8 @@ export class WorkflowEngine {
       handle = (await workers.dispatchSession({
         worker: launch.worker,
         prompt: launch.prompt,
+        // 定义以用户身份投递；没有定义时省略，workers 退化成单条 followup。
+        ...(launch.userPrompt === null ? {} : { userPrompt: launch.userPrompt }),
         title: `工作流任务 ${task.id}`,
         agentPreset: this.options.workerPreset,
         approval: 'ask',

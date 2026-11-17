@@ -2852,6 +2852,10 @@ function assertJobTransition(jobId, from, to) {
 * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
 * 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
 *
+* 派发时三段拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
+* 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
+* prompt 文件仍保存完整文本。
+*
 * 同时负责结束任务的投递文本。
 *
 * @module @buka/dsh-plugin-workflows/engine/prompt
@@ -2926,18 +2930,24 @@ function joinSections(sections) {
 	return sections.filter((section) => section !== null).join("\n\n");
 }
 /**
-* 组装一个 agent 任务的完整 prompt。
+* 按作者拆分执行提示。
 *
 * @param input 任务、岗位与任务类型
-* @returns prompt 文本
+* @returns 完整文本、上下文段与用户提示段
 */
-function buildExecutionPrompt(input) {
+function buildExecutionPromptSections(input) {
 	const { taskType, task } = input;
-	return joinSections([
-		BASELINE_RULES,
-		textSection("任务类型的定义", taskType.definition),
-		contentSection(task.content)
-	]);
+	const definition = typeof taskType.definition === "string" ? taskType.definition.trim() : "";
+	const content = contentSection(task.content);
+	return {
+		context: joinSections([BASELINE_RULES, content]),
+		userPrompt: definition === "" ? null : definition,
+		prompt: joinSections([
+			BASELINE_RULES,
+			definition === "" ? null : `## 任务类型的定义\n${definition}`,
+			content
+		])
+	};
 }
 /**
 * 结束任务的投递文本：把最终报告交给发起人，等待确认。
@@ -5362,10 +5372,11 @@ var WorkflowEngine = class {
 			await this.failTaskLocked(job.id, task.id, `task type "${task.type}" is not declared in the workflow`);
 			return null;
 		}
-		const prompt = buildExecutionPrompt({
+		const sections = buildExecutionPromptSections({
 			task,
 			taskType
 		});
+		const prompt = sections.prompt;
 		const attempt = await this.createAttempt({
 			jobId: job.id,
 			taskId: task.id,
@@ -5388,6 +5399,7 @@ var WorkflowEngine = class {
 			attemptId: attempt.id,
 			worker: storedExecutorRef(task.assignee) ?? "",
 			prompt,
+			userPrompt: sections.userPrompt,
 			planMode: taskType.mode === "plan"
 		};
 	}
@@ -5421,6 +5433,7 @@ var WorkflowEngine = class {
 			attemptId: attempt.id,
 			worker: assistantName,
 			prompt,
+			userPrompt: null,
 			planMode: false
 		};
 	}
@@ -5497,6 +5510,7 @@ var WorkflowEngine = class {
 			handle = await workers.dispatchSession({
 				worker: launch.worker,
 				prompt: launch.prompt,
+				...launch.userPrompt === null ? {} : { userPrompt: launch.userPrompt },
 				title: `工作流任务 ${task.id}`,
 				agentPreset: this.options.workerPreset,
 				approval: "ask",
