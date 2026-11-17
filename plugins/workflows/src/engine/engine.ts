@@ -2448,6 +2448,7 @@ export class WorkflowEngine {
         if (current?.taskId === input.taskId) this.sessionTasks.delete(input.sessionId)
       }
     }
+    let waiting = false
     execution.stopPoll = poll(this.options.pollIntervalMs, async () => {
       const task = this.store.getTask(input.taskId)
       if (task === undefined || task.status !== 'running') {
@@ -2456,6 +2457,19 @@ export class WorkflowEngine {
       }
       const snapshot = readHandleResult(input.handle, input.startSeq)
       if (!snapshot.turnEnded) return false
+      // 回合正常结束只说明这一轮把话说完（常见于 agent 提问后等用户回复），
+      // 任务仍在 running：保留句柄继续轮询，由 buka_task_complete、取消或
+      // taskTimeoutMs 收口。其它结束原因（error / aborted / max-tokens 等）
+      // 仍按失败处理。助理任务规则不变。
+      if (input.kind !== 'assistant' && snapshot.stopReason === 'completed') {
+        if (!waiting) {
+          waiting = true
+          this.logger?.info?.(
+            `buka-workflows: task ${input.taskId} is waiting for the session to continue after the turn completed`,
+          )
+        }
+        return false
+      }
       finish()
       if (input.kind === 'assistant') {
         await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker)

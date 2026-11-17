@@ -105,7 +105,7 @@ const WORKER_ENTRIES = [
 
 /** 一个可操纵的 workers 句柄。 */
 function makeHandle(sessionId) {
-  const state = { turnEnded: false, cancelled: false }
+  const state = { turnEnded: false, cancelled: false, disposed: false, stopReason: 'stop' }
   return {
     sessionId,
     startSeq: 0,
@@ -115,24 +115,33 @@ function makeHandle(sessionId) {
       return {
         sessionId,
         text: '',
-        stopReason: state.turnEnded ? 'stop' : '',
+        stopReason: state.turnEnded ? state.stopReason : '',
         turnEnded: state.turnEnded,
       }
     },
     async send() {
       return 0
     },
-    async cancel() {
+    async cancel(reason) {
       state.cancelled = true
+      state.cancelReason = reason
     },
-    async dispose() {},
+    async dispose() {
+      state.disposed = true
+    },
     getPlanMode() {
       return null
     },
     setPlanMode() {},
-    /** 测试钩子：结束这一轮但不调用 buka_task_complete。 */
-    endTurn() {
+    /**
+     * 测试钩子：结束这一轮但不调用 buka_task_complete。
+     *
+     * @param stopReason 本轮的结束原因；默认用 `stop` 这个非 `completed` 值，
+     *   让既有「会话异常结束」测试保持原来的失败语义。
+     */
+    endTurn(stopReason = 'stop') {
       state.turnEnded = true
+      state.stopReason = stopReason
     },
   }
 }
@@ -177,7 +186,7 @@ function makeDelivery() {
 }
 
 /** 测试用 options。 */
-function makeOptions(dataDir) {
+function makeOptions(dataDir, overrides = {}) {
   return {
     dataDir,
     taskTimeoutMs: 0,
@@ -189,6 +198,19 @@ function makeOptions(dataDir) {
     maxResultTextBytes: 1024 * 1024,
     orchestratorPresets: ['workflow-orchestrator'],
     workerPreset: 'standard',
+    ...overrides,
+  }
+}
+
+/** 记录 info 日志的 logger。 */
+function makeLogger() {
+  const infos = []
+  return {
+    infos,
+    info(message) {
+      infos.push(String(message))
+    },
+    warn() {},
   }
 }
 
@@ -200,6 +222,11 @@ async function waitFor(check, timeoutMs = 1500) {
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
   throw new Error(`waitFor timed out: ${check}`)
+}
+
+/** 等一小段，用来观察轮询是否重复触发。 */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** 简单定义：start → dev(agent) → end。 */
@@ -639,7 +666,7 @@ function overBudgetDefinition() {
 }
 
 /** 建一套引擎 + 存储 + 已激活工作流。 */
-async function setup(definition) {
+async function setup(definition, overrides = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-engine-'))
   const domain = new FakeDomain()
   const store = new WorkflowStore({ domain, dataDir })
@@ -649,8 +676,8 @@ async function setup(definition) {
   const engine = new WorkflowEngine({
     ctx: {},
     store,
-    options: makeOptions(dataDir),
-    logger: undefined,
+    options: makeOptions(dataDir, overrides.options),
+    logger: overrides.logger,
     workers: () => workers,
     delivery,
   })
@@ -1471,7 +1498,97 @@ test('engine: a human action creates the declared task only after validation', a
 // 技术失败、重试、取消
 // ---------------------------------------------------------------------------
 
-test('engine: a task session that ends without completing fails the task, and retry adds a new attempt', async () => {
+test('engine: a task session that ends its turn completed while unfinished waits for the user', async () => {
+  const logger = makeLogger()
+  const env = await setup(simpleDevDefinition(), { logger })
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    const handle = env.workers.dispatched[0].handle
+    handle.endTurn('completed')
+    await waitFor(() => logger.infos.length === 1)
+
+    // 回合正常结束不等于任务失败：任务保持 running，观测句柄留在 active 集合。
+    assert.equal(env.store.getTask(dev.id).status, 'running')
+    assert.equal(env.store.getTask(dev.id).error, null)
+    assert.equal(env.store.getJob(job.id).status, 'running')
+    assert.equal(env.engine.active.has(dev.id), true)
+    assert.equal(handle.state.disposed, false)
+    assert.equal(handle.state.cancelled, false)
+
+    // 等待只在第一次进入时记一条日志，轮询继续但不重复记。
+    await delay(40)
+    assert.equal(logger.infos.length, 1)
+    assert.match(logger.infos[0], /waiting/u)
+    assert.equal(env.store.getTask(dev.id).status, 'running', 'taskTimeoutMs 为 0 时无限等待')
+    assert.equal(handle.state.disposed, false)
+
+    // 用户在会话里回复并调用 buka_task_complete：任务完成，观测器清理干净。
+    await env.engine.completeTaskFromSession({
+      sessionId: handle.sessionId,
+      text: '收到',
+      attachments: [],
+    })
+    assert.equal(env.store.getTask(dev.id).status, 'completed')
+    assert.equal(env.store.getTask(dev.id).error, null)
+    await waitFor(() => handle.state.disposed === true)
+    assert.equal(env.engine.active.has(dev.id), false)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+for (const stopReason of ['error', 'aborted', 'max-tokens', 'interrupted', 'blocked']) {
+  test(`engine: a task session that ends with stopReason ${stopReason} fails the task`, async () => {
+    const env = await setup(simpleDevDefinition())
+    try {
+      const job = await env.engine.createJobFromHuman({
+        workflowId: env.workflowId,
+        content: { requirement: 'x' },
+      })
+      await waitFor(() => env.workers.dispatched.length === 1)
+      const dev = taskAt(env.store, job.id, 'dev')
+      const handle = env.workers.dispatched[0].handle
+      handle.endTurn(stopReason)
+      await waitFor(() => env.store.getTask(dev.id).status === 'failed')
+      // 异常结束仍按失败处理，错误信息保留 stopReason；作业等人工决定。
+      assert.equal(env.store.getJob(job.id).status, 'running')
+      assert.match(env.store.getTask(dev.id).error, /without calling buka_task_complete/u)
+      assert.match(env.store.getTask(dev.id).error, new RegExp(`stopReason: ${stopReason}`, 'u'))
+      await waitFor(() => handle.state.disposed === true)
+    } finally {
+      await env.cleanup()
+    }
+  })
+}
+
+test('engine: a waiting task still times out when taskTimeoutMs is set', async () => {
+  const logger = makeLogger()
+  const env = await setup(simpleDevDefinition(), {
+    logger,
+    options: { taskTimeoutMs: 60 },
+  })
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: 'x' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    env.workers.dispatched[0].handle.endTurn('completed')
+    await waitFor(() => env.store.getTask(dev.id).status === 'failed')
+    assert.match(env.store.getTask(dev.id).error, /timed out after 60ms/u)
+    assert.equal(logger.infos.length, 1, 'the wait was observed before the timeout')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: retrying a task failed by an abnormal session end adds a new attempt', async () => {
   const env = await setup(simpleDevDefinition())
   try {
     const job = await env.engine.createJobFromHuman({
@@ -1480,11 +1597,8 @@ test('engine: a task session that ends without completing fails the task, and re
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
-    env.workers.dispatched[0].handle.endTurn()
+    env.workers.dispatched[0].handle.endTurn('error')
     await waitFor(() => env.store.getTask(dev.id).status === 'failed')
-    // 失败任务等待人工决定，作业仍是 running。
-    assert.equal(env.store.getJob(job.id).status, 'running')
-    assert.match(env.store.getTask(dev.id).error, /without calling buka_task_complete/u)
 
     await env.engine.retryTask(job.id, dev.id)
     await waitFor(() => env.workers.dispatched.length === 2)
