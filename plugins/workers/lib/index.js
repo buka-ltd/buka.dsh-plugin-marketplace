@@ -2714,6 +2714,28 @@ function sendMethodNotAllowed(res, allow) {
 		message: `只支持 ${allow}`
 	}));
 }
+// .build/workers/serial-runner.js
+/**
+* 串行执行器的选择：优先借用 Skills 服务的共用队列。
+*
+* available / install / remove 与 Skills 的检查 / 更新都会整份重写
+* `skills-lock.json`。Skills 插件在的时候必须共用它的队列；没装时退回本插件
+* 自己的串行队列，至少保证本页面内的写入不并发。
+*
+* @module @buka/dsh-plugin-workers/serial-runner
+*/
+/**
+* 取一个串行执行器：优先用服务提供的共用队列，没有时用本地队列。
+*
+* @param service Skills 服务；插件没装时是 null / undefined
+* @param fallback 本插件自己的串行队列
+*/
+function preferSharedQueue(service, fallback) {
+	if (service === null || service === void 0) return fallback;
+	const shared = service.runSerialized;
+	if (typeof shared !== "function") return fallback;
+	return shared.bind(service);
+}
 // .build/workers/skill-update-batch.js
 /**
 * 「更新全部打工人」的批量编排。
@@ -2968,6 +2990,19 @@ function skillsService(ctx) {
 	}
 }
 /**
+* 取检查 / 更新所需的服务；插件没装或版本太旧时写好 503 并返回 null。
+*
+* @param ctx web 上下文
+* @param res 响应
+* @param action 失败文案里的动作描述
+*/
+function requireSkillsService(ctx, res, action) {
+	const service = skillsService(ctx);
+	if (service !== null && typeof service.updateSkills === "function") return service;
+	sendError(res, 503, "skills-unavailable", `没有找到 Skills 插件（@buka/dsh-plugin-skills），无法${action} skills。`);
+	return null;
+}
+/**
 * 注册项目级 skills 相关的精确路由。
 *
 */
@@ -2991,6 +3026,10 @@ function registerSkillRoutes(webCtx, deps) {
 		const run = npxQueue.then(work, work);
 		npxQueue = run.then(() => void 0, () => void 0);
 		return run;
+	}
+	/** 每次请求重新取服务：插件可能晚于路由启动。 */
+	function serialRunner() {
+		return preferSharedQueue(skillsService(webCtx), serializeNpx);
 	}
 	/** 把 resolveWorker 的错误写成响应。 */
 	function sendWorkerError(res, error) {
@@ -3018,7 +3057,7 @@ function registerSkillRoutes(webCtx, deps) {
 				return;
 			}
 			try {
-				const result = await serializeNpx(() => runNpxList([
+				const result = await serialRunner()(() => runNpxList([
 					"add",
 					source,
 					"--list"
@@ -3086,7 +3125,7 @@ function registerSkillRoutes(webCtx, deps) {
 				const args = ["add", source];
 				for (const skill of selected) args.push("--skill", skill);
 				args.push("-a", "universal", "-a", "claude-code", "-y");
-				const result = await serializeNpx(() => runNpx(args, resolved.worker.path));
+				const result = await serialRunner()(() => runNpx(args, resolved.worker.path));
 				if (!result.ok) {
 					sendJson(res, 502, {
 						ok: false,
@@ -3133,7 +3172,7 @@ function registerSkillRoutes(webCtx, deps) {
 				return;
 			}
 			try {
-				const result = await serializeNpx(() => runNpx([
+				const result = await serialRunner()(() => runNpx([
 					"remove",
 					skillName,
 					"-y"
@@ -3176,11 +3215,8 @@ function registerSkillRoutes(webCtx, deps) {
 				sendWorkerError(res, resolved.error);
 				return;
 			}
-			const service = skillsService(webCtx);
-			if (service === null || typeof service.updateSkills !== "function") {
-				sendError(res, 503, "skills-unavailable", "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法检查或更新这个打工人的 skills。");
-				return;
-			}
+			const service = requireSkillsService(webCtx, res, "检查或更新这个打工人的");
+			if (service === null) return;
 			try {
 				const result = await service.updateSkills({ dir: resolved.worker.path });
 				const report = reportSkillUpdate(result);
@@ -3216,11 +3252,8 @@ function registerSkillRoutes(webCtx, deps) {
 				sendMethodNotAllowed(res, "POST");
 				return;
 			}
-			const service = skillsService(webCtx);
-			if (service === null || typeof service.updateSkills !== "function") {
-				sendError(res, 503, "skills-unavailable", "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人的 skills。");
-				return;
-			}
+			const service = requireSkillsService(webCtx, res, "更新打工人的");
+			if (service === null) return;
 			try {
 				const listed = await listWorkers({
 					file: registryFile,
