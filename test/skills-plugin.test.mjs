@@ -157,7 +157,7 @@ test('卸载：手工安装直接删目录，不调用 npx', async () => {
   }
 })
 
-test('卸载：npx 管理的 skill 交给 npx，并确认目标消失', async () => {
+test('卸载：库管理的 skill 交给 removeSkills，并确认目标消失', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-store-'))
   try {
     const homes = { agentsHome: path.join(root, 'agents'), dshHome: path.join(root, 'dsh') }
@@ -172,25 +172,27 @@ test('卸载：npx 管理的 skill 交给 npx，并确认目标消失', async ()
       env: {},
       scope: 'agents',
       id: 'npx-skill',
-      runNpx: async (args) => {
-        calls.push(args)
+      remove: async (names, options) => {
+        calls.push({ names, options })
         await fs.rm(path.join(agentsSkills, 'npx-skill'), { recursive: true, force: true })
         const lock = JSON.parse(await fs.readFile(lockPath, 'utf8'))
         delete lock.skills['npx-skill']
         await fs.writeFile(lockPath, JSON.stringify(lock, null, 2))
-        return { ok: true, output: 'removed' }
+        return { removed: [...names], notFound: [], failed: [] }
       },
     })
 
     assert.deepEqual({ ok: result.ok, method: result.method }, { ok: true, method: 'npx' })
-    assert.deepEqual(calls, [['remove', 'npx-skill', '--global', '--yes']])
+    assert.deepEqual(calls, [
+      { names: ['npx-skill'], options: { scope: 'global', config: { telemetry: false } } },
+    ])
     assert.equal((await readNpxLock(lockPath)).skills['npx-skill'], undefined)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
 })
 
-test('卸载：npx 退出码为 0 但目录仍在时按失败上报', async () => {
+test('卸载：库报告成功但目录仍在、或库报告失败时按失败上报', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-store-'))
   try {
     const homes = { agentsHome: path.join(root, 'agents'), dshHome: path.join(root, 'dsh') }
@@ -203,21 +205,25 @@ test('卸载：npx 退出码为 0 但目录仍在时按失败上报', async () =
       env: {},
       scope: 'agents',
       id: 'stuck-skill',
-      runNpx: async () => ({ ok: true }),
+      remove: async () => ({ removed: ['stuck-skill'], notFound: [], failed: [] }),
     })
     assert.equal(stuck.ok, false)
-    assert.equal(stuck.code, 'npx-incomplete')
+    assert.equal(stuck.code, 'remove-incomplete')
 
     const failed = await uninstallGlobalSkill({
       homes,
       env: {},
       scope: 'agents',
       id: 'stuck-skill',
-      runNpx: async () => ({ ok: false, message: 'exit 1', output: 'network down' }),
+      remove: async () => ({
+        removed: [],
+        notFound: [],
+        failed: [{ skill: 'stuck-skill', message: 'network down' }],
+      }),
     })
     assert.equal(failed.ok, false)
-    assert.equal(failed.code, 'npx-failed')
-    assert.equal(failed.output, 'network down')
+    assert.equal(failed.code, 'remove-failed')
+    assert.match(String(failed.message), /network down/u)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

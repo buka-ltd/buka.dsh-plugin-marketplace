@@ -35,6 +35,7 @@ import type { Dirent } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
+import { removeSkills as removeSkillsLibrary } from 'skills'
 import { parseFrontmatterDescription } from './frontmatter.ts'
 import type { Homes } from './homes.ts'
 import { resolveHomes } from './homes.ts'
@@ -285,33 +286,42 @@ export async function collectGlobalSkills({
   }
 }
 
+/** `skills` 库删除结果里本模块用到的部分。 */
+export interface SkillsRemoveResult {
+  readonly removed: readonly string[]
+  readonly notFound: readonly string[]
+  readonly failed: readonly { readonly skill: string; readonly message: string }[]
+}
+
+/** 可注入的删除函数；默认是 `skills` 包的 `removeSkills`。 */
+export type SkillsRemover = (
+  names: readonly string[],
+  options?: { scope?: 'global' | 'project'; config?: { telemetry?: boolean } },
+) => Promise<SkillsRemoveResult>
+
 /**
  * 按「来源」选卸载方式：
  *
- * - `npx skills` 管理（位于 `~/.agents/skills` 且在该工具的 lockfile 里）：
- *   交给 `npx skills remove <name> --global --yes`，由它同时清理规范副本、
- *   各 agent 目录里的链接与 lockfile 记录；
+ * - `skills` 库管理（位于 `~/.agents/skills` 且在该工具的 lockfile 里）：
+ *   交给 `removeSkills()`，由它同时清理规范副本、各 agent 目录里的链接与
+ *   lockfile 记录；
  * - 其它（手工安装，或 `~/.dsh/skills` 下的 skill）：直接删除扫描到的目录或文件。
  *
  * lockfile 存在却读不出来时，agents 根下的 skill 一律拒绝卸载：这时无法判断
- * 它是否由 npx 管理，直接删目录会留下 lock 记录与悬空链接。两种方式都会在
- * 最后确认目标真的消失了；工具退出码为 0 但目录仍在时按失败上报。
+ * 它是否由库管理，直接删目录会留下 lock 记录与悬空链接。两种方式都会在最后
+ * 确认目标真的消失了。
  */
 export async function uninstallGlobalSkill({
   homes = resolveHomes(),
   scope,
   id,
-  runNpx,
+  remove = removeSkillsLibrary,
   env = process.env,
 }: {
   homes?: Homes
   scope?: unknown
   id?: unknown
-  runNpx: (args: string[]) => Promise<{
-    ok: boolean
-    message?: string
-    output?: string
-  }>
+  remove?: SkillsRemover
   env?: NodeJS.ProcessEnv
 }): Promise<UninstallResult> {
   if (scope !== 'agents' && scope !== 'dsh') {
@@ -320,8 +330,8 @@ export async function uninstallGlobalSkill({
   if (!isSafeSkillId(id)) {
     return { ok: false, code: 'invalid-id', message: `非法的 skill 名称：${String(id)}` }
   }
-  if (typeof runNpx !== 'function') {
-    return { ok: false, code: 'no-runner', message: '缺少执行 npx 的能力' }
+  if (typeof remove !== 'function') {
+    return { ok: false, code: 'no-remover', message: '缺少删除 skill 的能力' }
   }
 
   const root = globalRoots(homes).find((one) => one.scope === scope)
@@ -353,29 +363,30 @@ export async function uninstallGlobalSkill({
       }
     }
     if (npxRecordFor(lock, id) !== null) {
-      let result: { ok: boolean; message?: string; output?: string }
+      let result: SkillsRemoveResult
       try {
-        result = await runNpx(['remove', id, '--global', '--yes'])
+        result = await remove([id], { scope: 'global', config: { telemetry: false } })
       } catch (error) {
-        return { ok: false, code: 'npx-failed', message: errorText(error) }
+        return { ok: false, code: 'remove-failed', message: errorText(error) }
       }
-      if (!result?.ok) {
+      if (result.failed.length > 0) {
         return {
           ok: false,
-          code: 'npx-failed',
-          message: result?.message ?? 'npx skills remove 失败',
-          output: result?.output ?? '',
+          code: 'remove-failed',
+          message: result.failed.map((one) => `${one.skill}：${one.message}`).join('；'),
         }
+      }
+      if (result.removed.length === 0 && result.notFound.length > 0) {
+        return { ok: false, code: 'not-found', message: `没有找到这个 skill：${id}` }
       }
       if (await pathExists(entry.path)) {
         return {
           ok: false,
-          code: 'npx-incomplete',
-          message: 'npx skills remove 已退出，但 skill 目录仍然存在',
-          output: result.output ?? '',
+          code: 'remove-incomplete',
+          message: '已执行删除，但 skill 目录仍然存在',
         }
       }
-      return { ok: true, method: 'npx', output: result.output ?? '' }
+      return { ok: true, method: 'npx' }
     }
   }
 
