@@ -195,6 +195,13 @@ export interface FavouritesState {
   repos: Array<{ id: string; source: string; note: string }>
 }
 
+/** 更新结果里失败的一项。 */
+export interface SkillUpdateFailureItem {
+  name?: unknown
+  message?: unknown
+  output?: unknown
+}
+
 /** Skills 插件检查 / 更新的结果快照（Host 原样透传）。 */
 export interface SkillUpdateSummary {
   ok?: boolean
@@ -202,7 +209,7 @@ export interface SkillUpdateSummary {
   message?: string
   updated?: unknown[]
   skipped?: unknown[]
-  failed?: unknown[]
+  failed?: SkillUpdateFailureItem[]
 }
 
 /** 单个打工人更新响应。 */

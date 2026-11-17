@@ -58,6 +58,50 @@ test('批量更新：跳过机器人 / 目录缺失 / 空 skills，按顺序执�
   assert.equal(batch.skippedWorkers, 3)
 })
 
+test('批量更新：worker 内部分 skill 失败时该 worker 记失败，汇总按失败 skill 数', async () => {
+  const update = async ({ dir }) => {
+    if (dir === '/workers/partial') {
+      return {
+        ok: true,
+        message: '已更新 1 个 skill，1 个失败。',
+        updated: [{ name: 'a' }],
+        skipped: [{ name: 's' }],
+        failed: [{ name: 'b', message: '网络错误' }],
+      }
+    }
+    return { ok: true, message: '已是最新。', updated: [], skipped: [], failed: [] }
+  }
+  const batch = await updateWorkersSequentially({
+    workers: [worker('partial'), worker('ok')],
+    update,
+  })
+
+  assert.deepEqual(
+    batch.results.map((one) => [one.id, one.ok, one.failed]),
+    [
+      ['partial', false, 1],
+      ['ok', true, 0],
+    ],
+  )
+  assert.equal(batch.results[0].message, '已更新 1 个 skill，1 个失败。')
+  assert.equal(batch.failed, 1, '汇总数字是失败的 skill 数')
+  assert.equal(batch.updated, 1)
+})
+
+test('批量更新：整体失败但没有逐项记录时仍计 1 个失败', async () => {
+  const update = async () => ({
+    ok: false,
+    code: 'unsupported-home',
+    message: '全局根不一致',
+  })
+  const batch = await updateWorkersSequentially({ workers: [worker('broken')], update })
+
+  assert.equal(batch.results[0].ok, false)
+  assert.equal(batch.results[0].failed, 0)
+  assert.equal(batch.results[0].message, '全局根不一致')
+  assert.equal(batch.failed, 1)
+})
+
 test('批量更新：单个失败不中断，失败项带原因，最后汇总', async () => {
   const calls = []
   const update = async ({ dir }) => {

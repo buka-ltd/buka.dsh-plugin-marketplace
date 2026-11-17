@@ -169,18 +169,19 @@ window.__ModuleLoader__.load({
     * @param init 请求选项；`body` 是已经序列化好的 JSON 字符串
     */
     async function requestJson(url, init = {}) {
+    	const { allowFailureBody = false, ...requestInit } = init;
     	const headers = { accept: "application/json" };
-    	if (init.body !== void 0) headers["content-type"] = "application/json";
-    	const extraHeaders = init.headers ?? {};
+    	if (requestInit.body !== void 0) headers["content-type"] = "application/json";
+    	const extraHeaders = requestInit.headers ?? {};
     	const response = await fetch(url, {
-    		...init,
+    		...requestInit,
     		headers: {
     			...headers,
     			...extraHeaders
     		}
     	});
     	const body = await response.json().catch(() => null);
-    	if (!response.ok || body === null || body.ok !== true) {
+    	if (!response.ok || body === null || body.ok !== true && !allowFailureBody) {
     		const error = new Error(typeof body?.message === "string" ? body.message : `HTTP ${response.status}`);
     		error.code = typeof body?.code === "string" ? body.code : void 0;
     		error.output = typeof body?.output === "string" ? body.output : void 0;

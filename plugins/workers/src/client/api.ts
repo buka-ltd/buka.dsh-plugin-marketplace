@@ -2,12 +2,14 @@
  * 「打工人」页面与 Host 通信的请求 / 错误处理。
  *
  * 所有 `/buka-workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
- * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。
+ * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。逐项更新是例外：请求
+ * 成功但部分 skill 失败时回 200 + `ok:false`，由调用方读取 `update.failed`。
  *
  * @module @buka/dsh-plugin-workers/client/api
  */
 
 import { messageOf, requestJson as requestJsonBase } from '@buka/plugin-ui'
+import type { JsonRequestInit } from '@buka/plugin-ui'
 
 import type {
   HostResponse,
@@ -45,6 +47,20 @@ export function requestJson<T = HostResponse>(
   init: RequestInit & { body?: string } = {},
 ): Promise<T> {
   return requestJsonBase<T>(url, init)
+}
+
+/**
+ * 读允许 `ok:false` 的 2xx 响应。
+ *
+ * 更新的「逐项失败」是请求成功、部分 skill 失败：路由回 200 但 `ok:false`，
+ * 页面需要拿到 `update.failed` 里的原因再决定提示方式，所以不能按普通请求
+ * 直接抛错。
+ */
+export function requestUpdateJson<T = HostResponse>(
+  url: string,
+  init: JsonRequestInit = {},
+): Promise<T> {
+  return requestJsonBase<T>(url, { ...init, allowFailureBody: true })
 }
 
 /**

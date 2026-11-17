@@ -4,7 +4,14 @@
  * @module @buka/dsh-plugin-workers/client/actions/skills
  */
 
-import { claudeOf, failureText, outputOf, requestJson, skillsOf } from '../api.ts'
+import {
+  claudeOf,
+  failureText,
+  outputOf,
+  requestJson,
+  requestUpdateJson,
+  skillsOf,
+} from '../api.ts'
 import {
   AVAILABLE_ROUTE,
   INSTALL_ROUTE,
@@ -225,19 +232,37 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
 
   /**
    * 更新一个打工人的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
-   * 检查并更新目录，`modified` 会跳过。成功后刷新该打工人的 skills 列表。
+   * 检查并更新目录，`modified` 会跳过。逐项失败时路由回 200 但 `ok:false`，
+   * 页面展示第一个失败 skill 的原因与输出；整体失败走请求异常分支。
    */
   async function updateWorkerSkills(worker: Worker) {
     if (updatingSkills || updatingAllSkills) return
     setUpdatingSkills(true)
     setSkillError(null)
     try {
-      const body = await requestJson<WorkerSkillUpdateSnapshot>(SKILL_UPDATE_ROUTE, {
+      const body = await requestUpdateJson<WorkerSkillUpdateSnapshot>(SKILL_UPDATE_ROUTE, {
         method: 'POST',
         body: JSON.stringify({ id: worker.id }),
       })
       if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills })
-      const message = body.update?.message
+      const summary = body.update
+      const failed = Array.isArray(summary?.failed) ? summary.failed : []
+      const first = failed[0]
+      if (body.ok === false || failed.length > 0) {
+        const message =
+          typeof first?.message === 'string' && first.message !== ''
+            ? first.message
+            : typeof summary?.message === 'string' && summary.message !== ''
+              ? summary.message
+              : t('errUpdateFailed')
+        setSkillError({
+          message,
+          output: typeof first?.output === 'string' ? first.output : '',
+        })
+        flash('error', message)
+        return
+      }
+      const message = summary?.message
       flash(
         'success',
         typeof message === 'string' && message !== '' ? message : t('skillsUpToDate'),

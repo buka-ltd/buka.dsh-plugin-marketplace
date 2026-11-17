@@ -12,6 +12,7 @@ import type { ServerResponse } from 'node:http'
 import { createNpxRunner, parseSkillList } from '@buka/plugin-kit'
 import type { Context } from '@deepseek-ai/cordis'
 import { updateWorkersSequentially } from '../skill-update-batch.ts'
+import { reportSkillUpdate } from '../skill-update-report.ts'
 import { ensureClaudeLink, listWorkers, scanProjectSkills } from '../worker-store.ts'
 import {
   describeError,
@@ -416,9 +417,28 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
 
           try {
             const result = await service.updateSkills({ dir: resolved.worker.path })
+            const report = reportSkillUpdate(result)
+            if (report.failure !== null) {
+              webCtx.logger?.warn?.(
+                'buka-workers: 更新 skill 失败（%s）：%s',
+                resolved.worker.path,
+                report.failure.message,
+              )
+              sendJson(res, report.status, {
+                ok: false,
+                ...(report.failure.code === undefined ? {} : { code: report.failure.code }),
+                message: report.failure.message,
+                ...(report.failure.output === undefined ? {} : { output: report.failure.output }),
+              })
+              return
+            }
             const scanned = await scanProjectSkills(resolved.worker.path)
-            webCtx.logger?.info?.('buka-workers: 已更新 skill（%s）', resolved.worker.path)
-            sendJson(res, 200, { ok: true, update: result, skills: scanned.skills })
+            webCtx.logger?.info?.(
+              'buka-workers: 已更新 skill（%s，失败 %d 个）',
+              resolved.worker.path,
+              report.failed,
+            )
+            sendJson(res, 200, { ok: report.ok, update: result, skills: scanned.skills })
           } catch (error) {
             webCtx.logger?.warn?.('buka-workers: 更新 skill 失败：%s', describeError(error))
             sendError(res, 502, 'update-failed', `更新 skill 失败：${describeError(error)}`)

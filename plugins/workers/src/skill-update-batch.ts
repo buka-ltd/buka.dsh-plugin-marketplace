@@ -6,7 +6,7 @@
  * - 只对智能体（`driver === 'agent'`）、目录存在且确实装了 skill 的 worker
  *   执行；机器人没有目录，空 skills 的 worker 没有可更新项，都跳过；
  * - 按登记表顺序逐个执行，单个失败不中断后面的；
- * - 最后汇总每个 worker 的结果与整体成功 / 失败数。
+ * - 最后汇总每个 worker 的结果、更新成功数与失败 skill 数。
  *
  * @module @buka/dsh-plugin-workers/skill-update-batch
  */
@@ -47,7 +47,9 @@ export interface BatchWorkerResult {
 /** 批量更新的汇总。 */
 export interface BatchUpdateResult {
   readonly results: BatchWorkerResult[]
+  /** 更新成功的 skill 总数。 */
   readonly updated: number
+  /** 失败的 skill 总数；整体失败但没有逐项记录时按 1 计。 */
   readonly failed: number
   /** 因为没有目录、是机器人或没有 skill 而跳过的 worker 数。 */
   readonly skippedWorkers: number
@@ -78,18 +80,21 @@ export async function updateWorkersSequentially({
   for (const worker of targets) {
     try {
       const result = (await update({ dir: worker.path })) as UpdateSummary | null | undefined
+      const failed = Array.isArray(result?.failed) ? result.failed.length : 0
+      // worker 级 ok：整体没失败，且它内部的每个 skill 都没失败。
+      const ok = result?.ok !== false && failed === 0
       results.push({
         id: worker.id,
         name: worker.name === '' ? worker.id : worker.name,
-        ok: result?.ok !== false,
+        ok,
         message:
           typeof result?.message === 'string' && result.message !== ''
             ? result.message
-            : result?.ok === false
-              ? '更新失败。'
-              : '已是最新。',
+            : ok
+              ? '已是最新。'
+              : '更新失败。',
         updated: Array.isArray(result?.updated) ? result.updated.length : 0,
-        failed: Array.isArray(result?.failed) ? result.failed.length : 0,
+        failed,
         skipped: Array.isArray(result?.skipped) ? result.skipped.length : 0,
       })
     } catch (error) {
@@ -108,7 +113,11 @@ export async function updateWorkersSequentially({
   return {
     results,
     updated: results.reduce((total, one) => total + one.updated, 0),
-    failed: results.filter((one) => !one.ok).length,
+    // 汇总口径是「失败的 skill 总数」；整体失败但没有逐项记录时至少算 1 个。
+    failed: results.reduce(
+      (total, one) => total + (one.ok ? 0 : Math.max(one.failed, 1)),
+      0,
+    ),
     skippedWorkers: workers.length - targets.length,
   }
 }

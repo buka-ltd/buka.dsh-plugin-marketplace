@@ -183,18 +183,19 @@ window.__ModuleLoader__.load({
     * @param init 请求选项；`body` 是已经序列化好的 JSON 字符串
     */
     async function requestJson$1(url, init = {}) {
+    	const { allowFailureBody = false, ...requestInit } = init;
     	const headers = { accept: "application/json" };
-    	if (init.body !== void 0) headers["content-type"] = "application/json";
-    	const extraHeaders = init.headers ?? {};
+    	if (requestInit.body !== void 0) headers["content-type"] = "application/json";
+    	const extraHeaders = requestInit.headers ?? {};
     	const response = await fetch(url, {
-    		...init,
+    		...requestInit,
     		headers: {
     			...headers,
     			...extraHeaders
     		}
     	});
     	const body = await response.json().catch(() => null);
-    	if (!response.ok || body === null || body.ok !== true) {
+    	if (!response.ok || body === null || body.ok !== true && !allowFailureBody) {
     		const error = new Error(typeof body?.message === "string" ? body.message : `HTTP ${response.status}`);
     		error.code = typeof body?.code === "string" ? body.code : void 0;
     		error.output = typeof body?.output === "string" ? body.output : void 0;
@@ -330,7 +331,8 @@ window.__ModuleLoader__.load({
     * 「打工人」页面与 Host 通信的请求 / 错误处理。
     *
     * 所有 `/buka-workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
-    * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。
+    * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。逐项更新是例外：请求
+    * 成功但部分 skill 失败时回 200 + `ok:false`，由调用方读取 `update.failed`。
     *
     * @module @buka/dsh-plugin-workers/client/api
     */
@@ -353,6 +355,19 @@ window.__ModuleLoader__.load({
     */
     function requestJson(url, init = {}) {
     	return requestJson$1(url, init);
+    }
+    /**
+    * 读允许 `ok:false` 的 2xx 响应。
+    *
+    * 更新的「逐项失败」是请求成功、部分 skill 失败：路由回 200 但 `ok:false`，
+    * 页面需要拿到 `update.failed` 里的原因再决定提示方式，所以不能按普通请求
+    * 直接抛错。
+    */
+    function requestUpdateJson(url, init = {}) {
+    	return requestJson$1(url, {
+    		...init,
+    		allowFailureBody: true
+    	});
     }
     /**
     * Host 返回的错误码 → 可读文案；未知错误原样展示 message。
@@ -874,19 +889,32 @@ window.__ModuleLoader__.load({
     	}
     	/**
     	* 更新一个打工人的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
-    	* 检查并更新目录，`modified` 会跳过。成功后刷新该打工人的 skills 列表。
+    	* 检查并更新目录，`modified` 会跳过。逐项失败时路由回 200 但 `ok:false`，
+    	* 页面展示第一个失败 skill 的原因与输出；整体失败走请求异常分支。
     	*/
     	async function updateWorkerSkills(worker) {
     		if (updatingSkills || updatingAllSkills) return;
     		setUpdatingSkills(true);
     		setSkillError(null);
     		try {
-    			const body = await requestJson(SKILL_UPDATE_ROUTE, {
+    			const body = await requestUpdateJson(SKILL_UPDATE_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({ id: worker.id })
     			});
     			if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills });
-    			const message = body.update?.message;
+    			const summary = body.update;
+    			const failed = Array.isArray(summary?.failed) ? summary.failed : [];
+    			const first = failed[0];
+    			if (body.ok === false || failed.length > 0) {
+    				const message = typeof first?.message === "string" && first.message !== "" ? first.message : typeof summary?.message === "string" && summary.message !== "" ? summary.message : t("errUpdateFailed");
+    				setSkillError({
+    					message,
+    					output: typeof first?.output === "string" ? first.output : ""
+    				});
+    				flash("error", message);
+    				return;
+    			}
+    			const message = summary?.message;
     			flash("success", typeof message === "string" && message !== "" ? message : t("skillsUpToDate"));
     		} catch (failure) {
     			setSkillError({
@@ -2816,7 +2844,7 @@ window.__ModuleLoader__.load({
     	skillsUpToDate: "All skills are up to date.",
     	updateAllWorkers: "Update all workers",
     	updatingAllWorkers: "Updating all…",
-    	updateAllSummary: "Updated {n} skill(s); {f} worker(s) failed, {s} skipped.",
+    	updateAllSummary: "Updated {n} skill(s); {f} skill failure(s), {s} worker(s) skipped.",
     	skillsEmpty: "No project-level skills are installed in this worker yet.",
     	skillErrorTitle: "The skills command failed:",
     	outputLabel: "Command output",
@@ -3003,7 +3031,7 @@ window.__ModuleLoader__.load({
     	skillsUpToDate: "所有 skill 都已是最新。",
     	updateAllWorkers: "更新全部打工人",
     	updatingAllWorkers: "正在全部更新…",
-    	updateAllSummary: "已更新 {n} 个 skill；{f} 个打工人失败，跳过 {s} 个。",
+    	updateAllSummary: "已更新 {n} 个 skill；{f} 个 skill 失败，跳过 {s} 个打工人。",
     	skillsEmpty: "这个打工人还没有安装项目级 skills。",
     	skillErrorTitle: "skills 命令执行失败：",
     	outputLabel: "命令输出",
