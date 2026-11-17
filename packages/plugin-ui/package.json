@@ -11,6 +11,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./worker-label": {
+      "types": "./lib/worker-label.d.ts",
+      "default": "./lib/worker-label.js"
+    },
     "./package.json": "./package.json"
   }
 }

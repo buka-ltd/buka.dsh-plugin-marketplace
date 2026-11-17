@@ -470,6 +470,42 @@ async function readBoundedBody(req) {
 	}
 	return Buffer.concat(chunks, size).toString("utf8");
 }
+// packages/plugin-ui/lib/worker-label.js
+/**
+* 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+*
+* 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
+* 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
+* 标识符缺失时退回带过来的 `name`（v7 旧作业快照的形状）。
+*
+* @module @buka/plugin-ui/worker-label
+*/
+/** 取一个字段的 trim 值；不是字符串或为空时给空串。 */
+function text(value) {
+	return typeof value === "string" ? value.trim() : "";
+}
+/**
+* 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+*
+*/
+function workerDisplayName(worker) {
+	const name = text(worker?.name);
+	if (name !== "") return name;
+	const display = text(worker?.displayName);
+	if (display !== "") return display;
+	return text(worker?.id);
+}
+/**
+* 「展示名 · 标识符」：列表、详情与对话框里用来消歧。展示名等于标识符
+* （没设置名称）时只显示标识符，避免出现 `writer · writer`。
+*
+*/
+function workerIdentityLabel(worker) {
+	const id = text(worker?.id) || text(worker?.name);
+	const display = workerDisplayName(worker);
+	if (id === "") return display;
+	return display === "" || display === id ? id : `${display} · ${id}`;
+}
 // .build/skills/install-targets.js
 /**
 * 全局之外的安装目标：打工人目录与工作区目录。
@@ -478,11 +514,13 @@ async function readBoundedBody(req) {
 * 宿主服务，不能由浏览器传路径：
 *
 * - 打工人：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
-*   目录存在的打工人；机器人没有目录，装不了项目级 skill。
+*   目录存在的打工人；机器人没有目录，装不了项目级 skill。引用键是不可变的
+*   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
+*   `name`。
 * - 工作区：`ctx.workspaceRegistry`（DSH 自带）的 `list()`，取已注册工作区的
 *   规范路径与标题。
 *
-* 安装时按名字 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
+* 安装时按标识符 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
 * 登记表。浏览器传来的字符串永远只当日志里的选择依据，不会被直接拼进
 * `npx skills add` 的工作目录。
 *
@@ -514,32 +552,46 @@ function optionalService(ctx, name) {
 	}
 }
 /**
-* 规范化打工人列表：只要智能体、目录存在、名字与路径都非空的条目。
+* 取一条打工人记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
+*
+* `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
+* workers 才用它兜底。
+*
+* @param record `bukaWorkers.list()` 的一条记录
+*/
+function workerKeyOf(record) {
+	const id = typeof record.id === "string" ? record.id.trim() : "";
+	if (id !== "") return id;
+	return typeof record.name === "string" ? record.name.trim() : "";
+}
+/**
+* 规范化打工人列表：只要智能体、目录存在、标识符与路径都非空的条目。
 *
 * workers 插件的 `list()` 返回 `workers` 数组，字段随版本可能增减；这里按字段
 * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
-* 确认一次目录）。
+* 确认一次目录）。`name` 可以为空，按原值带回页面展示。
 *
 * @param result `bukaWorkers.list()` 的返回值
 */
 function normalizeWorkers(result) {
 	const workers = result?.workers;
 	if (!Array.isArray(workers)) return [];
-	const byName = /* @__PURE__ */ new Map();
+	const byKey = /* @__PURE__ */ new Map();
 	for (const value of workers) {
 		if (value === null || typeof value !== "object") continue;
 		const record = value;
 		if (record.driver === "robot" || record.exists === false) continue;
-		const name = typeof record.name === "string" ? record.name.trim() : "";
+		const key = workerKeyOf(record);
 		const workerPath = typeof record.path === "string" ? record.path.trim() : "";
-		if (name === "" || workerPath === "" || byName.has(name)) continue;
-		byName.set(name, {
-			name,
+		if (key === "" || workerPath === "" || byKey.has(key)) continue;
+		byKey.set(key, {
+			id: key,
+			name: typeof record.name === "string" ? record.name : "",
 			path: workerPath,
 			description: typeof record.description === "string" ? record.description : ""
 		});
 	}
-	return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+	return [...byKey.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 /**
 * 规范化工作区列表：路径非空的都保留，标题缺失时用目录名兜底。
@@ -632,7 +684,7 @@ async function listInstallTargets(ctx) {
 * 确认目标目录仍然存在，并把解析结果整理成安装流程使用的形状。
 *
 * @param directory 候选目录
-* @param label 展示名（打工人名 / 工作区标题）
+* @param label 展示标签（打工人按「名称 · 标识符」消歧，工作区用标题）
 */
 async function confirmDirectory(directory, label) {
 	let stat;
@@ -659,7 +711,8 @@ async function confirmDirectory(directory, label) {
 /**
 * 安装时把浏览器选中的目标解析成一个可信目录。
 *
-* - 打工人按名字在 `ctx.bukaWorkers` 的列表里找；
+* - 打工人按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+*   浏览器传的仍是 `name`）；
 * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
 *
 * 找不到、服务缺失或目录已消失都返回稳定的错误码，由路由映射成 HTTP 状态码。
@@ -669,11 +722,11 @@ async function confirmDirectory(directory, label) {
 */
 async function resolveInstallTarget(ctx, request) {
 	if (request?.target === "worker") {
-		const name = typeof request.worker === "string" ? request.worker.trim() : "";
-		if (name === "") return {
+		const wanted = typeof request.worker === "string" ? request.worker.trim() : "";
+		if (wanted === "") return {
 			ok: false,
 			code: "invalid-target",
-			message: "缺少打工人名称"
+			message: "缺少打工人标识符"
 		};
 		const workers = await readWorkers(ctx);
 		if (!workers.available) return {
@@ -686,13 +739,13 @@ async function resolveInstallTarget(ctx, request) {
 			code: "workers-unavailable",
 			message: workers.error
 		};
-		const found = workers.items.find((worker) => worker.name === name);
+		const found = workers.items.find((worker) => worker.id === wanted);
 		if (found === void 0) return {
 			ok: false,
 			code: "unknown-worker",
-			message: `没有找到这个打工人（可能只支持智能体）：${name}`
+			message: `没有找到这个打工人（可能只支持智能体）：${wanted}`
 		};
-		return confirmDirectory(found.path, found.name);
+		return confirmDirectory(found.path, workerIdentityLabel(found));
 	}
 	if (request?.target === "workspace") {
 		const wanted = typeof request.workspace === "string" ? request.workspace.trim() : "";
@@ -2094,7 +2147,7 @@ async function installProjectSkill({ targetDir, target = "workspace", source, na
 * 单条安装与目录安装共用的前半段：校验来源是收藏、解析目标目录、读仓库列表。
 *
 * 顺序有意保持：目标先解析，目标不存在时不必为了列仓库去打一次网络请求；
-* 来源与目标都以 Host 这次读到的数据为准，浏览器传来的只是名字 / 路径。
+* 来源与目标都以 Host 这次读到的数据为准，浏览器传来的只是标识符 / 路径。
 *
 * @returns 成功时给出规范化来源、仓库里的 skill 列表与（项目级安装时的）目标目录
 */
@@ -2207,7 +2260,7 @@ async function resolveSavedInstall({ homes, catalog, source, target, worker, wor
 * `target` 交给全局安装或某个打工人 / 工作区的项目级安装。
 *
 * 浏览器只传来源与 skill 的仓库路径：名字、是否真的存在都以 Host 这次读到的
-* 仓库列表为准；打工人 / 工作区也只传页面选中的名字或路径，真正的工作目录由
+* 仓库列表为准；打工人只传标识符、工作区只传路径，真正的工作目录由
 * `resolveTarget()` 从 Host 的登记表解析，避免页面缓存过期或请求被伪造时装错
 * 位置。
 */

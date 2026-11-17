@@ -196,6 +196,42 @@ window.__ModuleLoader__.load({
     function messageOf(failure) {
     	return failure instanceof Error ? failure.message : String(failure);
     }
+    // packages/plugin-ui/lib/worker-label.js
+    /**
+    * 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+    *
+    * 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
+    * 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
+    * 标识符缺失时退回带过来的 `name`（v7 旧作业快照的形状）。
+    *
+    * @module @buka/plugin-ui/worker-label
+    */
+    /** 取一个字段的 trim 值；不是字符串或为空时给空串。 */
+    function text(value) {
+    	return typeof value === "string" ? value.trim() : "";
+    }
+    /**
+    * 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+    *
+    */
+    function workerDisplayName(worker) {
+    	const name = text(worker?.name);
+    	if (name !== "") return name;
+    	const display = text(worker?.displayName);
+    	if (display !== "") return display;
+    	return text(worker?.id);
+    }
+    /**
+    * 「展示名 · 标识符」：列表、详情与对话框里用来消歧。展示名等于标识符
+    * （没设置名称）时只显示标识符，避免出现 `writer · writer`。
+    *
+    */
+    function workerIdentityLabel(worker) {
+    	const id = text(worker?.id) || text(worker?.name);
+    	const display = workerDisplayName(worker);
+    	if (id === "") return display;
+    	return display === "" || display === id ? id : `${display} · ${id}`;
+    }
     // .build/skills/client/primitives.js
     /**
     * 从 DSH 的浏览器模块表取基座组件。
@@ -356,25 +392,31 @@ window.__ModuleLoader__.load({
     	return Array.isArray(list?.items) ? [...list.items] : [];
     }
     /**
-    * 目标条目的选择键：打工人用名字，工作区用路径。
+    * 目标条目的选择键：打工人用不可变标识符（旧版退回 `name`），工作区用路径。
     *
     * @param kind 目标类型
     * @param item 一条目标
     */
     function targetKeyOf(kind, item) {
     	const record = item;
-    	const value = kind === "worker" ? record?.name : record?.path;
+    	if (kind === "worker") {
+    		const id = typeof record?.id === "string" ? record.id.trim() : "";
+    		if (id !== "") return id;
+    		return typeof record?.name === "string" ? record.name.trim() : "";
+    	}
+    	const value = record?.path;
     	return typeof value === "string" ? value : "";
     }
     /**
-    * 目标条目的展示名：打工人名，或工作区标题（缺省回退路径）。
+    * 目标条目的展示标签：打工人按「名称 · 标识符」消歧，工作区用标题（缺省回退
+    * 路径）。
     *
     * @param kind 目标类型
     * @param item 一条目标
     */
     function targetLabelOf(kind, item) {
     	const record = item;
-    	if (kind === "worker") return typeof record?.name === "string" ? record.name : "";
+    	if (kind === "worker") return workerIdentityLabel(record);
     	const title = typeof record?.title === "string" ? record.title.trim() : "";
     	return title !== "" ? title : typeof record?.path === "string" ? record.path : "";
     }
@@ -1696,7 +1738,7 @@ window.__ModuleLoader__.load({
     * 分别显示「目标 skill」或「目标目录 · 数量」。
     *
     * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
-    * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用名字 / 路径回去
+    * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用标识符 / 路径回去
     * 解析一次，所以这里展示的列表只用于选择。
     *
     * @module @buka/dsh-plugin-skills/client/components/target-dialog

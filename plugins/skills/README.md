@@ -117,7 +117,7 @@ Host 侧的约束：
 
 - 只允许安装**收藏过**的来源；浏览器只传来源与 skill 在仓库里的路径，名字和「这个 skill 是否存在」都以 Host 这次读到的仓库列表为准，页面过期的缓存不会让它装错东西；
 - 全局安装：已安装（两个全局根里任一命中同名目录）时直接拒绝并提示先去卸载，不会覆盖；
-- 打工人 / 工作区：浏览器只传选中的名字 / 路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录并确认目录仍在；没装 workers 插件、没有工作区注册表、机器人、未知打工人 / 工作区或目标目录已消失都返回稳定的错误码；
+- 打工人 / 工作区：浏览器只传选中的标识符 / 路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录并确认目录仍在；没装 workers 插件、没有工作区注册表、机器人、未知打工人 / 工作区或目标目录已消失都返回稳定的错误码；
 - 全局安装目标固定是 `~/.agents/skills`：`DSH_AGENTS_HOME` 指到别处时拒绝安装，避免装到 DSH 扫描不到的目录；
 - 安装与卸载共用一条串行队列，因为 `npx skills` 会整份重写共享的 lockfile；
 - 命令退出码为 0 但 `SKILL.md` 不在目标目录时按失败上报，错误信息带上命令输出。
@@ -184,7 +184,7 @@ export function apply(ctx) {
 | `src/service.ts`                               | 对外服务 `ctx.bukaSkills`：`listRepositories()` / `listSkills()` / `listPlugins()`；持有仓库请求的并发合并与 TTL 缓存入口，不依赖 DSH 包，便于单独测试                                                                                                                                                                                                |
 | `src/skill-store.ts`                           | 不含 DSH 依赖的扫描 / frontmatter 描述回退 / lockfile / 卸载决策逻辑，便于单独测试                                                                                                                                                                                                                                                                    |
 | `src/skill-install.ts`                         | 「安装」按钮背后的逻辑：只接受收藏来源、按 Host 读到的仓库列表定位 skill，再交给 `npx skills add` 装到全局 / 打工人 / 工作区，安装后确认 `SKILL.md` 落到目标目录；全局安装拒绝已安装与 `DSH_AGENTS_HOME` 指到 npx 不会写的位置，不依赖 DSH 包，便于单独测试                                                                                           |
-| `src/install-targets.ts`                       | 「安装到打工人 / 工作区」的目标解析：从可选的 `ctx.bukaWorkers` 与 `ctx.workspaceRegistry` 读列表（过滤机器人与缺目录条目），安装时把浏览器选中的名字 / 路径换回登记表里的可信目录并确认目录仍在；服务缺失与读取失败都退化成 `available: false`，不依赖其他插件实现                                                                                   |
+| `src/install-targets.ts`                       | 「安装到打工人 / 工作区」的目标解析：从可选的 `ctx.bukaWorkers` 与 `ctx.workspaceRegistry` 读列表（打工人按不可变标识符，展示名可空；过滤机器人与缺目录条目），安装时把浏览器选中的标识符 / 路径换回登记表里的可信目录并确认目录仍在；服务缺失与读取失败都退化成 `available: false`，不依赖其他插件实现                                               |
 | `src/repo-store.ts`                            | 收藏来源的规范化与分类（GitHub / 任意 git 地址 / 本地路径 / 网页链接 / 包名）/ 去重 / 原子读写（DSH home 下的 JSON 文件），不依赖 DSH 包                                                                                                                                                                                                              |
 | `src/repo-skills.ts`                           | 读仓库（GitHub API、本地目录、git 克隆）并按判定顺序识别 `npx skills` / Claude Code marketplace 仓库（都不是则不可用）；`probeRepoKind()` 只做轻量判定，`fetchRepoSkills()` 读 `SKILL.md` frontmatter 建树（npx 仓库按 CLI 的清单方式平铺 / 按仓库清单显式声明的插件分组）并带回 marketplace 清单；结果按 TTL 缓存到 DSH home，写入串行化避免并发覆盖 |
 | `src/repo/**`                                  | 仓库读取的实现细节：缓存、发现规则、分组、GitHub API、marketplace 清单、失败分类、本地 / git 来源与树模型                                                                                                                                                                                                                                             |

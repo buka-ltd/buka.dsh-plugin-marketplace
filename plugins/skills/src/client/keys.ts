@@ -7,6 +7,8 @@
  * @module @buka/dsh-plugin-skills/client/keys
  */
 
+import { workerIdentityLabel } from '@buka/plugin-ui/worker-label'
+
 import type {
   InstallTargetsSnapshot,
   SkillTreeChild,
@@ -89,26 +91,32 @@ function targetItemsOf(kind: TargetDialogKind, snapshot: InstallTargetsSnapshot 
 }
 
 /**
- * 目标条目的选择键：打工人用名字，工作区用路径。
+ * 目标条目的选择键：打工人用不可变标识符（旧版退回 `name`），工作区用路径。
  *
  * @param kind 目标类型
  * @param item 一条目标
  */
 function targetKeyOf(kind: TargetDialogKind, item: unknown): string {
   const record = item as Record<string, unknown> | null | undefined
-  const value = kind === 'worker' ? record?.name : record?.path
+  if (kind === 'worker') {
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    if (id !== '') return id
+    return typeof record?.name === 'string' ? record.name.trim() : ''
+  }
+  const value = record?.path
   return typeof value === 'string' ? value : ''
 }
 
 /**
- * 目标条目的展示名：打工人名，或工作区标题（缺省回退路径）。
+ * 目标条目的展示标签：打工人按「名称 · 标识符」消歧，工作区用标题（缺省回退
+ * 路径）。
  *
  * @param kind 目标类型
  * @param item 一条目标
  */
 function targetLabelOf(kind: TargetDialogKind, item: unknown): string {
   const record = item as Record<string, unknown> | null | undefined
-  if (kind === 'worker') return typeof record?.name === 'string' ? record.name : ''
+  if (kind === 'worker') return workerIdentityLabel(record)
   const title = typeof record?.title === 'string' ? record.title.trim() : ''
   return title !== '' ? title : typeof record?.path === 'string' ? record.path : ''
 }

@@ -5,7 +5,7 @@
  * 分别显示「目标 skill」或「目标目录 · 数量」。
  *
  * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
- * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用名字 / 路径回去
+ * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用标识符 / 路径回去
  * 解析一次，所以这里展示的列表只用于选择。
  *
  * @module @buka/dsh-plugin-skills/client/components/target-dialog
