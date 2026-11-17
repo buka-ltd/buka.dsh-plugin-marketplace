@@ -5372,6 +5372,7 @@ var WorkflowEngine = class {
 			await this.failTaskLocked(job.id, task.id, `task type "${task.type}" is not declared in the workflow`);
 			return null;
 		}
+		const planMode = taskType.mode === "plan";
 		const sections = buildExecutionPromptSections({
 			task,
 			taskType
@@ -5399,8 +5400,8 @@ var WorkflowEngine = class {
 			attemptId: attempt.id,
 			worker: storedExecutorRef(task.assignee) ?? "",
 			prompt,
-			userPrompt: sections.userPrompt,
-			planMode: taskType.mode === "plan"
+			userPrompt: planMode ? null : sections.userPrompt,
+			planMode
 		};
 	}
 	/** 认领助理承办的人任务。 */

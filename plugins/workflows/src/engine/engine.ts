@@ -131,8 +131,8 @@ type Launch =
       readonly worker: string
       readonly prompt: string
       /**
-       * 任务类型的定义：以用户身份提示投递。助理任务与没有定义的 agent 任务是
-       * null（保持原样 / 退化成单条 followup）。
+       * 任务类型的定义：以用户身份提示投递。助理任务、plan 模式与没有定义的
+       * agent 任务是 null（保持原样 / 退化成单条 followup）。
        */
       readonly userPrompt: string | null
       readonly planMode: boolean
@@ -2238,6 +2238,7 @@ export class WorkflowEngine {
       )
       return null
     }
+    const planMode = taskType.mode === 'plan'
     const sections = buildExecutionPromptSections({ task, taskType })
     const prompt = sections.prompt
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
@@ -2260,8 +2261,9 @@ export class WorkflowEngine {
       attemptId: attempt.id,
       worker: storedExecutorRef(task.assignee) ?? '',
       prompt,
-      userPrompt: sections.userPrompt,
-      planMode: taskType.mode === 'plan',
+      // plan 模式的投递保持原样：完整提示词一条 followup，不拆用户消息。
+      userPrompt: planMode ? null : sections.userPrompt,
+      planMode,
     }
   }
 
