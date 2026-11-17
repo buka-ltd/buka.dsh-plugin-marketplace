@@ -186,6 +186,9 @@ function makeDispatchContext({
   const state = {
     events,
     followups: [],
+    injected: [],
+    /** 投递顺序：`inject` 与 `followup` 交错记录，用来断言先后。 */
+    deliveries: [],
     disposed: false,
     createOptions: null,
     createCalls: 0,
@@ -219,8 +222,13 @@ function makeDispatchContext({
   const agent = {
     id: 'dispatch-session',
     session,
+    inject(message) {
+      state.injected.push(message)
+      state.deliveries.push({ kind: 'inject', message })
+    },
     followup(message) {
       state.followups.push(message)
+      state.deliveries.push({ kind: 'followup', message })
       events.push({ type: 'user/message', seq: events.length, data: {} })
       events.push({
         type: 'assistant/message',
@@ -564,6 +572,72 @@ test('workers service: dispatchSession creates a visible session without a struc
     assert.equal(announced.length, 1)
     assert.equal(announced[0][1].sessionId, handle.sessionId)
     assert.equal(announced[0][1].agentAvailable, false)
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('workers service: dispatchSession injects the context before the user prompt', async () => {
+  const home = await makeWorkerHome()
+  try {
+    const fake = makeDispatchContext()
+    const service = new WorkerSessionService({
+      ctx: fake.ctx,
+      workersDir: home.workersDir,
+      registryFile: home.registryFile,
+    })
+    const context = '## 工作流规则\n规则正文\n\n## 任务内容\n实现登录页'
+    const userPrompt = '## 任务类型的定义\n先读代码。\n\n/grill-with-docs'
+    const handle = await service.dispatchSession({
+      worker: 'writer',
+      prompt: context,
+      userPrompt,
+    })
+
+    assert.deepEqual(
+      fake.state.deliveries.map((delivery) => delivery.kind),
+      ['inject', 'followup'],
+    )
+    const [injected] = fake.state.injected
+    const [followed] = fake.state.followups
+    assert.equal(fake.state.followups.length, 1, 'the user prompt wakes exactly one turn')
+    assert.notEqual(
+      injected.source.kind,
+      'user',
+      'workflow rules and task content are not user input',
+    )
+    assert.equal(injected.source.kind, 'buka-worker')
+    assert.equal(injected.content[0].text, context)
+    assert.equal(followed.source.kind, 'user', 'the task type definition is delivered as the user')
+    assert.equal(followed.content[0].text, userPrompt)
+    assert.equal(followed.content[0].text.includes(context), false)
+    await handle.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
+test('workers service: dispatchSession without a user prompt keeps a single followup', async () => {
+  const home = await makeWorkerHome()
+  try {
+    for (const userPrompt of [undefined, '', '   \n  ']) {
+      const fake = makeDispatchContext()
+      const service = new WorkerSessionService({
+        ctx: fake.ctx,
+        workersDir: home.workersDir,
+        registryFile: home.registryFile,
+      })
+      const handle = await service.dispatchSession({
+        worker: 'writer',
+        prompt: 'do the work',
+        userPrompt,
+      })
+      assert.deepEqual(fake.state.injected, [], 'no empty context is injected')
+      assert.equal(fake.state.followups.length, 1, 'no empty user message is produced')
+      assert.equal(fake.state.followups[0].source.kind, 'buka-worker')
+      assert.equal(fake.state.followups[0].content[0].text, 'do the work')
+      await handle.dispose()
+    }
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })
   }

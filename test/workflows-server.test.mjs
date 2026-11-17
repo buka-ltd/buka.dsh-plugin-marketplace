@@ -975,6 +975,9 @@ test('engine: a human-started job completes the start task and dispatches the fi
     assert.match(dispatch.request.prompt, /## 任务内容/u)
     assert.match(dispatch.request.prompt, /登录页需求/u)
     assert.doesNotMatch(dispatch.request.prompt, /结果结构|通道|岗位|作业 #/u)
+    // 定义是流程维护者写的，按用户身份单独投递；规则与任务内容不跟过去。
+    assert.equal(dispatch.request.userPrompt, '实现需求，完成后创建交付任务。')
+    assert.doesNotMatch(dispatch.request.userPrompt, /## 工作流规则|## 任务内容|登录页需求/u)
     assert.equal(env.engine.taskForSession(dispatch.sessionId)?.taskId, dev.id)
 
     await env.engine.completeTaskFromSession({
@@ -986,6 +989,52 @@ test('engine: a human-started job completes the start task and dispatches the fi
     // 没有结束任务完成 → 作业结束为 failed。
     assert.equal(env.store.getJob(job.id).status, 'failed')
     assert.equal(env.engine.taskForSession(dispatch.sessionId), null)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: the task type definition is dispatched as the user prompt, the file keeps the full text', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].definition = '先读代码。\n\n/grill-with-docs'
+  const env = await setup(definition)
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.userPrompt, '先读代码。\n\n/grill-with-docs')
+    assert.match(dispatch.request.prompt, /## 工作流规则/u)
+    assert.match(dispatch.request.prompt, /\/grill-with-docs/u)
+    assert.match(dispatch.request.prompt, /登录页需求/u)
+
+    // 落盘的 prompt 文件仍是完整文本，供排查使用。
+    const dev = taskAt(env.store, job.id, 'dev')
+    const attempt = env.store.listAttempts(dev.id)[0]
+    assert.ok(attempt, 'the attempt is recorded')
+    assert.equal(typeof attempt.promptFile, 'string')
+    assert.equal(await env.store.readText(job.id, attempt.promptFile), dispatch.request.prompt)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a task type without a definition is dispatched without a user prompt', async () => {
+  const definition = simpleDevDefinition()
+  delete definition.positions[0].taskTypes[0].definition
+  const env = await setup(definition)
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal('userPrompt' in dispatch.request, false, 'no empty user message is produced')
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务类型的定义/u)
+    assert.match(dispatch.request.prompt, /## 任务内容/u)
   } finally {
     await env.cleanup()
   }
@@ -1372,6 +1421,8 @@ test('engine: a named assistant takes a human task and completes it with an acti
     assert.equal(approve.status, 'running')
     assert.equal(approve.claimant.kind, 'assistant')
     assert.match(dispatch.request.prompt, /buka_task_actions/u)
+    // 助理任务保持原样：一条完整提示词，不拆用户消息。
+    assert.equal('userPrompt' in dispatch.request, false)
 
     const actions = env.engine.taskActionsForSession(dispatch.sessionId)
     assert.deepEqual(

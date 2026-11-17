@@ -41,6 +41,15 @@ export interface WorkerSessionRequestBase {
 export interface WorkerDispatchRequest extends WorkerSessionRequestBase {
   prompt?: string
   /**
+   * 以**用户身份**投递的提示。有值时 `prompt` 作为上下文用 `inject` 投递
+   * （不唤醒会话），本字段用 `followup` 投递并唤醒这一轮；没有值时只投
+   * `prompt`，保持单条 followup 的旧行为。
+   *
+   * 工作流用它投递任务类型的 `definition`：只有 `source.kind === 'user'` 的
+   * 消息才会被宿主识别 `/skill-name` 手势。
+   */
+  userPrompt?: string
+  /**
    * 观察者可以预先生成会话 id 并落盘：宿主在 create 期间退出时，恢复流程仍能
    * 找到该续接哪条会话。省略时随机生成。
    */
@@ -122,6 +131,8 @@ export interface LiveAgent {
   }
   cancel(reason: { kind: 'hook'; reason?: string }, options?: { keepInbox?: boolean }): void
   followup(message: Record<string, unknown>): void
+  /** 投递模型可见的上下文，停在最近的 step 边界，不唤醒会话。 */
+  inject(message: Record<string, unknown>): void
   whenIdle(): Promise<unknown>
 }
 

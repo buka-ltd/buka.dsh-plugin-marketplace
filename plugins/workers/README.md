@@ -81,7 +81,10 @@ const { workers } = await ctx.bukaWorkers.list()
 
 const handle = await ctx.bukaWorkers.dispatchSession({
   worker: '软件工程师',
+  // 上下文（规则 + 任务内容）：用 inject 投递，来源不是 user
   prompt: '…',
+  // 用户身份提示（任务类型的定义）：用 followup 投递，来源是 user
+  userPrompt: '…',
   title: '作业 #3 · 研发 · 开发',
   agentPreset: 'standard',
   planMode: false,
@@ -92,6 +95,7 @@ const resumed = await ctx.bukaWorkers.openSession({ worker: '软件工程师', s
 ```
 
 - `dispatchSession` **只开新会话**；传 `sessionId` 会明确报错并提示用 `openSession`。新会话的模型取打工人登记的 `model`，没配置时回落到宿主默认模型。
+- `userPrompt` 可选：有值时 `prompt` 作为上下文用 `inject` 投递（来源不是 `user`，不唤醒会话），`userPrompt` 用 `followup` 以用户身份投递并唤醒这一轮，且 `inject` 先于 `followup`；没有值时仍只发一条 `followup`，来源 `buka-worker`。
 - `openSession` 只 resume / attach 同一会话，不发 prompt、不压缩。
 - 一个任务一条新会话；不再有 `outputSchema` / `routes` / `abortable` / `resultRetries` / `retryReport` / 结构化结果追问。
 - 句柄 `readResult({ sinceSeq })` 返回这一轮的文本、stopReason 与 turn 边界；任务结果由 workflows 的 `buka_task_complete` 收口。

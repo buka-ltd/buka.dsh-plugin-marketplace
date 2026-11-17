@@ -36,11 +36,13 @@ import { resolveAvatar } from './avatar.ts'
 import { WorkerSessionStop } from './engine/errors.ts'
 import { readPlanModeActive, readSessionTurn, seqOf } from './engine/session-events.ts'
 import {
+  contextMessage,
   describeError,
   disposeHandle,
   followupMessage,
   mergeAgentOptions,
   optionalService,
+  userMessage,
   waitForSettle,
 } from './engine/session-runtime.ts'
 import { summarizeWorker } from './engine/summary.ts'
@@ -170,6 +172,10 @@ export class WorkerSessionService {
    * 重新 open/dispatch。硬超时由调用方（观察者）自己计时后调用句柄的 `cancel()`。
    *
    * 一个任务一条新会话：这里不接受 `sessionId`，恢复只能走 `openSession`。
+   *
+   * 请求带 `userPrompt` 时，`prompt` 作为上下文用 `inject` 投递（来源不是
+   * `user`，不唤醒会话），`userPrompt` 用 `followup` 以用户身份投递并唤醒这一轮；
+   * 不带时只投一条 followup，行为与旧版一致。
    *
    */
   async dispatchSession(request: WorkerDispatchRequest = {}): Promise<WorkerSessionObserver> {
@@ -587,7 +593,17 @@ export class WorkerSessionService {
       throw error
     }
     const startSeq = seqOf(prepared.agent)
-    prepared.agent.followup(followupMessage(request.prompt ?? ''))
+    const userPrompt = typeof request.userPrompt === 'string' ? request.userPrompt : ''
+    if (userPrompt.trim() === '') {
+      // 没有用户身份提示：保持单条 followup，来源仍是 `buka-worker`。
+      prepared.agent.followup(followupMessage(request.prompt ?? ''))
+    } else {
+      // 先 inject 上下文（不唤醒），再 followup 用户消息唤醒这一轮；宿主在同一个
+      // step 边界先领上下文、再领用户消息。任务内容留在上下文里，不能借用户
+      // 身份触发 `/skill-name`。
+      prepared.agent.inject(contextMessage(request.prompt ?? ''))
+      prepared.agent.followup(userMessage(userPrompt))
+    }
     return this.#observeHandle({
       agent: prepared.agent,
       handle: prepared.handle,

@@ -143,9 +143,12 @@ function optionalService(ctx, name) {
 	}
 }
 /**
-* 一件完整的 user 消息：`followup` 要求 `role` 与 `id`，否则会话历史在请求
-* 模型时无法转换成消息。
+* 一件完整的 user 消息：`followup` / `inject` 都要求 `role` 与 `id`，否则会话
+* 历史在请求模型时无法转换成消息。
 *
+* @param text 消息正文
+* @param sourceKind 消息来源；决定宿主按什么身份处理它
+* @returns UserMessage 形状的对象
 */
 function followupMessage(text, sourceKind = "buka-worker") {
 	return {
@@ -157,6 +160,27 @@ function followupMessage(text, sourceKind = "buka-worker") {
 		}],
 		source: { kind: sourceKind }
 	};
+}
+/**
+* 插件作者生成的上下文（工作流规则 + 任务内容）：用 `inject` 投递，来源不是
+* `user`，不唤醒会话，也不会触发 `/skill-name` 手势。
+*
+* @param text 上下文正文
+* @returns 非用户来源的消息
+*/
+function contextMessage(text) {
+	return followupMessage(text, "buka-worker");
+}
+/**
+* 流程维护者写的提示（任务类型的 `definition`）：用 `followup` 投递，来源是
+* `user`。宿主只在这类消息里识别 `/skill-name` 手势，所以它也是
+* `disable-model-invocation: true` skill 的唯一入口。
+*
+* @param text 用户身份提示
+* @returns 用户来源的消息
+*/
+function userMessage(text) {
+	return followupMessage(text, "user");
 }
 /**
 * 取消后给 agent 一点时间落定 turn/end，避免读不到最后的文本。
@@ -4434,6 +4458,10 @@ var WorkerSessionService = class {
 	*
 	* 一个任务一条新会话：这里不接受 `sessionId`，恢复只能走 `openSession`。
 	*
+	* 请求带 `userPrompt` 时，`prompt` 作为上下文用 `inject` 投递（来源不是
+	* `user`，不唤醒会话），`userPrompt` 用 `followup` 以用户身份投递并唤醒这一轮；
+	* 不带时只投一条 followup，行为与旧版一致。
+	*
 	*/
 	async dispatchSession(request = {}) {
 		if (typeof request.prompt !== "string" || request.prompt.trim() === "") throw new Error("dispatchSession requires a non-empty prompt");
@@ -4711,7 +4739,12 @@ var WorkerSessionService = class {
 			throw error;
 		}
 		const startSeq = seqOf(prepared.agent);
-		prepared.agent.followup(followupMessage(request.prompt ?? ""));
+		const userPrompt = typeof request.userPrompt === "string" ? request.userPrompt : "";
+		if (userPrompt.trim() === "") prepared.agent.followup(followupMessage(request.prompt ?? ""));
+		else {
+			prepared.agent.inject(contextMessage(request.prompt ?? ""));
+			prepared.agent.followup(userMessage(userPrompt));
+		}
 		return this.#observeHandle({
 			agent: prepared.agent,
 			handle: prepared.handle,
