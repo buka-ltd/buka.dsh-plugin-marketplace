@@ -716,7 +716,7 @@ test('结构图：画通道、点节点打开抽屉、点通道记录选中', as
   })
 })
 
-test('结构图：同一对节点的并行通道分别画线并显示标签', async () => {
+test('结构图：同一对节点的并行通道分别画线，通道名默认隐藏', async () => {
   const client = await loadClient()
   const extra = {
     id: 'dev.qa.urgent',
@@ -746,8 +746,8 @@ test('结构图：同一对节点的并行通道分别画线并显示标签', as
   assert.equal(paths.length, DEFINITION.channels.length + 1, 'both parallel channels are drawn')
   assert.notEqual(paths[1], paths[5], 'parallel channels take different lanes')
   const text = texts.join(' ')
-  assert.match(text, /提测/u)
-  assert.match(text, /加急提测/u)
+  assert.ok(!text.includes('提测'), '通道名默认隐藏')
+  assert.ok(!text.includes('加急提测'), '并行通道的名称也默认隐藏')
 })
 
 test('结构图：节点头像来自打工人登记，而不是定义快照', async () => {
@@ -1477,4 +1477,37 @@ test('派生不可用：作业页标注，执行者与交回助理显示「已�
     ) !== null,
     'the deleted worker gets a placeholder avatar',
   )
+})
+
+test('结构图：连线名称默认隐藏，悬浮或选中通道时才显示', async () => {
+  const suffix = `?edge-labels=${Date.now()}`
+  const render = await import(
+    `${pathToFileURL(path.join(CLIENT_DIR, 'graph/render.ts')).href}${suffix}`
+  )
+  const layout = await import(
+    `${pathToFileURL(path.join(CLIENT_DIR, 'graph/layout.ts')).href}${suffix}`
+  )
+  const nodes = [
+    { id: 'start', label: '开始', kind: 'start' },
+    { id: 'end', label: '结束', kind: 'end' },
+  ]
+  const edges = [{ id: 'ch-1', label: '提交', from: 'start', to: 'end' }]
+  const page = { t: (key) => key }
+  const key = layout.layoutGraph(nodes, edges).edges[0].key
+  const renderGraph = (hoveredKey, extra = {}) => {
+    harness.queue = [1, hoveredKey]
+    harness.index = 0
+    return render.renderWorkflowGraph(page, { nodes, edges, showLegend: false, ...extra })
+  }
+
+  const idle = collect(renderGraph(null))
+  assert.ok(!idle.classes.includes('buka-workflows-edgeLabel'), '默认不画连线名称')
+  assert.ok(!idle.texts.includes('提交'), '默认看不到通道名')
+
+  const hovered = collect(renderGraph(key))
+  assert.ok(hovered.classes.includes('buka-workflows-edgeLabel'), '悬浮时显示连线名称')
+  assert.ok(hovered.texts.includes('提交'), '悬浮时读到通道名')
+
+  const selected = collect(renderGraph(null, { selectedChannelId: 'ch-1' }))
+  assert.ok(selected.classes.includes('buka-workflows-edgeLabel'), '选中的通道一直显示名称')
 })

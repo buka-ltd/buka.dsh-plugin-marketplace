@@ -3190,7 +3190,7 @@ window.__ModuleLoader__.load({
     				role: "button",
     				tabIndex: 0
     			}
-    		}), edge.labelAt === null || edge.label === "" ? null : h("text", {
+    		}), edge.labelAt === null || edge.label === "" || !selected && hoveredEdgeKey !== edge.key ? null : h("text", {
     			key: `${edge.key}-label`,
     			className: `buka-workflows-edgeLabel is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}`,
     			x: round(edge.labelAt.x),

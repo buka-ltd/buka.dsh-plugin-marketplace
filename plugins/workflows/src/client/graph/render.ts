@@ -148,7 +148,9 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                         tabIndex: 0,
                       }),
                 }),
-                edge.labelAt === null || edge.label === ''
+                edge.labelAt === null ||
+                  edge.label === '' ||
+                  (!selected && hoveredEdgeKey !== edge.key)
                   ? null
                   : h(
                       'text',
