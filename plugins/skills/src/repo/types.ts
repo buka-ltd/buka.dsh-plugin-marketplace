@@ -5,10 +5,15 @@
  * 拉取与探测的返回值。集中放在这里，实现模块之间只依赖类型、不互相 import，
  * 避免出现环。
  *
+ * 收藏只支持一种格式：仓库根 `skills/` 下（允许任意层级子目录）的 `SKILL.md`。
+ * 根 `SKILL.md`、各种 agent 目录（`.claude/skills`、`.codex/skills` 等）与
+ * Claude Code marketplace 都不算可安装来源，因此仓库类型只有「标准 npx 仓库」
+ * 与「不可用」两种。
+ *
  * @module @buka/dsh-plugin-skills/repo/types
  */
 
-/** 目录节点。 */
+/** 目录节点；`path` 是它在仓库里的完整路径。 */
 export interface DirNode {
   type: 'dir'
   name: string
@@ -16,7 +21,7 @@ export interface DirNode {
   children: TreeNode[]
 }
 
-/** skill 节点；`path` 是仓库内的完整路径。 */
+/** skill 节点；`path` 是仓库里的完整路径。 */
 export interface SkillNode {
   type: 'skill'
   name: string
@@ -27,21 +32,8 @@ export interface SkillNode {
 /** 展示树节点。 */
 export type TreeNode = DirNode | SkillNode
 
-/** 仓库分类：npx skills 仓库、Claude Code marketplace、不可用。 */
-export type RepoKind = 'npx-skills' | 'claude-code-marketplace' | 'unavailable'
-
-/** marketplace 里的一个插件。 */
-export interface MarketplacePlugin {
-  name: string
-  root: string
-  description: string
-}
-
-/** 缓存里的 marketplace 清单快照。 */
-export interface CachedMarketplace {
-  name: string
-  plugins: MarketplacePlugin[]
-}
+/** 仓库分类：标准 npx skills 仓库（根 `skills/`）或不可用。 */
+export type RepoKind = 'npx-skills' | 'unavailable'
 
 /** 一条完整树缓存。 */
 export interface CacheEntry {
@@ -54,7 +46,6 @@ export interface CacheEntry {
   skills: number
   complete: boolean
   root: TreeNode[]
-  marketplace: CachedMarketplace | null
 }
 
 /** 规范化后的来源坐标。 */
@@ -93,7 +84,11 @@ export interface RepoSkillsResult {
   readonly truncated: boolean
   readonly root: TreeNode[]
   readonly skills: number
-  readonly marketplace: CachedMarketplace | null
+  /**
+   * 刷新本地克隆失败时的提示：此时保留旧克隆、继续用缓存内容，错误只在
+   * 结果里报给调用方。
+   */
+  readonly warning?: string
 }
 
 /** `probeRepoKind()` 成功时的结果：没有 `root`，`skills` 是预计数量。 */
@@ -107,9 +102,10 @@ export interface RepoProbeResult {
   readonly sha: string
   readonly fetchedAt: number
   readonly truncated: boolean
+  readonly warning?: string
 }
 
-/** GitHub 树 / 本地扫描树里的一个节点；建树只读 `type` 与 `path`。 */
+/** 本地扫描树 / 克隆目录里的一个节点；建树只读 `type` 与 `path`。 */
 export type RepoTreeEntry = { type?: unknown; path?: unknown }
 
 /** 树里确认是 blob 且带字符串路径的节点。 */
@@ -123,6 +119,7 @@ export interface RepoReader {
   readonly truncated: boolean
   readonly tree: RepoTreeEntry[]
   readonly readFile: (repoPath: string) => Promise<string | null>
+  readonly warning?: string
 }
 
 /** `openRepo()` 的结果。 */
@@ -143,17 +140,9 @@ export interface SkillMetadata {
   internal: boolean
 }
 
-/** marketplace 里一个插件下的 skill 分组。 */
-export interface MarketplaceSkillGroup {
-  pluginName: string
-  pluginRoot: string
-  skills: Array<{ path: string; rel: string }>
-}
-
-/** 分类结果；读 marketplace 清单失败时带 `failure`。 */
+/** 分类结果；读仓库内容失败时带 `failure`（目前分类本身不读文件）。 */
 export type RepoClassification =
   | { kind: 'npx-skills' }
-  | { kind: 'claude-code-marketplace'; marketplace: CachedMarketplace }
   | { kind: 'unavailable' }
   | { failure: RepoSkillsFailure }
 
@@ -164,7 +153,6 @@ export type ResolvedTarget =
       readonly origin: RepoOrigin
       readonly canonical: string
       readonly timestamp: number
-      readonly resolvedToken: string | null
       readonly file: string
       readonly entries: Record<string, CacheEntry>
       readonly id: string

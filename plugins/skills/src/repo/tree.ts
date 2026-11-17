@@ -1,29 +1,20 @@
 /**
- * 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按清单分组、排序。
+ * 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按目录建树、排序。
  *
- * npx skills 仓库与 Claude Code marketplace 两条展示规则都在这里：
+ * 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。展示树
+ * 保留仓库里的物理目录结构，目录节点用真实仓库路径（如 `skills/engineering`），
+ * skill 节点用完整路径；页面上的「全部安装」因此可以直接收集叶子路径。
+ * `metadata.internal: true` 的内部 skill 不列。
  *
- * - npx：展示方式与 `npx skills add --list` 一致 —— 清单里显式归到插件的
- *   skill 放进以插件名命名的目录节点（同名插件的 skill 合并到同一组），其余
- *   skill 平铺在根上；**不按仓库的物理目录分组**。`metadata.internal: true`
- *   的内部 skill 默认不列（与 CLI 一致）；同名 skill 不去重（npx 的 GitHub
- *   快路径也只是逐个列出），保留它们是为了不隐藏仓库里真实存在的文件。
- * - marketplace：每个插件一个目录节点，skill 是它的直接子节点。
- *
- * 元数据走统一的 `reader.readFile()`：本地 / git 来源因此不碰网络，GitHub
- * 来源仍是 raw 请求 + frontmatter 解析 + 固定并发。
+ * 元数据走统一的 `reader.readFile()`：本地路径与本地克隆都不碰网络。
  *
  * @module @buka/dsh-plugin-skills/repo/tree
  */
 
 import { parseFrontmatter, parseFrontmatterInternal } from '../frontmatter.ts'
-import { allSkillMdPaths, findSkillMdPaths, SKIP_DIRS } from './discovery.ts'
-import { readSkillGroupings } from './groupings.ts'
+import { findSkillMdPaths } from './discovery.ts'
 import type {
-  CachedMarketplace,
   DirNode,
-  MarketplacePlugin,
-  MarketplaceSkillGroup,
   RepoTreeEntry,
   SkillFileMeta,
   SkillMetadata,
@@ -31,59 +22,34 @@ import type {
   TreeNode,
 } from './types.ts'
 
-/** 同时拉取 SKILL.md 的并发上限，避免一次打开几十个连接。 */
+/** 同时读取 SKILL.md 的并发上限，避免一次打开几十个文件 / 连接。 */
 const SKILL_MD_CONCURRENCY = 6
 
 /**
- * 按分类结果把仓库内容拉成可展示的树；只用于完整展开，探测不需要。
+ * 按仓库树把 skill 文件读成可展示的树。
  *
- * SKILL.md 元数据走同一个 `reader.readFile()`：本地 / git 来源因此不碰网络，
- * GitHub 来源仍是 raw 请求 + frontmatter 解析 + 6 并发。
- *
- * npx 分支还会读仓库根的 `.claude-plugin/plugin.json` / `marketplace.json`
- * 做展示分组（读不到或不合法就当没有分组，不影响列表）。marketplace 分支的
- * 插件清单在分类时已经解析过，这里直接用。
+ * @param tree 仓库树
+ * @param reader 仓库读取抽象（本地目录或浅克隆）
+ * @param repoName 仓库名；`skills/SKILL.md` 缺名称时的兜底
  */
 export async function loadRepoContent({
   tree,
   reader,
-  classification,
   repoName,
 }: {
   tree: RepoTreeEntry[]
   reader: { readFile: (repoPath: string) => Promise<string | null> }
-  classification:
-    | { kind: 'npx-skills' }
-    | { kind: 'claude-code-marketplace'; marketplace: CachedMarketplace }
   repoName: string
 }): Promise<{ root: TreeNode[]; skills: number }> {
-  if (classification.kind === 'npx-skills') {
-    const discovered = findSkillMdPaths(tree)
-    const metadata = await mapLimit(discovered, SKILL_MD_CONCURRENCY, (skillMd) =>
-      readSkillMetadata(skillMd, reader),
-    )
-    const groupings = await readSkillGroupings({ tree, reader })
-    return buildNpxTree(metadata, groupings, repoName)
-  }
-
-  const groups = collectMarketplaceSkills(tree, classification.marketplace)
-  const paths = groups.flatMap((group) => group.skills.map((skill) => skill.path))
-  const fetched = await mapLimit(paths, SKILL_MD_CONCURRENCY, (skillPath) =>
-    readSkillFile(reader, skillPath),
+  const discovered = findSkillMdPaths(tree)
+  const metadata = await mapLimit(discovered, SKILL_MD_CONCURRENCY, (skillMd) =>
+    readSkillMetadata(skillMd, reader),
   )
-  const metas = new Map<string, SkillFileMeta | undefined>()
-  paths.forEach((skillPath, index) => {
-    metas.set(skillPath, fetched[index])
-  })
-  return { root: buildMarketplaceTree(groups, metas), skills: paths.length }
+  return buildTree(metadata, repoName)
 }
 
 /**
  * 按仓库内完整路径读取并解析一个 SKILL.md；失败时 name/description 都留空。
- *
- * 这是 npx 与 marketplace 两条流程共用的底层：npx 流再根据完整路径算展示用的
- * 名称回退，marketplace 流直接用仓库完整路径。`reader` 屏蔽了来源差异
- * （GitHub raw、本地文件或 git 克隆目录里的文件）。
  *
  * @param skillMd 仓库内的完整 SKILL.md 路径
  */
@@ -153,170 +119,83 @@ async function mapLimit<T, R>(
   return results
 }
 
+/** 建树时的中间目录节点：子节点按名字去重后再装配成展示节点。 */
+interface DirBuilder {
+  name: string
+  path: string
+  dirs: Map<string, DirBuilder>
+  skills: SkillNode[]
+}
+
 /**
- * 把 npx skills 仓库的发现结果拼成展示树。
+ * 把发现结果装配成按物理目录分层的树。
  *
- * 展示方式与 `npx skills add --list` 一致：清单里显式归到插件的 skill 放进
- * 以插件名命名的目录节点（同名插件的 skill 合并到同一组），其余 skill 平铺在
- * 根上；**不按仓库的物理目录分组**。`metadata.internal: true` 的内部 skill
- * 默认不列（与 CLI 一致）；同名 skill 不去重（npx 的 GitHub 快路径也只是逐个
- * 列出），保留它们是为了不隐藏仓库里真实存在的文件。
+ * 目录与 skill 的 `path` 都保留仓库里的完整路径；目录名取目录段。skill 名称
+ * 优先 frontmatter `name`，缺失时回退到所在目录名，`skills/SKILL.md` 回退到
+ * 仓库名。
  *
- * - 目录节点的 `name` 与 `path` 都是插件名；
- * - skill 节点的 `path` 用仓库里的完整路径（如 `skills/engineering/x/SKILL.md`）；
- * - 名称缺失时用 skill 所在目录名兜底，根目录的 `SKILL.md` 用仓库名。
- *
- * @param groupings skill 目录 → 插件名（`readSkillGroupings()` 的结果）
+ * @param entries 发现阶段读到的元数据
+ * @param repoName 仓库名
  */
-function buildNpxTree(
+function buildTree(
   entries: SkillMetadata[],
-  groupings: Map<string, string>,
   repoName: string,
 ): { root: TreeNode[]; skills: number } {
-  const groups = new Map<string, SkillNode[]>()
-  const plain: SkillNode[] = []
+  const root: DirBuilder = { name: '', path: 'skills', dirs: new Map(), skills: [] }
   let skills = 0
 
   for (const entry of entries) {
     if (entry.internal === true) continue
     skills += 1
-    const name = entry.name === '' ? fallbackSkillName(entry.fullPath, repoName) : entry.name
+    // 路径一定以 `skills/` 开头，切掉这段后按目录分段；最后一段是 SKILL.md。
+    const segments = entry.fullPath.split('/').slice(1, -1)
+    const name = entry.name === '' ? fallbackSkillName(segments, repoName) : entry.name
     const node: SkillNode = {
       type: 'skill',
       name,
       path: entry.fullPath,
       description: entry.description,
     }
-    const plugin = groupings.get(skillDirOf(entry.fullPath))
-    if (plugin === undefined) {
-      plain.push(node)
-      continue
-    }
-    const children = groups.get(plugin)
-    if (children === undefined) groups.set(plugin, [node])
-    else children.push(node)
-  }
-
-  const dirs: DirNode[] = [...groups].map(([name, children]) => ({
-    type: 'dir',
-    name,
-    path: name,
-    children,
-  }))
-  const root: TreeNode[] = [...dirs, ...plain]
-  sortTree(root)
-  return { root, skills }
-}
-
-/**
- * SKILL.md 所在的仓库内目录；仓库根 `SKILL.md` 返回空串。
- */
-function skillDirOf(skillMd: string): string {
-  const slash = skillMd.lastIndexOf('/')
-  return slash < 0 ? '' : skillMd.slice(0, slash)
-}
-
-/**
- * skill 名称缺失时的兜底：skill 目录名；仓库根 `SKILL.md` 用仓库名。
- */
-function fallbackSkillName(skillMd: string, repoName: string): string {
-  const dir = skillDirOf(skillMd)
-  if (dir === '') return repoName
-  return dir.slice(dir.lastIndexOf('/') + 1)
-}
-
-/**
- * 把树里的 SKILL.md 按 marketplace 插件分组。
- *
- * 每个插件扫它 root 下的**所有** SKILL.md（不只是 `skills/` 一层）：marketplace
- * 的插件目录结构比 npx skills 自由，可能由 plugin.json 或 entry 指定自定义
- * skills 目录。按插件 root 从深到浅分配，每条完整路径只归第一个插件（根插件
- * 最后兜底）；`rel` 任一段落在 SKIP_DIRS 里的路径跳过。
- *
- * @param tree GitHub 树节点数组
- */
-function collectMarketplaceSkills(
-  tree: RepoTreeEntry[],
-  marketplace: { plugins: MarketplacePlugin[] },
-): MarketplaceSkillGroup[] {
-  const skillMds = allSkillMdPaths(tree)
-
-  const ordered = [...marketplace.plugins].sort((a, b) => pathDepth(b.root) - pathDepth(a.root))
-  const groups: MarketplaceSkillGroup[] = []
-  const claimed = new Set<string>()
-  for (const plugin of ordered) {
-    const skills: Array<{ path: string; rel: string }> = []
-    for (const skillPath of skillMds) {
-      if (claimed.has(skillPath)) continue
-      let rel: string
-      if (plugin.root === '') {
-        rel = skillPath
+    let current = root
+    let pathSoFar = 'skills'
+    for (const segment of segments) {
+      pathSoFar = `${pathSoFar}/${segment}`
+      const existing = current.dirs.get(segment)
+      if (existing === undefined) {
+        const created: DirBuilder = {
+          name: segment,
+          path: pathSoFar,
+          dirs: new Map(),
+          skills: [],
+        }
+        current.dirs.set(segment, created)
+        current = created
       } else {
-        if (!skillPath.startsWith(`${plugin.root}/`)) continue
-        rel = skillPath.slice(plugin.root.length + 1)
+        current = existing
       }
-      if (rel.split('/').some((segment) => SKIP_DIRS.has(segment))) continue
-      claimed.add(skillPath)
-      skills.push({ path: skillPath, rel })
     }
-    if (skills.length > 0) {
-      groups.push({ pluginName: plugin.name, pluginRoot: plugin.root, skills })
-    }
+    current.skills.push(node)
   }
-  return groups
+
+  return { root: finishDir(root), skills }
 }
 
 /**
- * marketplace 预计的 skill 数量；探测用，不拉原文。
+ * skill 名称缺失时的兜底：所在目录名；`skills/SKILL.md` 用仓库名。
  */
-export function countMarketplaceSkills(
-  tree: RepoTreeEntry[],
-  marketplace: { plugins: MarketplacePlugin[] },
-): number {
-  return collectMarketplaceSkills(tree, marketplace).reduce(
-    (total, group) => total + group.skills.length,
-    0,
-  )
+function fallbackSkillName(segments: string[], repoName: string): string {
+  return segments.at(-1) ?? repoName
 }
 
-/**
- * 相对路径的深度；空串（仓库根）算 0。
- */
-function pathDepth(root: string): number {
-  return root === '' ? 0 : root.split('/').length
-}
-
-/**
- * 建 marketplace 的插件分组树：每个插件一个目录节点，skill 是它的直接子节点。
- *
- * 目录节点的 `path` 是插件 root（仓库根用 `.`），skill 节点保留仓库完整路径。
- * skill 名称优先 frontmatter `name`；为空时回退到 `rel` 的倒数第二段目录名，
- * `rel` 不足两段（插件根 `SKILL.md`）时回退到插件名。
- *
- * @param metas key 是完整路径
- */
-function buildMarketplaceTree(
-  groups: MarketplaceSkillGroup[],
-  metas: Map<string, SkillFileMeta | undefined>,
-): TreeNode[] {
-  const nodes: DirNode[] = groups.map((group) => ({
+/** 把中间节点转成展示节点并递归排序。 */
+function finishDir(builder: DirBuilder): TreeNode[] {
+  const dirs: DirNode[] = [...builder.dirs.values()].map((dir) => ({
     type: 'dir',
-    name: group.pluginName,
-    path: group.pluginRoot === '' ? '.' : group.pluginRoot,
-    children: group.skills.map((skill): SkillNode => {
-      const meta = metas.get(skill.path) ?? { name: '', description: '' }
-      const segments = skill.rel.split('/')
-      const fallback =
-        segments.length >= 2 ? (segments.at(-2) ?? group.pluginName) : group.pluginName
-      return {
-        type: 'skill',
-        name: meta.name === '' ? fallback : meta.name,
-        path: skill.path,
-        description: meta.description,
-      }
-    }),
+    name: dir.name,
+    path: dir.path,
+    children: finishDir(dir),
   }))
-
+  const nodes: TreeNode[] = [...dirs, ...builder.skills]
   sortTree(nodes)
   return nodes
 }
