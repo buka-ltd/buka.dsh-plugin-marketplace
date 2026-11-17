@@ -8,8 +8,8 @@
  * @module @buka/dsh-plugin-workers/client/api
  */
 
-import { messageOf, requestJson as requestJsonBase } from '@buka/plugin-ui'
 import type { JsonRequestInit } from '@buka/plugin-ui'
+import { messageOf, requestJson as requestJsonBase } from '@buka/plugin-ui'
 
 import type {
   HostResponse,

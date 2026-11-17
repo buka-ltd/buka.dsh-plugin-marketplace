@@ -114,10 +114,7 @@ export async function updateWorkersSequentially({
     results,
     updated: results.reduce((total, one) => total + one.updated, 0),
     // 汇总口径是「失败的 skill 总数」；整体失败但没有逐项记录时至少算 1 个。
-    failed: results.reduce(
-      (total, one) => total + (one.ok ? 0 : Math.max(one.failed, 1)),
-      0,
-    ),
+    failed: results.reduce((total, one) => total + (one.ok ? 0 : Math.max(one.failed, 1)), 0),
     skippedWorkers: workers.length - targets.length,
   }
 }
