@@ -31,7 +31,7 @@ export interface GraphNodeInput {
 export interface GraphEdgeInput {
   /** 通道 id；同一对节点的多条通道靠它区分。 */
   id: string
-  /** 人读名字；画在连线上、悬停时显示。 */
+  /** 人读名字；主流程线常显，回向通道悬浮或选中时显示。 */
   label?: string
   from: string
   to: string
@@ -115,6 +115,10 @@ const BACK_STEP = 12
 
 /** 同一对节点的多条前向通道之间的横向间隔。 */
 const LANE_STEP = 16
+
+/** 并行前向通道的标签沿曲线错开的起点 / 跨度，避免彼此压字。 */
+const PARALLEL_LABEL_START = 0.26
+const PARALLEL_LABEL_SPREAD = 0.48
 
 /** 回向通道绕行额外留白（单侧）。 */
 const BACK_EXTRA = 12
@@ -243,6 +247,7 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
   // 前向通道的贝塞尔控制点可能鼓出节点外沿；回向车道要绕到这些曲线之外。
   const pairSeen = new Map<string, number>()
   const forwardOffsets = new Map<number, number>()
+  const forwardLabelTs = new Map<number, number>()
   let curveLeft = nodeLeft
   let curveRight = nodeRight
   for (const [index, edge] of edges.entries()) {
@@ -256,6 +261,10 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
     pairSeen.set(pair, seen + 1)
     const offset = total <= 1 ? 0 : (seen - (total - 1) / 2) * LANE_STEP
     forwardOffsets.set(index, offset)
+    forwardLabelTs.set(
+      index,
+      total <= 1 ? 0.5 : PARALLEL_LABEL_START + (PARALLEL_LABEL_SPREAD * seen) / (total - 1),
+    )
     curveLeft = Math.min(curveLeft, Math.min(from.x, to.x) + Math.min(0, offset))
     curveRight = Math.max(curveRight, Math.max(from.x, to.x) + Math.max(0, offset))
   }
@@ -286,7 +295,12 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
     const geometry =
       back && plan !== undefined
         ? backEdgeGeometry(plan, laneX)
-        : forwardEdgeGeometry(from, to, forwardOffsets.get(index) ?? 0)
+        : forwardEdgeGeometry(
+            from,
+            to,
+            forwardOffsets.get(index) ?? 0,
+            forwardLabelTs.get(index) ?? 0.5,
+          )
     laidOutEdges.push({
       key,
       id: edge.id,
@@ -647,17 +661,19 @@ function sidePortX(node: GraphLayoutNode, side: Side, offset: number): number {
 
 /**
  * 向下的通道：从下层节点的底边中点连到目标节点的顶边中点；同一对节点的
- * 多条通道用 `offset` 错开车道。
+ * 多条通道用 `offset` 错开车道，标签在曲线上用 `labelT` 错开高度。
  *
  * @param from
  * @param to
  * @param offset 横向车道偏移
+ * @param labelT 标签在曲线上的位置（0 起点，1 终点）
  * @returns
  */
 function forwardEdgeGeometry(
   from: GraphLayoutNode,
   to: GraphLayoutNode,
   offset = 0,
+  labelT = 0.5,
 ): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
   const x1 = from.x
   const y1 = from.y + from.height / 2
@@ -675,7 +691,7 @@ function forwardEdgeGeometry(
     d,
     hit: d,
     arrow: { x: point.x, y: point.y, angle: angleOf(tangent) },
-    labelAt: cubicPoint(p0, p1, p2, p3, 0.5),
+    labelAt: cubicPoint(p0, p1, p2, p3, labelT),
   }
 }
 

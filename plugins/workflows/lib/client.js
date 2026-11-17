@@ -2842,6 +2842,9 @@ window.__ModuleLoader__.load({
     const BACK_STEP = 12;
     /** 同一对节点的多条前向通道之间的横向间隔。 */
     const LANE_STEP = 16;
+    /** 并行前向通道的标签沿曲线错开的起点 / 跨度，避免彼此压字。 */
+    const PARALLEL_LABEL_START = .26;
+    const PARALLEL_LABEL_SPREAD = .48;
     /** 回向通道绕行额外留白（单侧）。 */
     const BACK_EXTRA = 12;
     /** 同一节点侧边多个端口展开的最大高度。 */
@@ -2923,6 +2926,7 @@ window.__ModuleLoader__.load({
     	}
     	const pairSeen = /* @__PURE__ */ new Map();
     	const forwardOffsets = /* @__PURE__ */ new Map();
+    	const forwardLabelTs = /* @__PURE__ */ new Map();
     	let curveLeft = nodeLeft;
     	let curveRight = nodeRight;
     	for (const [index, edge] of edges.entries()) {
@@ -2936,6 +2940,7 @@ window.__ModuleLoader__.load({
     		pairSeen.set(pair, seen + 1);
     		const offset = total <= 1 ? 0 : (seen - (total - 1) / 2) * LANE_STEP;
     		forwardOffsets.set(index, offset);
+    		forwardLabelTs.set(index, total <= 1 ? .5 : PARALLEL_LABEL_START + PARALLEL_LABEL_SPREAD * seen / (total - 1));
     		curveLeft = Math.min(curveLeft, Math.min(from.x, to.x) + Math.min(0, offset));
     		curveRight = Math.max(curveRight, Math.max(from.x, to.x) + Math.max(0, offset));
     	}
@@ -2954,7 +2959,7 @@ window.__ModuleLoader__.load({
     		const types = Array.isArray(edge.types) ? edge.types.filter((type) => typeof type === "string") : [];
     		const plan = plans.get(index);
     		const laneX = plan === void 0 ? 0 : plan.side === "right" ? curveRight + BACK_OFFSET + plan.lane * BACK_STEP : curveLeft - BACK_OFFSET - plan.lane * BACK_STEP;
-    		const geometry = back && plan !== void 0 ? backEdgeGeometry(plan, laneX) : forwardEdgeGeometry(from, to, forwardOffsets.get(index) ?? 0);
+    		const geometry = back && plan !== void 0 ? backEdgeGeometry(plan, laneX) : forwardEdgeGeometry(from, to, forwardOffsets.get(index) ?? 0, forwardLabelTs.get(index) ?? .5);
     		laidOutEdges.push({
     			key,
     			id: edge.id,
@@ -3260,14 +3265,15 @@ window.__ModuleLoader__.load({
     }
     /**
     * 向下的通道：从下层节点的底边中点连到目标节点的顶边中点；同一对节点的
-    * 多条通道用 `offset` 错开车道。
+    * 多条通道用 `offset` 错开车道，标签在曲线上用 `labelT` 错开高度。
     *
     * @param from
     * @param to
     * @param offset 横向车道偏移
+    * @param labelT 标签在曲线上的位置（0 起点，1 终点）
     * @returns
     */
-    function forwardEdgeGeometry(from, to, offset = 0) {
+    function forwardEdgeGeometry(from, to, offset = 0, labelT = .5) {
     	const x1 = from.x;
     	const y1 = from.y + from.height / 2;
     	const x2 = to.x;
@@ -3300,7 +3306,7 @@ window.__ModuleLoader__.load({
     			y: point.y,
     			angle: angleOf(tangent)
     		},
-    		labelAt: cubicPoint(p0, p1, p2, p3, .5)
+    		labelAt: cubicPoint(p0, p1, p2, p3, labelT)
     	};
     }
     /** 三次贝塞尔取点。 */
@@ -3338,7 +3344,7 @@ window.__ModuleLoader__.load({
     function GraphView(props) {
     	const { page, ...options } = props;
     	const { t } = page;
-    	const layout = layoutGraph(options.nodes, options.edges);
+    	const layout = react.default.useMemo(() => layoutGraph(options.nodes, options.edges), [options.nodes, options.edges]);
     	const mode = options.mode ?? "definition";
     	const showLegend = options.showLegend ?? true;
     	const caption = options.caption ?? null;
@@ -3346,9 +3352,48 @@ window.__ModuleLoader__.load({
     	const selectedNodeId = options.selectedNodeId ?? null;
     	const selectedChannelId = options.selectedChannelId ?? null;
     	const ref = react.default.useRef(null);
+    	const svgRef = react.default.useRef(null);
     	const [scale, setScale] = react.default.useState(1);
-    	const [hoveredEdgeKey, setHoveredEdgeKey] = react.default.useState(null);
-    	const hoveredEdge = layout.edges.find((edge) => edge.key === hoveredEdgeKey) ?? null;
+    	const [hoveredTip, setHoveredTip] = react.default.useState(null);
+    	const hoveredEdge = layout.edges.find((edge) => edge.key === hoveredTip?.key) ?? null;
+    	const orderedEdges = hoveredEdge === null ? layout.edges : [...layout.edges.filter((edge) => edge.key !== hoveredEdge.key), hoveredEdge];
+    	const edgeTip = hoveredEdge === null || hoveredTip === null || hoveredEdge.label === "" ? null : {
+    		edge: hoveredEdge,
+    		placement: edgeTipPlacement(hoveredTip, hoveredEdge.label)
+    	};
+    	/** 鼠标进入通道时，把气泡锚在指针旁边。 */
+    	const showEdgeTip = (edge, x, y) => {
+    		setHoveredTip({
+    			key: edge.key,
+    			x,
+    			y
+    		});
+    	};
+    	/** 鼠标沿通道移动时更新锚点；位移小于 2px 不重绘。 */
+    	const moveEdgeTip = (edge, x, y) => {
+    		setHoveredTip((current) => {
+    			if (current === null || current.key !== edge.key) return {
+    				key: edge.key,
+    				x,
+    				y
+    			};
+    			return Math.abs(current.x - x) < 2 && Math.abs(current.y - y) < 2 ? current : {
+    				key: edge.key,
+    				x,
+    				y
+    			};
+    		});
+    	};
+    	/** 键盘聚焦时没有指针坐标，改用连线标签位置作为锚点。 */
+    	const focusEdgeTip = (edge) => {
+    		const box = svgRef.current?.getBoundingClientRect();
+    		const at = edge.labelAt;
+    		if (box === void 0 || at === null) return;
+    		showEdgeTip(edge, box.left + at.x * scale, box.top + at.y * scale);
+    	};
+    	const hideEdgeTip = (edge) => {
+    		setHoveredTip((current) => current !== null && current.key === edge.key ? null : current);
+    	};
     	react.default.useEffect(() => {
     		if (!fit) return void 0;
     		const element = ref.current;
@@ -3366,7 +3411,8 @@ window.__ModuleLoader__.load({
     	}, [fit, layout.width]);
     	return h("div", { className: "buka-workflows-graphPane" }, h("div", {
     		ref,
-    		className: "buka-workflows-graphViewport"
+    		className: "buka-workflows-graphViewport",
+    		onScroll: () => setHoveredTip(null)
     	}, h("div", {
     		className: "buka-workflows-graphScaleBox",
     		style: {
@@ -3384,15 +3430,18 @@ window.__ModuleLoader__.load({
     		role: "group",
     		"aria-label": t("graphAria")
     	}, h("svg", {
+    		ref: svgRef,
     		className: "buka-workflows-graphSvg",
     		width: layout.width,
     		height: layout.height,
     		viewBox: `0 0 ${layout.width} ${layout.height}`
-    	}, ...layout.edges.map((edge) => {
+    	}, ...orderedEdges.map((edge) => {
     		const selected = selectedChannelId !== null && edge.id === selectedChannelId;
+    		const hovered = hoveredEdge !== null && hoveredEdge.key === edge.key;
+    		const dimmed = hoveredEdge !== null && !hovered && !selected;
     		return h("g", {
     			key: edge.key,
-    			className: `buka-workflows-edgeGroup is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}${selected ? " is-selected" : ""}`
+    			className: `buka-workflows-edgeGroup is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}${selected ? " is-selected" : ""}${hovered ? " is-hovered" : ""}${dimmed ? " is-dimmed" : ""}`
     		}, h("path", {
     			key: `${edge.key}-path`,
     			className: `buka-workflows-edge is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}`,
@@ -3401,17 +3450,18 @@ window.__ModuleLoader__.load({
     			key: `${edge.key}-hit`,
     			className: "buka-workflows-hitPath",
     			d: edge.hit,
-    			onMouseEnter: () => setHoveredEdgeKey(edge.key),
-    			onMouseLeave: () => setHoveredEdgeKey((current) => current === edge.key ? null : current),
-    			onFocus: () => setHoveredEdgeKey(edge.key),
-    			onBlur: () => setHoveredEdgeKey((current) => current === edge.key ? null : current),
+    			onMouseEnter: (event) => showEdgeTip(edge, event.clientX, event.clientY),
+    			onMouseMove: (event) => moveEdgeTip(edge, event.clientX, event.clientY),
+    			onMouseLeave: () => hideEdgeTip(edge),
+    			onFocus: () => focusEdgeTip(edge),
+    			onBlur: () => hideEdgeTip(edge),
     			"aria-label": edge.label === "" ? edge.id : edge.label,
     			...options.onEdgeClick === null || options.onEdgeClick === void 0 ? {} : {
     				onClick: () => options.onEdgeClick(edge),
     				role: "button",
     				tabIndex: 0
     			}
-    		}), edge.labelAt === null || edge.label === "" || !selected && hoveredEdgeKey !== edge.key ? null : h("text", {
+    		}), edge.labelAt === null || edge.label === "" || !selected && edge.kind !== "forward" ? null : h("text", {
     			key: `${edge.key}-label`,
     			className: `buka-workflows-edgeLabel is-${edge.kind}${edge.state === "taken" ? " is-taken" : ""}`,
     			x: round(edge.labelAt.x),
@@ -3450,14 +3500,11 @@ window.__ModuleLoader__.load({
     			"aria-pressed": selected,
     			onClick: () => options.onNodeClick(node.id)
     		}, renderAvatar(node.avatar, 16, "buka-workflows-nodeAvatar"), h("span", { className: "buka-workflows-nodeLabel" }, node.label), corner) : h("span", { className: `buka-workflows-node ${tag}${stateName}` }, renderAvatar(node.avatar, 16, "buka-workflows-nodeAvatar"), h("span", { className: "buka-workflows-nodeLabel" }, node.label), corner));
-    	})), hoveredEdge === null || hoveredEdge.labelAt === null || hoveredEdge.label === "" || !isClipped(hoveredEdge.label) ? null : h("span", {
+    	})))), edgeTip === null ? null : h("span", {
     		key: "edge-tip",
-    		className: "buka-workflows-edgeTip",
-    		style: {
-    			left: `${hoveredEdge.labelAt.x * scale}px`,
-    			top: `${(hoveredEdge.labelAt.y - 14) * scale}px`
-    		}
-    	}, hoveredEdge.label))), caption === null && !showLegend ? null : h("div", { className: "buka-workflows-graphFooter" }, caption === null ? null : h("p", { className: "buka-workflows-hint buka-workflows-graphHint" }, caption), showLegend ? renderGraphLegend(page, mode) : null));
+    		className: `buka-workflows-edgeTip is-${edgeTip.edge.kind}${edgeTip.placement.flipped ? " is-flipped" : ""}`,
+    		style: edgeTip.placement.style
+    	}, edgeTip.edge.label), caption === null && !showLegend ? null : h("div", { className: "buka-workflows-graphFooter" }, caption === null ? null : h("p", { className: "buka-workflows-hint buka-workflows-graphHint" }, caption), showLegend ? renderGraphLegend(page, mode) : null));
     }
     /**
     * 画一张流程图。
@@ -3523,16 +3570,58 @@ window.__ModuleLoader__.load({
     function round(value) {
     	return Math.round(value * 100) / 100;
     }
-    /** 连线上的标签：过长时截断，悬停能看到全文。 */
+    /** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断。 */
     const LABEL_MAX = 14;
-    /** 标签是否被截断（只有截断时才需要悬停提示）。 */
-    function isClipped(label) {
-    	return [...label].length > LABEL_MAX;
-    }
     /** 截断后的画布标签。 */
     function clipLabel(label, max = LABEL_MAX) {
     	const chars = [...label];
     	return chars.length <= max ? label : `${chars.slice(0, max - 1).join("")}…`;
+    }
+    /** 气泡与鼠标之间的间距。 */
+    const TIP_GAP = 14;
+    /** 气泡离视口边缘的安全距离。 */
+    const TIP_MARGIN = 8;
+    /** 气泡的半高，用于上下夹取。 */
+    const TIP_HALF_HEIGHT = 12;
+    /** 气泡最大宽度。 */
+    const TIP_MAX_WIDTH = 280;
+    /**
+    * 气泡的定位：默认在鼠标右下方展开，右边放不下时翻到左边，
+    * 垂直方向夹在视口内。气泡是独立图层，不压在连线上。
+    *
+    * @param anchor 鼠标 / 聚焦位置（视口坐标）
+    * @param label 通道名
+    * @returns 定位结果
+    */
+    function edgeTipPlacement(anchor, label) {
+    	const { width, height } = viewportSize();
+    	const flipped = width > 0 && anchor.x + TIP_GAP + tipWidthOf(label) + TIP_MARGIN > width;
+    	const top = height > 0 ? Math.min(Math.max(anchor.y, 20), height - TIP_MARGIN - TIP_HALF_HEIGHT) : anchor.y;
+    	return {
+    		flipped,
+    		style: {
+    			left: `${round(flipped ? anchor.x - TIP_GAP : anchor.x + TIP_GAP)}px`,
+    			top: `${round(top)}px`,
+    			transform: flipped ? "translate(-100%,-50%)" : "translateY(-50%)"
+    		}
+    	};
+    }
+    /** 估算气泡宽度：中文按字号算，拉丁字母按半宽算。 */
+    function tipWidthOf(label) {
+    	let width = 0;
+    	for (const char of label) width += (char.codePointAt(0) ?? 0) >= 11904 ? 11 : 6.5;
+    	return Math.min(TIP_MAX_WIDTH, width + 20);
+    }
+    /** 视口尺寸；测试环境没有窗口时返回 0，退化成不翻转。 */
+    function viewportSize() {
+    	if (typeof window === "undefined") return {
+    		width: 0,
+    		height: 0
+    	};
+    	return {
+    		width: window.innerWidth,
+    		height: window.innerHeight
+    	};
     }
     // .build/workflows/client/components/job-flow.js
     /**
@@ -6091,18 +6180,28 @@ window.__ModuleLoader__.load({
     .buka-workflows-graphHint{margin:0;flex:1 1 240px;min-width:0}
     .buka-workflows-graphCanvas{position:absolute;left:0;top:0;flex:none}
     .buka-workflows-graphSvg{position:absolute;left:0;top:0;z-index:1;pointer-events:none;overflow:visible}
-    .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.7}
+    .buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.7;transition:opacity 140ms ease,stroke-width 140ms ease}
     .buka-workflows-edgeGroup.is-back .buka-workflows-edge{stroke:var(--dsw-alias-state-warn-primary);stroke-dasharray:5 4;opacity:.9}
     .buka-workflows-edge.is-taken{stroke:var(--dsw-alias-brand-primary);stroke-width:2.2;opacity:1}
     .buka-workflows-edgeGroup.is-selected .buka-workflows-edge{stroke:var(--dsw-alias-brand-primary);stroke-width:2.4;opacity:1}
     .buka-workflows-hitPath{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:pointer}
-    .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none}
+    .buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none;transition:opacity 140ms ease}
     .buka-workflows-edgeArrow.is-back{fill:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-edgeArrow.is-taken{fill:var(--dsw-alias-brand-primary);opacity:1}
-    .buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none}
+    .buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none;transition:fill 140ms ease}
     .buka-workflows-edgeLabel.is-back{fill:var(--dsw-alias-state-warn-primary)}
     .buka-workflows-edgeLabel.is-taken{fill:var(--dsw-alias-brand-primary)}
-    .buka-workflows-edgeTip{position:absolute;z-index:4;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 2px 10px color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:nowrap;pointer-events:none}
+    .buka-workflows-edgeGroup.is-hovered .buka-workflows-edgeLabel{fill:var(--dsw-alias-brand-primary);font-weight:600}
+    .buka-workflows-edgeGroup.is-hovered .buka-workflows-edge{stroke-width:2.4;opacity:1}
+    .buka-workflows-edgeGroup.is-hovered .buka-workflows-edgeArrow{opacity:1}
+    .buka-workflows-edgeGroup.is-dimmed .buka-workflows-edge{opacity:.5}
+    .buka-workflows-edgeGroup.is-dimmed .buka-workflows-edgeArrow{opacity:.5}
+    @media (prefers-reduced-motion:reduce){.buka-workflows-edge,.buka-workflows-edgeArrow,.buka-workflows-edgeLabel{transition:none}.buka-workflows-edgeTip{animation:none}}
+    .buka-workflows-edgeTip{position:fixed;z-index:30;max-width:min(280px,calc(100vw - 24px));padding:4px 9px;border-radius:6px;border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 4px 14px rgb(0 0 0 / 14%);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:normal;overflow-wrap:anywhere;pointer-events:none;animation:buka-workflows-edgeTip-in 120ms ease-out}
+    .buka-workflows-edgeTip::before{content:'';position:absolute;left:-5px;top:50%;transform:translateY(-50%);border:5px solid transparent;border-right-color:var(--dsw-alias-bg-layer-1)}
+    .buka-workflows-edgeTip.is-flipped::before{left:auto;right:-5px;border-right-color:transparent;border-left-color:var(--dsw-alias-bg-layer-1)}
+    .buka-workflows-edgeTip.is-back{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 45%,transparent)}
+    @keyframes buka-workflows-edgeTip-in{from{opacity:0}to{opacity:1}}
     .buka-workflows-nodeWrap{position:absolute;z-index:2}
     .buka-workflows-node{position:relative;display:flex;align-items:center;gap:6px;width:100%;height:100%;box-sizing:border-box;margin:0;padding:0 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;overflow:visible}
     button.buka-workflows-node{cursor:pointer}

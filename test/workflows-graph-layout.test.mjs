@@ -151,6 +151,29 @@ test('同层回向通道绕到行外，仍然只用直角折线', () => {
   assert.equal(pathCrossesNode(edge, layout.nodes), null, '同层回连不能穿过别的节点')
 })
 
+test('并行前向通道的名称沿曲线错开，避免同排压字', () => {
+  const layout = layoutGraph(
+    [
+      { id: 'start', label: '开始', kind: 'start' },
+      position('dev', '开发'),
+      { id: 'end', label: '结束', kind: 'end' },
+    ],
+    [
+      { id: 'start.dev.a', label: '受理', from: 'start', to: 'dev' },
+      { id: 'start.dev.b', label: '加急受理', from: 'start', to: 'dev' },
+    ],
+  )
+  const [first, second] = layout.edges
+  assert.equal(layout.edges.length, 2)
+  assert.ok(first !== undefined && second !== undefined)
+  assert.ok(first.labelAt !== null && second.labelAt !== null)
+  assert.ok(first.labelAt.y < second.labelAt.y, '并行标签应分别靠近起点和终点')
+  assert.ok(
+    Math.abs(first.labelAt.y - second.labelAt.y) >= 12,
+    '并行标签的垂直间距应足够容纳一行文字',
+  )
+})
+
 /** 解析 `M x y L x y ...` 形式的路径。 */
 function parsePath(d) {
   const tokens = d.trim().split(/\s+/)

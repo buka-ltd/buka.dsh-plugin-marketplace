@@ -40,11 +40,21 @@ export interface RenderGraphOptions {
   fit?: boolean
 }
 
+/** 悬浮通道气泡的定位：视口坐标。 */
+interface EdgeTipAnchor {
+  key: string
+  x: number
+  y: number
+}
+
 /** 流程图组件：负责测量容器宽度做等比缩放。 */
 function GraphView(props: RenderGraphOptions & { page: AppContext }): React.ReactElement {
   const { page, ...options } = props
   const { t } = page
-  const layout = layoutGraph(options.nodes, options.edges)
+  const layout = React.useMemo(
+    () => layoutGraph(options.nodes, options.edges),
+    [options.nodes, options.edges],
+  )
   const mode = options.mode ?? 'definition'
   const showLegend = options.showLegend ?? true
   const caption = options.caption ?? null
@@ -53,9 +63,47 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
   const selectedChannelId = options.selectedChannelId ?? null
 
   const ref = React.useRef<HTMLDivElement | null>(null)
+  const svgRef = React.useRef<SVGSVGElement | null>(null)
   const [scale, setScale] = React.useState(1)
-  const [hoveredEdgeKey, setHoveredEdgeKey] = React.useState<string | null>(null)
-  const hoveredEdge = layout.edges.find((edge) => edge.key === hoveredEdgeKey) ?? null
+  const [hoveredTip, setHoveredTip] = React.useState<EdgeTipAnchor | null>(null)
+  const hoveredEdge = layout.edges.find((edge) => edge.key === hoveredTip?.key) ?? null
+  // 悬浮的通道最后画，交叉处不会被别的线盖住。
+  const orderedEdges =
+    hoveredEdge === null
+      ? layout.edges
+      : [...layout.edges.filter((edge) => edge.key !== hoveredEdge.key), hoveredEdge]
+  const edgeTip =
+    hoveredEdge === null || hoveredTip === null || hoveredEdge.label === ''
+      ? null
+      : { edge: hoveredEdge, placement: edgeTipPlacement(hoveredTip, hoveredEdge.label) }
+
+  /** 鼠标进入通道时，把气泡锚在指针旁边。 */
+  const showEdgeTip = (edge: GraphLayoutEdge, x: number, y: number): void => {
+    setHoveredTip({ key: edge.key, x, y })
+  }
+
+  /** 鼠标沿通道移动时更新锚点；位移小于 2px 不重绘。 */
+  const moveEdgeTip = (edge: GraphLayoutEdge, x: number, y: number): void => {
+    setHoveredTip((current) => {
+      if (current === null || current.key !== edge.key) return { key: edge.key, x, y }
+      return Math.abs(current.x - x) < 2 && Math.abs(current.y - y) < 2
+        ? current
+        : { key: edge.key, x, y }
+    })
+  }
+
+  /** 键盘聚焦时没有指针坐标，改用连线标签位置作为锚点。 */
+  const focusEdgeTip = (edge: GraphLayoutEdge): void => {
+    const box = svgRef.current?.getBoundingClientRect()
+    const at = edge.labelAt
+    if (box === undefined || at === null) return
+    showEdgeTip(edge, box.left + at.x * scale, box.top + at.y * scale)
+  }
+
+  const hideEdgeTip = (edge: GraphLayoutEdge): void => {
+    setHoveredTip((current) => (current !== null && current.key === edge.key ? null : current))
+  }
+
   React.useEffect(() => {
     if (!fit) return undefined
     const element = ref.current
@@ -80,6 +128,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
       {
         ref,
         className: 'buka-workflows-graphViewport',
+        onScroll: () => setHoveredTip(null),
       },
       h(
         'div',
@@ -106,20 +155,25 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
           h(
             'svg',
             {
+              ref: svgRef,
               className: 'buka-workflows-graphSvg',
               width: layout.width,
               height: layout.height,
               viewBox: `0 0 ${layout.width} ${layout.height}`,
             },
-            ...layout.edges.map((edge) => {
+            ...orderedEdges.map((edge) => {
               const selected = selectedChannelId !== null && edge.id === selectedChannelId
+              const hovered = hoveredEdge !== null && hoveredEdge.key === edge.key
+              const dimmed = hoveredEdge !== null && !hovered && !selected
               return h(
                 'g',
                 {
                   key: edge.key,
                   className: `buka-workflows-edgeGroup is-${edge.kind}${
                     edge.state === 'taken' ? ' is-taken' : ''
-                  }${selected ? ' is-selected' : ''}`,
+                  }${selected ? ' is-selected' : ''}${hovered ? ' is-hovered' : ''}${
+                    dimmed ? ' is-dimmed' : ''
+                  }`,
                 },
                 h('path', {
                   key: `${edge.key}-path`,
@@ -132,12 +186,13 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                   key: `${edge.key}-hit`,
                   className: 'buka-workflows-hitPath',
                   d: edge.hit,
-                  onMouseEnter: () => setHoveredEdgeKey(edge.key),
-                  onMouseLeave: () =>
-                    setHoveredEdgeKey((current) => (current === edge.key ? null : current)),
-                  onFocus: () => setHoveredEdgeKey(edge.key),
-                  onBlur: () =>
-                    setHoveredEdgeKey((current) => (current === edge.key ? null : current)),
+                  onMouseEnter: (event: React.MouseEvent<SVGPathElement>) =>
+                    showEdgeTip(edge, event.clientX, event.clientY),
+                  onMouseMove: (event: React.MouseEvent<SVGPathElement>) =>
+                    moveEdgeTip(edge, event.clientX, event.clientY),
+                  onMouseLeave: () => hideEdgeTip(edge),
+                  onFocus: () => focusEdgeTip(edge),
+                  onBlur: () => hideEdgeTip(edge),
                   'aria-label': edge.label === '' ? edge.id : edge.label,
                   ...(options.onEdgeClick === null || options.onEdgeClick === undefined
                     ? {}
@@ -148,9 +203,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                         tabIndex: 0,
                       }),
                 }),
-                edge.labelAt === null ||
-                  edge.label === '' ||
-                  (!selected && hoveredEdgeKey !== edge.key)
+                edge.labelAt === null || edge.label === '' || (!selected && edge.kind !== 'forward')
                   ? null
                   : h(
                       'text',
@@ -243,25 +296,21 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
             )
           }),
         ),
-        hoveredEdge === null ||
-          hoveredEdge.labelAt === null ||
-          hoveredEdge.label === '' ||
-          !isClipped(hoveredEdge.label)
-          ? null
-          : h(
-              'span',
-              {
-                key: 'edge-tip',
-                className: 'buka-workflows-edgeTip',
-                style: {
-                  left: `${hoveredEdge.labelAt.x * scale}px`,
-                  top: `${(hoveredEdge.labelAt.y - 14) * scale}px`,
-                },
-              },
-              hoveredEdge.label,
-            ),
       ),
     ),
+    edgeTip === null
+      ? null
+      : h(
+          'span',
+          {
+            key: 'edge-tip',
+            className: `buka-workflows-edgeTip is-${edgeTip.edge.kind}${
+              edgeTip.placement.flipped ? ' is-flipped' : ''
+            }`,
+            style: edgeTip.placement.style,
+          },
+          edgeTip.edge.label,
+        ),
     caption === null && !showLegend
       ? null
       : h(
@@ -377,16 +426,72 @@ function round(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-/** 连线上的标签：过长时截断，悬停能看到全文。 */
+/** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断。 */
 const LABEL_MAX = 14
-
-/** 标签是否被截断（只有截断时才需要悬停提示）。 */
-function isClipped(label: string): boolean {
-  return [...label].length > LABEL_MAX
-}
 
 /** 截断后的画布标签。 */
 function clipLabel(label: string, max = LABEL_MAX): string {
   const chars = [...label]
   return chars.length <= max ? label : `${chars.slice(0, max - 1).join('')}…`
+}
+
+/** 气泡与鼠标之间的间距。 */
+const TIP_GAP = 14
+
+/** 气泡离视口边缘的安全距离。 */
+const TIP_MARGIN = 8
+
+/** 气泡的半高，用于上下夹取。 */
+const TIP_HALF_HEIGHT = 12
+
+/** 气泡最大宽度。 */
+const TIP_MAX_WIDTH = 280
+
+/** 气泡位置：沿鼠标哪一侧展开，以及对应的内联样式。 */
+interface EdgeTipPlacement {
+  flipped: boolean
+  style: React.CSSProperties
+}
+
+/**
+ * 气泡的定位：默认在鼠标右下方展开，右边放不下时翻到左边，
+ * 垂直方向夹在视口内。气泡是独立图层，不压在连线上。
+ *
+ * @param anchor 鼠标 / 聚焦位置（视口坐标）
+ * @param label 通道名
+ * @returns 定位结果
+ */
+function edgeTipPlacement(anchor: EdgeTipAnchor, label: string): EdgeTipPlacement {
+  const { width, height } = viewportSize()
+  const flipped = width > 0 && anchor.x + TIP_GAP + tipWidthOf(label) + TIP_MARGIN > width
+  const top =
+    height > 0
+      ? Math.min(
+          Math.max(anchor.y, TIP_MARGIN + TIP_HALF_HEIGHT),
+          height - TIP_MARGIN - TIP_HALF_HEIGHT,
+        )
+      : anchor.y
+  return {
+    flipped,
+    style: {
+      left: `${round(flipped ? anchor.x - TIP_GAP : anchor.x + TIP_GAP)}px`,
+      top: `${round(top)}px`,
+      transform: flipped ? 'translate(-100%,-50%)' : 'translateY(-50%)',
+    },
+  }
+}
+
+/** 估算气泡宽度：中文按字号算，拉丁字母按半宽算。 */
+function tipWidthOf(label: string): number {
+  let width = 0
+  for (const char of label) {
+    width += (char.codePointAt(0) ?? 0) >= 0x2e80 ? 11 : 6.5
+  }
+  return Math.min(TIP_MAX_WIDTH, width + 20)
+}
+
+/** 视口尺寸；测试环境没有窗口时返回 0，退化成不翻转。 */
+function viewportSize(): { width: number; height: number } {
+  if (typeof window === 'undefined') return { width: 0, height: 0 }
+  return { width: window.innerWidth, height: window.innerHeight }
 }

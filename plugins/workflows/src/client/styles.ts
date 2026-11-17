@@ -99,18 +99,28 @@ export const CSS = `
 .buka-workflows-graphHint{margin:0;flex:1 1 240px;min-width:0}
 .buka-workflows-graphCanvas{position:absolute;left:0;top:0;flex:none}
 .buka-workflows-graphSvg{position:absolute;left:0;top:0;z-index:1;pointer-events:none;overflow:visible}
-.buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.7}
+.buka-workflows-edge{fill:none;stroke:var(--dsw-alias-label-caption);stroke-width:1.5;stroke-linecap:round;opacity:.7;transition:opacity 140ms ease,stroke-width 140ms ease}
 .buka-workflows-edgeGroup.is-back .buka-workflows-edge{stroke:var(--dsw-alias-state-warn-primary);stroke-dasharray:5 4;opacity:.9}
 .buka-workflows-edge.is-taken{stroke:var(--dsw-alias-brand-primary);stroke-width:2.2;opacity:1}
 .buka-workflows-edgeGroup.is-selected .buka-workflows-edge{stroke:var(--dsw-alias-brand-primary);stroke-width:2.4;opacity:1}
 .buka-workflows-hitPath{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:pointer}
-.buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none}
+.buka-workflows-edgeArrow{fill:var(--dsw-alias-label-caption);opacity:.8;pointer-events:none;transition:opacity 140ms ease}
 .buka-workflows-edgeArrow.is-back{fill:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-edgeArrow.is-taken{fill:var(--dsw-alias-brand-primary);opacity:1}
-.buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none}
+.buka-workflows-edgeLabel{fill:var(--dsw-alias-label-tertiary);font-size:10px;paint-order:stroke;stroke:var(--dsw-alias-bg-base);stroke-width:3px;stroke-linejoin:round;pointer-events:none;user-select:none;transition:fill 140ms ease}
 .buka-workflows-edgeLabel.is-back{fill:var(--dsw-alias-state-warn-primary)}
 .buka-workflows-edgeLabel.is-taken{fill:var(--dsw-alias-brand-primary)}
-.buka-workflows-edgeTip{position:absolute;z-index:4;transform:translate(-50%,-50%);padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 2px 10px color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:nowrap;pointer-events:none}
+.buka-workflows-edgeGroup.is-hovered .buka-workflows-edgeLabel{fill:var(--dsw-alias-brand-primary);font-weight:600}
+.buka-workflows-edgeGroup.is-hovered .buka-workflows-edge{stroke-width:2.4;opacity:1}
+.buka-workflows-edgeGroup.is-hovered .buka-workflows-edgeArrow{opacity:1}
+.buka-workflows-edgeGroup.is-dimmed .buka-workflows-edge{opacity:.5}
+.buka-workflows-edgeGroup.is-dimmed .buka-workflows-edgeArrow{opacity:.5}
+@media (prefers-reduced-motion:reduce){.buka-workflows-edge,.buka-workflows-edgeArrow,.buka-workflows-edgeLabel{transition:none}.buka-workflows-edgeTip{animation:none}}
+.buka-workflows-edgeTip{position:fixed;z-index:30;max-width:min(280px,calc(100vw - 24px));padding:4px 9px;border-radius:6px;border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 4px 14px rgb(0 0 0 / 14%);color:var(--dsw-alias-label-primary);font-size:11px;line-height:16px;white-space:normal;overflow-wrap:anywhere;pointer-events:none;animation:buka-workflows-edgeTip-in 120ms ease-out}
+.buka-workflows-edgeTip::before{content:'';position:absolute;left:-5px;top:50%;transform:translateY(-50%);border:5px solid transparent;border-right-color:var(--dsw-alias-bg-layer-1)}
+.buka-workflows-edgeTip.is-flipped::before{left:auto;right:-5px;border-right-color:transparent;border-left-color:var(--dsw-alias-bg-layer-1)}
+.buka-workflows-edgeTip.is-back{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 45%,transparent)}
+@keyframes buka-workflows-edgeTip-in{from{opacity:0}to{opacity:1}}
 .buka-workflows-nodeWrap{position:absolute;z-index:2}
 .buka-workflows-node{position:relative;display:flex;align-items:center;gap:6px;width:100%;height:100%;box-sizing:border-box;margin:0;padding:0 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;overflow:visible}
 button.buka-workflows-node{cursor:pointer}

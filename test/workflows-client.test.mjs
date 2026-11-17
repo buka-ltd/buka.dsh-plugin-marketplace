@@ -183,7 +183,9 @@ function collect(tree) {
   const texts = []
   const classes = []
   const paths = []
+  const nodes = []
   walk(tree, (node) => {
+    nodes.push(node)
     const className = node.props?.className
     if (typeof className === 'string') classes.push(...className.split(/\s+/).filter(Boolean))
     if (
@@ -197,7 +199,7 @@ function collect(tree) {
       if (typeof child === 'string' || typeof child === 'number') texts.push(String(child))
     }
   })
-  return { texts, classes, paths }
+  return { texts, classes, paths, nodes }
 }
 
 /** 找到第一个满足条件的元素。 */
@@ -716,7 +718,7 @@ test('结构图：画通道、点节点打开抽屉、点通道记录选中', as
   })
 })
 
-test('结构图：同一对节点的并行通道分别画线，通道名默认隐藏', async () => {
+test('结构图：同一对节点的并行通道分别画线，名称默认都显示', async () => {
   const client = await loadClient()
   const extra = {
     id: 'dev.qa.urgent',
@@ -746,8 +748,8 @@ test('结构图：同一对节点的并行通道分别画线，通道名默认�
   assert.equal(paths.length, DEFINITION.channels.length + 1, 'both parallel channels are drawn')
   assert.notEqual(paths[1], paths[5], 'parallel channels take different lanes')
   const text = texts.join(' ')
-  assert.ok(!text.includes('提测'), '通道名默认隐藏')
-  assert.ok(!text.includes('加急提测'), '并行通道的名称也默认隐藏')
+  assert.ok(text.includes('提测'), '主流程通道名默认显示')
+  assert.ok(text.includes('加急提测'), '并行通道的名称也默认显示')
 })
 
 test('结构图：节点头像来自打工人登记，而不是定义快照', async () => {
@@ -1479,7 +1481,7 @@ test('派生不可用：作业页标注，执行者与交回助理显示「已�
   )
 })
 
-test('结构图：连线名称默认隐藏，悬浮或选中通道时才显示', async () => {
+test('结构图：主流程线默认显示名称，悬浮强调连线并在鼠标旁弹气泡', async () => {
   const suffix = `?edge-labels=${Date.now()}`
   const render = await import(
     `${pathToFileURL(path.join(CLIENT_DIR, 'graph/render.ts')).href}${suffix}`
@@ -1491,23 +1493,60 @@ test('结构图：连线名称默认隐藏，悬浮或选中通道时才显示',
     { id: 'start', label: '开始', kind: 'start' },
     { id: 'end', label: '结束', kind: 'end' },
   ]
-  const edges = [{ id: 'ch-1', label: '提交', from: 'start', to: 'end' }]
+  const edges = [
+    { id: 'ch-1', label: '提交', from: 'start', to: 'end' },
+    { id: 'ch-2', label: '加急提交', from: 'start', to: 'end' },
+    { id: 'ch-3', label: '返工', from: 'end', to: 'start', back: true },
+  ]
   const page = { t: (key) => key }
   const key = layout.layoutGraph(nodes, edges).edges[0].key
-  const renderGraph = (hoveredKey, extra = {}) => {
-    harness.queue = [1, hoveredKey]
+  const renderEdges = (list, anchor, extra = {}) => {
+    harness.queue = [1, anchor]
     harness.index = 0
-    return render.renderWorkflowGraph(page, { nodes, edges, showLegend: false, ...extra })
+    return render.renderWorkflowGraph(page, { nodes, edges: list, showLegend: false, ...extra })
   }
+  const renderGraph = (anchor, extra = {}) => renderEdges(edges, anchor, extra)
+  const findTip = (collected) =>
+    collected.nodes.find(
+      (node) =>
+        typeof node.props?.className === 'string' &&
+        node.props.className.split(/\s+/).includes('buka-workflows-edgeTip'),
+    )
 
   const idle = collect(renderGraph(null))
-  assert.ok(!idle.classes.includes('buka-workflows-edgeLabel'), '默认不画连线名称')
-  assert.ok(!idle.texts.includes('提交'), '默认看不到通道名')
+  assert.ok(idle.classes.includes('buka-workflows-edgeLabel'), '主流程线默认显示名称')
+  assert.ok(idle.texts.includes('提交'), '主流程通道名默认可见')
+  assert.ok(idle.texts.includes('加急提交'), '并行主流程通道名也默认可见')
+  assert.ok(!idle.texts.includes('返工'), '回向通道名称默认隐藏')
+  assert.ok(!idle.classes.includes('buka-workflows-edgeTip'), '默认不显示悬浮气泡')
+  assert.ok(!idle.classes.includes('is-hovered'), '默认不高亮连线')
+  assert.ok(!idle.classes.includes('is-dimmed'), '默认不淡化其他连线')
 
-  const hovered = collect(renderGraph(key))
-  assert.ok(hovered.classes.includes('buka-workflows-edgeLabel'), '悬浮时显示连线名称')
-  assert.ok(hovered.texts.includes('提交'), '悬浮时读到通道名')
+  const hovered = collect(renderGraph({ key, x: 120, y: 80 }))
+  assert.ok(hovered.classes.includes('buka-workflows-edgeLabel'), '悬浮不隐藏线上名称')
+  assert.ok(hovered.classes.includes('buka-workflows-edgeTip'), '悬浮时另起气泡层')
+  assert.ok(hovered.classes.includes('is-hovered'), '悬浮的连线自身高亮')
+  assert.ok(hovered.classes.includes('is-dimmed'), '其他连线变淡，便于辨认')
+  assert.ok(hovered.texts.includes('提交'), '气泡里读到通道名')
+  const hoveredTip = findTip(hovered)
+  assert.ok(hoveredTip !== undefined, '气泡应该是一个独立的 DOM 层')
+  assert.ok(hoveredTip.props.className.includes('is-forward'), '气泡标出通道方向')
+  assert.equal(hoveredTip.props.style.left, '134px', '气泡在鼠标右侧')
+  assert.equal(hoveredTip.props.style.top, '80px', '气泡与鼠标垂直居中')
+  assert.equal(hoveredTip.props.style.transform, 'translateY(-50%)')
 
-  const selected = collect(renderGraph(null, { selectedChannelId: 'ch-1' }))
-  assert.ok(selected.classes.includes('buka-workflows-edgeLabel'), '选中的通道一直显示名称')
+  const selectedBack = collect(renderGraph(null, { selectedChannelId: 'ch-3' }))
+  assert.ok(selectedBack.classes.includes('buka-workflows-edgeLabel'), '选中的回向通道也显示名称')
+  assert.ok(selectedBack.texts.includes('返工'), '选中的回向通道名称可见')
+
+  const longLabel = '提交给下游岗位并等待最终验收结果'
+  const longEdges = [{ id: 'ch-long', label: longLabel, from: 'start', to: 'end' }]
+  const longKey = layout.layoutGraph(nodes, longEdges).edges[0].key
+  const longIdle = collect(renderEdges(longEdges, null))
+  assert.ok(
+    longIdle.texts.some((text) => text.endsWith('…')),
+    '线上名称过长时仍截断',
+  )
+  const longHovered = collect(renderEdges(longEdges, { key: longKey, x: 40, y: 40 }))
+  assert.ok(longHovered.texts.includes(longLabel), '气泡显示完整通道名，不截断')
 })
