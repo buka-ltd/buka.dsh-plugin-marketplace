@@ -34,6 +34,8 @@ export const REVEAL_ROUTE = '/buka-workers/reveal'
 export const AVAILABLE_ROUTE = '/buka-workers/skills/available'
 export const INSTALL_ROUTE = '/buka-workers/skills/install'
 export const SKILL_REMOVE_ROUTE = '/buka-workers/skills/remove'
+export const SKILL_UPDATE_ROUTE = '/buka-workers/skills/update'
+export const SKILL_UPDATE_ALL_ROUTE = '/buka-workers/skills/update-all'
 
 /**
  * Skills 插件（`@buka/dsh-plugin-skills`）的收藏仓库路由。

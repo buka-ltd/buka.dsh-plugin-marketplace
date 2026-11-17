@@ -102,6 +102,7 @@ export const CSS = `
 .buka-workers-section{display:flex;flex-direction:column;gap:12px}
 .buka-workers-agentsSection{flex:1 1 auto;min-height:0}
 .buka-workers-sectionHead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.buka-workers-sectionActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .buka-workers-sectionTitle{margin:0;font-size:15px;font-weight:600;line-height:22px}
 .buka-workers-skillList{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
 .buka-workers-skillRow{display:flex;flex-direction:column;gap:2px;min-width:0;border-radius:var(--dsw-radius-md);padding:8px 8px;margin:0 -8px}

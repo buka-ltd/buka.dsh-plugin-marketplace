@@ -99,6 +99,10 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errListUnparsed')
     case 'npx-failed':
       return t('errNpxFailed')
+    case 'skills-unavailable':
+      return t('errSkillsUnavailable')
+    case 'update-failed':
+      return t('errUpdateFailed')
     default:
       return messageOf(failure)
   }

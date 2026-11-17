@@ -7,6 +7,7 @@
 import {
   Button,
   IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
   StateDot,
@@ -42,8 +43,16 @@ export function SkillsSection({
   state: WorkersPageState
   skillActions: SkillActions
 }): ReactElement {
-  const { mutating, confirmingSkill, removing, skillError, setConfirmingSkill, corrupt } = state
-  const { removeSkill, openInstallDialog } = skillActions
+  const {
+    mutating,
+    confirmingSkill,
+    removing,
+    skillError,
+    setConfirmingSkill,
+    corrupt,
+    updatingSkills,
+  } = state
+  const { removeSkill, openInstallDialog, updateWorkerSkills } = skillActions
   const skills = skillsOf(worker)
   const anyBusy = mutating
 
@@ -132,16 +141,34 @@ export function SkillsSection({
       { className: 'buka-workers-sectionHead' },
       h('h2', { className: 'buka-workers-sectionTitle' }, t('skillsTitle')),
       h(
-        Button,
-        {
-          variant: 'primary',
-          size: 'sm',
-          className: 'buka-workers-toolbarButton',
-          icon: h(IconPlusOutlineRegular, { size: 13 }),
-          disabled: mutating || corrupt || worker.exists === false,
-          onClick: openInstallDialog,
-        },
-        t('installSkills'),
+        'div',
+        { className: 'buka-workers-sectionActions' },
+        h(
+          Button,
+          {
+            variant: 'outline',
+            size: 'sm',
+            className: 'buka-workers-toolbarButton',
+            icon: updatingSkills
+              ? h(StateDot, { state: 'ongoing', size: 13 })
+              : h(IconRefreshOutlineRegular, { size: 13 }),
+            disabled: mutating || corrupt || worker.exists === false || skills.length === 0,
+            onClick: () => updateWorkerSkills(worker),
+          },
+          updatingSkills ? t('updatingSkills') : t('updateSkills'),
+        ),
+        h(
+          Button,
+          {
+            variant: 'primary',
+            size: 'sm',
+            className: 'buka-workers-toolbarButton',
+            icon: h(IconPlusOutlineRegular, { size: 13 }),
+            disabled: mutating || corrupt || worker.exists === false,
+            onClick: openInstallDialog,
+          },
+          t('installSkills'),
+        ),
       ),
     ),
     h(

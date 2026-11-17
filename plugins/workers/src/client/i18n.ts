@@ -146,6 +146,12 @@ export const en = {
   confirmRemoveSkill: 'Confirm remove',
   removing: 'Removing…',
   skillRemoved: 'Removed skill:',
+  updateSkills: 'Update',
+  updatingSkills: 'Updating…',
+  skillsUpToDate: 'All skills are up to date.',
+  updateAllWorkers: 'Update all workers',
+  updatingAllWorkers: 'Updating all…',
+  updateAllSummary: 'Updated {n} skill(s); {f} worker(s) failed, {s} skipped.',
   skillsEmpty: 'No project-level skills are installed in this worker yet.',
   skillErrorTitle: 'The skills command failed:',
   outputLabel: 'Command output',
@@ -202,6 +208,9 @@ export const en = {
   errInvalidSource: 'Invalid source. Use an npx skills source such as owner/repo.',
   errInvalidSkill: 'Invalid skill name.',
   errNpxFailed: 'npx skills failed. See the command output below.',
+  errSkillsUnavailable:
+    'The Skills plugin (@buka/dsh-plugin-skills) is not installed, so worker skills cannot be updated.',
+  errUpdateFailed: 'Could not update skills:',
 }
 
 /** 简体中文文案。 */
@@ -337,6 +346,12 @@ export const zh: Record<keyof typeof en, string> = {
   confirmRemoveSkill: '确认移除',
   removing: '移除中…',
   skillRemoved: '已移除 skill：',
+  updateSkills: '更新',
+  updatingSkills: '更新中…',
+  skillsUpToDate: '所有 skill 都已是最新。',
+  updateAllWorkers: '更新全部打工人',
+  updatingAllWorkers: '正在全部更新…',
+  updateAllSummary: '已更新 {n} 个 skill；{f} 个打工人失败，跳过 {s} 个。',
   skillsEmpty: '这个打工人还没有安装项目级 skills。',
   skillErrorTitle: 'skills 命令执行失败：',
   outputLabel: '命令输出',
@@ -387,4 +402,6 @@ export const zh: Record<keyof typeof en, string> = {
   errInvalidSource: '来源不合法：请填 owner/repo 这类 npx skills 来源。',
   errInvalidSkill: 'skill 名称不合法。',
   errNpxFailed: 'npx skills 执行失败，输出见下方。',
+  errSkillsUnavailable: '没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人 skills。',
+  errUpdateFailed: '更新 skills 失败：',
 }

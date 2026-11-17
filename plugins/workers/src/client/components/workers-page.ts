@@ -49,7 +49,7 @@ export function WorkersPage(props: {
   return h(
     'div',
     { className: 'buka-workers-page' },
-    h(PageHeader, { t, state, actions, detail }),
+    h(PageHeader, { t, state, actions, detail, skillActions }),
     h(
       'div',
       { className: 'buka-workers-body' },

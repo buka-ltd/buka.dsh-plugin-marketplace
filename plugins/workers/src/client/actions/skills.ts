@@ -9,10 +9,18 @@ import {
   AVAILABLE_ROUTE,
   INSTALL_ROUTE,
   SKILL_REMOVE_ROUTE,
+  SKILL_UPDATE_ALL_ROUTE,
+  SKILL_UPDATE_ROUTE,
   SKILLS_REPOS_ROUTE,
 } from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
-import type { Translate, Worker, WorkerClaude } from '../types.ts'
+import type {
+  Translate,
+  Worker,
+  WorkerClaude,
+  WorkerSkillUpdateAllSnapshot,
+  WorkerSkillUpdateSnapshot,
+} from '../types.ts'
 
 /**
  * 构造 skills 动作。
@@ -34,12 +42,17 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     setInstalling,
     selectedWorker,
     patchWorker,
+    reload,
     flash,
     corrupt,
     removing,
     setRemoving,
     setConfirmingSkill,
     setSkillError,
+    updatingSkills,
+    setUpdatingSkills,
+    updatingAllSkills,
+    setUpdatingAllSkills,
   } = state
 
   /**
@@ -211,6 +224,60 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
+   * 更新一个打工人的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
+   * 检查并更新目录，`modified` 会跳过。成功后刷新该打工人的 skills 列表。
+   */
+  async function updateWorkerSkills(worker: Worker) {
+    if (updatingSkills || updatingAllSkills) return
+    setUpdatingSkills(true)
+    setSkillError(null)
+    try {
+      const body = await requestJson<WorkerSkillUpdateSnapshot>(SKILL_UPDATE_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ id: worker.id }),
+      })
+      if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills })
+      const message = body.update?.message
+      flash(
+        'success',
+        typeof message === 'string' && message !== '' ? message : t('skillsUpToDate'),
+      )
+    } catch (failure) {
+      setSkillError({ message: failureText(t, failure), output: outputOf(failure) })
+    } finally {
+      setUpdatingSkills(false)
+    }
+  }
+
+  /**
+   * 列表页「更新全部打工人」：Host 只对智能体、目录存在且有 skill 的 worker
+   * 顺序执行，单个失败不中断；页面用汇总提示结果并刷新列表。
+   */
+  async function updateAllWorkers() {
+    if (updatingSkills || updatingAllSkills) return
+    setUpdatingAllSkills(true)
+    try {
+      const body = await requestJson<WorkerSkillUpdateAllSnapshot>(SKILL_UPDATE_ALL_ROUTE, {
+        method: 'POST',
+      })
+      const results = Array.isArray(body.results) ? body.results : []
+      const failed = Number(body.failed ?? results.filter((one) => one.ok === false).length)
+      const updated = Number(body.updated ?? 0)
+      const skipped = Number(body.skippedWorkers ?? 0)
+      const summary = t('updateAllSummary')
+        .replace('{n}', String(updated))
+        .replace('{f}', String(failed))
+        .replace('{s}', String(skipped))
+      flash(failed > 0 ? 'error' : 'success', summary)
+      reload()
+    } catch (failure) {
+      flash('error', `${t('errUpdateFailed')} ${failureText(t, failure)}`)
+    } finally {
+      setUpdatingAllSkills(false)
+    }
+  }
+
+  /**
    * 移除项目级 skill：Host 执行 `npx skills remove <skill> -y` 并返回新的
    * skills 列表；请求体字段是 `{ name, skill }`（路由契约）。
    *
@@ -243,5 +310,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     selectAllCandidates,
     installSelectedSkills,
     removeSkill,
+    updateWorkerSkills,
+    updateAllWorkers,
   }
 }
