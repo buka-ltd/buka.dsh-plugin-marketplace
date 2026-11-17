@@ -1,6 +1,10 @@
 /**
  * 流程图布局：岗位 / 内建开始结束节点按层从上到下排布，通道向下或从侧面绕行。
  *
+ * 回向通道走直角折线：从节点侧边出线，沿所有节点外侧的纵向车道回到目标侧边。
+ * 车道按纵向区间复用——互不重叠的回路共用一条车道——同一节点上的多个端口
+ * 沿侧边错开，避免两条线叠在一起。
+ *
  * 这里不依赖宿主一半的 `src/graph.ts`：坐标全部在浏览器侧按定义快照计算，
  * 服务端只给「岗位 + 通道 + 任务状态」。图不横向滚动，宽度超出时由外层整体缩放。
  */
@@ -107,13 +111,64 @@ const SIDE_PAD = 24
 const BACK_OFFSET = 20
 
 /** 多条回向通道之间的横向间隔。 */
-const BACK_STEP = 10
+const BACK_STEP = 12
 
 /** 同一对节点的多条前向通道之间的横向间隔。 */
 const LANE_STEP = 16
 
 /** 回向通道绕行额外留白（单侧）。 */
 const BACK_EXTRA = 12
+
+/** 同一节点侧边多个端口展开的最大高度。 */
+const BACK_PORT_SPAN = 20
+
+/** 同一节点侧边相邻端口之间的间距。 */
+const BACK_PORT_STEP = 10
+
+/** 同层回向通道绕行轨道之间的间距。 */
+const SAME_LAYER_STEP = 10
+
+/** 同层回向通道绕行轨道离行边的距离。 */
+const SAME_LAYER_GAP = 12
+
+/** 箭头离节点边缘的距离。 */
+const ARROW_INSET = 5
+
+/** 回向通道走哪一侧。 */
+type Side = 'left' | 'right'
+
+/** 一条回向通道的走线计划；坐标在布局完成后补进来。 */
+interface BackEdgePlan {
+  /** 在过滤后的通道列表里的下标。 */
+  index: number
+  from: GraphLayoutNode
+  to: GraphLayoutNode
+  side: Side
+  /** 该侧的第几条纵向车道；区间不重叠的回路会复用同一条。 */
+  lane: number
+  /** 纵向车道覆盖的 y 区间，用来判断两条回路能不能共用车道。 */
+  yLow: number
+  yHigh: number
+  /** 同层回绕的轨道序号。 */
+  track: number
+  /** 同层回绕走行的下一行还是上一行。 */
+  trackBelow: boolean
+  /** 同层回绕轨道的 y。 */
+  trackY: number
+  /** 出线 / 入线在节点侧边的纵向偏移。 */
+  sourceOffset: number
+  targetOffset: number
+  /** 同层回绕进入目标底边 / 顶边时的横向偏移，避开中间的箭头。 */
+  entryOffset: number
+}
+
+/** 回向通道的端口。 */
+interface BackPort {
+  plan: BackEdgePlan
+  role: 'source' | 'target'
+  /** 另一端节点的 y，用来决定端口在侧边上的顺序。 */
+  otherY: number
+}
 
 /**
  * 计算分层的上下坐标与通道路径。
@@ -172,11 +227,44 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
     }
   })
 
+  if (laidOut.length === 0) return { width, height, nodes: laidOut, edges: [] }
+
+  const rows = new Map<number, GraphLayoutNode[]>()
+  let nodeLeft = Number.POSITIVE_INFINITY
+  let nodeRight = Number.NEGATIVE_INFINITY
+  for (const node of laidOut) {
+    const group = rows.get(node.layer)
+    if (group === undefined) rows.set(node.layer, [node])
+    else group.push(node)
+    nodeLeft = Math.min(nodeLeft, node.x - node.width / 2)
+    nodeRight = Math.max(nodeRight, node.x + node.width / 2)
+  }
+
+  // 前向通道的贝塞尔控制点可能鼓出节点外沿；回向车道要绕到这些曲线之外。
+  const pairSeen = new Map<string, number>()
+  const forwardOffsets = new Map<number, number>()
+  let curveLeft = nodeLeft
+  let curveRight = nodeRight
+  for (const [index, edge] of edges.entries()) {
+    if (isBackEdge(edge, layers)) continue
+    const from = byId.get(edge.from)
+    const to = byId.get(edge.to)
+    if (from === undefined || to === undefined) continue
+    const pair = `${edge.from}->${edge.to}`
+    const total = pairCounts.get(pair) ?? 1
+    const seen = pairSeen.get(pair) ?? 0
+    pairSeen.set(pair, seen + 1)
+    const offset = total <= 1 ? 0 : (seen - (total - 1) / 2) * LANE_STEP
+    forwardOffsets.set(index, offset)
+    curveLeft = Math.min(curveLeft, Math.min(from.x, to.x) + Math.min(0, offset))
+    curveRight = Math.max(curveRight, Math.max(from.x, to.x) + Math.max(0, offset))
+  }
+
+  const plans = planBackEdges(edges, layers, byId, rows, layerKeys)
+
   const laidOutEdges: GraphLayoutEdge[] = []
   const usedKeys = new Map<string, number>()
-  const pairSeen = new Map<string, number>()
-  let backLane = 0
-  for (const edge of edges) {
+  for (const [index, edge] of edges.entries()) {
     const from = byId.get(edge.from)
     const to = byId.get(edge.to)
     if (from === undefined || to === undefined) continue
@@ -185,16 +273,20 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
     const seen = usedKeys.get(baseKey) ?? 0
     usedKeys.set(baseKey, seen + 1)
     const key = seen === 0 ? baseKey : `${baseKey}#${seen}`
-    const pair = pairCounts.get(baseKey) ?? 1
-    const lane = pairSeen.get(baseKey) ?? 0
-    pairSeen.set(baseKey, lane + 1)
     const types = Array.isArray(edge.types)
       ? edge.types.filter((type) => typeof type === 'string')
       : []
-    const geometry = back
-      ? backEdgeGeometry(from, to, backLane, width)
-      : forwardEdgeGeometry(from, to, pair <= 1 ? 0 : (lane - (pair - 1) / 2) * LANE_STEP)
-    if (back) backLane += 1
+    const plan = plans.get(index)
+    const laneX =
+      plan === undefined
+        ? 0
+        : plan.side === 'right'
+          ? curveRight + BACK_OFFSET + plan.lane * BACK_STEP
+          : curveLeft - BACK_OFFSET - plan.lane * BACK_STEP
+    const geometry =
+      back && plan !== undefined
+        ? backEdgeGeometry(plan, laneX)
+        : forwardEdgeGeometry(from, to, forwardOffsets.get(index) ?? 0)
     laidOutEdges.push({
       key,
       id: edge.id,
@@ -286,6 +378,274 @@ function assignLayers(nodes: GraphNodeInput[], edges: GraphEdgeInput[]): Map<str
 }
 
 /**
+ * 给回向通道选边、排车道、分端口。全部用节点中心坐标判断，结果与横向平移无关。
+ *
+ * @param edges
+ * @param layers
+ * @param byId
+ * @param rows
+ * @param layerKeys
+ * @returns 通道下标 → 走线计划
+ */
+function planBackEdges(
+  edges: GraphEdgeInput[],
+  layers: Map<string, number>,
+  byId: Map<string, GraphLayoutNode>,
+  rows: Map<number, GraphLayoutNode[]>,
+  layerKeys: number[],
+): Map<number, BackEdgePlan> {
+  const plans: BackEdgePlan[] = []
+  for (const [index, edge] of edges.entries()) {
+    if (!isBackEdge(edge, layers)) continue
+    const from = byId.get(edge.from)
+    const to = byId.get(edge.to)
+    if (from === undefined || to === undefined) continue
+    // 同层回连从目标底边 / 顶边进入，目标那一侧的兄弟节点不影响选边。
+    const sameLayer = from.layer === to.layer
+    const left = blockerCount(from, 'left', rows) + (sameLayer ? 0 : blockerCount(to, 'left', rows))
+    const right =
+      blockerCount(from, 'right', rows) + (sameLayer ? 0 : blockerCount(to, 'right', rows))
+    plans.push({
+      index,
+      from,
+      to,
+      side: left < right ? 'left' : 'right',
+      lane: 0,
+      yLow: Math.min(from.y, to.y),
+      yHigh: Math.max(from.y, to.y),
+      track: 0,
+      trackBelow: true,
+      trackY: 0,
+      sourceOffset: 0,
+      targetOffset: 0,
+      entryOffset: 0,
+    })
+  }
+
+  const maxLayer = layerKeys.at(-1) ?? 0
+  const trackCounts = new Map<number, number>()
+  for (const plan of plans) {
+    if (plan.from.layer !== plan.to.layer) continue
+    const count = trackCounts.get(plan.from.layer) ?? 0
+    trackCounts.set(plan.from.layer, count + 1)
+    plan.track = count
+    plan.trackBelow = plan.from.layer < maxLayer
+    const rowTop = plan.from.y - plan.from.height / 2
+    const rowBottom = plan.from.y + plan.from.height / 2
+    plan.trackY = plan.trackBelow
+      ? rowBottom + SAME_LAYER_GAP + count * SAME_LAYER_STEP
+      : rowTop - SAME_LAYER_GAP - count * SAME_LAYER_STEP
+    plan.yLow = Math.min(plan.from.y, plan.trackY)
+    plan.yHigh = Math.max(plan.from.y, plan.trackY)
+  }
+
+  assignBackLanes(plans)
+  assignBackPorts(plans)
+  assignSameLayerEntries(plans)
+
+  const byIndex = new Map<number, BackEdgePlan>()
+  for (const plan of plans) byIndex.set(plan.index, plan)
+  return byIndex
+}
+
+/**
+ * 节点同一行里，朝某一侧出线会穿过几个兄弟节点；越少越好。
+ *
+ * @param node
+ * @param side
+ * @param rows
+ * @returns
+ */
+function blockerCount(
+  node: GraphLayoutNode,
+  side: Side,
+  rows: Map<number, GraphLayoutNode[]>,
+): number {
+  const row = rows.get(node.layer) ?? []
+  let count = 0
+  for (const other of row) {
+    if (other.id === node.id) continue
+    if (side === 'right' ? other.x > node.x : other.x < node.x) count += 1
+  }
+  return count
+}
+
+/**
+ * 按纵向区间分配车道：短回路先占内圈，长回路套在外圈；区间不重叠的回路复用同一条。
+ *
+ * @param plans
+ */
+function assignBackLanes(plans: BackEdgePlan[]): void {
+  for (const side of ['left', 'right'] as const) {
+    const list = plans.filter((plan) => plan.side === side)
+    list.sort(
+      (left, right) =>
+        left.yHigh - left.yLow - (right.yHigh - right.yLow) ||
+        left.yLow - right.yLow ||
+        left.index - right.index,
+    )
+    const lanes: Array<Array<{ low: number; high: number }>> = []
+    for (const plan of list) {
+      let lane = 0
+      while (lane < lanes.length) {
+        const used = lanes[lane] ?? []
+        const free = used.every(
+          (interval) => plan.yHigh < interval.low || plan.yLow > interval.high,
+        )
+        if (free) break
+        lane += 1
+      }
+      if (lane === lanes.length) lanes.push([])
+      const used = lanes[lane]
+      if (used !== undefined) used.push({ low: plan.yLow, high: plan.yHigh })
+      plan.lane = lane
+    }
+  }
+}
+
+/**
+ * 同一节点的同侧端口沿侧边上下错开；顺序按另一端的位置排，避免两条线在节点口重叠。
+ *
+ * @param plans
+ */
+function assignBackPorts(plans: BackEdgePlan[]): void {
+  const groups = new Map<string, BackPort[]>()
+  for (const plan of plans) {
+    addBackPort(groups, plan, 'source', plan.from, plan.to.y)
+    if (plan.from.layer !== plan.to.layer) addBackPort(groups, plan, 'target', plan.to, plan.from.y)
+  }
+  for (const group of groups.values()) {
+    group.sort(
+      (left, right) =>
+        left.otherY - right.otherY ||
+        left.plan.index - right.plan.index ||
+        (left.role === right.role ? 0 : left.role === 'source' ? -1 : 1),
+    )
+    const count = group.length
+    const span = count <= 1 ? 0 : Math.min(BACK_PORT_SPAN, (count - 1) * BACK_PORT_STEP)
+    group.forEach((port, slot) => {
+      const offset = count <= 1 ? 0 : span / 2 - (span * slot) / (count - 1)
+      if (port.role === 'source') port.plan.sourceOffset = offset
+      else port.plan.targetOffset = offset
+    })
+  }
+}
+
+/** 把一个端口加进「节点 + 侧」的分组里。 */
+function addBackPort(
+  groups: Map<string, BackPort[]>,
+  plan: BackEdgePlan,
+  role: BackPort['role'],
+  node: GraphLayoutNode,
+  otherY: number,
+): void {
+  const key = `${node.id}\u0000${plan.side}`
+  const port: BackPort = { plan, role, otherY }
+  const group = groups.get(key)
+  if (group === undefined) groups.set(key, [port])
+  else group.push(port)
+}
+
+/**
+ * 同层回绕从目标的底边 / 顶边进入：入口偏离中点，避免和中间的向前箭头叠在一起；
+ * 同一个目标的多条回连分在两侧。
+ *
+ * @param plans
+ */
+function assignSameLayerEntries(plans: BackEdgePlan[]): void {
+  const counts = new Map<string, number>()
+  for (const plan of plans) {
+    if (plan.from.layer !== plan.to.layer) continue
+    const count = counts.get(plan.to.id) ?? 0
+    counts.set(plan.to.id, count + 1)
+    const reach = Math.min(16, plan.to.width / 4)
+    const side = plan.side === 'right' ? 1 : -1
+    plan.entryOffset = side * (count % 2 === 0 ? reach : -reach)
+  }
+}
+
+/**
+ * 回向通道：从侧边出线，沿节点外侧的车道折回目标侧边。全程只有水平/垂直线段。
+ *
+ * @param plan
+ * @param laneX 车道的 x
+ * @returns
+ */
+function backEdgeGeometry(
+  plan: BackEdgePlan,
+  laneX: number,
+): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
+  const { from, to, side } = plan
+  const sx = sidePortX(from, side, plan.sourceOffset)
+  const sy = from.y + plan.sourceOffset
+  if (from.layer === to.layer) return sameLayerBackGeometry(plan, laneX, sx, sy)
+
+  const tx = sidePortX(to, side, plan.targetOffset)
+  const ty = to.y + plan.targetOffset
+  const d = `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(ty)} L ${fmt(tx)} ${fmt(ty)}`
+  return {
+    d,
+    hit: d,
+    arrow: {
+      x: tx + (side === 'right' ? ARROW_INSET : -ARROW_INSET),
+      y: ty,
+      angle: side === 'right' ? 180 : 0,
+    },
+    labelAt: { x: laneX, y: (sy + ty) / 2 },
+  }
+}
+
+/**
+ * 同层回向通道：从侧边绕到下一行（没有下一行时绕到上一行）的轨道，再从目标底边 / 顶边进入。
+ *
+ * @param plan
+ * @param laneX
+ * @param sx 出线点 x
+ * @param sy 出线点 y
+ * @returns
+ */
+function sameLayerBackGeometry(
+  plan: BackEdgePlan,
+  laneX: number,
+  sx: number,
+  sy: number,
+): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
+  const { to } = plan
+  const tx = to.x + plan.entryOffset
+  const radius = to.height / 2
+  const straight = to.width / 2 - radius
+  const cap = Math.max(0, Math.abs(plan.entryOffset) - straight)
+  const reach = Math.sqrt(Math.max(0, radius * radius - cap * cap))
+  const edgeY = plan.trackBelow ? to.y + reach : to.y - reach
+  const d = `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`
+  return {
+    d,
+    hit: d,
+    arrow: {
+      x: tx,
+      y: plan.trackBelow ? edgeY + ARROW_INSET : edgeY - ARROW_INSET,
+      angle: plan.trackBelow ? -90 : 90,
+    },
+    labelAt: { x: (laneX + tx) / 2, y: plan.trackY },
+  }
+}
+
+/**
+ * 节点侧边的出线点：纵向偏移后落在胶囊形的圆弧上。
+ *
+ * @param node
+ * @param side
+ * @param offset 相对节点中心的纵向偏移
+ * @returns
+ */
+function sidePortX(node: GraphLayoutNode, side: Side, offset: number): number {
+  const radius = node.height / 2
+  const reach = Math.sqrt(Math.max(0, radius * radius - offset * offset))
+  const distance = node.width / 2 - radius + reach
+  return node.x + (side === 'right' ? distance : -distance)
+}
+
+/**
  * 向下的通道：从下层节点的底边中点连到目标节点的顶边中点；同一对节点的
  * 多条通道用 `offset` 错开车道。
  *
@@ -311,41 +671,6 @@ function forwardEdgeGeometry(
   const d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(p1.x)} ${fmt(p1.y)} ${fmt(p2.x)} ${fmt(p2.y)} ${fmt(x2)} ${fmt(y2)}`
   const point = cubicPoint(p0, p1, p2, p3, 0.8)
   const tangent = cubicTangent(p0, p1, p2, p3, 0.8)
-  return {
-    d,
-    hit: d,
-    arrow: { x: point.x, y: point.y, angle: angleOf(tangent) },
-    labelAt: cubicPoint(p0, p1, p2, p3, 0.5),
-  }
-}
-
-/**
- * 回向通道：从节点右侧绕出去，再回到目标的右侧，避免穿过中间的节点。
- *
- * @param from
- * @param to
- * @param lane 第几条回向通道，用来错开绕行线
- * @param width 画布宽度
- * @returns
- */
-function backEdgeGeometry(
-  from: GraphLayoutNode,
-  to: GraphLayoutNode,
-  lane: number,
-  width: number,
-): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
-  const x1 = from.x + from.width / 2
-  const y1 = from.y
-  const x2 = to.x + to.width / 2
-  const y2 = to.y
-  const laneX = Math.min(width - 8, Math.max(x1, x2) + BACK_OFFSET + lane * BACK_STEP)
-  const p0 = { x: x1, y: y1 }
-  const p1 = { x: laneX, y: y1 }
-  const p2 = { x: laneX, y: y2 }
-  const p3 = { x: x2, y: y2 }
-  const d = `M ${fmt(x1)} ${fmt(y1)} C ${fmt(p1.x)} ${fmt(p1.y)} ${fmt(p2.x)} ${fmt(p2.y)} ${fmt(x2)} ${fmt(y2)}`
-  const point = cubicPoint(p0, p1, p2, p3, 0.94)
-  const tangent = cubicTangent(p0, p1, p2, p3, 0.94)
   return {
     d,
     hit: d,
