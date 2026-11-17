@@ -1,3 +1,7 @@
 # Buka Skills
 
-在侧边栏新增「Skills」页面，顶部两个 Tab：已安装列出对所有会话生效的全局 skills，并按来源选择正确的卸载方式（交给 npx skills，或直接删除手工安装的目录）；收藏用来记下常用的 npx skills 来源（owner/repo、GitHub/GitLab 链接、任意 git 地址、本地绝对路径、包名；包名可收藏但不能展开），点「刷新」旁边的「收藏」按钮在对话框里填写仓库与备注，有网页地址的来源点标题打开仓库、可删除收藏；每个可列出的来源都会自动判定是 npx skills 仓库、Claude Code marketplace 仓库还是不可用并显示徽标，可用仓库还能展开成带缓存的 skills 树（marketplace 按插件分组），树里每个 skill 都有「全局安装」「安装到打工人」「安装到工作区」三个入口：分别交给 npx skills add 装到全局、某个智能体目录（.agents/skills 与 .claude/skills）或某个已注册工作区（.agents/skills）；目录行也有同样的三个入口，全局入口叫「全部安装」，把目录下每个 skill 依次装到全局（已装过的跳过）；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（目录要求其下全部 skill 都已安装），打工人与工作区每次在选择框里选目标，git 地址先浅克隆到 DSH home 缓存、本地路径直接扫描；同时通过 ctx.bukaSkills Host 服务把收藏仓库、仓库里的 skills 与 marketplace 插件列表开放给其他插件。
+在侧边栏新增「Skills」页面，顶部两个 Tab：已安装列出对所有会话生效的全局 skills，标出哪些由 `skills` 库管理，并可以检查更新、应用更新（只应用 `update`；`modified` 默认跳过，旧 Claude Code marketplace 安装显示 `unsupported-source`）；收藏用来记下常用的 skill 来源（owner/repo、GitHub/GitLab 链接、任意 git 地址、本地绝对路径、包名；包名可收藏但不能展开），点「刷新」旁边的「收藏」按钮填写仓库与备注，可删除收藏，并在卡片上标出「标准 npx 仓库」或「不可用」。
+
+只有仓库根 `skills/` 下（允许任意层级子目录）的 `SKILL.md` 算可安装来源；根 `SKILL.md`、`.claude/skills` 等 agent 目录与 Claude Code marketplace 都不认。所有收藏来源（包括 GitHub）都读到本地浅克隆缓存再扫描，GitHub 不再调用 API 列树；刷新克隆失败时保留旧克隆并给出警告。
+
+树里每个 skill、或目录行的「全部安装」，都能安装到全局（走 `skills` 库 API，lock 里保留原始来源）、某个打工人（`.agents/skills` 与 `.claude/skills`）或某个已注册工作区（`.agents/skills`）。安装 / 卸载 / 更新共用一条串行队列；`ctx.bukaSkills` Host 服务把收藏仓库、仓库里的 skills 与按目录检查 / 更新的能力开放给其他插件，workers 页面因此可以更新单个打工人或按顺序更新全部打工人。插件把 `skills@1.9.0` 固定为运行时依赖，全程不再 spawn `npx`，库与 CLI 调用都关闭遥测。
