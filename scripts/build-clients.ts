@@ -34,7 +34,13 @@ const BASELINE_MODULES = ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/
  */
 const HARNESS_MODULES = /^@deepseek-ai\//
 
-/** 由 DSH 运行时提供的包：宿主一半只引用、不打包。 */
+/**
+ * 宿主一半保持外部引用、不打包进来的包：
+ * - `@deepseek-ai/*`：DSH 自己提供的模块；
+ * - `node:*`：Node 内建模块；
+ * - `skills`：插件在 `dependencies` 里声明的运行时依赖（库 API 与自带 CLI），
+ *   由用户的包管理器解析，不能内联进插件产物。
+ */
 const HOST_EXTERNAL = [/^@deepseek-ai\//, /^node:/, /^skills(?:\/|$)/]
 
 interface PluginManifest {
