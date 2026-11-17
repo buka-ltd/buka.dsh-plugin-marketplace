@@ -6,9 +6,7 @@
  * 30 分钟；git 来源的克隆目录另由 `src/git-source.ts` 管理。缓存是**可重建的
  * 易失数据**：文件损坏、版本不符或单条结构不合法时都直接当作未命中并重拉重写，
  * 不像收藏文件那样拒绝覆盖。写入仍是原子写（同目录临时文件 + rename），避免
- * 留下半个文件。marketplace 的清单（`.claude-plugin/marketplace.json`）也随
- * 完整树一起缓存，这样「列出市场里有哪些插件」不必重拉：树里没有 skill 的插件
- * 不会建节点，但清单仍在，调用方可以列出它们并给一个空 skill 列表。
+ * 留下半个文件。
  *
  * @module @buka/dsh-plugin-skills/repo/cache
  */
@@ -19,25 +17,19 @@ import path from 'node:path'
 import { writeJsonAtomic } from '@buka/plugin-kit'
 import { repoKey } from '../repo-store.ts'
 import type { Homes } from '../skill-store.ts'
-import { normalizeCachedMarketplace } from './marketplace.ts'
 import type { CacheEntry, RepoKind, TreeNode } from './types.ts'
 
 /**
- * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v1 没有 kind / complete，v2 没有
- * marketplace 清单，v3 只认 GitHub 来源，v4 的 npx 树按物理目录分组、与
- * `npx skills` 的清单不一致）。
+ * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v5 及更早版本支持 Claude Code
+ * marketplace 与物理目录分组，与现在的「只认根 skills/」不一致）。
  */
-export const REPO_SKILLS_CACHE_VERSION = 5
+export const REPO_SKILLS_CACHE_VERSION = 6
 
-/** 缓存有效期：30 分钟。GitHub 的树变化不频繁，过期后按需重拉。 */
+/** 缓存有效期：30 分钟。仓库树变化不频繁，过期后按需重拉。 */
 export const REPO_SKILLS_CACHE_TTL_MS = 30 * 60 * 1000
 
 /** 合法的仓库分类；与缓存条目的 `kind` 字段同值。 */
-const REPO_KINDS: ReadonlySet<string> = new Set([
-  'npx-skills',
-  'claude-code-marketplace',
-  'unavailable',
-])
+const REPO_KINDS: ReadonlySet<string> = new Set(['npx-skills', 'unavailable'])
 
 /**
  * 缓存文件的绝对路径。
@@ -52,7 +44,6 @@ export function repoSkillsCacheFile(homes: Pick<Homes, 'dshHome'>): string {
  * 读缓存；文件不存在、损坏、版本不符或结构不对都返回空对象。
  *
  * 缓存随时可以重建，所以这里不区分「坏文件」与「没有文件」，也不报错。
- * v1 的缓存没有 `kind` / `complete`，因版本不符自动丢弃并重建。
  */
 export async function readCache(file: string): Promise<Record<string, CacheEntry>> {
   let parsed: unknown
@@ -86,10 +77,8 @@ export async function readCache(file: string): Promise<Record<string, CacheEntry
 /**
  * 校验并复制一条缓存记录；结构不合法时返回 null。
  *
- * 除旧字段外还要求 `kind` 属于三种仓库类型、`complete` 是布尔值：缺字段的
- * v1 形状或手改坏的条目都按未命中处理，整条丢弃。`marketplace` 是 v3 新增的
- * 清单快照：缺失或为 null 视为没有清单（兼容手写的旧形状缓存），存在但不是
- * 合法清单时整条丢弃，避免把损坏数据当成插件列表返回。
+ * 除旧字段外还要求 `kind` 属于两种仓库类型、`complete` 是布尔值：缺字段的
+ * 旧形状或手改坏的条目都按未命中处理，整条丢弃。
  */
 function normalizeCacheEntry(raw: unknown): CacheEntry | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -104,10 +93,6 @@ function normalizeCacheEntry(raw: unknown): CacheEntry | null {
   }
   if (typeof record.complete !== 'boolean') return null
   if (!isValidTree(record.root)) return null
-  const marketplace = normalizeCachedMarketplace(record.marketplace)
-  if (marketplace === null && record.marketplace !== null && record.marketplace !== undefined) {
-    return null
-  }
   return {
     source: record.source,
     kind: record.kind as RepoKind,
@@ -118,7 +103,6 @@ function normalizeCacheEntry(raw: unknown): CacheEntry | null {
     root: record.root,
     skills: record.skills,
     complete: record.complete,
-    marketplace,
   }
 }
 
@@ -185,7 +169,7 @@ export async function writeProbeCache(file: string, id: string, entry: CacheEntr
  * 缓存写队列：同一个缓存文件的「读最新内容 → 改 → 原子写」串行执行。
  *
  * 不加队列时，两个并发探测各自用开始时读到的旧快照整文件重写，后写的会
- * 悄悄丢掉先写的条目。缓存丢了只会多打一次 GitHub，但没必要。
+ * 悄悄丢掉先写的条目。缓存丢了只多拉一次仓库，但没必要。
  */
 const cacheWrites = new Map<string, Promise<void>>()
 

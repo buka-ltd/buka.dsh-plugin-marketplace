@@ -55,11 +55,15 @@ export interface CloneHomes {
   readonly dshHome: string
 }
 
-/** 克隆成功：目录与 HEAD sha。 */
+/** 克隆成功：目录、HEAD sha 与刷新失败时的降级提示。 */
 export interface GitCloneOk {
   readonly ok: true
   readonly dir: string
   readonly sha: string
+  /** 刷新（fetch + reset）失败、仍在用旧克隆时为 true。 */
+  readonly stale?: boolean
+  /** 刷新失败的原因；只在 `stale` 时出现。 */
+  readonly warning?: string
 }
 
 /** 克隆失败：本机没有 git，或 git 命令失败。 */
@@ -135,7 +139,15 @@ async function prepareClone({
 }): Promise<GitCloneResult> {
   try {
     if (await isDirectory(dir)) {
-      if (update === true) await updateClone(dir, runGit)
+      if (update === true) {
+        const warning = await updateClone(dir, runGit)
+        return {
+          ok: true,
+          dir,
+          sha: await headSha(dir, runGit),
+          ...(warning === null ? {} : { stale: true, warning }),
+        }
+      }
       return { ok: true, dir, sha: await headSha(dir, runGit) }
     }
 
@@ -168,14 +180,18 @@ async function prepareClone({
 }
 
 /**
- * 尝试更新已有克隆；失败时静默保留旧克隆（离线可用）。
+ * 尝试更新已有克隆；失败时保留旧克隆（离线可用），返回失败原因。
+ *
+ * @returns 成功时 null，失败时可展示的警告文案
  */
-async function updateClone(dir: string, runGit: GitRunner): Promise<void> {
+async function updateClone(dir: string, runGit: GitRunner): Promise<string | null> {
   try {
     await runGit(['-C', dir, 'fetch', '--depth', '1', 'origin'], { cwd: dir })
     await runGit(['-C', dir, 'reset', '--hard', 'FETCH_HEAD'], { cwd: dir })
-  } catch {
-    // 远端不可达时就继续用旧克隆：缓存的意义是让离线也能展开。
+    return null
+  } catch (error) {
+    // 远端不可达时继续用旧克隆：缓存的意义是让离线也能展开；原因交给页面提示。
+    return `Failed to refresh the local clone; showing the cached copy: ${gitFailure(error).message}`
   }
 }
 

@@ -1,21 +1,18 @@
 /**
- * 「GitHub 仓库 skills 列表」拉取、缓存与建树的单测。
+ * 「收藏仓库里有哪些 skills」的发现、缓存与刷新单测。
  *
- * 本地绝对路径与任意 git 地址的读取在 `skills-repos-local-git.test.mjs` 单独覆盖；
- * 这里只验证 GitHub 行为不变，以及来源种类变化后的错误码：web / package 仍是
- * `unsupported-source`，git 地址在没有 git 时返回 `git-unavailable`。
+ * 收藏只认仓库根 `skills/` 下（任意层级子目录）的 `SKILL.md`：根 `SKILL.md`、
+ * agent 目录与 Claude Code marketplace 布局都不算可安装来源。GitHub 与其它
+ * git 远端都走本地浅克隆（这里注入假 git runner，不联网），本地路径直接扫描。
  *
- * 全部走注入的 `fetchImpl`，不访问真实网络；缓存目录用临时 DSH home，
- * 每个用例结束清理。重点覆盖：
+ * 重点覆盖：
  *
- * - 与 `npx skills` 一致的发现规则、平铺展示与清单插件分组；
- * - 仓库分类顺序：npx skills → Claude Code marketplace → 不可用；
- * - marketplace 清单解析、本地插件分组与远程/非法 source 的跳过；
- * - `probeRepoKind()` 的轻量探测与「不降级完整缓存」；
- * - skill 的排序与完整仓库路径；
- * - TTL、`refresh`、损坏缓存与 v1 缓存的重建；
- * - 各错误码与分支回退；
- * - token 来源与 SKILL.md 拉取的并发上限。
+ * - 发现过滤与物理目录建树、frontmatter 元数据、内部 skill；
+ * - GitHub 只克隆不调用 API、来源收敛成同一缓存键；
+ * - TTL / refresh / 刷新失败保留旧克隆并返回 warning；
+ * - 不可用仓库的缓存与错误码；
+ * - `probeRepoKind()` 的轻量结论与「不降级完整树」；
+ * - 缓存版本与损坏条目重建。
  */
 
 import assert from 'node:assert/strict'
@@ -26,32 +23,16 @@ import test from 'node:test'
 
 import {
   fetchRepoSkills,
-  githubRepoOf,
   probeRepoKind,
   REPO_SKILLS_CACHE_TTL_MS,
   REPO_SKILLS_CACHE_VERSION,
   repoSkillsCacheFile,
 } from '../plugins/skills/src/repo-skills.ts'
 import { repoKey } from '../plugins/skills/src/repo-store.ts'
-import {
-  parseFrontmatter,
-  parseFrontmatterDescription,
-  parseFrontmatterInternal,
-} from '../plugins/skills/src/skill-store.ts'
-
-/** GitHub tree API 的 URL，测试里拼断言用。 */
-function treeUrl(owner, repo, branch, host = 'api.github.com') {
-  return `https://${host}/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`
-}
-
-/** raw.githubusercontent.com 的 URL，测试里拼断言用。 */
-function rawUrl(owner, repo, branch, repoPath) {
-  return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${repoPath}`
-}
 
 /** 建一个临时 DSH home，并在测试结束后删除。 */
 async function tempHomes(t) {
-  const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-repo-skills-'))
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-repo-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   return {
     root,
@@ -59,67 +40,19 @@ async function tempHomes(t) {
   }
 }
 
-/**
- * 按 URL 分派的假 fetch。
- *
- * `trees[branch]` 可以是：
- * - `{ tree, sha, truncated }`：成功的 tree 响应；
- * - `{ status, headers }`：指定状态码（如 403/500）；
- * - `{ raw }`：返回坏 JSON；
- * - `{ throw }`：直接抛错。
- * `contents[repoPath]` 是 raw 文件原文（SKILL.md 或 marketplace.json）；
- * 缺失时返回 404，`{ status }` 指定 HTTP 状态码，`{ throw }` 直接抛错。
- */
-function createFetch({ owner = 'Acme', repo = 'Demo', trees = {}, contents = {} } = {}) {
-  const calls = []
-  const fetchImpl = async (url, init = {}) => {
-    calls.push({ url, init })
-
-    // GitHub 的 owner/repo 不区分大小写；mock 也跟着不区分，避免测试里
-    // 来源大小写和 mock 配置不一致时出现「假」的网络失败。
-    const apiPrefix = `https://api.github.com/repos/${owner}/${repo}/git/trees/`
-    if (url.toLowerCase().startsWith(apiPrefix.toLowerCase())) {
-      const branch = decodeURIComponent(url.slice(apiPrefix.length).split('?')[0])
-      const spec = trees[branch]
-      if (spec === undefined) return new Response(null, { status: 404 })
-      if (spec.throw !== undefined) throw new Error(String(spec.throw))
-      if (spec.status !== undefined) {
-        return new Response(null, { status: spec.status, headers: spec.headers ?? {} })
-      }
-      if (spec.raw !== undefined) return new Response(spec.raw, { status: 200 })
-      return new Response(
-        JSON.stringify({
-          sha: spec.sha ?? 'tree-sha',
-          tree: spec.tree,
-          truncated: spec.truncated === true,
-        }),
-        {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        },
-      )
-    }
-
-    const rawPrefix = `https://raw.githubusercontent.com/${owner}/${repo}/`
-    if (url.toLowerCase().startsWith(rawPrefix.toLowerCase())) {
-      const rest = url.slice(rawPrefix.length)
-      const slash = rest.indexOf('/')
-      const repoPath = decodeURIComponent(slash < 0 ? '' : rest.slice(slash + 1))
-      const content = contents[repoPath]
-      if (content === undefined) return new Response(null, { status: 404 })
-      if (typeof content === 'object' && content !== null) {
-        if (content.throw !== undefined) throw new Error(String(content.throw))
-        return new Response(null, { status: content.status ?? 404 })
-      }
-      return new Response(content, { status: 200 })
-    }
-
-    throw new Error(`unexpected fetch: ${url}`)
-  }
-  return { fetchImpl, calls }
+/** 在 fixture 目录里按相对路径写文件，自动建父目录。 */
+async function writeRel(root, relPath, content) {
+  const abs = path.join(root, ...relPath.split('/'))
+  await fs.mkdir(path.dirname(abs), { recursive: true })
+  await fs.writeFile(abs, content)
 }
 
-/** 读回缓存文件；不存在时返回 null。 */
+/** 写一个最小 SKILL.md。 */
+function skillFile(name, description = `${name} description`, extra = '') {
+  return `---\nname: ${name}\ndescription: ${description}\n${extra}---\n\n# ${name}\n`
+}
+
+/** 读回缓存文件；不存在或损坏时返回 null。 */
 async function readCacheFile(homes) {
   try {
     return JSON.parse(await fs.readFile(repoSkillsCacheFile(homes), 'utf8'))
@@ -128,1150 +61,337 @@ async function readCacheFile(homes) {
   }
 }
 
-test('GitHub 仓库：发现 SKILL.md、按 npx 清单平铺、排序并解析元数据', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = [
-    { type: 'blob', path: 'SKILL.md' },
-    { type: 'blob', path: 'README.md' },
-    { type: 'blob', path: 'skills/find-skills/SKILL.md' },
-    { type: 'blob', path: 'skills/core/firecrawl-agent/SKILL.md' },
-    { type: 'blob', path: 'skills/Workflows/batch/SKILL.md' },
-    // 有优先级结果时不会被兜底规则收进来。
-    { type: 'blob', path: '.automations/daily/SKILL.md' },
-  ]
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { sha: 'tree-sha', tree } },
-    contents: {
-      'SKILL.md': '---\ndescription: Root skill\n---\n\n# Demo\n',
-      'skills/find-skills/SKILL.md':
-        '---\nname: find-skills\ndescription: "Find the right skill"\n---\n',
-      'skills/core/firecrawl-agent/SKILL.md':
-        '---\nname: firecrawl-agent\ndescription: >\n  Agentic\n  browsing\n---\n',
-      // batch 故意不提供原文：模拟 SKILL.md 拉取失败，名称回退目录名。
-    },
-  })
-  const now = 1_700_000_000_000
+/**
+ * 假 git runner：clone 时把 fixture 复制到目标目录；fetch 可按需失败。
+ *
+ * @param {{ fixture?: string, sha?: string, failFetch?: string }} [options]
+ */
+function createGit({ fixture, sha = 'git-sha', failFetch } = {}) {
+  const calls = []
+  const runGit = async (args, options = {}) => {
+    calls.push({ args, options })
+    if (args[0] === 'clone') {
+      const separator = args.indexOf('--')
+      const target = args[separator + 2]
+      if (fixture !== undefined) await fs.cp(fixture, target, { recursive: true })
+      else await fs.mkdir(target, { recursive: true })
+      return { stdout: '', stderr: '' }
+    }
+    if (args.includes('rev-parse')) return { stdout: `${sha}\n`, stderr: '' }
+    if (failFetch !== undefined && (args.includes('fetch') || args.includes('reset'))) {
+      const error = new Error(failFetch)
+      error.stderr = failFetch
+      throw error
+    }
+    return { stdout: '', stderr: '' }
+  }
+  return {
+    runGit,
+    calls,
+    cloneCalls: () => calls.filter((one) => one.args[0] === 'clone'),
+  }
+}
 
-  const result = await fetchRepoSkills({
-    homes,
-    source: 'Acme/Demo',
-    fetchImpl,
-    token: 'test-token',
-    now,
-  })
+/** 建一个标准的 npx 仓库 fixture。 */
+async function makeRepo(root) {
+  await writeRel(root, 'README.md', '# demo\n')
+  await writeRel(root, 'SKILL.md', skillFile('root-should-not-count'))
+  await writeRel(root, '.claude/skills/agent-only/SKILL.md', skillFile('agent-only'))
+  await writeRel(root, '.codex/skills/agent-only/SKILL.md', skillFile('agent-only'))
+  await writeRel(root, 'skills/top/SKILL.md', skillFile('top', 'Top level skill'))
+  await writeRel(root, 'skills/deep/nested/SKILL.md', skillFile('nested', 'Nested skill'))
+  await writeRel(
+    root,
+    'skills/notes.md',
+    '---\nname: not-a-skill\ndescription: plain markdown\n---\n',
+  )
+  await writeRel(
+    root,
+    'skills/internal/SKILL.md',
+    skillFile('internal', 'Hidden', 'metadata:\n  internal: true\n'),
+  )
+  return root
+}
 
+test('发现：只认仓库根 skills/ 下任意深度的 SKILL.md，根与 agent 目录不算', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const git = createGit({ fixture })
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'npx-skills')
-  assert.equal(result.source, 'Acme/Demo')
-  assert.equal(result.ref, 'HEAD')
-  assert.equal(result.sha, 'tree-sha')
-  assert.equal(result.fetchedAt, now)
-  assert.equal(result.cached, false)
-  assert.equal(result.truncated, false)
-  assert.equal(result.skills, 4)
-  // 与 `npx skills add --list` 一致：catalog 布局里的 bucket（core / Workflows）
-  // 只对发现有作用，不进展示树；skill 全部平铺并按名称排序。
-  assert.deepEqual(result.root, [
-    {
-      type: 'skill',
-      name: 'batch',
-      path: 'skills/Workflows/batch/SKILL.md',
-      description: '',
-    },
-    { type: 'skill', name: 'Demo', path: 'SKILL.md', description: 'Root skill' },
-    {
-      type: 'skill',
-      name: 'find-skills',
-      path: 'skills/find-skills/SKILL.md',
-      description: 'Find the right skill',
-    },
-    {
-      type: 'skill',
-      name: 'firecrawl-agent',
-      path: 'skills/core/firecrawl-agent/SKILL.md',
-      description: 'Agentic browsing',
-    },
-  ])
+  assert.equal(result.skills, 2, '内部 skill 不列，根 / agent 目录 / 普通 .md 也不算')
 
-  // 被过滤掉的 .automations 不应出现在树的任何一层。
-  const names = []
-  const walk = (nodes) => {
-    for (const node of nodes) {
-      names.push(node.name)
-      if (node.type === 'dir') walk(node.children)
-    }
+  // GitHub 转成 HTTPS 克隆地址，不再有 API / raw 请求。
+  const clone = git.cloneCalls()[0]
+  assert.ok(clone, '应该走 git clone')
+  assert.ok(clone.args.includes('https://github.com/acme/demo.git'))
+  assert.ok(clone.args.includes('--depth'))
+  assert.ok(clone.args.includes('1'))
+  assert.ok(clone.args.includes('--single-branch'))
+  assert.ok(clone.args.includes('--no-tags'))
+
+  // 展示树保留物理目录结构：skills/top 与 skills/deep/nested。
+  const top = result.root.find((node) => node.type === 'dir' && node.name === 'top')
+  assert.ok(top, '顶层目录 top 应在根上')
+  assert.equal(top.path, 'skills/top')
+  assert.deepEqual(
+    top.children.map((node) => ({ name: node.name, path: node.path })),
+    [{ name: 'top', path: 'skills/top/SKILL.md' }],
+  )
+  const deep = result.root.find((node) => node.type === 'dir' && node.name === 'deep')
+  assert.ok(deep)
+  const nested = deep.children[0]
+  assert.equal(nested.type, 'dir')
+  assert.equal(nested.children[0].name, 'nested')
+  assert.equal(nested.children[0].description, 'Nested skill')
+})
+
+test('GitHub 简写与链接收敛成同一来源与缓存键，命中缓存不重复克隆', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const git = createGit({ fixture })
+
+  const first = await fetchRepoSkills({ homes, source: 'Acme/Demo', runGit: git.runGit })
+  assert.equal(first.ok, true)
+  assert.equal(first.source, 'Acme/Demo')
+  assert.equal(git.cloneCalls().length, 1)
+
+  const second = await fetchRepoSkills({
+    homes,
+    source: 'https://github.com/acme/demo.git',
+    runGit: git.runGit,
+  })
+  assert.equal(second.ok, true)
+  if (second.ok) {
+    assert.equal(second.cached, true, '链接形式应命中同一份缓存')
+    assert.equal(second.source.toLowerCase(), 'acme/demo')
   }
-  walk(result.root)
-  assert.equal(names.includes('daily'), false)
-
-  const apiCalls = calls.filter((one) => one.url.startsWith('https://api.github.com/'))
-  assert.equal(apiCalls.length, 1)
-  assert.equal(apiCalls[0].url, treeUrl('Acme', 'Demo', 'HEAD'))
-  assert.equal(apiCalls[0].init.headers.Accept, 'application/vnd.github.v3+json')
-  assert.equal(apiCalls[0].init.headers['User-Agent'], 'buka-skills')
-  assert.equal(apiCalls[0].init.headers.Authorization, 'Bearer test-token')
-  assert.ok(apiCalls[0].init.signal instanceof AbortSignal)
-
-  const rawCalls = calls.filter((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
-  assert.deepEqual(rawCalls.map((one) => one.url).sort(), [
-    'https://raw.githubusercontent.com/Acme/Demo/HEAD/SKILL.md',
-    'https://raw.githubusercontent.com/Acme/Demo/HEAD/skills/Workflows/batch/SKILL.md',
-    'https://raw.githubusercontent.com/Acme/Demo/HEAD/skills/core/firecrawl-agent/SKILL.md',
-    'https://raw.githubusercontent.com/Acme/Demo/HEAD/skills/find-skills/SKILL.md',
-  ])
-  assert.equal(rawCalls[0].init.headers.Authorization, 'Bearer test-token')
-  assert.ok(rawCalls[0].init.signal instanceof AbortSignal)
+  assert.equal(git.cloneCalls().length, 1)
 
   const cache = await readCacheFile(homes)
-  assert.equal(
-    repoSkillsCacheFile(homes),
-    path.join(homes.dshHome, 'buka-skills', 'cache', 'repo-skills.json'),
-  )
   assert.equal(cache.version, REPO_SKILLS_CACHE_VERSION)
-  const entry = cache.entries[repoKey('Acme/Demo')]
-  assert.equal(entry.source, 'Acme/Demo')
-  assert.equal(entry.kind, 'npx-skills')
-  assert.equal(entry.complete, true)
-  assert.equal(entry.ref, 'HEAD')
-  assert.equal(entry.sha, 'tree-sha')
-  assert.equal(entry.fetchedAt, now)
-  assert.equal(entry.skills, 4)
-  assert.deepEqual(entry.root, result.root)
+  assert.deepEqual(Object.keys(cache.entries), [repoKey('Acme/Demo')])
 })
 
-test('GitHub 链接与 owner/repo 收敛成同一来源和缓存键', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }], truncated: true } },
-  })
+test('缓存：TTL 内命中、refresh 与过期后重新 fetch 克隆', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const git = createGit({ fixture })
 
-  const first = await fetchRepoSkills({
+  await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit, now: 1_000_000 })
+  const fresh = await fetchRepoSkills({
     homes,
-    source: 'https://github.com/Acme/Demo',
-    fetchImpl,
-    now: 1,
+    source: 'acme/demo',
+    runGit: git.runGit,
+    now: 1_000_000 + REPO_SKILLS_CACHE_TTL_MS - 1,
   })
-  assert.equal(first.ok, true)
-  assert.equal(first.kind, 'npx-skills')
-  assert.equal(first.source, 'Acme/Demo')
-  assert.equal(first.truncated, true)
-  assert.equal(calls.length, 2, '一次 tree + 一次 SKILL.md')
-
-  const second = await fetchRepoSkills({ homes, source: 'Acme/Demo', fetchImpl, now: 2 })
-  assert.equal(second.cached, true)
-  assert.equal(second.kind, 'npx-skills')
-  assert.equal(second.fetchedAt, 1)
-  assert.equal(second.truncated, true)
-  assert.equal(calls.length, 2)
-})
-
-test('缓存：TTL 内命中、refresh 强制重拉、过期后重拉', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { sha: 'sha-1', tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] } },
-    contents: { 'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n' },
-  })
-  const now = 1_700_000_000_000
-
-  const first = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now })
-  assert.equal(first.ok, true)
-  assert.equal(first.kind, 'npx-skills')
-  assert.equal(first.cached, false)
-  assert.equal(calls.length, 2)
-
-  const second = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: now + 1 })
-  assert.equal(second.ok, true)
-  assert.equal(second.cached, true)
-  assert.equal(second.fetchedAt, first.fetchedAt)
-  assert.equal(second.ref, 'HEAD')
-  assert.deepEqual(second.root, first.root)
-  assert.equal(calls.length, 2, '缓存命中不应再发请求')
+  assert.equal(fresh.ok, true)
+  if (fresh.ok) assert.equal(fresh.cached, true)
+  assert.equal(git.calls.filter((one) => one.args.includes('fetch')).length, 0)
 
   const refreshed = await fetchRepoSkills({
     homes,
     source: 'acme/demo',
-    fetchImpl,
-    now: now + 2,
+    runGit: git.runGit,
     refresh: true,
+    now: 1_000_000,
   })
   assert.equal(refreshed.ok, true)
-  assert.equal(refreshed.cached, false)
-  assert.equal(refreshed.fetchedAt, now + 2)
-  assert.equal(calls.length, 4)
+  if (refreshed.ok) assert.equal(refreshed.cached, false)
+  assert.equal(git.calls.filter((one) => one.args.includes('fetch')).length, 1)
 
   const expired = await fetchRepoSkills({
     homes,
     source: 'acme/demo',
-    fetchImpl,
-    now: now + 2 + REPO_SKILLS_CACHE_TTL_MS,
+    runGit: git.runGit,
+    now: 1_000_000 + REPO_SKILLS_CACHE_TTL_MS,
   })
   assert.equal(expired.ok, true)
-  assert.equal(expired.cached, false)
-  assert.equal(calls.length, 6)
+  assert.equal(git.calls.filter((one) => one.args.includes('fetch')).length, 2)
 })
 
-test('错误码：非法来源、非 GitHub、404、限流与网络失败', async (t) => {
-  const { homes } = await tempHomes(t)
-  const called = []
-  const neverFetch = async (url) => {
-    called.push(url)
-    throw new Error('network should not be called')
-  }
+test('刷新克隆失败：保留旧克隆继续展示，并在 warning 里报错', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const good = createGit({ fixture })
+  await fetchRepoSkills({ homes, source: 'acme/demo', runGit: good.runGit })
 
-  for (const source of ['', '   ', 42, null, undefined, 'x/'.repeat(200)]) {
-    const result = await fetchRepoSkills({ homes, source, fetchImpl: neverFetch })
-    assert.equal(result.ok, false)
-    assert.equal(result.code, 'invalid-source', String(source))
-    assert.equal(typeof result.message, 'string')
-  }
-  for (const source of ['@scope/pkg', 'notion', 'https://github.com/a/b/tree/main']) {
-    const result = await fetchRepoSkills({ homes, source, fetchImpl: neverFetch })
-    assert.equal(result.ok, false)
-    assert.equal(result.code, 'unsupported-source', source)
-  }
-  // 非 GitHub 的 git 地址会走 clone：本机没有 git 时返回 git-unavailable，
-  // 仍然不碰 fetch。
-  const noGit = async () => {
-    throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' })
-  }
-  const gitMissing = await fetchRepoSkills({
-    homes,
-    source: 'https://gitlab.com/a/b',
-    fetchImpl: neverFetch,
-    runGit: noGit,
-  })
-  assert.equal(gitMissing.ok, false)
-  assert.equal(gitMissing.code, 'git-unavailable')
-  assert.equal(called.length, 0, '非法/不支持的来源不应该发请求')
-
-  const missing = createFetch({ trees: {} })
-  const notFound = await fetchRepoSkills({
+  // 远端改动后刷新失败：内容仍是旧克隆，warning 带 git 的 stderr。
+  await writeRel(fixture, 'skills/added/SKILL.md', skillFile('added'))
+  const failing = createGit({ fixture, failFetch: 'fatal: unable to access remote' })
+  const refreshed = await fetchRepoSkills({
     homes,
     source: 'acme/demo',
-    fetchImpl: missing.fetchImpl,
+    runGit: failing.runGit,
+    refresh: true,
   })
-  assert.equal(notFound.ok, false)
-  assert.equal(notFound.code, 'repo-not-found')
-  assert.deepEqual(
-    missing.calls.map((one) => one.url),
-    [
-      treeUrl('acme', 'demo', 'HEAD'),
-      treeUrl('acme', 'demo', 'main'),
-      treeUrl('acme', 'demo', 'master'),
-    ],
+  assert.equal(refreshed.ok, true)
+  if (refreshed.ok) {
+    assert.match(String(refreshed.warning), /unable to access remote/u)
+    assert.equal(
+      refreshed.root.some((node) => node.name === 'added'),
+      false,
+      '刷新失败时仍用旧克隆内容',
+    )
+  }
+})
+
+test('不可用仓库：根 SKILL.md / agent 目录 / marketplace 布局都返回 repo-unavailable 并缓存', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = path.join(root, 'fixture')
+  await writeRel(fixture, 'SKILL.md', skillFile('root-only'))
+  await writeRel(fixture, '.claude/skills/only/SKILL.md', skillFile('agent-only'))
+  await writeRel(
+    fixture,
+    '.claude-plugin/marketplace.json',
+    JSON.stringify({ name: 'm', plugins: [{ name: 'p', source: './plugins/p' }] }),
   )
+  await writeRel(fixture, 'plugins/p/skills/x/SKILL.md', skillFile('x'))
+  const git = createGit({ fixture })
 
-  const limited = createFetch({
-    trees: { HEAD: { status: 403, headers: { 'x-ratelimit-remaining': '0' } } },
-  })
-  const rateLimited = await fetchRepoSkills({
-    homes,
-    source: 'acme/demo',
-    fetchImpl: limited.fetchImpl,
-  })
-  assert.equal(rateLimited.ok, false)
-  assert.equal(rateLimited.code, 'rate-limited')
-  assert.equal(limited.calls.length, 1, '限流后不再尝试其它分支')
-
-  const forbidden = createFetch({ trees: { HEAD: { status: 403 } } })
-  const forbiddenResult = await fetchRepoSkills({
-    homes,
-    source: 'acme/demo',
-    fetchImpl: forbidden.fetchImpl,
-  })
-  assert.equal(forbiddenResult.code, 'fetch-failed')
-  assert.equal(forbidden.calls.length, 1)
-
-  const offline = async () => {
-    throw new Error('offline')
-  }
-  const offlineResult = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl: offline })
-  assert.equal(offlineResult.ok, false)
-  assert.equal(offlineResult.code, 'fetch-failed')
-
-  const broken = createFetch({ trees: { HEAD: { status: 500 } } })
-  const brokenResult = await fetchRepoSkills({
-    homes,
-    source: 'acme/demo',
-    fetchImpl: broken.fetchImpl,
-  })
-  assert.equal(brokenResult.code, 'fetch-failed')
-  assert.equal(broken.calls.length, 1, '5xx 后不再尝试其它分支')
-
-  const badJson = createFetch({ trees: { HEAD: { raw: 'not json' } } })
-  const badJsonResult = await fetchRepoSkills({
-    homes,
-    source: 'acme/demo',
-    fetchImpl: badJson.fetchImpl,
-  })
-  assert.equal(badJsonResult.code, 'fetch-failed')
-
-  const badTree = createFetch({ trees: { HEAD: { sha: 's', tree: 'not-an-array' } } })
-  const badTreeResult = await fetchRepoSkills({
-    homes,
-    source: 'acme/demo',
-    fetchImpl: badTree.fetchImpl,
-  })
-  assert.equal(badTreeResult.code, 'fetch-failed')
-})
-
-test('分支回退：HEAD 404 时用 main，并返回命中的 ref', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: {
-      main: { sha: 'main-sha', tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] },
-    },
-    contents: { 'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n' },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'npx-skills')
-  assert.equal(result.ref, 'main')
-  assert.equal(result.sha, 'main-sha')
-  assert.equal(result.cached, false)
-  assert.deepEqual(
-    calls.filter((one) => one.url.startsWith('https://api.github.com/')).map((one) => one.url),
-    [treeUrl('acme', 'demo', 'HEAD'), treeUrl('acme', 'demo', 'main')],
-  )
-  const raw = calls.find((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
-  assert.equal(raw.url, 'https://raw.githubusercontent.com/acme/demo/main/skills/a/SKILL.md')
-})
-
-test('缓存损坏或版本不符时当作未命中，拉取成功后重写', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl } = createFetch({
-    trees: { HEAD: { sha: 'sha-1', tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] } },
-    contents: { 'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n' },
-  })
-  const file = repoSkillsCacheFile(homes)
-  const id = repoKey('acme/demo')
-  const now = 1_700_000_000_000
-
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, '{"version":1,"entries":{')
-
-  const first = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now })
-  assert.equal(first.ok, true)
-  assert.equal(first.cached, false)
-  let cache = await readCacheFile(homes)
-  assert.equal(cache.version, REPO_SKILLS_CACHE_VERSION)
-  assert.equal(cache.entries[id].sha, 'sha-1')
-
-  await fs.writeFile(file, JSON.stringify({ version: 99, entries: {} }))
-  const second = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: now + 1 })
-  assert.equal(second.ok, true)
-  assert.equal(second.cached, false)
-  cache = await readCacheFile(homes)
-  assert.equal(cache.version, REPO_SKILLS_CACHE_VERSION)
-  assert.ok(cache.entries[id])
-
-  // 版本对但单条结构不合法：root 不是数组。
-  await fs.writeFile(
-    file,
-    JSON.stringify({
-      version: REPO_SKILLS_CACHE_VERSION,
-      entries: {
-        [id]: {
-          source: 'acme/demo',
-          ref: 'HEAD',
-          sha: 'bad',
-          fetchedAt: now,
-          truncated: false,
-          root: 'oops',
-          skills: 0,
-        },
-      },
-    }),
-  )
-  const third = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: now + 2 })
-  assert.equal(third.ok, true)
-  assert.equal(third.cached, false)
-  assert.deepEqual((await readCacheFile(homes)).entries[id].root, third.root)
-})
-
-test('既不是 npx skills 也不是 marketplace 的仓库返回 repo-unavailable，并缓存判定', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: {
-      HEAD: {
-        tree: [
-          { type: 'blob', path: 'README.md' },
-          { type: 'tree', path: 'src' },
-        ],
-      },
-    },
-  })
-
-  const first = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-  assert.equal(first.ok, false)
-  assert.equal(first.code, 'repo-unavailable')
-  assert.equal(typeof first.message, 'string')
-  assert.equal(calls.length, 1, '没有 SKILL.md / marketplace 时只发 tree 请求')
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'repo-unavailable')
 
   const cache = await readCacheFile(homes)
   const entry = cache.entries[repoKey('acme/demo')]
   assert.equal(entry.kind, 'unavailable')
-  assert.equal(entry.complete, false)
-  assert.deepEqual(entry.root, [])
   assert.equal(entry.skills, 0)
 
-  const second = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-  assert.equal(second.ok, false)
-  assert.equal(second.code, 'repo-unavailable')
-  assert.equal(calls.length, 1, '未过期的「不可用」结论不再发请求')
+  // 命中不可用缓存时不再访问来源。
+  const again = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(again.ok, false)
+  assert.equal(again.code, 'repo-unavailable')
+  assert.equal(git.cloneCalls().length, 1)
 })
 
-test('SKILL.md 的并发上限为 6', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = Array.from({ length: 10 }, (_, index) => ({
-    type: 'blob',
-    path: `skills/s${index}/SKILL.md`,
-  }))
-  let inFlight = 0
-  let maxInFlight = 0
-  const fetchImpl = async (url) => {
-    if (url.startsWith('https://api.github.com/')) {
-      return new Response(JSON.stringify({ sha: 's', tree, truncated: false }), { status: 200 })
-    }
-    inFlight += 1
-    maxInFlight = Math.max(maxInFlight, inFlight)
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 5))
-      const name = decodeURIComponent(url).split('/').at(-2)
-      return new Response(`---\nname: ${name}\ndescription: d\n---\n`, { status: 200 })
-    } finally {
-      inFlight -= 1
-    }
-  }
+test('错误码：非法来源、包名 / 网页子页面、本地缺失、找不到 git', async (t) => {
+  const { homes, root } = await tempHomes(t)
 
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-  assert.equal(result.ok, true)
-  assert.equal(result.skills, 10)
-  assert.equal(maxInFlight, 6)
-})
-
-test('token：显式参数优先，缺省读环境变量，空串按无 token 处理', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { tree: [] } },
-  })
-  const savedGithub = process.env.GITHUB_TOKEN
-  const savedGh = process.env.GH_TOKEN
-  const setEnv = (name, value) => {
-    if (value === undefined) delete process.env[name]
-    else process.env[name] = value
-  }
-
-  try {
-    await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, token: 'explicit', now: 1 })
-    assert.equal(calls[0].init.headers.Authorization, 'Bearer explicit')
-
-    process.env.GITHUB_TOKEN = ''
-    process.env.GH_TOKEN = 'gh-env'
-    const beforeGh = calls.length
-    await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: 2, refresh: true })
-    assert.equal(calls[beforeGh].init.headers.Authorization, 'Bearer gh-env')
-
-    process.env.GITHUB_TOKEN = ''
-    process.env.GH_TOKEN = ''
-    const beforeEmpty = calls.length
-    await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: 3, refresh: true })
-    assert.equal(calls[beforeEmpty].init.headers.Authorization, undefined)
-  } finally {
-    setEnv('GITHUB_TOKEN', savedGithub)
-    setEnv('GH_TOKEN', savedGh)
-  }
-})
-
-test('githubRepoOf：只认 GitHub owner/repo 与 github.com 链接', () => {
-  assert.deepEqual(githubRepoOf('Acme/Demo'), { owner: 'Acme', repo: 'Demo' })
-  assert.deepEqual(githubRepoOf('github.com/Acme/Demo'), { owner: 'Acme', repo: 'Demo' })
-  assert.deepEqual(githubRepoOf('https://github.com/Acme/Demo.git'), {
-    owner: 'Acme',
-    repo: 'Demo',
-  })
-  assert.deepEqual(githubRepoOf('https://www.github.com/Acme/Demo/tree/main'), {
-    owner: 'Acme',
-    repo: 'Demo',
-  })
-  for (const bad of ['@scope/pkg', 'notion', 'https://gitlab.com/a/b', '', null, 42, 'a/b/c']) {
-    assert.equal(githubRepoOf(bad), null, String(bad))
-  }
-})
-
-test('parseFrontmatterInternal 只认 metadata.internal: true', () => {
-  assert.equal(
-    parseFrontmatterInternal(
-      '---\nname: a\ndescription: A\nmetadata:\n  version: "1"\n  internal: true\n---\n',
-    ),
-    true,
-  )
-  assert.equal(parseFrontmatterInternal('---\nmetadata: { internal: true }\n---\n'), true)
-  assert.equal(
-    parseFrontmatterInternal('---\nmetadata:\n  internal: "true"\n---\n'),
-    false,
-    '字符串 true 不算',
-  )
-  assert.equal(parseFrontmatterInternal('---\nmetadata:\n  internal: false\n---\n'), false)
-  assert.equal(parseFrontmatterInternal('---\nname: a\ndescription: A\n---\n'), false)
-  assert.equal(parseFrontmatterInternal('no frontmatter'), false)
-  assert.equal(parseFrontmatterInternal(undefined), false)
-})
-
-test('parseFrontmatter 同时解析 name 与 description，旧导出行为不变', () => {
-  assert.deepEqual(parseFrontmatter('---\nname: demo\ndescription: >\n  folded\n  text\n---\n'), {
-    name: 'demo',
-    description: 'folded text',
-  })
-  assert.deepEqual(parseFrontmatter('---\nname: "quoted name"\n---\n'), {
-    name: 'quoted name',
-    description: '',
-  })
-  assert.deepEqual(parseFrontmatter('no frontmatter'), { name: '', description: '' })
-  assert.deepEqual(parseFrontmatter(undefined), { name: '', description: '' })
-  assert.equal(parseFrontmatterDescription('---\ndescription: inline\n---\n'), 'inline')
-})
-
-test('分类：npx 优先，判定不依赖清单；展开时读清单只为插件分组', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = [
-    { type: 'blob', path: 'skills/a/SKILL.md' },
-    { type: 'blob', path: '.claude-plugin/marketplace.json' },
-  ]
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { tree } },
-    contents: {
-      'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n',
-      // npx 仓库也会按清单里**显式声明**的 skills 目录分组（CLI 的
-      // getPluginGroupings 行为）；判定本身仍在看到 SKILL.md 时就定了。
-      '.claude-plugin/marketplace.json': JSON.stringify({
-        plugins: [{ name: 'p', source: './', skills: ['./skills/a'] }],
-      }),
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'npx-skills')
-  assert.equal(result.skills, 1)
-  assert.deepEqual(result.root, [
-    {
-      type: 'dir',
-      name: 'p',
-      path: 'p',
-      children: [{ type: 'skill', name: 'a', path: 'skills/a/SKILL.md', description: 'A' }],
-    },
-  ])
-  assert.deepEqual(
-    calls
-      .filter((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
-      .map((one) => one.url)
-      .sort(),
-    [
-      rawUrl('acme', 'demo', 'HEAD', '.claude-plugin/marketplace.json'),
-      rawUrl('acme', 'demo', 'HEAD', 'skills/a/SKILL.md'),
-    ].sort(),
-  )
-})
-
-test('npx：按 plugin.json 显式声明的 skills 分组，bucket 目录不进树', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = [
-    { type: 'blob', path: 'skills/engineering/ask-matt/SKILL.md' },
-    { type: 'blob', path: 'skills/engineering/tdd/SKILL.md' },
-    { type: 'blob', path: 'skills/in-progress/loop-me/SKILL.md' },
-    { type: 'blob', path: 'skills/productivity/grill-me/SKILL.md' },
-    { type: 'blob', path: '.claude-plugin/plugin.json' },
-  ]
-  const { fetchImpl } = createFetch({
-    trees: { HEAD: { tree } },
-    contents: {
-      'skills/engineering/ask-matt/SKILL.md': '---\nname: ask-matt\ndescription: Router\n---\n',
-      'skills/engineering/tdd/SKILL.md': '---\nname: tdd\ndescription: Test driven\n---\n',
-      'skills/in-progress/loop-me/SKILL.md': '---\nname: loop-me\ndescription: Beta loop\n---\n',
-      'skills/productivity/grill-me/SKILL.md': '---\nname: grill-me\ndescription: Interview\n---\n',
-      // plugin.json 只声明两个 promoted 目录；loop-me 没有声明，留在根上。
-      '.claude-plugin/plugin.json': JSON.stringify({
-        name: 'mattpocock-skills',
-        skills: ['./skills/engineering/ask-matt', './skills/engineering/tdd'],
-      }),
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'npx-skills')
-  assert.equal(result.skills, 4)
-  assert.deepEqual(result.root, [
-    {
-      type: 'dir',
-      name: 'mattpocock-skills',
-      path: 'mattpocock-skills',
-      children: [
-        {
-          type: 'skill',
-          name: 'ask-matt',
-          path: 'skills/engineering/ask-matt/SKILL.md',
-          description: 'Router',
-        },
-        {
-          type: 'skill',
-          name: 'tdd',
-          path: 'skills/engineering/tdd/SKILL.md',
-          description: 'Test driven',
-        },
-      ],
-    },
-    {
-      type: 'skill',
-      name: 'grill-me',
-      path: 'skills/productivity/grill-me/SKILL.md',
-      description: 'Interview',
-    },
-    {
-      type: 'skill',
-      name: 'loop-me',
-      path: 'skills/in-progress/loop-me/SKILL.md',
-      description: 'Beta loop',
-    },
-  ])
-})
-
-test('Claude Code marketplace：按插件分组列出 SKILL.md（不列 commands / agents）', async (t) => {
-  const { homes } = await tempHomes(t)
-  const marketplace = {
-    name: 'Demo Marketplace',
-    metadata: { pluginRoot: 'plugins' },
-    plugins: [
-      { name: 'alpha', source: 'alpha', description: 'Alpha plugin' },
-      { name: 'beta', source: './plugins/beta' },
-    ],
-  }
-  const tree = [
-    { type: 'blob', path: '.claude-plugin/marketplace.json' },
-    { type: 'blob', path: 'plugins/alpha/skills/x/SKILL.md' },
-    { type: 'blob', path: 'plugins/alpha/commands/run.md' },
-    { type: 'blob', path: 'plugins/alpha/agents/helper.md' },
-    { type: 'blob', path: 'plugins/alpha/README.md' },
-    { type: 'blob', path: 'plugins/beta/SKILL.md' },
-  ]
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { sha: 'market-sha', tree } },
-    contents: {
-      '.claude-plugin/marketplace.json': JSON.stringify(marketplace),
-      'plugins/alpha/skills/x/SKILL.md': '---\nname: alpha-x\ndescription: X from alpha\n---\n',
-      'plugins/beta/SKILL.md': '---\ndescription: Beta root skill\n---\n',
-    },
-  })
-  const now = 1_700_000_000_000
-
-  const result = await fetchRepoSkills({ homes, source: 'Acme/Demo', fetchImpl, now })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'claude-code-marketplace')
-  assert.equal(result.skills, 2)
-  assert.equal(result.cached, false)
-  assert.equal(result.ref, 'HEAD')
-  assert.equal(result.sha, 'market-sha')
-  assert.deepEqual(result.root, [
-    {
-      type: 'dir',
-      name: 'alpha',
-      path: 'plugins/alpha',
-      children: [
-        {
-          type: 'skill',
-          name: 'alpha-x',
-          path: 'plugins/alpha/skills/x/SKILL.md',
-          description: 'X from alpha',
-        },
-      ],
-    },
-    {
-      type: 'dir',
-      name: 'beta',
-      path: 'plugins/beta',
-      // 插件根 SKILL.md 没有 frontmatter name：回退到插件名。
-      children: [
-        {
-          type: 'skill',
-          name: 'beta',
-          path: 'plugins/beta/SKILL.md',
-          description: 'Beta root skill',
-        },
-      ],
-    },
-  ])
-
-  // 只拉清单和两个 SKILL.md；commands / agents / README 不拉。
-  assert.deepEqual(
-    calls
-      .filter((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
-      .map((one) => one.url)
-      .sort(),
-    [
-      rawUrl('Acme', 'Demo', 'HEAD', '.claude-plugin/marketplace.json'),
-      rawUrl('Acme', 'Demo', 'HEAD', 'plugins/alpha/skills/x/SKILL.md'),
-      rawUrl('Acme', 'Demo', 'HEAD', 'plugins/beta/SKILL.md'),
-    ].sort(),
-  )
-
-  const entry = (await readCacheFile(homes)).entries[repoKey('Acme/Demo')]
-  assert.equal(entry.kind, 'claude-code-marketplace')
-  assert.equal(entry.complete, true)
-  assert.equal(entry.skills, 2)
-  assert.deepEqual(entry.root, result.root)
-})
-
-test('marketplace：跳过远程/非法 source，只列仓库内的本地插件', async (t) => {
-  const { homes } = await tempHomes(t)
-  const marketplace = {
-    plugins: [
-      { name: 'remote', source: { source: 'github', repo: 'x/y' } },
-      { name: 'escape', source: './../escape' },
-      { name: 'bare', source: 'bare' },
-      { name: 'slash', source: 'plugins/slash' },
-      { name: '../bad', source: './plugins/bad' },
-      { name: '', source: './plugins/empty-name' },
-      { name: 42, source: './plugins/number-name' },
-      'not-an-object',
-      { name: 'ok', source: './plugins/ok' },
-    ],
-  }
-  const tree = [
-    { type: 'blob', path: '.claude-plugin/marketplace.json' },
-    { type: 'blob', path: 'plugins/slash/SKILL.md' },
-    { type: 'blob', path: 'plugins/bare/SKILL.md' },
-    { type: 'blob', path: 'plugins/ok/skills/ok-skill/SKILL.md' },
-  ]
-  const { fetchImpl } = createFetch({
-    trees: { HEAD: { tree } },
-    contents: {
-      '.claude-plugin/marketplace.json': JSON.stringify(marketplace),
-      'plugins/ok/skills/ok-skill/SKILL.md': '---\nname: ok-skill\ndescription: Local skill\n---\n',
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'claude-code-marketplace')
-  assert.equal(result.skills, 1)
-  assert.deepEqual(result.root, [
-    {
-      type: 'dir',
-      name: 'ok',
-      path: 'plugins/ok',
-      children: [
-        {
-          type: 'skill',
-          name: 'ok-skill',
-          path: 'plugins/ok/skills/ok-skill/SKILL.md',
-          description: 'Local skill',
-        },
-      ],
-    },
-  ])
-})
-
-test('marketplace：JSON 非法或结构不对时判定为不可用', async (t) => {
-  const { homes } = await tempHomes(t)
-  const now = 1_700_000_000_000
-  const cases = [
-    { repo: 'BadJson', text: 'not json' },
-    { repo: 'BadShape', text: JSON.stringify({ plugins: 'nope' }) },
-    { repo: 'BadTop', text: JSON.stringify([1, 2]) },
-  ]
-
-  for (const one of cases) {
-    const { fetchImpl } = createFetch({
-      repo: one.repo,
-      trees: { HEAD: { tree: [{ type: 'blob', path: '.claude-plugin/marketplace.json' }] } },
-      contents: { '.claude-plugin/marketplace.json': one.text },
-    })
-    const result = await fetchRepoSkills({ homes, source: `Acme/${one.repo}`, fetchImpl, now })
-    assert.equal(result.ok, false, one.repo)
-    assert.equal(result.code, 'repo-unavailable', one.repo)
-
-    const entry = (await readCacheFile(homes)).entries[repoKey(`Acme/${one.repo}`)]
-    assert.equal(entry.kind, 'unavailable', one.repo)
-    assert.equal(entry.complete, false, one.repo)
-    assert.deepEqual(entry.root, [], one.repo)
-  }
-})
-
-test('marketplace：清单不合法但有 npx 兜底可发现的 SKILL.md 时按 npx 处理', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl } = createFetch({
-    trees: {
-      HEAD: {
-        tree: [
-          { type: 'blob', path: '.claude-plugin/marketplace.json' },
-          { type: 'blob', path: 'docs/skill-demo/SKILL.md' },
-        ],
-      },
-    },
-    contents: {
-      '.claude-plugin/marketplace.json': 'not json',
-      'docs/skill-demo/SKILL.md': '---\nname: skill-demo\ndescription: fallback\n---\n',
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'npx-skills')
-  assert.equal(result.skills, 1)
-  // 兜底发现的 skill 同样平铺；物理目录 docs/ 不进树。
-  assert.deepEqual(result.root, [
-    {
-      type: 'skill',
-      name: 'skill-demo',
-      path: 'docs/skill-demo/SKILL.md',
-      description: 'fallback',
-    },
-  ])
-})
-
-test('npx：metadata.internal 的内部 skill 默认不列（与 npx CLI 一致）', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl } = createFetch({
-    trees: {
-      HEAD: {
-        tree: [
-          { type: 'blob', path: 'skills/public/SKILL.md' },
-          { type: 'blob', path: '.agents/skills/internal/SKILL.md' },
-        ],
-      },
-    },
-    contents: {
-      'skills/public/SKILL.md': '---\nname: public\ndescription: Public skill\n---\n',
-      '.agents/skills/internal/SKILL.md':
-        '---\nname: internal\ndescription: Internal skill\nmetadata:\n  internal: true\n---\n',
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.skills, 1)
-  assert.deepEqual(result.root, [
-    { type: 'skill', name: 'public', path: 'skills/public/SKILL.md', description: 'Public skill' },
-  ])
-})
-
-test('npx：basename 必须是 SKILL.md，foo-skill.md 这类普通 Markdown 不会被当成 skill', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl } = createFetch({
-    trees: {
-      HEAD: {
-        tree: [
-          { type: 'blob', path: '.changeset/software-factory-skill.md' },
-          { type: 'blob', path: 'docs/writing-a-skill.md' },
-        ],
-      },
-    },
-    contents: {
-      '.changeset/software-factory-skill.md':
-        '---\nname: software-factory-skill\ndescription: Not a skill\n---\n',
-      'docs/writing-a-skill.md': '---\nname: writing-a-skill\ndescription: Not a skill\n---\n',
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, false)
-  assert.equal(result.code, 'repo-unavailable')
-  assert.equal((await readCacheFile(homes)).entries[repoKey('acme/demo')].skills, 0)
-})
-
-test('marketplace：清单拉取失败返回 fetch-failed 而不是不可用', async (t) => {
-  const { homes } = await tempHomes(t)
-  const cases = [
-    { repo: 'HttpFail', content: { status: 500 } },
-    { repo: 'NetFail', content: { throw: 'offline' } },
-  ]
-
-  for (const one of cases) {
-    const { fetchImpl } = createFetch({
-      repo: one.repo,
-      trees: { HEAD: { tree: [{ type: 'blob', path: '.claude-plugin/marketplace.json' }] } },
-      contents: { '.claude-plugin/marketplace.json': one.content },
-    })
-    const result = await fetchRepoSkills({ homes, source: `Acme/${one.repo}`, fetchImpl })
-    assert.equal(result.ok, false, one.repo)
-    assert.equal(result.code, 'fetch-failed', one.repo)
-  }
-  assert.equal(await readCacheFile(homes), null, '拉取失败不写缓存')
-})
-
-test('marketplace：有效清单但没有任何本地 skill 时返回空树', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = [
-    { type: 'blob', path: '.claude-plugin/marketplace.json' },
-    { type: 'tree', path: 'plugins/empty' },
-  ]
-  const { fetchImpl } = createFetch({
-    trees: { HEAD: { tree } },
-    contents: {
-      '.claude-plugin/marketplace.json': JSON.stringify({
-        plugins: [{ name: 'empty', source: './plugins/empty' }],
-      }),
-    },
-  })
-
-  const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'claude-code-marketplace')
-  assert.deepEqual(result.root, [])
-  assert.equal(result.skills, 0)
-
-  const entry = (await readCacheFile(homes)).entries[repoKey('acme/demo')]
-  assert.equal(entry.kind, 'claude-code-marketplace')
-  assert.equal(entry.complete, true)
-  assert.equal(entry.skills, 0)
-})
-
-test('probeRepoKind：npx 结论只拉 tree、写轻量缓存，展开时补完整树', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { sha: 'probe-sha', tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] } },
-  })
-  const now = 1_700_000_000_000
-
-  const first = await probeRepoKind({ homes, source: 'acme/demo', fetchImpl, now })
-  assert.equal(first.ok, true)
-  assert.equal(first.kind, 'npx-skills')
-  assert.equal(first.skills, 1)
-  assert.equal(first.cached, false)
-  assert.equal(first.ref, 'HEAD')
-  assert.equal(first.sha, 'probe-sha')
-  assert.equal(calls.length, 1, '探测不拉 SKILL.md')
-
-  const entry = (await readCacheFile(homes)).entries[repoKey('acme/demo')]
-  assert.equal(entry.kind, 'npx-skills')
-  assert.equal(entry.complete, false)
-  assert.deepEqual(entry.root, [])
-  assert.equal(entry.skills, 1)
-
-  const second = await probeRepoKind({ homes, source: 'acme/demo', fetchImpl, now: now + 1 })
-  assert.equal(second.ok, true)
-  assert.equal(second.cached, true)
-  assert.equal(second.kind, 'npx-skills')
-  assert.equal(second.skills, 1)
-  assert.equal(calls.length, 1, '轻量缓存未过期时不再请求')
-
-  // 展开时命中轻量缓存仍会补拉完整流程，写回 complete: true。
-  const expanded = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: now + 2 })
-  assert.equal(expanded.ok, true)
-  assert.equal(expanded.cached, false)
-  assert.equal(expanded.skills, 1)
-  const rewritten = (await readCacheFile(homes)).entries[repoKey('acme/demo')]
-  assert.equal(rewritten.complete, true)
-  assert.equal(rewritten.kind, 'npx-skills')
-  assert.equal(rewritten.root.length, 1)
-})
-
-test('probeRepoKind：marketplace 结论只拉 tree 与 marketplace.json', async (t) => {
-  const { homes } = await tempHomes(t)
-  const tree = [
-    { type: 'blob', path: '.claude-plugin/marketplace.json' },
-    { type: 'blob', path: 'plugins/p/skills/x/SKILL.md' },
-  ]
-  const { fetchImpl, calls } = createFetch({
-    repo: 'Market',
-    trees: { HEAD: { tree } },
-    contents: {
-      '.claude-plugin/marketplace.json': JSON.stringify({
-        plugins: [{ name: 'p', source: './plugins/p' }],
-      }),
-      'plugins/p/skills/x/SKILL.md': '---\nname: x\ndescription: X\n---\n',
-    },
-  })
-
-  const result = await probeRepoKind({ homes, source: 'Acme/Market', fetchImpl })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'claude-code-marketplace')
-  assert.equal(result.skills, 1)
-  assert.equal(result.cached, false)
-  assert.deepEqual(
-    calls
-      .filter((one) => one.url.startsWith('https://raw.githubusercontent.com/'))
-      .map((one) => one.url),
-    [rawUrl('Acme', 'Market', 'HEAD', '.claude-plugin/marketplace.json')],
-  )
-
-  const entry = (await readCacheFile(homes)).entries[repoKey('Acme/Market')]
-  assert.equal(entry.kind, 'claude-code-marketplace')
-  assert.equal(entry.complete, false)
-  assert.deepEqual(entry.root, [])
-})
-
-test('probeRepoKind：不可用结论也会缓存，第二次不再发请求', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    repo: 'Empty',
-    trees: { HEAD: { tree: [{ type: 'blob', path: 'README.md' }] } },
-  })
-
-  const first = await probeRepoKind({ homes, source: 'Acme/Empty', fetchImpl })
-  assert.equal(first.ok, false)
-  assert.equal(first.code, 'repo-unavailable')
-  assert.equal(typeof first.message, 'string')
-  assert.equal(calls.length, 1)
-
-  const entry = (await readCacheFile(homes)).entries[repoKey('Acme/Empty')]
-  assert.equal(entry.kind, 'unavailable')
-  assert.equal(entry.complete, false)
-  assert.equal(entry.skills, 0)
-
-  const second = await probeRepoKind({ homes, source: 'Acme/Empty', fetchImpl })
-  assert.equal(second.ok, false)
-  assert.equal(second.code, 'repo-unavailable')
-  assert.equal(calls.length, 1)
-})
-
-test('probeRepoKind：命中完整缓存返回 kind，刷新探测不降级完整树', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl, calls } = createFetch({
-    trees: { HEAD: { tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] } },
-    contents: { 'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n' },
-  })
-  const now = 1_700_000_000_000
-
-  const full = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now })
-  assert.equal(full.ok, true)
-  const fullCalls = calls.length
-
-  const cachedProbe = await probeRepoKind({ homes, source: 'acme/demo', fetchImpl, now: now + 1 })
-  assert.equal(cachedProbe.ok, true)
-  assert.equal(cachedProbe.cached, true)
-  assert.equal(cachedProbe.kind, 'npx-skills')
-  assert.equal(cachedProbe.skills, 1)
-  assert.equal(calls.length, fullCalls, '完整缓存命中不请求')
-
-  const refreshed = await probeRepoKind({
+  const invalid = await fetchRepoSkills({
     homes,
-    source: 'acme/demo',
-    fetchImpl,
-    now: now + 2,
-    refresh: true,
+    source: '@scope/pkg/extra',
+    runGit: createGit().runGit,
   })
-  assert.equal(refreshed.ok, true)
-  assert.equal(refreshed.cached, false)
-  assert.equal(refreshed.kind, 'npx-skills')
-  assert.equal(calls.length, fullCalls + 1, '探测刷新只多拉一次 tree')
+  assert.equal(invalid.ok, false)
+  assert.equal(invalid.code, 'invalid-source')
 
-  const entry = (await readCacheFile(homes)).entries[repoKey('acme/demo')]
-  assert.equal(entry.complete, true)
-  assert.equal(entry.kind, 'npx-skills')
-  assert.deepEqual(entry.root, full.root)
-})
+  const pkg = await fetchRepoSkills({ homes, source: 'notion', runGit: createGit().runGit })
+  assert.equal(pkg.ok, false)
+  assert.equal(pkg.code, 'unsupported-source')
 
-test('probeRepoKind：非法/非 GitHub 来源直接失败且不发请求', async (t) => {
-  const { homes } = await tempHomes(t)
-  const called = []
-  const neverFetch = async (url) => {
-    called.push(url)
-    throw new Error('network should not be called')
-  }
+  const web = await fetchRepoSkills({
+    homes,
+    source: 'https://github.com/acme/demo/tree/main',
+    runGit: createGit().runGit,
+  })
+  assert.equal(web.ok, false)
+  assert.equal(web.code, 'unsupported-source')
 
-  for (const source of ['', '   ', 42, null]) {
-    const result = await probeRepoKind({ homes, source, fetchImpl: neverFetch })
-    assert.equal(result.ok, false)
-    assert.equal(result.code, 'invalid-source', String(source))
-  }
-  for (const source of ['@scope/pkg', 'notion', 'https://github.com/a/b/tree/main']) {
-    const result = await probeRepoKind({ homes, source, fetchImpl: neverFetch })
-    assert.equal(result.ok, false)
-    assert.equal(result.code, 'unsupported-source', source)
-  }
+  const missing = await fetchRepoSkills({
+    homes,
+    source: path.join(root, 'nope'),
+    runGit: createGit().runGit,
+  })
+  assert.equal(missing.ok, false)
+  assert.equal(missing.code, 'repo-not-found')
+
   const noGit = async () => {
-    throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' })
+    const error = new Error('spawn git ENOENT')
+    error.code = 'ENOENT'
+    throw error
   }
-  const gitMissing = await probeRepoKind({
+  const unavailable = await fetchRepoSkills({
     homes,
-    source: 'https://gitlab.com/a/b',
-    fetchImpl: neverFetch,
+    source: 'git@example.com:acme/demo.git',
     runGit: noGit,
   })
-  assert.equal(gitMissing.ok, false)
-  assert.equal(gitMissing.code, 'git-unavailable')
-  assert.equal(called.length, 0)
+  assert.equal(unavailable.ok, false)
+  assert.equal(unavailable.code, 'git-unavailable')
 })
 
-test('缓存版本不匹配：旧版本被丢弃，kind 非法或缺失 complete 的条目按未命中处理', async (t) => {
-  const { homes } = await tempHomes(t)
-  const { fetchImpl } = createFetch({
-    trees: { HEAD: { tree: [{ type: 'blob', path: 'skills/a/SKILL.md' }] } },
-    contents: { 'skills/a/SKILL.md': '---\nname: a\ndescription: A\n---\n' },
-  })
-  const file = repoSkillsCacheFile(homes)
-  const id = repoKey('acme/demo')
-  const now = 1_700_000_000_000
-  const oldRoot = [{ type: 'skill', name: 'old', path: 'skills/old/SKILL.md', description: '' }]
+test('probeRepoKind：只写轻量结论，展开时补完整树，刷新探测不降级完整树', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const git = createGit({ fixture })
 
+  const probed = await probeRepoKind({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(probed.ok, true)
+  assert.equal(probed.kind, 'npx-skills')
+  assert.equal(probed.skills, 3, '探测只数 SKILL.md，内部 skill 也会计入')
+  assert.equal(probed.cached, false)
+
+  let cache = await readCacheFile(homes)
+  let entry = cache.entries[repoKey('acme/demo')]
+  assert.equal(entry.complete, false)
+  assert.equal(entry.skills, 3)
+  assert.deepEqual(entry.root, [])
+
+  const fetched = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(fetched.ok, true)
+  assert.equal(fetched.cached, false, '轻量缓存不能直接当完整树返回')
+  cache = await readCacheFile(homes)
+  entry = cache.entries[repoKey('acme/demo')]
+  assert.equal(entry.complete, true)
+  assert.ok(entry.root.length > 0)
+
+  const reprobed = await probeRepoKind({
+    homes,
+    source: 'acme/demo',
+    runGit: git.runGit,
+    refresh: true,
+  })
+  assert.equal(reprobed.ok, true)
+  cache = await readCacheFile(homes)
+  entry = cache.entries[repoKey('acme/demo')]
+  assert.equal(entry.complete, true, '刷新探测不能把完整树降级成轻量结论')
+  assert.ok(entry.root.length > 0)
+})
+
+test('缓存版本不符或条目损坏时当作未命中并重建', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = await makeRepo(path.join(root, 'fixture'))
+  const git = createGit({ fixture })
+  const file = repoSkillsCacheFile(homes)
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(
     file,
     JSON.stringify({
       version: 1,
+      entries: { [repoKey('acme/demo')]: { source: 'acme/demo', root: [] } },
+    }),
+  )
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(result.ok, true)
+  const cache = await readCacheFile(homes)
+  assert.equal(cache.version, REPO_SKILLS_CACHE_VERSION)
+  assert.equal(cache.entries[repoKey('acme/demo')].complete, true)
+
+  // 版本正确但 kind 非法：整条丢弃，重新拉取。
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      version: REPO_SKILLS_CACHE_VERSION,
       entries: {
-        [id]: {
-          source: 'Acme/Demo',
+        [repoKey('acme/demo')]: {
+          source: 'acme/demo',
+          kind: 'claude-code-marketplace',
           ref: 'HEAD',
-          sha: 'v1-sha',
-          fetchedAt: now,
+          sha: '',
+          fetchedAt: Date.now(),
           truncated: false,
-          skills: 1,
-          root: oldRoot,
+          skills: 0,
+          complete: true,
+          root: [],
         },
       },
     }),
   )
-  const first = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now })
-  assert.equal(first.ok, true)
-  assert.equal(first.cached, false, 'v1 缓存整份丢弃')
-  let cache = await readCacheFile(homes)
-  assert.equal(cache.version, REPO_SKILLS_CACHE_VERSION)
-  assert.equal(cache.entries[id].complete, true)
-  assert.equal(cache.entries[id].kind, 'npx-skills')
-
-  const base = {
-    source: 'Acme/Demo',
-    kind: 'npx-skills',
-    ref: 'HEAD',
-    sha: 'v2-sha',
-    fetchedAt: now + 10,
-    truncated: false,
-    skills: 1,
-    complete: true,
-    root: oldRoot,
-  }
-  const withoutComplete = { ...base }
-  delete withoutComplete.complete
-  const invalidEntries = [
-    ['kind 非法', { ...base, kind: 'bogus-kind' }],
-    ['complete 缺失', withoutComplete],
-  ]
-  for (const [label, entry] of invalidEntries) {
-    await fs.writeFile(
-      file,
-      JSON.stringify({ version: REPO_SKILLS_CACHE_VERSION, entries: { [id]: entry } }),
-    )
-    const result = await fetchRepoSkills({ homes, source: 'acme/demo', fetchImpl, now: now + 20 })
-    assert.equal(result.ok, true, label)
-    assert.equal(result.cached, false, label)
-    assert.equal(result.kind, 'npx-skills', label)
-  }
-
-  cache = await readCacheFile(homes)
-  assert.equal(cache.entries[id].complete, true)
-  assert.notDeepEqual(cache.entries[id].root, oldRoot)
+  const rebuilt = await fetchRepoSkills({ homes, source: 'acme/demo', runGit: git.runGit })
+  assert.equal(rebuilt.ok, true)
+  assert.equal(git.cloneCalls().length, 1, '已有克隆时只 fetch，不重新 clone')
+  assert.equal(git.calls.filter((one) => one.args.includes('fetch')).length, 1)
 })

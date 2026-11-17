@@ -18,12 +18,12 @@ export function failure(code: RepoSkillsFailureCode, message: string): RepoSkill
 }
 
 /**
- * 「既不是 npx skills 仓库，也不是 Claude Code marketplace」的统一失败返回。
+ * 「仓库根 skills/ 下没有可安装的 skill」的统一失败返回。
  */
 export function repoUnavailable(): RepoSkillsFailure {
   return failure(
     'repo-unavailable',
-    'Repository is neither an npx skills repository nor a Claude Code plugin marketplace.',
+    'Repository has no installable skills: expected SKILL.md files under the repository root "skills/" directory.',
   )
 }
 

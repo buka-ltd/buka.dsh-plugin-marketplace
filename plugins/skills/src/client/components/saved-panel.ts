@@ -25,7 +25,7 @@ import type { SkillsPageState } from '../types.ts'
 import { createTreeRenderer } from './tree.ts'
 
 /**
- * 收藏卡片标题行的仓库类型徽标：npx skills / Claude Code 市场 / 不可用。
+ * 收藏卡片标题行的仓库类型徽标：npx skills / 不可用。
  *
  * kind 由 Host 给出：展开后拿到的完整结果与轻量探测都带它。两处都没有
  * （还没探测完、探测失败）时不显示徽标，也不渲染占位的「…」。
@@ -36,12 +36,10 @@ import { createTreeRenderer } from './tree.ts'
 function kindTagOf(
   kind: unknown,
   t: Translate,
-): { text: string; tone: 'neutral' | 'info' | 'warning' } | null {
+): { text: string; tone: 'neutral' | 'warning' } | null {
   switch (kind) {
     case 'npx-skills':
       return { text: t('kindNpx'), tone: 'neutral' }
-    case 'claude-code-marketplace':
-      return { text: t('kindMarketplace'), tone: 'info' }
     case 'unavailable':
       return { text: t('kindUnavailable'), tone: 'warning' }
     default:
@@ -79,6 +77,7 @@ function renderSaved(state: SkillsPageState): ReactElement {
     // 两处都没有（还在探测、探测失败）时不渲染徽标，也不显示占位。
     const kind = trees[repo.id]?.data?.kind ?? probes[repo.id]?.data?.kind
     const kindTag = kindTagOf(kind, t)
+    const warning = probes[repo.id]?.data?.warning ?? trees[repo.id]?.data?.warning
     return h(
       'li',
       { className: 'buka-skills-card', key: repo.id },
@@ -152,6 +151,14 @@ function renderSaved(state: SkillsPageState): ReactElement {
         ),
         typeof repo.note === 'string' && repo.note !== ''
           ? h('div', { className: 'buka-skills-cardDesc' }, repo.note)
+          : null,
+        typeof warning === 'string' && warning !== ''
+          ? h(
+              'p',
+              { className: 'buka-skills-notice', role: 'status' },
+              h(IconWarningOutlineRegular, { size: 16 }),
+              h('span', null, `${t('treeRefreshWarning')} ${warning}`),
+            )
           : null,
         expanded && listable ? renderTree(repo) : null,
       ),
