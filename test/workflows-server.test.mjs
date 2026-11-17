@@ -1021,6 +1021,34 @@ test('engine: the task type definition is dispatched as the user prompt, the fil
   }
 })
 
+test('engine: a plan-mode task type keeps the single-message dispatch without a user prompt', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].mode = 'plan'
+  const env = await setup(definition)
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.planMode, true)
+    // plan 模式投递保持原样：不拆用户消息，workers 只发一条 followup。
+    assert.equal('userPrompt' in dispatch.request, false, 'plan mode keeps a single followup')
+    assert.match(dispatch.request.prompt, /## 工作流规则/u)
+    assert.match(dispatch.request.prompt, /## 任务类型的定义/u)
+    assert.match(dispatch.request.prompt, /实现需求，完成后创建交付任务。/u)
+    assert.match(dispatch.request.prompt, /登录页需求/u)
+
+    // 落盘仍是完整文本，供排查使用。
+    const dev = taskAt(env.store, job.id, 'dev')
+    const attempt = env.store.listAttempts(dev.id)[0]
+    assert.equal(await env.store.readText(job.id, attempt.promptFile), dispatch.request.prompt)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('engine: a task type without a definition is dispatched without a user prompt', async () => {
   const definition = simpleDevDefinition()
   delete definition.positions[0].taskTypes[0].definition

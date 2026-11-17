@@ -643,6 +643,36 @@ test('workers service: dispatchSession without a user prompt keeps a single foll
   }
 })
 
+test('workers service: a plan-mode dispatch without a user prompt delivers a single followup', async () => {
+  const home = await makeWorkerHome()
+  try {
+    const planCommands = makePlanCommands()
+    const fake = makeDispatchContext({ commands: planCommands.service })
+    const service = new WorkerSessionService({
+      ctx: fake.ctx,
+      workersDir: home.workersDir,
+      registryFile: home.registryFile,
+    })
+    const handle = await service.dispatchSession({
+      worker: 'writer',
+      prompt: 'plan it',
+      planMode: true,
+    })
+
+    assert.deepEqual(
+      fake.state.deliveries.map((delivery) => delivery.kind),
+      ['followup'],
+      'plan mode keeps the original single-message dispatch',
+    )
+    assert.equal(fake.state.injected.length, 0)
+    assert.equal(fake.state.followups.length, 1)
+    assert.equal(fake.state.followups[0].source.kind, 'buka-worker')
+    await handle.dispose()
+  } finally {
+    await fs.rm(home.root, { recursive: true, force: true })
+  }
+})
+
 test('workers service: the blocking startSession is gone', async () => {
   const home = await makeWorkerHome()
   try {
