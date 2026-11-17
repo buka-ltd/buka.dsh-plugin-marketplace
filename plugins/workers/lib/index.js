@@ -2723,7 +2723,7 @@ function sendMethodNotAllowed(res, allow) {
 * - 只对智能体（`driver === 'agent'`）、目录存在且确实装了 skill 的 worker
 *   执行；机器人没有目录，空 skills 的 worker 没有可更新项，都跳过；
 * - 按登记表顺序逐个执行，单个失败不中断后面的；
-* - 最后汇总每个 worker 的结果与整体成功 / 失败数。
+* - 最后汇总每个 worker 的结果、更新成功数与失败 skill 数。
 *
 * @module @buka/dsh-plugin-workers/skill-update-batch
 */
@@ -2738,13 +2738,15 @@ async function updateWorkersSequentially({ workers, update }) {
 	const results = [];
 	for (const worker of targets) try {
 		const result = await update({ dir: worker.path });
+		const failed = Array.isArray(result?.failed) ? result.failed.length : 0;
+		const ok = result?.ok !== false && failed === 0;
 		results.push({
 			id: worker.id,
 			name: worker.name === "" ? worker.id : worker.name,
-			ok: result?.ok !== false,
-			message: typeof result?.message === "string" && result.message !== "" ? result.message : result?.ok === false ? "更新失败。" : "已是最新。",
+			ok,
+			message: typeof result?.message === "string" && result.message !== "" ? result.message : ok ? "已是最新。" : "更新失败。",
 			updated: Array.isArray(result?.updated) ? result.updated.length : 0,
-			failed: Array.isArray(result?.failed) ? result.failed.length : 0,
+			failed,
 			skipped: Array.isArray(result?.skipped) ? result.skipped.length : 0
 		});
 	} catch (error) {
@@ -2761,8 +2763,66 @@ async function updateWorkersSequentially({ workers, update }) {
 	return {
 		results,
 		updated: results.reduce((total, one) => total + one.updated, 0),
-		failed: results.filter((one) => !one.ok).length,
+		failed: results.reduce((total, one) => total + (one.ok ? 0 : Math.max(one.failed, 1)), 0),
 		skippedWorkers: workers.length - targets.length
+	};
+}
+// .build/workers/skill-update-report.js
+/**
+* 把 Skills 服务的更新结果翻译成路由响应。
+*
+* `updateSkills()` 有两种失败：整体失败（`ok:false`，带错误码与 message）与
+* 逐项失败（`ok:true`，`failed` 数组里是失败的 skill）。前者要让请求方看到
+* 错误状态，后者是请求成功、只是部分 skill 没更新成功，所以回 200，但用
+* `ok:false` 明确结果。
+*
+* @module @buka/dsh-plugin-workers/skill-update-report
+*/
+/**
+* 更新服务的失败码 → HTTP 状态码，与 Skills 插件的 `updateStatusFor` 一致。
+*
+* @param code 服务返回的错误码
+*/
+function skillUpdateErrorStatus(code) {
+	if (code === "invalid-dir" || code === "invalid-source") return 400;
+	if (code === "lock-unreadable") return 409;
+	if (code === "unsupported-home") return 500;
+	return 502;
+}
+/** 读一个字符串字段；不是非空字符串时返回 undefined。 */
+function text(record, key) {
+	const value = record[key];
+	return typeof value === "string" && value !== "" ? value : void 0;
+}
+/**
+* 读一次 `updateSkills()` 的结果。
+*
+* @param result Skills 服务返回的更新结果
+* @returns 状态码、整体是否成功与失败 skill 数
+*/
+function reportSkillUpdate(result) {
+	const record = result !== null && typeof result === "object" ? result : {};
+	if (record.ok === false) {
+		const code = text(record, "code");
+		const message = text(record, "message") ?? "更新 skill 失败。";
+		const output = typeof record.output === "string" ? record.output : void 0;
+		return {
+			status: skillUpdateErrorStatus(code),
+			ok: false,
+			failure: {
+				...code === void 0 ? {} : { code },
+				message,
+				...output === void 0 ? {} : { output }
+			},
+			failed: 0
+		};
+	}
+	const failed = Array.isArray(record.failed) ? record.failed.length : 0;
+	return {
+		status: 200,
+		ok: failed === 0,
+		failure: null,
+		failed
 	};
 }
 // .build/workers/routes/target.js
@@ -3123,10 +3183,21 @@ function registerSkillRoutes(webCtx, deps) {
 			}
 			try {
 				const result = await service.updateSkills({ dir: resolved.worker.path });
+				const report = reportSkillUpdate(result);
+				if (report.failure !== null) {
+					webCtx.logger?.warn?.("buka-workers: 更新 skill 失败（%s）：%s", resolved.worker.path, report.failure.message);
+					sendJson(res, report.status, {
+						ok: false,
+						...report.failure.code === void 0 ? {} : { code: report.failure.code },
+						message: report.failure.message,
+						...report.failure.output === void 0 ? {} : { output: report.failure.output }
+					});
+					return;
+				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已更新 skill（%s）", resolved.worker.path);
+				webCtx.logger?.info?.("buka-workers: 已更新 skill（%s，失败 %d 个）", resolved.worker.path, report.failed);
 				sendJson(res, 200, {
-					ok: true,
+					ok: report.ok,
 					update: result,
 					skills: scanned.skills
 				});

@@ -15,6 +15,16 @@ export interface RequestError extends Error {
   output?: string | undefined
 }
 
+/** JSON 请求选项：`body` 是已经序列化好的 JSON 字符串。 */
+export interface JsonRequestInit extends RequestInit {
+  body?: string
+  /**
+   * 2xx 响应即使 `ok:false` 也返回响应体。逐项更新这类「请求成功、部分失败」
+   * 的接口用 `ok` 表达结果，调用方需要拿到完整结果再决定提示方式。
+   */
+  allowFailureBody?: boolean
+}
+
 /**
  * 请求 Host 的 JSON 路由；非 2xx 或 `ok !== true` 时抛出带 `code` 的错误。
  * `npx-failed` 的响应里还有 `output`，一并挂到错误上供详情页展示。
@@ -24,15 +34,16 @@ export interface RequestError extends Error {
  */
 export async function requestJson<T = Record<string, unknown>>(
   url: string,
-  init: RequestInit & { body?: string } = {},
+  init: JsonRequestInit = {},
 ): Promise<T> {
+  const { allowFailureBody = false, ...requestInit } = init
   const headers: Record<string, string> = { accept: 'application/json' }
-  if (init.body !== undefined) headers['content-type'] = 'application/json'
+  if (requestInit.body !== undefined) headers['content-type'] = 'application/json'
   // 调用方只传普通对象形式的 headers；这里按同类对象展开。
-  const extraHeaders = (init.headers ?? {}) as Record<string, string>
-  const response = await fetch(url, { ...init, headers: { ...headers, ...extraHeaders } })
+  const extraHeaders = (requestInit.headers ?? {}) as Record<string, string>
+  const response = await fetch(url, { ...requestInit, headers: { ...headers, ...extraHeaders } })
   const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
-  if (!response.ok || body === null || body.ok !== true) {
+  if (!response.ok || body === null || (body.ok !== true && !allowFailureBody)) {
     const error: RequestError = new Error(
       typeof body?.message === 'string' ? body.message : `HTTP ${response.status}`,
     )
