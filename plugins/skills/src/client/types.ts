@@ -22,6 +22,31 @@ export interface InstalledSkill {
   readonly npxSourceUrl?: string | null
 }
 
+/** `GET /buka-skills/check` 返回的一行状态。 */
+export interface SkillCheckEntry {
+  readonly name?: string
+  readonly source?: string | null
+  readonly status?: string
+  readonly message?: string
+}
+
+/** `GET /buka-skills/check` 的响应。 */
+export interface SkillCheckSnapshot {
+  readonly ok?: boolean
+  readonly scope?: string
+  readonly results?: SkillCheckEntry[]
+  readonly message?: string
+}
+
+/** `POST /buka-skills/update` 的响应。 */
+export interface SkillUpdateSnapshot {
+  readonly ok?: boolean
+  readonly updated?: Array<{ name?: string }>
+  readonly skipped?: Array<{ name?: string; status?: string; reason?: string }>
+  readonly failed?: Array<{ name?: string; message?: string }>
+  readonly message?: string
+}
+
 /** 已安装列表快照。 */
 export interface InstalledSnapshot {
   readonly skills?: InstalledSkill[]
@@ -125,6 +150,8 @@ export interface SkillGroupInstallSnapshot {
 export interface RepoTreeData {
   readonly kind?: string
   readonly root?: SkillTreeChild[]
+  /** 刷新本地克隆失败时的提示；内容仍是旧克隆。 */
+  readonly warning?: string
   readonly [extra: string]: unknown
 }
 
@@ -193,6 +220,20 @@ export interface SkillsPageState {
   readonly setNotice: Dispatch<SetStateAction<Notice | null>>
   /** 正在卸载的 skill 行键。 */
   readonly busy: string | null
+  /** 是否正在检查更新。 */
+  readonly checking: boolean
+  /** 是否正在更新。 */
+  readonly updating: boolean
+  /** 已安装行键 → 检查状态。 */
+  readonly checkResults: Record<string, SkillCheckEntry>
+  /** 检查 / 更新的整体说明（「已是最新」等）。 */
+  readonly checkMessage: string | null
+  /** 是否有可更新的 skill。 */
+  readonly hasUpdates: boolean
+  /** 检查全局 skill 的更新。 */
+  readonly checkUpdates: () => Promise<void>
+  /** 应用可用的更新。 */
+  readonly updateSkills: () => Promise<void>
   /** 正在二次确认的 skill 行键。 */
   readonly confirming: string | null
   /** 设置二次确认的行。 */

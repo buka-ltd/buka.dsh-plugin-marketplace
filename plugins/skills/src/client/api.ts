@@ -18,6 +18,8 @@ const INSTALL_ROUTE = '/buka-skills/install'
 const REPOS_ROUTE = '/buka-skills/repos'
 const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
 const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
+const CHECK_ROUTE = '/buka-skills/check'
+const UPDATE_ROUTE = '/buka-skills/update'
 
 /**
  * 取错误上的 `code` 字段（Host 的失败响应带它）。
@@ -28,6 +30,7 @@ function errorCode(failure: unknown): string | undefined {
 }
 
 export {
+  CHECK_ROUTE,
   errorCode,
   INSTALL_ROUTE,
   LIST_ROUTE,
@@ -38,4 +41,5 @@ export {
   requestJson,
   TARGETS_ROUTE,
   UNINSTALL_ROUTE,
+  UPDATE_ROUTE,
 }

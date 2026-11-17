@@ -1,8 +1,10 @@
 /**
- * 「已安装」面板：两个全局根下的 skill 卡片、lockfile 提示与卸载入口。
+ * 「已安装」面板：两个全局根下的 skill 卡片、检查 / 更新入口、lockfile 提示
+ * 与卸载按钮。
  *
- * 每条 skill 右侧的卸载按钮与二次确认都在这里渲染；数据与动作由页面状态
- * （`useSkillsPageState`）提供。
+ * 检查结果按 `update` / `modified` / `up-to-date` / `unsupported-source` /
+ * `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用按钮。数据与动作由
+ * 页面状态（`useSkillsPageState`）提供。
  *
  * @module @buka/dsh-plugin-skills/client/components/installed-panel
  */
@@ -15,13 +17,14 @@ import { entryKey } from '../keys.ts'
 import {
   Button,
   h,
+  IconRefreshOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
   StateDot,
   Tag,
 } from '../primitives.ts'
 import { repoLabel } from '../repo-source.ts'
-import type { InstalledSkill, SkillsPageState } from '../types.ts'
+import type { InstalledSkill, SkillCheckEntry, SkillsPageState } from '../types.ts'
 
 /** 一行右侧操作区的入参。 */
 interface RowActionsState {
@@ -50,6 +53,29 @@ function sourceTagOf(
   if (entry.managedByNpx !== true) return { text: t('badgeManual'), tone: 'outline' }
   const source = repoLabel(entry.npxSourceUrl) || repoLabel(entry.npxSource)
   return { text: source === '' ? t('badgeNpx') : source, tone: 'info' }
+}
+
+/**
+ * 检查结果 → 行内状态标签；没有结果（还没检查、手工安装）时不显示。
+ */
+function statusTagOf(
+  result: SkillCheckEntry | undefined,
+  t: Translate,
+): { text: string; tone: 'info' | 'warning' | 'success' } | null {
+  switch (result?.status) {
+    case 'update':
+      return { text: t('statusUpdate'), tone: 'info' }
+    case 'modified':
+      return { text: t('statusModified'), tone: 'warning' }
+    case 'up-to-date':
+      return { text: t('statusUpToDate'), tone: 'success' }
+    case 'unsupported-source':
+      return { text: t('statusUnsupported'), tone: 'warning' }
+    case 'failed':
+      return { text: t('statusFailed'), tone: 'warning' }
+    default:
+      return null
+  }
 }
 
 /**
@@ -118,9 +144,27 @@ function rowActions(entry: InstalledSkill, state: RowActionsState): ReactElement
  * @param state 页面状态与动作
  */
 function renderInstalled(state: SkillsPageState): ReactElement {
-  const { t, skills, busy, confirming, setConfirming, uninstall, installed, installedData } = state
+  const {
+    t,
+    skills,
+    busy,
+    checking,
+    updating,
+    checkResults,
+    checkMessage,
+    hasUpdates,
+    checkUpdates,
+    updateSkills,
+    confirming,
+    setConfirming,
+    uninstall,
+    installed,
+    installedData,
+  } = state
+  const anyCheckBusy = checking || updating
   const rows = skills.map((entry) => {
     const source = sourceTagOf(entry, t)
+    const status = statusTagOf(checkResults[entryKey(entry)], t)
     return h(
       'li',
       { className: 'buka-skills-card', key: `${entry.scope}:${entry.id}` },
@@ -136,6 +180,7 @@ function renderInstalled(state: SkillsPageState): ReactElement {
             h('span', { className: 'buka-skills-cardTitle' }, entry.name),
             h(Tag, { tone: 'neutral' }, entry.scope),
             h(Tag, { tone: source.tone }, source.text),
+            status === null ? null : h(Tag, { tone: status.tone }, status.text),
           ),
           h(
             'div',
@@ -176,6 +221,37 @@ function renderInstalled(state: SkillsPageState): ReactElement {
   return h(
     'div',
     { className: 'buka-skills-panel' },
+    h(
+      'div',
+      { className: 'buka-skills-panelActions' },
+      checkMessage === null
+        ? null
+        : h('p', { className: 'buka-skills-meta', role: 'status' }, checkMessage),
+      h(
+        Button,
+        {
+          variant: 'outline',
+          size: 'sm',
+          icon: checking
+            ? h(StateDot, { state: 'ongoing', size: 13 })
+            : h(IconRefreshOutlineRegular, { size: 13 }),
+          disabled: anyCheckBusy,
+          onClick: () => void checkUpdates(),
+        },
+        checking ? t('checkingUpdates') : t('checkUpdates'),
+      ),
+      h(
+        Button,
+        {
+          variant: 'primary',
+          size: 'sm',
+          icon: updating ? h(StateDot, { state: 'ongoing', size: 13 }) : undefined,
+          disabled: anyCheckBusy || !hasUpdates,
+          onClick: () => void updateSkills(),
+        },
+        updating ? t('updatingSkills') : t('updateSkills'),
+      ),
+    ),
     installed.error === null
       ? null
       : h(
