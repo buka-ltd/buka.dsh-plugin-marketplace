@@ -136,6 +136,11 @@ export function useWorkersState(props: { getService: GetService }) {
 
   /** Toast 文案；同一时刻只保留最后一条。 */
   const [notice, setNotice] = React.useState<Notice | null>(null)
+
+  // skill 更新：单 worker 与列表页批量更新共用一个进行中标记，避免重复点击。
+  // 放在状态 Hook 列表末尾，避免改变已有状态的位置。
+  const [updatingSkills, setUpdatingSkills] = React.useState(false)
+  const [updatingAllSkills, setUpdatingAllSkills] = React.useState(false)
   // 首次挂载与每次刷新（reloadKey 变化）都重新读 Host 的打工人登记表。
   React.useEffect(() => {
     let cancelled = false
@@ -165,6 +170,8 @@ export function useWorkersState(props: { getService: GetService }) {
     creating ||
     busy !== null ||
     installing ||
+    updatingSkills ||
+    updatingAllSkills ||
     removing !== null ||
     agentsSaving ||
     avatarSaving ||
@@ -383,6 +390,10 @@ export function useWorkersState(props: { getService: GetService }) {
     setInstallError,
     installing,
     setInstalling,
+    updatingSkills,
+    setUpdatingSkills,
+    updatingAllSkills,
+    setUpdatingAllSkills,
     favourites,
     setFavourites,
     notice,

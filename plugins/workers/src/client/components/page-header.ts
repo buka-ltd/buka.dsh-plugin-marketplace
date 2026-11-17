@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactElement } from 'react'
 import type { createDetailActions } from '../actions/detail.ts'
+import type { createSkillActions } from '../actions/skills.ts'
 import type { createWorkerActions } from '../actions/workers.ts'
 import { workerDisplayName, workerIdentityLabel } from '../api.ts'
 import { renderAvatar } from '../avatar.ts'
@@ -37,15 +38,28 @@ export function PageHeader({
   state,
   actions,
   detail,
+  skillActions,
 }: {
   t: Translate
   state: WorkersPageState
   actions: ReturnType<typeof createWorkerActions>
   detail: ReturnType<typeof createDetailActions>
+  skillActions: ReturnType<typeof createSkillActions>
 }): ReactElement {
-  const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } =
-    state
+  const {
+    selectedWorker,
+    mutating,
+    corrupt,
+    list,
+    busy,
+    tab,
+    reload,
+    switchTab,
+    backToList,
+    updatingAllSkills,
+  } = state
   const { openCreateDialog, openWorker, revealWorker } = actions
+  const { updateAllWorkers } = skillActions
   const { openAvatarDialog, openRenameDialog } = detail
   // 机器人只读：不提供新会话 / 打开目录 / 改名 / 换头像入口。
   const robot = selectedWorker?.driver === 'robot'
@@ -70,6 +84,26 @@ export function PageHeader({
       t('refresh'),
     ),
   )
+
+  // 列表页的「更新全部打工人」：只对智能体、目录存在且有 skill 的 worker
+  // 顺序执行；单个失败不中断，结果由 Host 汇总。
+  const updateAllButton =
+    selectedWorker === null
+      ? h(
+          Button,
+          {
+            variant: 'outline',
+            size: 'sm',
+            className: 'buka-workers-toolbarButton',
+            icon: updatingAllSkills
+              ? h(StateDot, { state: 'ongoing', size: 13 })
+              : h(IconRefreshOutlineRegular, { size: 13 }),
+            disabled: mutating || corrupt || updatingAllSkills,
+            onClick: () => updateAllWorkers(),
+          },
+          updatingAllSkills ? t('updatingAllWorkers') : t('updateAllWorkers'),
+        )
+      : null
 
   // 「创建打工人」常驻标题行，「刷新」右侧、同一尺寸；名称在对话框里填。
   const createButton =
@@ -211,7 +245,14 @@ export function PageHeader({
               ),
         ),
       ),
-      h('div', { className: 'buka-workers-toolbar' }, detailActions, refreshButton, createButton),
+      h(
+        'div',
+        { className: 'buka-workers-toolbar' },
+        detailActions,
+        updateAllButton,
+        refreshButton,
+        createButton,
+      ),
       selectedWorker === null
         ? null
         : h(

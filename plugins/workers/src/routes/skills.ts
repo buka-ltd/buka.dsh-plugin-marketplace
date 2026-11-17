@@ -11,7 +11,8 @@
 import type { ServerResponse } from 'node:http'
 import { createNpxRunner, parseSkillList } from '@buka/plugin-kit'
 import type { Context } from '@deepseek-ai/cordis'
-import { ensureClaudeLink, scanProjectSkills } from '../worker-store.ts'
+import { updateWorkersSequentially } from '../skill-update-batch.ts'
+import { ensureClaudeLink, listWorkers, scanProjectSkills } from '../worker-store.ts'
 import {
   describeError,
   readJsonBody,
@@ -30,6 +31,12 @@ const INSTALL_ROUTE = '/buka-workers/skills/install'
 
 /** 页面移除项目级 skill 用的路由。 */
 const SKILL_REMOVE_ROUTE = '/buka-workers/skills/remove'
+
+/** 单个打工人的 skill 更新入口。 */
+const SKILL_UPDATE_ROUTE = '/buka-workers/skills/update'
+
+/** 列表页「更新全部打工人」。 */
+const SKILL_UPDATE_ALL_ROUTE = '/buka-workers/skills/update-all'
 
 /** `add --list` 的输出需要整段解析，给列清单的 runner 单独放宽上限。 */
 const LIST_OUTPUT_BYTES = 256 * 1024
@@ -103,6 +110,20 @@ function normalizeSkillSelection(value: unknown): string[] | null {
 export interface SkillRouteDeps {
   workersDir: string
   registryFile: string
+}
+
+/** Skills 插件的 Host Service 里本路由用到的部分。 */
+interface SkillsUpdateService {
+  updateSkills?(options: { dir: string }): Promise<unknown>
+}
+
+/** 从 web 上下文取可选的 `bukaSkills` 服务；插件没装时返回 null。 */
+function skillsService(ctx: Context): SkillsUpdateService | null {
+  try {
+    return (ctx.get?.('bukaSkills') ?? null) as SkillsUpdateService | null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -359,5 +380,109 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
         },
       }),
     `buka-workers: POST ${SKILL_REMOVE_ROUTE}`,
+  )
+
+  // ---- 打工人 skill 更新 ---------------------------------------------------
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: SKILL_UPDATE_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'POST') {
+            sendMethodNotAllowed(res, 'POST')
+            return
+          }
+          const body = await readJsonBody(req, res)
+          if (body === undefined) return
+
+          const resolved = await resolveWorker(registryFile, body?.id)
+          if (resolved.error !== undefined) {
+            sendWorkerError(res, resolved.error)
+            return
+          }
+          const service = skillsService(webCtx)
+          if (service === null || typeof service.updateSkills !== 'function') {
+            sendError(
+              res,
+              503,
+              'skills-unavailable',
+              '没有找到 Skills 插件（@buka/dsh-plugin-skills），无法检查或更新这个打工人的 skills。',
+            )
+            return
+          }
+
+          try {
+            const result = await service.updateSkills({ dir: resolved.worker.path })
+            const scanned = await scanProjectSkills(resolved.worker.path)
+            webCtx.logger?.info?.('buka-workers: 已更新 skill（%s）', resolved.worker.path)
+            sendJson(res, 200, { ok: true, update: result, skills: scanned.skills })
+          } catch (error) {
+            webCtx.logger?.warn?.('buka-workers: 更新 skill 失败：%s', describeError(error))
+            sendError(res, 502, 'update-failed', `更新 skill 失败：${describeError(error)}`)
+          }
+        },
+      }),
+    `buka-workers: POST ${SKILL_UPDATE_ROUTE}`,
+  )
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: SKILL_UPDATE_ALL_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'POST') {
+            sendMethodNotAllowed(res, 'POST')
+            return
+          }
+          const service = skillsService(webCtx)
+          if (service === null || typeof service.updateSkills !== 'function') {
+            sendError(
+              res,
+              503,
+              'skills-unavailable',
+              '没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人的 skills。',
+            )
+            return
+          }
+
+          try {
+            const listed = await listWorkers({
+              file: registryFile,
+              workersDir: deps.workersDir,
+            })
+            if (listed.corrupt) {
+              sendError(
+                res,
+                409,
+                'registry-unreadable',
+                `打工人登记文件无法读取：${registryFile}。请修复或删除该文件后刷新。`,
+              )
+              return
+            }
+            // 只更新智能体、目录存在且确实装了 skill 的打工人；顺序执行，
+            // 单个失败不中断，汇总见 `skill-update-batch.ts`。
+            const updateSkills = service.updateSkills.bind(service)
+            const batch = await updateWorkersSequentially({
+              workers: listed.workers,
+              update: (options) => updateSkills(options),
+            })
+            webCtx.logger?.info?.(
+              'buka-workers: 已更新全部打工人（%d 个 worker，%d 个失败）',
+              batch.results.length,
+              batch.failed,
+            )
+            sendJson(res, 200, { ok: true, ...batch })
+          } catch (error) {
+            webCtx.logger?.warn?.('buka-workers: 更新全部打工人失败：%s', describeError(error))
+            sendError(res, 502, 'update-failed', `更新全部打工人失败：${describeError(error)}`)
+          }
+        },
+      }),
+    `buka-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`,
   )
 }

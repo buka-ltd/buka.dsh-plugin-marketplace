@@ -195,6 +195,43 @@ export interface FavouritesState {
   repos: Array<{ id: string; source: string; note: string }>
 }
 
+/** Skills 插件检查 / 更新的结果快照（Host 原样透传）。 */
+export interface SkillUpdateSummary {
+  ok?: boolean
+  code?: string
+  message?: string
+  updated?: unknown[]
+  skipped?: unknown[]
+  failed?: unknown[]
+}
+
+/** 单个打工人更新响应。 */
+export interface WorkerSkillUpdateSnapshot {
+  ok?: boolean
+  update?: SkillUpdateSummary
+  skills?: WorkerSkill[]
+}
+
+/** 批量更新里一个打工人的结果。 */
+export interface WorkerSkillUpdateResult {
+  id?: string
+  name?: string
+  ok?: boolean
+  message?: string
+  updated?: number
+  failed?: number
+  skipped?: number
+}
+
+/** 批量更新响应。 */
+export interface WorkerSkillUpdateAllSnapshot {
+  ok?: boolean
+  results?: WorkerSkillUpdateResult[]
+  updated?: number
+  failed?: number
+  skippedWorkers?: number
+}
+
 /** 写操作失败时留在对话框里的提示。 */
 export interface DialogFailure {
   message: string
@@ -221,6 +258,9 @@ export interface HostResponse {
   name?: string | undefined
   removed?: boolean | undefined
   repos?: Array<{ id?: string; source?: string; note?: string }> | undefined
+  update?: SkillUpdateSummary | undefined
+  results?: WorkerSkillUpdateResult[] | undefined
+  skippedWorkers?: number | undefined
   jobs?: WorkerUsageJob[] | undefined
   blockers?: { runningJobs?: WorkerUsageJob[] } | undefined
   workflows?: WorkerUsageWorkflow[] | undefined
