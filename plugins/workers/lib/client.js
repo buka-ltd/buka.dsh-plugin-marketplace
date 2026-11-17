@@ -383,6 +383,8 @@ window.__ModuleLoader__.load({
     		case "invalid-skills": return t("errInvalidSkills");
     		case "list-unparsed": return t("errListUnparsed");
     		case "npx-failed": return t("errNpxFailed");
+    		case "skills-unavailable": return t("errSkillsUnavailable");
+    		case "update-failed": return t("errUpdateFailed");
     		default: return messageOf(failure);
     	}
     }
@@ -475,6 +477,8 @@ window.__ModuleLoader__.load({
     const AVAILABLE_ROUTE = "/buka-workers/skills/available";
     const INSTALL_ROUTE = "/buka-workers/skills/install";
     const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
+    const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
+    const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
     /**
     * Skills 插件（`@buka/dsh-plugin-skills`）的收藏仓库路由。
     *
@@ -708,7 +712,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createSkillActions(state, t) {
-    	const { favourites, setFavourites, setInstallOpen, installCandidates, setInstallCandidates, installSource, setInstallSource, installSelected, setInstallSelected, setInstallError, installing, setInstalling, selectedWorker, patchWorker, flash, corrupt, removing, setRemoving, setConfirmingSkill, setSkillError } = state;
+    	const { favourites, setFavourites, setInstallOpen, installCandidates, setInstallCandidates, installSource, setInstallSource, installSelected, setInstallSelected, setInstallError, installing, setInstalling, selectedWorker, patchWorker, reload, flash, corrupt, removing, setRemoving, setConfirmingSkill, setSkillError, updatingSkills, setUpdatingSkills, updatingAllSkills, setUpdatingAllSkills } = state;
     	/**
     	* 读 Skills 插件的收藏仓库。只读它已经存在的 `GET /buka-skills/repos`：
     	* 两个插件之间不 import，这个路由回 404（插件没装）或任何失败都按
@@ -869,6 +873,53 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
+    	* 更新一个打工人的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
+    	* 检查并更新目录，`modified` 会跳过。成功后刷新该打工人的 skills 列表。
+    	*/
+    	async function updateWorkerSkills(worker) {
+    		if (updatingSkills || updatingAllSkills) return;
+    		setUpdatingSkills(true);
+    		setSkillError(null);
+    		try {
+    			const body = await requestJson(SKILL_UPDATE_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({ id: worker.id })
+    			});
+    			if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills });
+    			const message = body.update?.message;
+    			flash("success", typeof message === "string" && message !== "" ? message : t("skillsUpToDate"));
+    		} catch (failure) {
+    			setSkillError({
+    				message: failureText(t, failure),
+    				output: outputOf(failure)
+    			});
+    		} finally {
+    			setUpdatingSkills(false);
+    		}
+    	}
+    	/**
+    	* 列表页「更新全部打工人」：Host 只对智能体、目录存在且有 skill 的 worker
+    	* 顺序执行，单个失败不中断；页面用汇总提示结果并刷新列表。
+    	*/
+    	async function updateAllWorkers() {
+    		if (updatingSkills || updatingAllSkills) return;
+    		setUpdatingAllSkills(true);
+    		try {
+    			const body = await requestJson(SKILL_UPDATE_ALL_ROUTE, { method: "POST" });
+    			const results = Array.isArray(body.results) ? body.results : [];
+    			const failed = Number(body.failed ?? results.filter((one) => one.ok === false).length);
+    			const updated = Number(body.updated ?? 0);
+    			const skipped = Number(body.skippedWorkers ?? 0);
+    			const summary = t("updateAllSummary").replace("{n}", String(updated)).replace("{f}", String(failed)).replace("{s}", String(skipped));
+    			flash(failed > 0 ? "error" : "success", summary);
+    			reload();
+    		} catch (failure) {
+    			flash("error", `${t("errUpdateFailed")} ${failureText(t, failure)}`);
+    		} finally {
+    			setUpdatingAllSkills(false);
+    		}
+    	}
+    	/**
     	* 移除项目级 skill：Host 执行 `npx skills remove <skill> -y` 并返回新的
     	* skills 列表；请求体字段是 `{ name, skill }`（路由契约）。
     	*
@@ -905,7 +956,9 @@ window.__ModuleLoader__.load({
     		toggleCandidate,
     		selectAllCandidates,
     		installSelectedSkills,
-    		removeSkill
+    		removeSkill,
+    		updateWorkerSkills,
+    		updateAllWorkers
     	};
     }
     // .build/workers/client/actions/workers.js
@@ -1354,6 +1407,8 @@ window.__ModuleLoader__.load({
     	});
     	/** Toast 文案；同一时刻只保留最后一条。 */
     	const [notice, setNotice] = react.default.useState(null);
+    	const [updatingSkills, setUpdatingSkills] = react.default.useState(false);
+    	const [updatingAllSkills, setUpdatingAllSkills] = react.default.useState(false);
     	react.default.useEffect(() => {
     		let cancelled = false;
     		setList((prev) => ({
@@ -1384,7 +1439,7 @@ window.__ModuleLoader__.load({
     	const corrupt = data?.corrupt === true;
     	const selectedWorker = selectedId === null ? null : workers.find((worker) => worker.id === selectedId) ?? null;
     	/** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
-    	const mutating = creating || busy !== null || installing || removing !== null || agentsSaving || avatarSaving || descriptionSaving || renameSaving || modelSaving || deleteDialog.saving;
+    	const mutating = creating || busy !== null || installing || updatingSkills || updatingAllSkills || removing !== null || agentsSaving || avatarSaving || descriptionSaving || renameSaving || modelSaving || deleteDialog.saving;
     	/**
     	* 新建打工人时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
     	* 打工人全是一个样子（Host 也会在没传头像时做同样的分配）。
@@ -1589,6 +1644,10 @@ window.__ModuleLoader__.load({
     		setInstallError,
     		installing,
     		setInstalling,
+    		updatingSkills,
+    		setUpdatingSkills,
+    		updatingAllSkills,
+    		setUpdatingAllSkills,
     		favourites,
     		setFavourites,
     		notice,
@@ -1772,9 +1831,10 @@ window.__ModuleLoader__.load({
     * 渲染标题行、工具栏与详情页签。
     *
     */
-    function PageHeader({ t, state, actions, detail }) {
-    	const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList } = state;
+    function PageHeader({ t, state, actions, detail, skillActions }) {
+    	const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList, updatingAllSkills } = state;
     	const { openCreateDialog, openWorker, revealWorker } = actions;
+    	const { updateAllWorkers } = skillActions;
     	const { openAvatarDialog, openRenameDialog } = detail;
     	const robot = selectedWorker?.driver === "robot";
     	const refreshButton = h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
@@ -1795,6 +1855,17 @@ window.__ModuleLoader__.load({
     		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
     		onClick: reload
     	}, t("refresh")));
+    	const updateAllButton = selectedWorker === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workers-toolbarButton",
+    		icon: updatingAllSkills ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    			state: "ongoing",
+    			size: 13
+    		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
+    		disabled: mutating || corrupt || updatingAllSkills,
+    		onClick: () => updateAllWorkers()
+    	}, updatingAllSkills ? t("updatingAllWorkers") : t("updateAllWorkers")) : null;
     	const createButton = selectedWorker === null ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "primary",
     		size: "sm",
@@ -1859,7 +1930,7 @@ window.__ModuleLoader__.load({
     	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedWorker === null ? null : h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
     		t,
     		worker: selectedWorker
-    	})))), h("div", { className: "buka-workers-toolbar" }, detailActions, refreshButton, createButton), selectedWorker === null ? null : h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	})))), h("div", { className: "buka-workers-toolbar" }, detailActions, updateAllButton, refreshButton, createButton), selectedWorker === null ? null : h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-workers-tabList",
     		label: t("tabsLabel"),
@@ -1904,8 +1975,8 @@ window.__ModuleLoader__.load({
     *
     */
     function SkillsSection({ t, worker, state, skillActions }) {
-    	const { mutating, confirmingSkill, removing, skillError, setConfirmingSkill, corrupt } = state;
-    	const { removeSkill, openInstallDialog } = skillActions;
+    	const { mutating, confirmingSkill, removing, skillError, setConfirmingSkill, corrupt, updatingSkills } = state;
+    	const { removeSkill, openInstallDialog, updateWorkerSkills } = skillActions;
     	const skills = skillsOf(worker);
     	const anyBusy = mutating;
     	const rows = skills.map((skill, index) => {
@@ -1947,14 +2018,24 @@ window.__ModuleLoader__.load({
     	return h("section", {
     		className: "buka-workers-section",
     		"aria-busy": anyBusy ? true : void 0
-    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("skillsTitle")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("skillsTitle")), h("div", { className: "buka-workers-sectionActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "outline",
+    		size: "sm",
+    		className: "buka-workers-toolbarButton",
+    		icon: updatingSkills ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    			state: "ongoing",
+    			size: 13
+    		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
+    		disabled: mutating || corrupt || worker.exists === false || skills.length === 0,
+    		onClick: () => updateWorkerSkills(worker)
+    	}, updatingSkills ? t("updatingSkills") : t("updateSkills")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "primary",
     		size: "sm",
     		className: "buka-workers-toolbarButton",
     		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 13 }),
     		disabled: mutating || corrupt || worker.exists === false,
     		onClick: openInstallDialog
-    	}, t("installSkills"))), h("p", { className: "buka-workers-intro" }, t("skillsIntroBefore"), h("code", { className: "buka-workers-inlineCode" }, "npx skills add <source>"), t("skillsIntroMiddle"), h("code", { className: "buka-workers-inlineCode" }, ".agents/skills"), t("skillsIntroAfter")), skillError === null ? null : h("div", {
+    	}, t("installSkills")))), h("p", { className: "buka-workers-intro" }, t("skillsIntroBefore"), h("code", { className: "buka-workers-inlineCode" }, "npx skills add <source>"), t("skillsIntroMiddle"), h("code", { className: "buka-workers-inlineCode" }, ".agents/skills"), t("skillsIntroAfter")), skillError === null ? null : h("div", {
     		className: "buka-workers-alert",
     		role: "alert"
     	}, h("div", { className: "buka-workers-alertHead" }, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("skillErrorTitle")} ${skillError.message}`)), typeof skillError.output === "string" && skillError.output !== "" ? h(react.default.Fragment, null, h("span", { className: "buka-workers-outputLabel" }, t("outputLabel")), h("pre", { className: "buka-workers-output" }, skillError.output)) : null), skills.length === 0 ? h("p", { className: "buka-workers-empty" }, t("skillsEmpty")) : h("ul", { className: "buka-workers-skillList" }, ...rows));
@@ -2553,7 +2634,8 @@ window.__ModuleLoader__.load({
     		t,
     		state,
     		actions,
-    		detail
+    		detail,
+    		skillActions
     	}), h("div", { className: "buka-workers-body" }, selectedWorker === null ? h(WorkerList, {
     		t,
     		state,
@@ -2729,6 +2811,12 @@ window.__ModuleLoader__.load({
     	confirmRemoveSkill: "Confirm remove",
     	removing: "Removing…",
     	skillRemoved: "Removed skill:",
+    	updateSkills: "Update",
+    	updatingSkills: "Updating…",
+    	skillsUpToDate: "All skills are up to date.",
+    	updateAllWorkers: "Update all workers",
+    	updatingAllWorkers: "Updating all…",
+    	updateAllSummary: "Updated {n} skill(s); {f} worker(s) failed, {s} skipped.",
     	skillsEmpty: "No project-level skills are installed in this worker yet.",
     	skillErrorTitle: "The skills command failed:",
     	outputLabel: "Command output",
@@ -2777,7 +2865,9 @@ window.__ModuleLoader__.load({
     	errInvalidContent: "The AGENTS.md content must be text.",
     	errInvalidSource: "Invalid source. Use an npx skills source such as owner/repo.",
     	errInvalidSkill: "Invalid skill name.",
-    	errNpxFailed: "npx skills failed. See the command output below."
+    	errNpxFailed: "npx skills failed. See the command output below.",
+    	errSkillsUnavailable: "The Skills plugin (@buka/dsh-plugin-skills) is not installed, so worker skills cannot be updated.",
+    	errUpdateFailed: "Could not update skills:"
     };
     /** 简体中文文案。 */
     const zh = {
@@ -2908,6 +2998,12 @@ window.__ModuleLoader__.load({
     	confirmRemoveSkill: "确认移除",
     	removing: "移除中…",
     	skillRemoved: "已移除 skill：",
+    	updateSkills: "更新",
+    	updatingSkills: "更新中…",
+    	skillsUpToDate: "所有 skill 都已是最新。",
+    	updateAllWorkers: "更新全部打工人",
+    	updatingAllWorkers: "正在全部更新…",
+    	updateAllSummary: "已更新 {n} 个 skill；{f} 个打工人失败，跳过 {s} 个。",
     	skillsEmpty: "这个打工人还没有安装项目级 skills。",
     	skillErrorTitle: "skills 命令执行失败：",
     	outputLabel: "命令输出",
@@ -2956,7 +3052,9 @@ window.__ModuleLoader__.load({
     	errInvalidContent: "AGENTS.md 内容必须是文本。",
     	errInvalidSource: "来源不合法：请填 owner/repo 这类 npx skills 来源。",
     	errInvalidSkill: "skill 名称不合法。",
-    	errNpxFailed: "npx skills 执行失败，输出见下方。"
+    	errNpxFailed: "npx skills 执行失败，输出见下方。",
+    	errSkillsUnavailable: "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人 skills。",
+    	errUpdateFailed: "更新 skills 失败："
     };
     // .build/workers/client/styles.js
     /**
@@ -3062,6 +3160,7 @@ window.__ModuleLoader__.load({
     .buka-workers-section{display:flex;flex-direction:column;gap:12px}
     .buka-workers-agentsSection{flex:1 1 auto;min-height:0}
     .buka-workers-sectionHead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .buka-workers-sectionActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .buka-workers-sectionTitle{margin:0;font-size:15px;font-weight:600;line-height:22px}
     .buka-workers-skillList{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
     .buka-workers-skillRow{display:flex;flex-direction:column;gap:2px;min-width:0;border-radius:var(--dsw-radius-md);padding:8px 8px;margin:0 -8px}

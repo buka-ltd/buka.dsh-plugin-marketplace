@@ -2714,6 +2714,57 @@ function sendMethodNotAllowed(res, allow) {
 		message: `只支持 ${allow}`
 	}));
 }
+// .build/workers/skill-update-batch.js
+/**
+* 「更新全部打工人」的批量编排。
+*
+* 页面只调一次接口；真正的顺序执行、过滤与汇总放在这里，便于单独测试：
+*
+* - 只对智能体（`driver === 'agent'`）、目录存在且确实装了 skill 的 worker
+*   执行；机器人没有目录，空 skills 的 worker 没有可更新项，都跳过；
+* - 按登记表顺序逐个执行，单个失败不中断后面的；
+* - 最后汇总每个 worker 的结果与整体成功 / 失败数。
+*
+* @module @buka/dsh-plugin-workers/skill-update-batch
+*/
+/**
+* 顺序更新一批打工人。
+*
+* @param workers 登记表里的全部 worker（含机器人）
+* @param update Skills 服务的 `updateSkills({ dir })`
+*/
+async function updateWorkersSequentially({ workers, update }) {
+	const targets = workers.filter((worker) => worker.driver === "agent" && worker.exists !== false && Array.isArray(worker.skills) && worker.skills.length > 0);
+	const results = [];
+	for (const worker of targets) try {
+		const result = await update({ dir: worker.path });
+		results.push({
+			id: worker.id,
+			name: worker.name === "" ? worker.id : worker.name,
+			ok: result?.ok !== false,
+			message: typeof result?.message === "string" && result.message !== "" ? result.message : result?.ok === false ? "更新失败。" : "已是最新。",
+			updated: Array.isArray(result?.updated) ? result.updated.length : 0,
+			failed: Array.isArray(result?.failed) ? result.failed.length : 0,
+			skipped: Array.isArray(result?.skipped) ? result.skipped.length : 0
+		});
+	} catch (error) {
+		results.push({
+			id: worker.id,
+			name: worker.name === "" ? worker.id : worker.name,
+			ok: false,
+			message: error instanceof Error ? error.message : String(error),
+			updated: 0,
+			failed: 1,
+			skipped: 0
+		});
+	}
+	return {
+		results,
+		updated: results.reduce((total, one) => total + one.updated, 0),
+		failed: results.filter((one) => !one.ok).length,
+		skippedWorkers: workers.length - targets.length
+	};
+}
 // .build/workers/routes/target.js
 /**
 * 按标识符解析打工人并确认目录仍在。
@@ -2788,6 +2839,10 @@ const AVAILABLE_ROUTE = "/buka-workers/skills/available";
 const INSTALL_ROUTE = "/buka-workers/skills/install";
 /** 页面移除项目级 skill 用的路由。 */
 const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
+/** 单个打工人的 skill 更新入口。 */
+const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
+/** 列表页「更新全部打工人」。 */
+const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
 /** `add --list` 的输出需要整段解析，给列清单的 runner 单独放宽上限。 */
 const LIST_OUTPUT_BYTES = 262144;
 /** 项目级安装 / 移除的最长等待时间；比全局版 npx runner 默认的 120 s 更宽。 */
@@ -2843,6 +2898,14 @@ function normalizeSkillSelection(value) {
 	}
 	if (names.length === 0 || names.length > MAX_SKILL_SELECTION) return null;
 	return names;
+}
+/** 从 web 上下文取可选的 `bukaSkills` 服务；插件没装时返回 null。 */
+function skillsService(ctx) {
+	try {
+		return ctx.get?.("bukaSkills") ?? null;
+	} catch {
+		return null;
+	}
 }
 /**
 * 注册项目级 skills 相关的精确路由。
@@ -3037,6 +3100,81 @@ function registerSkillRoutes(webCtx, deps) {
 			}
 		}
 	}), `buka-workers: POST ${SKILL_REMOVE_ROUTE}`);
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
+		path: SKILL_UPDATE_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "POST") {
+				sendMethodNotAllowed(res, "POST");
+				return;
+			}
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const resolved = await resolveWorker(registryFile, body?.id);
+			if (resolved.error !== void 0) {
+				sendWorkerError(res, resolved.error);
+				return;
+			}
+			const service = skillsService(webCtx);
+			if (service === null || typeof service.updateSkills !== "function") {
+				sendError(res, 503, "skills-unavailable", "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法检查或更新这个打工人的 skills。");
+				return;
+			}
+			try {
+				const result = await service.updateSkills({ dir: resolved.worker.path });
+				const scanned = await scanProjectSkills(resolved.worker.path);
+				webCtx.logger?.info?.("buka-workers: 已更新 skill（%s）", resolved.worker.path);
+				sendJson(res, 200, {
+					ok: true,
+					update: result,
+					skills: scanned.skills
+				});
+			} catch (error) {
+				webCtx.logger?.warn?.("buka-workers: 更新 skill 失败：%s", describeError$1(error));
+				sendError(res, 502, "update-failed", `更新 skill 失败：${describeError$1(error)}`);
+			}
+		}
+	}), `buka-workers: POST ${SKILL_UPDATE_ROUTE}`);
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
+		path: SKILL_UPDATE_ALL_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "POST") {
+				sendMethodNotAllowed(res, "POST");
+				return;
+			}
+			const service = skillsService(webCtx);
+			if (service === null || typeof service.updateSkills !== "function") {
+				sendError(res, 503, "skills-unavailable", "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人的 skills。");
+				return;
+			}
+			try {
+				const listed = await listWorkers({
+					file: registryFile,
+					workersDir: deps.workersDir
+				});
+				if (listed.corrupt) {
+					sendError(res, 409, "registry-unreadable", `打工人登记文件无法读取：${registryFile}。请修复或删除该文件后刷新。`);
+					return;
+				}
+				const updateSkills = service.updateSkills.bind(service);
+				const batch = await updateWorkersSequentially({
+					workers: listed.workers,
+					update: (options) => updateSkills(options)
+				});
+				webCtx.logger?.info?.("buka-workers: 已更新全部打工人（%d 个 worker，%d 个失败）", batch.results.length, batch.failed);
+				sendJson(res, 200, {
+					ok: true,
+					...batch
+				});
+			} catch (error) {
+				webCtx.logger?.warn?.("buka-workers: 更新全部打工人失败：%s", describeError$1(error));
+				sendError(res, 502, "update-failed", `更新全部打工人失败：${describeError$1(error)}`);
+			}
+		}
+	}), `buka-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`);
 }
 // .build/workers/builder.js
 /**

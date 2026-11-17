@@ -1,346 +1,12 @@
-import path from "node:path";
-import { execFile, spawn } from "node:child_process";
-import { constants, promises } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
+import path from "node:path";
+import { promises } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { installSkills, removeSkills } from "skills";
 import { createHash } from "node:crypto";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-// packages/plugin-kit/lib/npx.js
-/**
-* 定位并执行 `npx skills`：安装、卸载与列清单共用。
-*
-* 桌面版 DSH 从 Finder / Dock 启动时，进程的 PATH 可能与登录 shell 不同（没有
-* mise / nvm / Homebrew 的 shim），所以这里不直接 `spawn('npx')`，而是：
-*
-* 1. 先按 `PATH` 找 `npx`；
-* 2. 再按常见 Node 安装位置找（mise、nvm、Volta、Homebrew、系统目录）；
-* 3. 只有 `node` 时，用 node 直接跑 npm 自带的 `npx-cli.js`。
-*
-* 找不到任何入口就返回可读的失败原因，绝不让 npx 管理的 skill 退化成直接删
-* 目录 —— 那会留下 lockfile 记录与其它 agent 目录里的链接。
-*
-* 子进程超时时先解析失败响应再杀进程组：npm exec 可能再 fork 一个子进程，
-* 只杀直接子进程会让继承的管道一直开着、请求永远不返回。
-*
-* 两个插件的已知差异都保留成显式参数，不在这里悄悄统一：
-*
-* - 工作目录：skills 的全局安装固定在 `agentsHome` 下，workers 每次调用传项目
-*   目录（`cwd` 既可以在工厂里绑定，也可以在调用时覆盖）；
-* - 超时：skills 用默认的 120 s，workers 显式传 180 s；
-* - 失败信息：找不到 npx 时的完整文案由调用方传入；命令名默认是
-*   `npx skills`，workers 传一个按子命令生成的函数；
-* - 「没跑到子进程」的失败（找不到 npx、spawn 直接抛错）是否带 `output: ''`：
-*   workers 的返回形状要求有，skills 原本没有。
-*
-* 本模块只依赖 Node 内置模块，便于单独测试。
-*/
-/** 页面展示与失败信息里保留的命令输出上限。 */
-const MAX_OUTPUT_BYTES = 4e3;
-/** Windows 上 npm 的启动器是 `npx.cmd`，其余平台是 `npx`。 */
-const NPX_EXECUTABLE = process.platform === "win32" ? "npx.cmd" : "npx";
-/** 失败信息里的默认命令名。 */
-const DEFAULT_NPX_LABEL = "npx skills";
-/** CSI 转义序列（颜色、光标显隐、清行等）；ANSI 控制字符是这里要清理的目标。 */
-const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -/]*[@-~]/gu;
-/** 命令输出里的回车符。 */
-const CARRIAGE_RETURN = /\r/gu;
-/**
-* 生成调用 `npx skills` 的函数。
-*
-* 参数与 `uninstallGlobalSkill` / workers 安装路由里的 `runNpx` 一致：传入子命令
-* 参数，解析为 `{ ok, message?, output? }`；不抛错（工作目录缺失属于调用方
-* 编程错误，会直接抛出）。
-*
-* @param options 工作目录、超时、输出上限、失败文案等全部差异
-* @returns 调用 `npx skills` 的函数
-*/
-function createNpxRunner(options) {
-	const baseEnv = options.env ?? process.env;
-	const timeoutMs = options.timeoutMs ?? 12e4;
-	const maxOutputBytes = normalizeMaxOutputBytes(options.maxOutputBytes);
-	return async function runNpx(args, cwd) {
-		const commandArgs = Array.isArray(args) ? args : [];
-		const workingDirectory = typeof cwd === "string" && cwd !== "" ? cwd : options.cwd;
-		if (typeof workingDirectory !== "string" || workingDirectory === "") throw new Error("执行 npx 需要工作目录");
-		const label = labelOf(options.label, commandArgs);
-		const setupFailure = (message) => options.emptyOutputOnSetupFailure === true ? {
-			ok: false,
-			message,
-			output: ""
-		} : {
-			ok: false,
-			message
-		};
-		const resolved = await resolveNpxCommand(baseEnv);
-		if (resolved === null) return setupFailure(options.missingMessage);
-		return await new Promise((resolve) => {
-			let child;
-			let timer;
-			let settled = false;
-			/** 只结算一次：超时后 close 事件仍可能到来。 */
-			const settle = (value) => {
-				if (settled) return;
-				settled = true;
-				if (timer !== void 0) clearTimeout(timer);
-				resolve(value);
-			};
-			try {
-				child = spawn(resolved.command, [
-					...resolved.prefixArgs,
-					"--yes",
-					"skills",
-					...commandArgs
-				], {
-					cwd: workingDirectory,
-					env: {
-						...baseEnv,
-						PATH: resolved.pathValue
-					},
-					stdio: [
-						"ignore",
-						"pipe",
-						"pipe"
-					],
-					windowsHide: true,
-					detached: process.platform !== "win32",
-					shell: process.platform === "win32"
-				});
-			} catch (error) {
-				settle(setupFailure(errorText$6(error)));
-				return;
-			}
-			let output = "";
-			const collect = (chunk) => {
-				output = (output + chunk.toString()).slice(-maxOutputBytes);
-			};
-			child.stdout?.on("data", collect);
-			child.stderr?.on("data", collect);
-			timer = setTimeout(() => {
-				const text = cleanOutput(output, maxOutputBytes);
-				settle({
-					ok: false,
-					message: `${label} 超时（${Math.round(timeoutMs / 1e3)}s）`,
-					output: text
-				});
-				killTree(child);
-			}, timeoutMs);
-			child.once("error", (error) => {
-				settle({
-					ok: false,
-					message: errorText$6(error),
-					output: cleanOutput(output, maxOutputBytes)
-				});
-			});
-			child.once("close", (code, signal) => {
-				const text = cleanOutput(output, maxOutputBytes);
-				if (code === 0) {
-					settle({
-						ok: true,
-						output: text
-					});
-					return;
-				}
-				const reason = signal === null || signal === void 0 ? `${label} 退出码 ${String(code)}` : `${label} 被信号 ${signal} 终止`;
-				settle({
-					ok: false,
-					message: reason,
-					output: text
-				});
-			});
-		});
-	};
-}
-/**
-* 清理命令输出：去掉 ANSI 颜色、光标控制与回车，保留末尾一段。
-*
-* @param text 任意输出值；非字符串按空串处理
-* @param maxBytes 保留的末尾字节数；默认 {@link MAX_OUTPUT_BYTES}
-* @returns 清理后的文本
-*/
-function cleanOutput(text, maxBytes = MAX_OUTPUT_BYTES) {
-	const limit = normalizeMaxOutputBytes(maxBytes);
-	return (typeof text === "string" ? text : "").replace(ANSI_ESCAPE, "").replace(CARRIAGE_RETURN, "").trim().slice(-limit);
-}
-/**
-* 找到可执行的 npx；找不到时返回 null。
-*
-* @param env 子进程环境
-* @returns npx 入口；找不到时是 `null`
-*/
-async function resolveNpxCommand(env = process.env) {
-	const dirs = await candidateDirs(env);
-	const pathValue = dirs.join(path.delimiter);
-	const npx = await findExecutable(NPX_EXECUTABLE, dirs);
-	if (npx !== null) return {
-		command: npx,
-		prefixArgs: [],
-		pathValue
-	};
-	const node = await findExecutable("node", dirs);
-	if (node === null) return null;
-	const npxCli = path.resolve(path.dirname(node), "..", "lib", "node_modules", "npm", "bin", "npx-cli.js");
-	if (await exists(npxCli)) return {
-		command: node,
-		prefixArgs: [npxCli],
-		pathValue
-	};
-	return null;
-}
-/**
-* 失败信息里的命令名：默认 `npx skills`；传函数时按本次调用的参数生成。
-*
-* @param label 配置的命令名
-* @param args 本次调用的参数
-* @returns 命令名
-*/
-function labelOf(label, args) {
-	if (typeof label === "function") return label(args);
-	if (typeof label === "string" && label !== "") return label;
-	return DEFAULT_NPX_LABEL;
-}
-/**
-* 输出上限归一化：不合法时回落到 {@link MAX_OUTPUT_BYTES}。
-*
-* @param value 配置的上限
-* @returns 正整数上限
-*/
-function normalizeMaxOutputBytes(value) {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : MAX_OUTPUT_BYTES;
-}
-/**
-* 杀掉子进程；POSIX 上连同它的进程组，避免 npm exec 的子进程继续占着管道。
-*
-* @param child 要杀掉的子进程
-*/
-function killTree(child) {
-	try {
-		if (process.platform !== "win32" && typeof child.pid === "number") {
-			process.kill(-child.pid, "SIGKILL");
-			return;
-		}
-	} catch {}
-	try {
-		child.kill("SIGKILL");
-	} catch {}
-}
-/**
-* @param error 任意错误
-* @returns 可以展示的错误文本
-*/
-function errorText$6(error) {
-	if (error instanceof Error) return error.message;
-	return String(error);
-}
-/**
-* 收集可能放着 node/npx 的目录，按优先级去重。
-*
-* @param env 子进程环境
-* @returns 候选目录
-*/
-async function candidateDirs(env) {
-	const dirs = [];
-	const seen = /* @__PURE__ */ new Set();
-	const add = (dir) => {
-		if (typeof dir !== "string" || dir === "" || seen.has(dir)) return;
-		seen.add(dir);
-		dirs.push(dir);
-	};
-	for (const dir of (env.PATH ?? "").split(path.delimiter)) add(dir);
-	add(path.join(os.homedir(), ".local", "share", "mise", "shims"));
-	add(path.join(os.homedir(), ".volta", "bin"));
-	for (const base of [path.join(os.homedir(), ".local", "share", "mise", "installs", "node"), path.join(os.homedir(), ".nvm", "versions", "node")]) try {
-		for (const version of await promises.readdir(base)) add(path.join(base, version, "bin"));
-	} catch {}
-	if (process.platform === "win32") {
-		add(path.join(env.APPDATA ?? "", "npm"));
-		add(path.join(env.LOCALAPPDATA ?? "", "Programs", "nodejs"));
-		add(path.join(env.ProgramFiles ?? "", "nodejs"));
-	} else for (const dir of [
-		"/opt/homebrew/bin",
-		"/usr/local/bin",
-		"/usr/bin",
-		"/bin"
-	]) add(dir);
-	return dirs;
-}
-/**
-* 在候选目录里找一个可执行文件。
-*
-* @param name 可执行文件名（不带路径）
-* @param dirs 候选目录
-* @returns 可执行文件路径；找不到时是 `null`
-*/
-async function findExecutable(name, dirs) {
-	for (const dir of dirs) {
-		const candidate = path.join(dir, name);
-		try {
-			if (!(await promises.stat(candidate)).isFile()) continue;
-			await promises.access(candidate, constants.X_OK);
-			return candidate;
-		} catch {}
-	}
-	return null;
-}
-/**
-* @param target 路径
-* @returns 路径存在时为 true
-*/
-async function exists(target) {
-	try {
-		await promises.access(target);
-		return true;
-	} catch {
-		return false;
-	}
-}
-// packages/plugin-kit/lib/store.js
-/**
-* 插件的落盘小工具：原子写 JSON 与安全读取。
-*
-* 四个插件各自维护过一份「临时文件 + rename」的写法：临时文件名有三种方案，
-* 权限 0600 只有一部分地方显式收紧。这里统一成「同目录临时文件 → rename、文件
-* 权限 0600」，调用方只保留自己的业务语义（写什么、何时写、损坏怎么处理）。
-*
-* 目录权限不在统一之列：有的调用方需要把新建目录收紧到 0700（收藏与缓存
-* 目录），有的保持默认，所以 `writeJsonAtomic` 用 `dirMode` 显式接收。
-*
-* 本模块只依赖 Node 内置模块，便于单独测试。
-*/
-/**
-* 原子写 JSON：先写同目录临时文件，再 rename；失败时清理临时文件。
-*
-* 文件权限固定 0600：写入时带上 mode，再显式 chmod 一次（umask 可能削弱创建
-* 权限；Windows 上 chmod 基本是空操作）。内容格式是两空格缩进 + 末尾换行，
-* 与插件里原有的落盘格式一致。
-*
-* @param file 目标文件（目录不存在时会先创建）
-* @param value 要写入的值
-* @param options 目录权限等可选项
-*/
-async function writeJsonAtomic(file, value, options = {}) {
-	const dir = path.dirname(file);
-	if (options.dirMode === void 0) await promises.mkdir(dir, { recursive: true });
-	else await promises.mkdir(dir, {
-		recursive: true,
-		mode: options.dirMode
-	});
-	const temporary = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-	try {
-		await promises.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-			encoding: "utf8",
-			mode: 384
-		});
-		try {
-			await promises.chmod(temporary, 384);
-		} catch {}
-		await promises.rename(temporary, file);
-	} catch (error) {
-		try {
-			await promises.rm(temporary, { force: true });
-		} catch {}
-		throw error;
-	}
-}
 // .build/skills/homes.js
 /**
 * DSH home 路径的解析。
@@ -522,7 +188,7 @@ function workerIdentityLabel(worker) {
 *
 * 安装时按标识符 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
 * 登记表。浏览器传来的字符串永远只当日志里的选择依据，不会被直接拼进
-* `npx skills add` 的工作目录。
+* 安装 / 更新时使用的工作目录。
 *
 * 两个服务都是可选的：没装 workers 插件或运行在 headless 组合里时，对应列表
 * 标记成 `available: false`，页面给出说明而不是整页失败。
@@ -778,6 +444,55 @@ async function resolveInstallTarget(ctx, request) {
 		code: "invalid-target",
 		message: `未知的安装目标：${String(request?.target)}`
 	};
+}
+process.platform;
+// packages/plugin-kit/lib/store.js
+/**
+* 插件的落盘小工具：原子写 JSON 与安全读取。
+*
+* 四个插件各自维护过一份「临时文件 + rename」的写法：临时文件名有三种方案，
+* 权限 0600 只有一部分地方显式收紧。这里统一成「同目录临时文件 → rename、文件
+* 权限 0600」，调用方只保留自己的业务语义（写什么、何时写、损坏怎么处理）。
+*
+* 目录权限不在统一之列：有的调用方需要把新建目录收紧到 0700（收藏与缓存
+* 目录），有的保持默认，所以 `writeJsonAtomic` 用 `dirMode` 显式接收。
+*
+* 本模块只依赖 Node 内置模块，便于单独测试。
+*/
+/**
+* 原子写 JSON：先写同目录临时文件，再 rename；失败时清理临时文件。
+*
+* 文件权限固定 0600：写入时带上 mode，再显式 chmod 一次（umask 可能削弱创建
+* 权限；Windows 上 chmod 基本是空操作）。内容格式是两空格缩进 + 末尾换行，
+* 与插件里原有的落盘格式一致。
+*
+* @param file 目标文件（目录不存在时会先创建）
+* @param value 要写入的值
+* @param options 目录权限等可选项
+*/
+async function writeJsonAtomic(file, value, options = {}) {
+	const dir = path.dirname(file);
+	if (options.dirMode === void 0) await promises.mkdir(dir, { recursive: true });
+	else await promises.mkdir(dir, {
+		recursive: true,
+		mode: options.dirMode
+	});
+	const temporary = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		await promises.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+			encoding: "utf8",
+			mode: 384
+		});
+		try {
+			await promises.chmod(temporary, 384);
+		} catch {}
+		await promises.rename(temporary, file);
+	} catch (error) {
+		try {
+			await promises.rm(temporary, { force: true });
+		} catch {}
+		throw error;
+	}
 }
 // .build/skills/frontmatter.js
 /**
@@ -1232,16 +947,16 @@ async function collectGlobalSkills({ homes = resolveHomes(), summaries = [], env
 /**
 * 按「来源」选卸载方式：
 *
-* - `npx skills` 管理（位于 `~/.agents/skills` 且在该工具的 lockfile 里）：
-*   交给 `npx skills remove <name> --global --yes`，由它同时清理规范副本、
-*   各 agent 目录里的链接与 lockfile 记录；
+* - `skills` 库管理（位于 `~/.agents/skills` 且在该工具的 lockfile 里）：
+*   交给 `removeSkills()`，由它同时清理规范副本、各 agent 目录里的链接与
+*   lockfile 记录；
 * - 其它（手工安装，或 `~/.dsh/skills` 下的 skill）：直接删除扫描到的目录或文件。
 *
 * lockfile 存在却读不出来时，agents 根下的 skill 一律拒绝卸载：这时无法判断
-* 它是否由 npx 管理，直接删目录会留下 lock 记录与悬空链接。两种方式都会在
-* 最后确认目标真的消失了；工具退出码为 0 但目录仍在时按失败上报。
+* 它是否由库管理，直接删目录会留下 lock 记录与悬空链接。两种方式都会在最后
+* 确认目标真的消失了。
 */
-async function uninstallGlobalSkill({ homes = resolveHomes(), scope, id, runNpx, env = process.env }) {
+async function uninstallGlobalSkill({ homes = resolveHomes(), scope, id, remove = removeSkills, env = process.env }) {
 	if (scope !== "agents" && scope !== "dsh") return {
 		ok: false,
 		code: "invalid-scope",
@@ -1252,10 +967,10 @@ async function uninstallGlobalSkill({ homes = resolveHomes(), scope, id, runNpx,
 		code: "invalid-id",
 		message: `非法的 skill 名称：${String(id)}`
 	};
-	if (typeof runNpx !== "function") return {
+	if (typeof remove !== "function") return {
 		ok: false,
-		code: "no-runner",
-		message: "缺少执行 npx 的能力"
+		code: "no-remover",
+		message: "缺少删除 skill 的能力"
 	};
 	const root = globalRoots(homes).find((one) => one.scope === scope);
 	if (root === void 0) return {
@@ -1288,35 +1003,35 @@ async function uninstallGlobalSkill({ homes = resolveHomes(), scope, id, runNpx,
 		if (npxRecordFor(lock, id) !== null) {
 			let result;
 			try {
-				result = await runNpx([
-					"remove",
-					id,
-					"--global",
-					"--yes"
-				]);
+				result = await remove([id], {
+					scope: "global",
+					config: { telemetry: false }
+				});
 			} catch (error) {
 				return {
 					ok: false,
-					code: "npx-failed",
+					code: "remove-failed",
 					message: errorText$5(error)
 				};
 			}
-			if (!result?.ok) return {
+			if (result.failed.length > 0) return {
 				ok: false,
-				code: "npx-failed",
-				message: result?.message ?? "npx skills remove 失败",
-				output: result?.output ?? ""
+				code: "remove-failed",
+				message: result.failed.map((one) => `${one.skill}：${one.message}`).join("；")
+			};
+			if (result.removed.length === 0 && result.notFound.length > 0) return {
+				ok: false,
+				code: "not-found",
+				message: `没有找到这个 skill：${id}`
 			};
 			if (await pathExists$1(entry.path)) return {
 				ok: false,
-				code: "npx-incomplete",
-				message: "npx skills remove 已退出，但 skill 目录仍然存在",
-				output: result.output ?? ""
+				code: "remove-incomplete",
+				message: "已执行删除，但 skill 目录仍然存在"
 			};
 			return {
 				ok: true,
-				method: "npx",
-				output: result.output ?? ""
+				method: "npx"
 			};
 		}
 	}
@@ -1796,32 +1511,20 @@ async function removeSavedRepo({ homes = resolveHomes(), id } = {}) {
 		file
 	};
 }
-/**
-* 安装时指定的 `npx skills` agent。
-*
-* 不指定 agent 时（`-y`）CLI 会把 skill 装到**本机检测到的所有 agent** 目录里：
-* DSH 只关心 `~/.agents/skills`，而纯 DSH 机器上检测不到任何 agent 时它甚至会
-* 给全部 agent 各建一份链接。`universal` 是 CLI 自带的「通用 agent」，读写的就是
-* 规范副本 `~/.agents/skills`，指定它只写这一处，不碰其它 agent 目录。
-*
-* 新版本 CLI 若改掉了这个 agent 名，`npx skills add` 会以 `Invalid agents` 失败，
-* 调用方会退回不带 agent 的默认命令（见 `installGlobalSkill()` /
-* `installProjectSkill()`）。
-*/
+/** 安装时指定的 agent：`universal` 读写 `~/.agents/skills`（项目里是 `.agents/skills`）。 */
 const INSTALL_AGENT = "universal";
+/** 打工人额外落一份 `.claude/skills` 链接。 */
+const WORKER_CLAUDE_AGENT = "claude-code";
 /**
-* `npx skills` 的全局规范副本目录（`~/.agents/skills` 的上级），DSH 的
-* `user-agents` 根也在这里。`npx` 自己的规则是 `homedir()/.agents/skills`，
-* 不接受别的路径覆盖。
+* 库的全局规范副本目录（`~/.agents/skills` 的上级），DSH 的 `user-agents`
+* 根也在这里。`skills` 的规则是 `homedir()/.agents/skills`，不接受别的路径覆盖。
 */
 function npxGlobalAgentsHome() {
 	return path.join(os.homedir(), AGENTS_DIR);
 }
 /**
-* skill 名对应的安装目录名，规则与 `npx skills` 的 `sanitizeName()` 完全一致：
+* skill 名对应的安装目录名，规则与 `skills` 的 `sanitizeName()` 完全一致：
 * 小写，非 `[a-z0-9._]` 的连续字符换成连字符，去掉首尾的 `.` 与 `-`，最多 255 字符。
-*
-* 用来在安装后确认真正的目录，也用于页面判断「这个 skill 是不是已经装过」。
 *
 * @param name skill 名
 * @returns 目录名；名字不合法时可能是空串
@@ -1831,15 +1534,14 @@ function skillDirName(name) {
 	return name.toLowerCase().replace(/[^a-z0-9._]+/gu, "-").replace(/^[.-]+|[.-]+$/gu, "").slice(0, 255);
 }
 /**
-* 这个 skill 名能不能交给 `npx skills add --skill`：
+* 这个 skill 名能不能交给安装库：
 *
 * - 非空、不超过 255 字符；
-* - 不能以 `-` 或空白开头（会被命令行解析成选项）；
+* - 不能以 `-` 或空白开头（会被当成命令行选项）；
 * - 不能含控制字符；
 * - 必须能 sanitize 出非空目录名。
 *
-* 空格是允许的：仓库里确实有 `Convex Best Practices` 这类带空格的名字，
-* `npx skills` 支持按引号传入的名字安装。
+* 空格是允许的：仓库里确实有 `Convex Best Practices` 这类带空格的名字。
 *
 * @param name skill 名
 */
@@ -1867,13 +1569,6 @@ function errorText$3(error) {
 }
 /**
 * 两个全局根里是否已经有这个 skill（目录名或展示名命中）。
-*
-* 同一名字同时存在于 `~/.agents/skills` 与 `~/.dsh/skills` 时 DSH 会列两行，
-* 这里也当作已安装：再装一次要么出现第三份，要么被其中一个根遮住，先拒绝并
-* 让用户去「已安装」里处理。
-*
-* @param id 安装目录名
-* @param name skill 展示名
 */
 async function findInstalledElsewhere(homes, id, name) {
 	const wanted = /* @__PURE__ */ new Set([id, name]);
@@ -1897,20 +1592,7 @@ async function findInstalledElsewhere(homes, id, name) {
 	return { status: "absent" };
 }
 /**
-* 这次失败是不是「CLI 不认识 `universal` agent」。
-*
-* CLI 的报错形如 `Invalid agents: universal`，并且退出码非 0；命中时退回不带
-* agent 的默认命令，而不是把一次可安装的请求判死。
-*/
-function isInvalidAgentFailure(result) {
-	const text = `${result?.message ?? ""}\n${result?.output ?? ""}`;
-	return /Invalid agents?:/iu.test(text);
-}
-/**
 * 安装前共用的来源 / 名字校验：全局、打工人、工作区三处都必须过这一关。
-*
-* @param source 仓库来源
-* @param name skill 名
 */
 function checkSourceAndName(source, name) {
 	if (typeof source !== "string" || source.trim() === "") return {
@@ -1945,44 +1627,62 @@ function checkSourceAndName(source, name) {
 	};
 }
 /**
-* `npx skills` 的全局副本目录与 DSH 扫描的目录是否一致；不一致时返回拒绝理由。
-*
-* 单条安装与目录批量安装共用这一条判断，避免两处文案分叉。
-*
-* @param homes 两个全局 skills 根目录
-* @param canonicalAgentsHome `npx skills` 会写入的全局目录（`~/.agents`）
+* 库的全局副本目录与 DSH 扫描的目录是否一致；不一致时返回拒绝理由。
 */
-function globalHomeMismatch(homes, canonicalAgentsHome) {
+function globalHomeMismatch$1(homes, canonicalAgentsHome) {
 	if (path.resolve(canonicalAgentsHome) === path.resolve(homes.agentsHome)) return null;
-	return `npx skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, "skills")}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, "skills")}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`;
+	return `skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, "skills")}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, "skills")}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`;
 }
 /**
-* 把单个 skill 从某个 `npx skills` 来源安装到全局 `~/.agents/skills`。
+* 安装后的结果核对：库报告成功的条目里选 universal（或第一个），确认目标
+* 目录里真的有 `SKILL.md`。
+*/
+async function installedPathOf(result, fallbackDir, id) {
+	if (result.failed.length > 0) {
+		const first = result.failed[0];
+		return {
+			ok: false,
+			message: `${first?.skill ?? ""}（${first?.agent ?? ""}）：${first?.message ?? "安装失败"}`
+		};
+	}
+	const chosen = result.installed.find((one) => one.agent === "universal") ?? result.installed[0];
+	const target = chosen?.canonicalPath ?? chosen?.path ?? path.join(fallbackDir, id);
+	if (!await pathExists(path.join(target, "SKILL.md"))) return {
+		ok: false,
+		message: `安装已结束，但没有在 ${target} 找到 SKILL.md`
+	};
+	return {
+		ok: true,
+		path: target
+	};
+}
+/**
+* 把单个 skill 从某个来源安装到全局 `~/.agents/skills`。
 *
 * 失败码：
 *
-* - `invalid-source`：来源为空或以 `-` 开头（会被当成命令选项）；
-* - `invalid-skill-name`：名字不能安全地交给 `npx skills add --skill`；
-* - `no-runner`：调用方没给执行能力；
-* - `unsupported-home`：`DSH_AGENTS_HOME` 指到了 `npx` 不会写入的位置；
+* - `invalid-source`：来源为空或以 `-` 开头；
+* - `invalid-skill-name`：名字不能安全地交给安装库；
+* - `no-installer`：调用方没给安装能力；
+* - `unsupported-home`：`DSH_AGENTS_HOME` 指到了库不会写入的位置；
 * - `scan-failed`：读全局 skills 目录失败，无法判断是否已安装；
 * - `already-installed`：两个全局根里已经有同名 skill；
-* - `npx-failed`：`npx skills add` 失败，`output` 带命令输出；
-* - `install-incomplete`：命令退出码为 0 但目标目录或 `SKILL.md` 不在。
+* - `install-failed`：安装库失败，`output` 带库返回的失败说明；
+* - `install-incomplete`：库报告成功但目标目录 / `SKILL.md` 不在。
 */
-async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), source, name, runNpx }) {
+async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), source, name, install = installSkills }) {
 	const checked = checkSourceAndName(source, name);
 	if (!checked.ok) return checked.result;
 	const { source: trimmedSource, name: skillName } = checked;
-	if (typeof runNpx !== "function") return {
+	if (typeof install !== "function") return {
 		ok: false,
-		code: "no-runner",
-		message: "缺少执行 npx 的能力"
+		code: "no-installer",
+		message: "缺少安装 skill 的能力"
 	};
 	if (path.resolve(canonicalAgentsHome) !== path.resolve(homes.agentsHome)) return {
 		ok: false,
 		code: "unsupported-home",
-		message: globalHomeMismatch(homes, canonicalAgentsHome) ?? ""
+		message: globalHomeMismatch$1(homes, canonicalAgentsHome) ?? ""
 	};
 	const id = skillDirName(skillName);
 	const existing = await findInstalledElsewhere(homes, id, skillName);
@@ -1998,43 +1698,24 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 	};
 	let result;
 	try {
-		result = await runNpx([
-			"add",
-			trimmedSource,
-			"--skill",
-			skillName,
-			"--global",
-			"--yes",
-			"-a",
-			INSTALL_AGENT
-		]);
-		if (!result?.ok && isInvalidAgentFailure(result)) result = await runNpx([
-			"add",
-			trimmedSource,
-			"--skill",
-			skillName,
-			"--global",
-			"--yes"
-		]);
+		result = await install(trimmedSource, {
+			skills: [skillName],
+			scope: "global",
+			agents: [INSTALL_AGENT],
+			config: { telemetry: false }
+		});
 	} catch (error) {
 		return {
 			ok: false,
-			code: "npx-failed",
+			code: "install-failed",
 			message: errorText$3(error)
 		};
 	}
-	if (!result?.ok) return {
+	const target = await installedPathOf(result, path.join(canonicalAgentsHome, "skills"), id);
+	if (!target.ok) return {
 		ok: false,
-		code: "npx-failed",
-		message: result?.message ?? "npx skills add 失败",
-		output: result?.output ?? ""
-	};
-	const target = path.join(canonicalAgentsHome, "skills", id);
-	if (!await pathExists(path.join(target, "SKILL.md"))) return {
-		ok: false,
-		code: "install-incomplete",
-		message: `npx skills add 已退出，但没有在 ${target} 找到 SKILL.md`,
-		output: result.output ?? ""
+		code: result.failed.length > 0 ? "install-failed" : "install-incomplete",
+		message: target.message
 	};
 	return {
 		ok: true,
@@ -2042,36 +1723,29 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 		name: skillName,
 		target: "global",
 		scope: "agents",
-		path: target,
-		output: result.output ?? ""
+		path: target.path,
+		output: ""
 	};
 }
 /**
-* 把单个 skill 从某个 `npx skills` 来源安装到打工人或工作区目录。
+* 把单个 skill 从某个来源安装到打工人或工作区目录。
 *
 * 目标目录由调用方（`install-targets.ts`）从 Host 的登记表解析，浏览器不能
 * 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个打工人 /
-* 工作区是正常操作，重复执行交给 `npx skills` 自己处理。
+* 工作区是正常操作，重复执行交给安装库自己处理。
 *
 * 打工人目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
-* （`-a universal -a claude-code`）；工作区只写 DSH 会扫描的 `.agents/skills`，
-* 不碰用户其它 agent 目录。
-*
-* 失败码在全局安装的基础上增加：
-*
-* - `invalid-target`：目标目录为空；
-* - `missing-target`：目标目录不存在或不是目录；
-* - `no-target`：调用方没给目标目录；
-* - `npx-failed` / `install-incomplete`：与全局安装相同。
+* （`agents: ['universal', 'claude-code']`）；工作区只写 DSH 会扫描的
+* `.agents/skills`，不碰用户其它 agent 目录。
 */
-async function installProjectSkill({ targetDir, target = "workspace", source, name, runNpx }) {
+async function installProjectSkill({ targetDir, target = "workspace", source, name, install = installSkills }) {
 	const checked = checkSourceAndName(source, name);
 	if (!checked.ok) return checked.result;
 	const { source: trimmedSource, name: skillName } = checked;
-	if (typeof runNpx !== "function") return {
+	if (typeof install !== "function") return {
 		ok: false,
-		code: "no-runner",
-		message: "缺少执行 npx 的能力"
+		code: "no-installer",
+		message: "缺少安装 skill 的能力"
 	};
 	if (typeof targetDir !== "string" || targetDir.trim() === "") return {
 		ok: false,
@@ -2094,53 +1768,37 @@ async function installProjectSkill({ targetDir, target = "workspace", source, na
 		code: "missing-target",
 		message: `目标路径不是目录：${directory}`
 	};
-	const agents = target === "worker" ? ["universal", "claude-code"] : ["universal"];
-	const args = [
-		"add",
-		trimmedSource,
-		"--skill",
-		skillName
-	];
-	for (const agent of agents) args.push("-a", agent);
-	args.push("-y");
+	const agents = target === "worker" ? [INSTALL_AGENT, WORKER_CLAUDE_AGENT] : [INSTALL_AGENT];
 	let result;
 	try {
-		result = await runNpx(args, directory);
-		if (!result?.ok && isInvalidAgentFailure(result)) result = await runNpx([
-			"add",
-			trimmedSource,
-			"--skill",
-			skillName,
-			"-y"
-		], directory);
+		result = await install(trimmedSource, {
+			skills: [skillName],
+			scope: "project",
+			cwd: directory,
+			agents,
+			config: { telemetry: false }
+		});
 	} catch (error) {
 		return {
 			ok: false,
-			code: "npx-failed",
+			code: "install-failed",
 			message: errorText$3(error)
 		};
 	}
-	if (!result?.ok) return {
-		ok: false,
-		code: "npx-failed",
-		message: result?.message ?? "npx skills add 失败",
-		output: result?.output ?? ""
-	};
 	const id = skillDirName(skillName);
-	const targetPath = path.join(directory, AGENTS_DIR, "skills", id);
-	if (!await pathExists(path.join(targetPath, "SKILL.md"))) return {
+	const targetPath = await installedPathOf(result, path.join(directory, AGENTS_DIR, "skills"), id);
+	if (!targetPath.ok) return {
 		ok: false,
-		code: "install-incomplete",
-		message: `npx skills add 已退出，但没有在 ${targetPath} 找到 SKILL.md`,
-		output: result.output ?? ""
+		code: result.failed.length > 0 ? "install-failed" : "install-incomplete",
+		message: targetPath.message
 	};
 	return {
 		ok: true,
 		id,
 		name: skillName,
 		target,
-		path: targetPath,
-		output: result.output ?? ""
+		path: targetPath.path,
+		output: ""
 	};
 }
 /**
@@ -2264,7 +1922,7 @@ async function resolveSavedInstall({ homes, catalog, source, target, worker, wor
 * `resolveTarget()` 从 Host 的登记表解析，避免页面缓存过期或请求被伪造时装错
 * 位置。
 */
-async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPath, name, target = "global", worker, workspace, resolveTarget, runNpx }) {
+async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPath, name, target = "global", worker, workspace, resolveTarget, install = installSkills }) {
 	if (target !== "global" && target !== "worker" && target !== "workspace") return {
 		ok: false,
 		code: "invalid-target",
@@ -2295,13 +1953,12 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 			canonicalAgentsHome,
 			source: repoSource,
 			name: match.name,
-			runNpx
+			install
 		});
 		if (!installed.ok) return installed;
 		return {
 			...installed,
-			repo: repoSource,
-			plugin: match.plugin ?? null
+			repo: repoSource
 		};
 	}
 	const installed = await installProjectSkill({
@@ -2309,28 +1966,21 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 		target,
 		source: repoSource,
 		name: match.name,
-		runNpx
+		install
 	});
 	if (!installed.ok) return installed;
 	return {
 		...installed,
-		repo: repoSource,
-		plugin: match.plugin ?? null
+		repo: repoSource
 	};
 }
 /**
 * 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的打工人 / 工作区。
 *
-* 浏览器传的是目录里各个 skill 的仓库路径（树的叶子路径），Host 逐个回到这次
-* 读到的仓库列表里核对，再交给自己串行队列里的安装；目录节点本身不是仓库路径，
-* 所以不能让 Host 按目录前缀自己找 skill。
-*
-* 全局安装会跳过已经装过的 skill（与单条安装的 `already-installed` 对应），
-* 这样「装全部」在部分装过时仍然可用；项目级安装每次都装，不跳过。任何一个
-* skill 失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
+* 任何一个失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
 * 有失败时整体 `ok: false`，`message` 列出每个失败的名字与原因。
 */
-async function installSavedSkillGroup({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPaths, target = "global", worker, workspace, resolveTarget, runNpx }) {
+async function installSavedSkillGroup({ homes = resolveHomes(), canonicalAgentsHome = npxGlobalAgentsHome(), catalog, source, skillPaths, target = "global", worker, workspace, resolveTarget, install = installSkills }) {
 	if (target !== "global" && target !== "worker" && target !== "workspace") return {
 		ok: false,
 		code: "invalid-target",
@@ -2353,9 +2003,9 @@ async function installSavedSkillGroup({ homes = resolveHomes(), canonicalAgentsH
 	});
 	const paths = requestedSkillPaths(skillPaths);
 	if (paths === null || paths.length === 0) return settle("invalid-skill-paths", `目录安装需要一组 skill 路径（最多 200 个），且不能为空`);
-	if (typeof runNpx !== "function") return settle("no-runner", "缺少执行 npx 的能力");
+	if (typeof install !== "function") return settle("no-installer", "缺少安装 skill 的能力");
 	if (target === "global") {
-		const mismatch = globalHomeMismatch(homes, canonicalAgentsHome);
+		const mismatch = globalHomeMismatch$1(homes, canonicalAgentsHome);
 		if (mismatch !== null) return settle("unsupported-home", mismatch);
 	}
 	const prepared = await resolveSavedInstall({
@@ -2385,13 +2035,13 @@ async function installSavedSkillGroup({ homes = resolveHomes(), canonicalAgentsH
 			canonicalAgentsHome,
 			source: repoSource,
 			name: skill.name,
-			runNpx
+			install
 		}) : await installProjectSkill({
 			targetDir: targetDir ?? "",
 			target,
 			source: repoSource,
 			name: skill.name,
-			runNpx
+			install
 		});
 		if (one.ok) {
 			const entry = { name: skill.name };
@@ -2406,13 +2056,13 @@ async function installSavedSkillGroup({ homes = resolveHomes(), canonicalAgentsH
 		}
 		failed.push({
 			name: skill.name,
-			code: one.code ?? "npx-failed",
+			code: one.code ?? "install-failed",
 			message: one.message ?? "安装失败"
 		});
 	}
 	if (failed.length > 0) return {
 		ok: false,
-		code: failed[0]?.code ?? "npx-failed",
+		code: failed[0]?.code ?? "install-failed",
 		message: failed.map((one) => `${one.name}（${one.message}）`).join("；"),
 		batch: true,
 		target,
@@ -2457,6 +2107,8 @@ function requestedSkillPaths(value) {
 *
 * - `GET /buka-skills/list` 列出全局 skills；
 * - `POST /buka-skills/uninstall` 卸载一个；
+* - `GET /buka-skills/check` 检查全局 skill 的更新；
+* - `POST /buka-skills/update` 应用可用的更新；
 * - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
 *   （`ctx.workspaceRegistry`）；
 * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
@@ -2465,7 +2117,7 @@ function requestedSkillPaths(value) {
 * - `POST /buka-skills/repos` 收藏一个，
 * - `POST /buka-skills/repos/remove` 移除一个，
 * - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
-*   `probe=1` 时只探测仓库类型：npx skills / Claude Code marketplace / 不可用）。
+*   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。
 *
 * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
 * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -2486,6 +2138,10 @@ const REPOS_ROUTE = "/buka-skills/repos";
 const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
 /** 收藏仓库的 skills 树路由。 */
 const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
+/** 已安装 skill 的检查路由。 */
+const CHECK_ROUTE = "/buka-skills/check";
+/** 已安装 skill 的更新路由。 */
+const UPDATE_ROUTE = "/buka-skills/update";
 /**
 * 注册全部路由。
 *
@@ -2493,7 +2149,7 @@ const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
 * @param deps 入口装配好的共享依赖
 */
 function registerRoutes(ctx, deps) {
-	const { homes, runNpx, catalog, readSnapshot, serializeNpx } = deps;
+	const { homes, catalog, readSnapshot, serializeSkills } = deps;
 	ctx.inject(["webServer", "connection"], (webCtx) => {
 		/** 复用 web 组合的信任栅栏；被拒绝时已经写好响应。 */
 		function rejected(req, res) {
@@ -2543,11 +2199,10 @@ function registerRoutes(ctx, deps) {
 				if (body === void 0) return;
 				const fields = body;
 				try {
-					const result = await serializeNpx(() => uninstallGlobalSkill({
+					const result = await serializeSkills(() => uninstallGlobalSkill({
 						homes,
 						scope: fields?.scope,
-						id: fields?.id,
-						runNpx
+						id: fields?.id
 					}));
 					if (result.ok) webCtx.logger?.info?.("buka-skills: 已卸载 %s（%s）", String(fields?.id), result.method);
 					sendJson(res, result.ok ? 200 : statusFor(result.code), result);
@@ -2594,7 +2249,7 @@ function registerRoutes(ctx, deps) {
 				if (body === void 0) return;
 				const fields = body;
 				try {
-					const result = await serializeNpx(() => Array.isArray(fields?.paths) ? installSavedSkillGroup({
+					const result = await serializeSkills(() => Array.isArray(fields?.paths) ? installSavedSkillGroup({
 						homes,
 						catalog,
 						source: fields?.source,
@@ -2602,8 +2257,7 @@ function registerRoutes(ctx, deps) {
 						target: fields?.target,
 						worker: fields?.worker,
 						workspace: fields?.workspace,
-						resolveTarget: (request) => resolveInstallTarget(webCtx, request),
-						runNpx
+						resolveTarget: (request) => resolveInstallTarget(webCtx, request)
 					}) : installSavedSkill({
 						homes,
 						catalog,
@@ -2612,8 +2266,7 @@ function registerRoutes(ctx, deps) {
 						target: fields?.target,
 						worker: fields?.worker,
 						workspace: fields?.workspace,
-						resolveTarget: (request) => resolveInstallTarget(webCtx, request),
-						runNpx
+						resolveTarget: (request) => resolveInstallTarget(webCtx, request)
 					}));
 					if (result.ok) {
 						const count = "installed" in result && Array.isArray(result.installed) ? result.installed.length : 1;
@@ -2628,6 +2281,47 @@ function registerRoutes(ctx, deps) {
 				}
 			}
 		}), `buka-skills: POST ${INSTALL_ROUTE}`);
+		webCtx.effect(() => webCtx.webServer.register({
+			kind: "exact",
+			path: CHECK_ROUTE,
+			handler: async (req, res) => {
+				if (rejected(req, res)) return;
+				if (req.method !== "GET") {
+					sendMethodNotAllowed(res, "GET");
+					return;
+				}
+				try {
+					const result = await catalog.checkSkills({});
+					sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result);
+				} catch (error) {
+					sendJson(res, 500, {
+						ok: false,
+						message: describeError$1(error)
+					});
+				}
+			}
+		}), `buka-skills: GET ${CHECK_ROUTE}`);
+		webCtx.effect(() => webCtx.webServer.register({
+			kind: "exact",
+			path: UPDATE_ROUTE,
+			handler: async (req, res) => {
+				if (rejected(req, res)) return;
+				if (req.method !== "POST") {
+					sendMethodNotAllowed(res, "POST");
+					return;
+				}
+				try {
+					const result = await catalog.updateSkills({});
+					if (result.ok) webCtx.logger?.info?.("buka-skills: 更新完成（%d 个成功，%d 个失败）", result.updated.length, result.failed.length);
+					sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result);
+				} catch (error) {
+					sendJson(res, 500, {
+						ok: false,
+						message: describeError$1(error)
+					});
+				}
+			}
+		}), `buka-skills: POST ${UPDATE_ROUTE}`);
 		let repoQueue = Promise.resolve();
 		function serializeRepo(work) {
 			const run = repoQueue.then(work, work);
@@ -2771,6 +2465,18 @@ function installStatusFor(code) {
 	return 502;
 }
 /**
+* 检查 / 更新的失败码 → HTTP 状态码。
+*
+* `unsupported-home` 是本机环境配置问题（500）；`check-failed` / `lock-unreadable`
+* 是当前状态无法完成（409 / 502）。其它校验类错误按 400。
+*/
+function updateStatusFor(code) {
+	if (code === "invalid-dir" || code === "invalid-source") return 400;
+	if (code === "lock-unreadable") return 409;
+	if (code === "unsupported-home") return 500;
+	return 502;
+}
+/**
 * 收藏操作的失败码 → HTTP 状态码。
 *
 * `duplicate` 与 `store-unreadable` 都是 409：请求本身合法，只是当前状态
@@ -2787,8 +2493,8 @@ function repoStatusFor(code) {
 *
 * `unsupported-source` 用 400：来源本身合法，但这个来源（npm 包名 / 已知不是
 * 仓库的网页链接）没有可以让 Host 列举的仓库树，请求方不该重试。
-* `repo-unavailable` 用 422：请求格式没问题，只是这个仓库既不是 npx skills
-* 也不是 Claude Code marketplace，改来源才有意义。
+* `repo-unavailable` 用 422：请求格式没问题，只是这个仓库根 `skills/` 下没有
+* 可安装的 skill，改来源才有意义。
 *
 * `git-unavailable`（本机没有 git）用 500：这是 Host 环境问题，与来源无关；
 * `git-failed`（clone/fetch 失败）用 502：上游 git 服务或网络的问题，和 GitHub
@@ -2808,7 +2514,7 @@ function repoSkillsStatusFor(code) {
 *
 * 两个地方用到它，原因相同：底层的写入不是为并发准备的。
 *
-* - `npx skills` 会整份重写共享的 lockfile，安装与卸载并发执行可能互相覆盖条目；
+* - `skills` 的安装 / 卸载 / 更新会整份重写共享的 lockfile，并发执行可能互相覆盖条目；
 * - 收藏文件是整份 JSON，两次「添加」并发会互相覆盖整个文件。
 *
 * 失败不会卡住队列：下一个任务照样执行，错误由各自的调用方处理。
@@ -2828,148 +2534,10 @@ function createSerialQueue() {
 		return run;
 	};
 }
-// .build/skills/repo/marketplace.js
-/**
-* Claude Code marketplace 清单（`.claude-plugin/marketplace.json`）的解析与校验。
-*
-* 清单在仓库里的固定路径、插件名与插件 root 的合法形状都集中在这里；分组与
-* 缓存校验复用同一套规则，保证「写进缓存」与「从缓存读回」的判断一致。
-*
-* @module @buka/dsh-plugin-skills/repo/marketplace
-*/
-/** Claude Code marketplace 清单在仓库里的固定路径。 */
-const MARKETPLACE_PATH = ".claude-plugin/marketplace.json";
-/**
-* Claude Code 单插件清单在插件根下的固定路径；npx skills 仓库按它声明的
-* `skills` 做展示分组，与 CLI 的 `getPluginGroupings()` 一致。
-*/
-const PLUGIN_MANIFEST_PATH = ".claude-plugin/plugin.json";
-/** marketplace 插件名的格式；与 Claude Code 的插件命名规则一致。 */
-const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
-/** 控制字符（含换行、制表符）不允许出现在路径里。 */
-const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
-/**
-* 解析 Claude Code marketplace 清单。
-*
-* 顶层不是对象、或者 `plugins` 不是数组时整份按不合法处理（返回 null，调用方
-* 判定为不可用）。单个插件的 name / source 不合法只跳过该插件：宁可少列一个，
-* 也不要让一份有瑕疵的清单整份失败。
-*/
-function parseMarketplace(text) {
-	let data;
-	try {
-		data = JSON.parse(text);
-	} catch {
-		return null;
-	}
-	if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
-	const record = data;
-	if (!Array.isArray(record.plugins)) return null;
-	const metadata = record.metadata;
-	const pluginRoot = normalizeRelativePath(metadata?.pluginRoot);
-	const plugins = [];
-	const roots = /* @__PURE__ */ new Set();
-	for (const entry of record.plugins) {
-		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-		const item = entry;
-		const pluginName = normalizePluginName(item.name);
-		if (pluginName === null) continue;
-		const root = resolvePluginRoot(item.source, pluginRoot);
-		if (root === null || roots.has(root)) continue;
-		roots.add(root);
-		plugins.push({
-			name: pluginName,
-			root,
-			description: typeof item.description === "string" ? item.description : ""
-		});
-	}
-	return {
-		name: typeof record.name === "string" ? record.name : "",
-		plugins
-	};
-}
-/**
-* 校验 marketplace 插件名：trim 后必须匹配插件命名规则。
-*/
-function normalizePluginName(value) {
-	if (typeof value !== "string") return null;
-	const text = value.trim();
-	if (!PLUGIN_NAME_PATTERN.test(text)) return null;
-	return text;
-}
-/**
-* 校验一个安全的仓库内相对路径；不合法时返回 null。
-*
-* 拒绝绝对路径、反斜杠、控制字符、空段、`.` / `..` 段与超长路径。空串表示
-* 仓库根，是合法的相对路径。
-*/
-function normalizeRelativePath(value) {
-	if (typeof value !== "string") return null;
-	if (value === "") return "";
-	if (value.length > 300) return null;
-	if (value.startsWith("/") || value.includes("\\") || CONTROL_PATTERN.test(value)) return null;
-	if (value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return null;
-	return value;
-}
-/**
-* 把一个插件的 `source` 解析成仓库内相对路径；只接受仓库内的本地 source。
-*
-* - `'.'` → 仓库根（`''`）；
-* - `'./x'` → `'x'`；
-* - 不含 `/` 的裸名 → `${metadata.pluginRoot}/${source}`（没有合法 pluginRoot
-*   则跳过）；裸名指目录名，可能与 entry 的显示名不同；
-* - 其它（含 `/` 但不以 `./` 开头、对象形式的 github / npm / url source）→ 跳过，
-*   因为它们不在这个仓库里，Host 无法列出其中的 skill。
-*
-* @param pluginRoot `metadata.pluginRoot` 的校验结果
-*/
-function resolvePluginRoot(source, pluginRoot) {
-	if (typeof source !== "string") return null;
-	if (source === ".") return "";
-	if (source.startsWith("./")) return normalizeRelativePath(source.slice(2));
-	if (source.includes("/")) return null;
-	if (pluginRoot === null) return null;
-	return normalizeRelativePath(pluginRoot === "" ? source : `${pluginRoot}/${source}`);
-}
-/**
-* 校验缓存里的 marketplace 清单；缺失或结构不合法时返回 null。
-*
-* 插件名与 root 都按写入前同一套规则重新校验：缓存可能被手工改过，不能让
-* 非法路径或名字从缓存里重新变成对外服务的返回值。
-*/
-function normalizeCachedMarketplace(value) {
-	if (value === null || value === void 0) return null;
-	if (typeof value !== "object" || Array.isArray(value)) return null;
-	const record = value;
-	if (typeof record.name !== "string") return null;
-	if (!Array.isArray(record.plugins)) return null;
-	const plugins = [];
-	for (const entry of record.plugins) {
-		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
-		const item = entry;
-		const name = normalizePluginName(item.name);
-		const root = normalizeRelativePath(item.root);
-		if (name === null || root === null) return null;
-		if (typeof item.description !== "string") return null;
-		plugins.push({
-			name,
-			root,
-			description: item.description
-		});
-	}
-	return {
-		name: record.name,
-		plugins
-	};
-}
-/** 缓存有效期：30 分钟。GitHub 的树变化不频繁，过期后按需重拉。 */
+/** 缓存有效期：30 分钟。仓库树变化不频繁，过期后按需重拉。 */
 const REPO_SKILLS_CACHE_TTL_MS = 18e5;
 /** 合法的仓库分类；与缓存条目的 `kind` 字段同值。 */
-const REPO_KINDS = /* @__PURE__ */ new Set([
-	"npx-skills",
-	"claude-code-marketplace",
-	"unavailable"
-]);
+const REPO_KINDS = /* @__PURE__ */ new Set(["npx-skills", "unavailable"]);
 /**
 * 缓存文件的绝对路径。
 *
@@ -2982,7 +2550,6 @@ function repoSkillsCacheFile(homes) {
 * 读缓存；文件不存在、损坏、版本不符或结构不对都返回空对象。
 *
 * 缓存随时可以重建，所以这里不区分「坏文件」与「没有文件」，也不报错。
-* v1 的缓存没有 `kind` / `complete`，因版本不符自动丢弃并重建。
 */
 async function readCache(file) {
 	let parsed;
@@ -2993,7 +2560,7 @@ async function readCache(file) {
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 	const record = parsed;
-	if (record.version !== 5) return {};
+	if (record.version !== 6) return {};
 	if (record.entries === null || typeof record.entries !== "object" || Array.isArray(record.entries)) return {};
 	const entries = {};
 	for (const [id, raw] of Object.entries(record.entries)) {
@@ -3007,10 +2574,8 @@ async function readCache(file) {
 /**
 * 校验并复制一条缓存记录；结构不合法时返回 null。
 *
-* 除旧字段外还要求 `kind` 属于三种仓库类型、`complete` 是布尔值：缺字段的
-* v1 形状或手改坏的条目都按未命中处理，整条丢弃。`marketplace` 是 v3 新增的
-* 清单快照：缺失或为 null 视为没有清单（兼容手写的旧形状缓存），存在但不是
-* 合法清单时整条丢弃，避免把损坏数据当成插件列表返回。
+* 除旧字段外还要求 `kind` 属于两种仓库类型、`complete` 是布尔值：缺字段的
+* 旧形状或手改坏的条目都按未命中处理，整条丢弃。
 */
 function normalizeCacheEntry(raw) {
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -3023,8 +2588,6 @@ function normalizeCacheEntry(raw) {
 	if (typeof record.skills !== "number" || !Number.isInteger(record.skills) || record.skills < 0) return null;
 	if (typeof record.complete !== "boolean") return null;
 	if (!isValidTree(record.root)) return null;
-	const marketplace = normalizeCachedMarketplace(record.marketplace);
-	if (marketplace === null && record.marketplace !== null && record.marketplace !== void 0) return null;
 	return {
 		source: record.source,
 		kind: record.kind,
@@ -3034,8 +2597,7 @@ function normalizeCacheEntry(raw) {
 		truncated: record.truncated,
 		root: record.root,
 		skills: record.skills,
-		complete: record.complete,
-		marketplace
+		complete: record.complete
 	};
 }
 /**
@@ -3099,7 +2661,7 @@ async function writeProbeCache(file, id, entry) {
 * 缓存写队列：同一个缓存文件的「读最新内容 → 改 → 原子写」串行执行。
 *
 * 不加队列时，两个并发探测各自用开始时读到的旧快照整文件重写，后写的会
-* 悄悄丢掉先写的条目。缓存丢了只会多打一次 GitHub，但没必要。
+* 悄悄丢掉先写的条目。缓存丢了只多拉一次仓库，但没必要。
 */
 const cacheWrites = /* @__PURE__ */ new Map();
 /**
@@ -3123,9 +2685,78 @@ function updateCache(file, update) {
 */
 async function writeCache(file, entries) {
 	await writeJsonAtomic(file, {
-		version: 5,
+		version: 6,
 		entries
 	}, { dirMode: 448 });
+}
+/** 与仓库树扫描保持一致的跳过目录。 */
+const SKIP_DIRS$1 = /* @__PURE__ */ new Set([
+	"node_modules",
+	".git",
+	"dist",
+	"build",
+	"__pycache__"
+]);
+/**
+* 路径的 basename 是否就是 `SKILL.md`（大小写不敏感）。
+*
+* 不能写成 `endsWith('skill.md')`：那会把 `.changeset/foo-skill.md`、
+* `my-skill.md` 这类普通 Markdown 也当成 skill。
+*
+* @param value 仓库内路径
+*/
+function isSkillMdPath(value) {
+	if (typeof value !== "string") return false;
+	return value.slice(value.lastIndexOf("/") + 1).toLowerCase() === "skill.md";
+}
+/** 树节点是否是带字符串路径的 blob；用于把 unknown 树收窄成可读路径。 */
+function isBlobEntry(entry) {
+	return entry.type === "blob" && typeof entry.path === "string";
+}
+/** 树里所有 blob 的完整路径。 */
+function treeBlobPaths(tree) {
+	return tree.filter(isBlobEntry).map((entry) => entry.path);
+}
+/**
+* 收集树里所有 SKILL.md blob 的完整路径。
+*
+* @param tree 仓库树节点数组
+*/
+function allSkillMdPaths(tree) {
+	return treeBlobPaths(tree).filter(isSkillMdPath);
+}
+/**
+* 一个仓库内路径是否落在 `skills/` 下、且中间没有跳过目录。
+*
+* @param skillMd 仓库内的完整 SKILL.md 路径
+*/
+function isUnderSkillsDir(skillMd) {
+	const segments = skillMd.split("/");
+	if (segments[0] !== "skills" || segments.length < 2) return false;
+	return segments.slice(1, -1).every((segment) => segment !== "" && !SKIP_DIRS$1.has(segment));
+}
+/**
+* 发现仓库里可安装的 skill：`skills/` 下任意层级的 `SKILL.md`。
+*
+* 根 `SKILL.md`、agent 目录与仓库里其它位置的 `SKILL.md` 一律忽略。返回的
+* 顺序与树一致，展示树再按名字排序。
+*
+* @param tree 仓库树节点数组
+*/
+function findSkillMdPaths(tree) {
+	return allSkillMdPaths(tree).filter(isUnderSkillsDir);
+}
+/**
+* 判定仓库是否可用：根 `skills/` 下至少有一个 `SKILL.md`。
+*
+* 不读任何文件，只看树。没有可安装 skill 的仓库（包括只有根 `SKILL.md`、
+* 只有 `.claude/skills/**`、或 Claude Code marketplace 布局的仓库）统一
+* 标记为 `unavailable`。
+*
+* @param tree 仓库树节点数组
+*/
+function classifyRepo(tree) {
+	return findSkillMdPaths(tree).length > 0 ? { kind: "npx-skills" } : { kind: "unavailable" };
 }
 // .build/skills/repo/failure.js
 /**
@@ -3148,320 +2779,10 @@ function failure$2(code, message) {
 	};
 }
 /**
-* 「既不是 npx skills 仓库，也不是 Claude Code marketplace」的统一失败返回。
+* 「仓库根 skills/ 下没有可安装的 skill」的统一失败返回。
 */
 function repoUnavailable() {
-	return failure$2("repo-unavailable", "Repository is neither an npx skills repository nor a Claude Code plugin marketplace.");
-}
-/**
-* 把任意错误转成可以展示的文本。
-*/
-function errorText$2(error) {
-	if (error instanceof Error) return error.message;
-	return String(error);
-}
-// .build/skills/repo/discovery.js
-/**
-* `npx skills` 的 SKILL.md 发现规则，以及据此判定仓库类型。
-*
-* 发现规则与 `npx skills` CLI 的 `findSkillMdPaths()` 保持一致（文件名必须是
-* `SKILL.md`、优先级前缀、container 层级、跳过的目录），**展示方式也照 CLI 的
-* 清单来**：npx 仓库不按仓库的物理目录分组。像 `skills/<bucket>/<skill>/
-* SKILL.md` 这种 catalog 布局，bucket 只对发现有用。
-*
-* 收藏的仓库有两类，判定顺序固定（用户要求）：先按 `npx skills` 的优先级前缀
-* （标准布局）判定 npx skills 仓库；没命中再看仓库根有没有
-* `.claude-plugin/marketplace.json`，有合法清单就按 Claude Code marketplace
-* 处理；两者都不是时，npx 的兜底规则（任意不超过 6 段的 SKILL.md）仍然算 npx
-* skills 仓库；最后才标记为不可用（`repo-unavailable`）。兜底排在 marketplace
-* 之后，是因为它太宽松：`plugins/<plugin>/skills/<name>/SKILL.md` 正好 5 段，
-* 会命中；若它在前，marketplace 永远显示成 npx。判定本身只看这棵树，不依赖
-* 清单文件；npx 仓库展开时才读清单做插件分组，判定不受影响。
-*
-* @module @buka/dsh-plugin-skills/repo/discovery
-*/
-/**
-* 优先级前缀，顺序必须与 `npx skills` CLI 的 `PRIORITY_PREFIXES` 一致：
-* 越靠前的容器目录越优先；空串表示「根目录或一层目录」。
-*/
-const PRIORITY_PREFIXES = [
-	"",
-	"skills/",
-	"skills/.curated/",
-	"skills/.experimental/",
-	"skills/.system/",
-	".agents/skills/",
-	".claude/skills/",
-	".cline/skills/",
-	".codebuddy/skills/",
-	".codex/skills/",
-	".commandcode/skills/",
-	".continue/skills/",
-	".factory/skills/",
-	".github/skills/",
-	".goose/skills/",
-	".grok/skills/",
-	".iflow/skills/",
-	".junie/skills/",
-	".kilo/skills/",
-	".kilocode/skills/",
-	".kimchi/skills/",
-	".kiro/skills/",
-	".minimax/skills/",
-	".mux/skills/",
-	".neovate/skills/",
-	".opencode/skills/",
-	".openhands/skills/",
-	".pi/skills/",
-	".posit/assistant/skills/",
-	".qoder/skills/",
-	".roo/skills/",
-	".trae/skills/",
-	".windsurf/skills/",
-	".zcode/skills/",
-	".zencoder/skills/"
-];
-/** 与 CLI 相同的跳过目录，只在 container 下的嵌套候选里生效。 */
-const SKIP_DIRS$1 = /* @__PURE__ */ new Set([
-	"node_modules",
-	".git",
-	"dist",
-	"build",
-	"__pycache__"
-]);
-/**
-* 路径的 basename 是否就是 `SKILL.md`（大小写不敏感）。
-*
-* 不能写成 `endsWith('skill.md')`：那会把 `.changeset/foo-skill.md`、
-* `my-skill.md` 这类普通 Markdown 也当成 skill。`npx skills` CLI 的
-* `findSkillMdPaths()` 用的是 basename 比较。
-*
-* @param value 仓库内路径
-*/
-function isSkillMdPath(value) {
-	if (typeof value !== "string") return false;
-	return value.slice(value.lastIndexOf("/") + 1).toLowerCase() === "skill.md";
-}
-/** 树节点是否是带字符串路径的 blob；用于把 unknown 树收窄成可读路径。 */
-function isBlobEntry(entry) {
-	return entry.type === "blob" && typeof entry.path === "string";
-}
-/** 树里所有 blob 的完整路径。 */
-function treeBlobPaths(tree) {
-	return tree.filter(isBlobEntry).map((entry) => entry.path);
-}
-/**
-* 收集树里所有 SKILL.md blob 的完整路径。
-*
-* @param tree GitHub 树节点数组
-*/
-function allSkillMdPaths(tree) {
-	return treeBlobPaths(tree).filter(isSkillMdPath);
-}
-/**
-* 只按优先级前缀发现 SKILL.md，返回命中的完整路径集合。
-*
-* 分类时用它判断 npx 规则是不是**真的**发现了这个仓库：`findSkillMdPaths()`
-* 末尾还有一条很宽松的兜底（任意 ≤6 段的 SKILL.md），Claude Code marketplace
-* 的 `plugins/<plugin>/skills/<name>/SKILL.md` 正好会被它命中。若兜底也算
-* 「npx 仓库」，marketplace 就永远轮不到，所以先用优先级前缀判定。
-*
-* 另外，catalog 布局（`skills/<bucket>/<skill>/SKILL.md`）命中前缀后不再把
-* bucket 目录留到展示层：npx 的清单是扁平的，bucket 只对发现有用。
-*/
-function findPrioritySkillMdPaths(allSkillMds) {
-	const lowerPaths = new Set(allSkillMds.map((one) => one.toLowerCase()));
-	const found = /* @__PURE__ */ new Set();
-	for (const prefix of PRIORITY_PREFIXES) {
-		const isContainer = prefix !== "";
-		for (const skillMd of allSkillMds) {
-			if (!skillMd.startsWith(prefix)) continue;
-			const rest = skillMd.slice(prefix.length);
-			if (rest.toLowerCase() === "skill.md") {
-				found.add(skillMd);
-				continue;
-			}
-			const parts = rest.split("/");
-			if (parts.length === 2 && (parts[1] ?? "").toLowerCase() === "skill.md") {
-				found.add(skillMd);
-				continue;
-			}
-			const skillDirs = parts.slice(0, -1);
-			const hasAncestorSkill = skillDirs.slice(0, -1).some((_, index) => {
-				const ancestor = skillDirs.slice(0, index + 1).join("/");
-				return lowerPaths.has(`${prefix}${ancestor}/SKILL.md`.toLowerCase());
-			});
-			if (isContainer && parts.length >= 3 && parts.length <= 4 && (parts.at(-1) ?? "").toLowerCase() === "skill.md" && skillDirs.every((part) => !SKIP_DIRS$1.has(part)) && !hasAncestorSkill) found.add(skillMd);
-		}
-	}
-	return found;
-}
-/**
-* 照搬 `npx skills` CLI 的 `findSkillMdPaths()`，返回可安装 skill 的
-* `SKILL.md` 完整路径列表（顺序同 CLI：优先级前缀顺序 → 树顺序）。
-*
-* 与 CLI 一样返回扁平路径：容器前缀（`skills/`、`.agents/skills/` 等）和
-* catalog 布局里的 bucket 目录都只用于发现，不进展示路径；展示分组由
-* `readSkillGroupings()` 按仓库清单决定。CLI 的 `subpath` 参数这里不需要，
-* 等价于空串。
-*
-* @param tree GitHub 树节点数组
-*/
-function findSkillMdPaths(tree) {
-	const allSkillMds = allSkillMdPaths(tree);
-	if (allSkillMds.length === 0) return [];
-	const found = findPrioritySkillMdPaths(allSkillMds);
-	if (found.size > 0) return [...found];
-	return allSkillMds.filter((skillMd) => skillMd.split("/").length <= 6);
-}
-/**
-* 判定仓库属于哪种技能仓库，顺序固定：npx skills → marketplace → 不可用。
-*
-* npx 的**优先级前缀**命中任何一个 SKILL.md 就直接按 npx skills 处理，
-* **不再拉** marketplace.json；只有优先级规则一个都没命中时才看仓库根有没有
-* `.claude-plugin/marketplace.json`。兜底的宽松规则留到最后：marketplace 的
-* `plugins/<plugin>/skills/<name>/SKILL.md` 也会被兜底命中，若它先于
-* marketplace 判定，这类仓库就永远显示成 npx（详见 `findPrioritySkillMdPaths`）。
-*
-* tree 里说 marketplace 文件在、却读不到时返回 `fetch-failed`（而不是
-* 「不可用」），避免把网络 / 读文件问题误判成仓库类型。
-*/
-async function classifyRepo({ tree, reader }) {
-	const allSkillMds = allSkillMdPaths(tree);
-	if (findPrioritySkillMdPaths(allSkillMds).size > 0) return { kind: "npx-skills" };
-	if (tree.some((entry) => entry !== null && typeof entry === "object" && entry.type === "blob" && entry.path === ".claude-plugin/marketplace.json")) {
-		const text = await reader.readFile(MARKETPLACE_PATH);
-		if (text === null) return { failure: failure$2("fetch-failed", "Failed to read the Claude Code marketplace manifest from the repository.") };
-		const marketplace = parseMarketplace(text);
-		if (marketplace !== null) return {
-			kind: "claude-code-marketplace",
-			marketplace
-		};
-	}
-	if (allSkillMds.some((skillMd) => skillMd.split("/").length <= 6)) return { kind: "npx-skills" };
-	return { kind: "unavailable" };
-}
-// .build/skills/repo/github.js
-/**
-* GitHub 侧的网络读取：仓库树、SKILL.md 原文与请求头。
-*
-* - 树：`GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1`；
-* - 文件：`https://raw.githubusercontent.com/...`。
-*
-* 网络实现从参数注入（`fetchImpl`），所以本模块可以脱离网络单测；token 的
-* 来源规则见 `resolveToken()`。
-*
-* @module @buka/dsh-plugin-skills/repo/github
-*/
-/** 依次尝试的分支。很多仓库没有 `main`，所以先问 `HEAD`。 */
-const BRANCHES = [
-	"HEAD",
-	"main",
-	"master"
-];
-/** GitHub API 的请求超时。 */
-const TREE_TIMEOUT_MS = 1e4;
-/** raw.githubusercontent.com 上单个文件的请求超时；失败只影响一个节点。 */
-const RAW_TIMEOUT_MS = 8e3;
-/**
-* 解析 token：显式参数优先，缺省时读 `GITHUB_TOKEN` / `GH_TOKEN`；
-* 空串按「没有 token」处理，避免发出空的 Authorization 头。
-*
-* @param provided `fetchRepoSkills` 的 `token` 选项
-*/
-function resolveToken(provided) {
-	if (provided !== void 0) {
-		if (typeof provided !== "string") return null;
-		const text = provided.trim();
-		return text === "" ? null : text;
-	}
-	for (const value of [process.env.GITHUB_TOKEN, process.env.GH_TOKEN]) {
-		if (typeof value !== "string") continue;
-		const text = value.trim();
-		if (text !== "") return text;
-	}
-	return null;
-}
-/**
-* 按分支顺序拉取递归树。
-*
-* 404 只意味着这个分支不存在，继续试下一个；403 且额度用尽立即返回
-* `rate-limited`；其它非 2xx、网络异常、JSON 解析失败或没有 `tree` 数组
-* 都直接返回 `fetch-failed`，不再浪费后续分支的请求。
-*/
-async function fetchRepoTree({ owner, repo, token, fetchImpl }) {
-	for (const branch of BRANCHES) {
-		const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
-		let response;
-		try {
-			response = await fetchImpl(url, {
-				headers: apiHeaders(token),
-				signal: AbortSignal.timeout(TREE_TIMEOUT_MS)
-			});
-		} catch (error) {
-			return failure$2("fetch-failed", `GitHub tree request failed: ${errorText$2(error)}`);
-		}
-		if (response?.status === 404) continue;
-		if (response?.status === 403 && response.headers?.get("x-ratelimit-remaining") === "0") return failure$2("rate-limited", "GitHub API rate limit exhausted; retry later or set GITHUB_TOKEN.");
-		if (!response?.ok) return failure$2("fetch-failed", `GitHub API returned HTTP ${response?.status ?? "unknown"}.`);
-		let data;
-		try {
-			data = await response.json();
-		} catch {
-			return failure$2("fetch-failed", "GitHub API returned invalid JSON.");
-		}
-		const record = data !== null && typeof data === "object" ? data : null;
-		if (record === null || !Array.isArray(record.tree)) return failure$2("fetch-failed", "GitHub API tree response is missing the tree array.");
-		return {
-			ok: true,
-			ref: branch,
-			sha: typeof record.sha === "string" ? record.sha : "",
-			truncated: record.truncated === true,
-			tree: record.tree
-		};
-	}
-	return failure$2("repo-not-found", "Repository not found on GitHub (tried HEAD, main and master).");
-}
-/**
-* GitHub 的 `readFile`：从 raw.githubusercontent.com 取文件原文。
-*
-* 网络异常、超时与任何非 2xx 都返回 null（对调用方就是「这个文件读不到」）：
-* SKILL.md 读不到只影响一个节点的元数据，marketplace 清单读不到则由分类函数
-* 升级成 `fetch-failed`。
-*/
-function createGithubReader({ owner, repo, ref, token, fetchImpl }) {
-	return async function readFile(repoPath) {
-		const url = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${repoPath.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`;
-		try {
-			const response = await fetchImpl(url, {
-				headers: rawHeaders(token),
-				signal: AbortSignal.timeout(RAW_TIMEOUT_MS)
-			});
-			if (!response?.ok) return null;
-			return await response.text();
-		} catch {
-			return null;
-		}
-	};
-}
-/**
-* GitHub API 请求头。
-*/
-function apiHeaders(token) {
-	const headers = {
-		Accept: "application/vnd.github.v3+json",
-		"User-Agent": "buka-skills"
-	};
-	if (token !== null) headers.Authorization = `Bearer ${token}`;
-	return headers;
-}
-/**
-* raw.githubusercontent.com 的请求头；带 token 可以访问私有仓库。
-*/
-function rawHeaders(token) {
-	const headers = { "User-Agent": "buka-skills" };
-	if (token !== null) headers.Authorization = `Bearer ${token}`;
-	return headers;
+	return failure$2("repo-unavailable", "Repository has no installable skills: expected SKILL.md files under the repository root \"skills/\" directory.");
 }
 // .build/skills/git-source.js
 /**
@@ -3544,7 +2865,18 @@ const pendingClones = /* @__PURE__ */ new Map();
 async function prepareClone({ dir, url, runGit, update }) {
 	try {
 		if (await isDirectory(dir)) {
-			if (update === true) await updateClone(dir, runGit);
+			if (update === true) {
+				const warning = await updateClone(dir, runGit);
+				return {
+					ok: true,
+					dir,
+					sha: await headSha(dir, runGit),
+					...warning === null ? {} : {
+						stale: true,
+						warning
+					}
+				};
+			}
 			return {
 				ok: true,
 				dir,
@@ -3599,7 +2931,9 @@ async function prepareClone({ dir, url, runGit, update }) {
 	}
 }
 /**
-* 尝试更新已有克隆；失败时静默保留旧克隆（离线可用）。
+* 尝试更新已有克隆；失败时保留旧克隆（离线可用），返回失败原因。
+*
+* @returns 成功时 null，失败时可展示的警告文案
 */
 async function updateClone(dir, runGit) {
 	try {
@@ -3618,7 +2952,10 @@ async function updateClone(dir, runGit) {
 			"--hard",
 			"FETCH_HEAD"
 		], { cwd: dir });
-	} catch {}
+		return null;
+	} catch (error) {
+		return `Failed to refresh the local clone; showing the cached copy: ${gitFailure(error).message}`;
+	}
 }
 /**
 * 取 HEAD 的 sha；失败留空串（请求方只把它当展示信息）。
@@ -3657,7 +2994,7 @@ async function isDirectory(dir) {
 function gitFailure(error) {
 	if (error !== null && typeof error === "object" && error.code === "ENOENT") return failure$1("git-unavailable", "Git executable not found; install git or add it to PATH.");
 	const tail = lastLines((typeof error?.stderr === "string" ? error.stderr : "").trim(), 3);
-	return failure$1("git-failed", tail === "" ? `git failed: ${errorText$1(error)}` : `git failed: ${tail}`);
+	return failure$1("git-failed", tail === "" ? `git failed: ${errorText$2(error)}` : `git failed: ${tail}`);
 }
 /**
 * 取文本最后几行，并限制长度，避免把整份 git 输出塞进错误消息。
@@ -3700,7 +3037,7 @@ function failure$1(code, message) {
 		message
 	};
 }
-function errorText$1(error) {
+function errorText$2(error) {
 	if (error instanceof Error) return error.message;
 	return String(error);
 }
@@ -3724,7 +3061,7 @@ async function openLocalRepo(root) {
 	} catch (error) {
 		const code = error?.code;
 		if (code === "ENOENT" || code === "ENOTDIR") return failure("repo-not-found", `Local path does not exist: ${root}`);
-		return failure("fetch-failed", `Could not read local path ${root}: ${errorText(error)}`);
+		return failure("fetch-failed", `Could not read local path ${root}: ${errorText$1(error)}`);
 	}
 	if (!stats.isDirectory()) return failure("repo-not-found", `Local path is not a directory: ${root}`);
 	try {
@@ -3739,7 +3076,7 @@ async function openLocalRepo(root) {
 			readFile: createFileReader(realRoot)
 		};
 	} catch (error) {
-		return failure("fetch-failed", `Could not scan local path ${root}: ${errorText(error)}`);
+		return failure("fetch-failed", `Could not scan local path ${root}: ${errorText$1(error)}`);
 	}
 }
 /**
@@ -3872,7 +3209,7 @@ function failure(code, message) {
 		message
 	};
 }
-function errorText(error) {
+function errorText$1(error) {
 	if (error instanceof Error) return error.message;
 	return String(error);
 }
@@ -3880,50 +3217,41 @@ function errorText(error) {
 /**
 * 打开一棵仓库树：把三种来源都收敛成 `{ tree, readFile }`。
 *
-* GitHub 用 API 拉树、raw.githubusercontent.com 读文件；git 来源先浅克隆到缓存
-* 目录再当本地目录扫描；本地来源直接扫描目录。后面的发现规则、分类与建树只认
-* 这个读取抽象，不再关心来源本身。
+* GitHub 仓库与其它 git 远端都先浅克隆到 DSH home 下的缓存目录，再把克隆
+* 目录当本地目录扫描；本地路径直接扫描目录。GitHub 不再调用 API 列树，所有
+* 远端来源都走同一条 git 路径。后面的发现规则与建树只认这个读取抽象，不再
+* 关心来源本身。
+*
+* 刷新克隆（`update: true`）失败时保留旧克隆继续使用，并把失败原因作为
+* `warning` 带回结果，由页面提示；首次克隆失败（含找不到 git）才返回错误。
 *
 * @module @buka/dsh-plugin-skills/repo/reader
 */
 /**
-* 打开一棵仓库树：把三种来源都收敛成 `{ tree, readFile }`。
+* GitHub 仓库的 HTTPS 克隆地址。
 *
-* GitHub 用 API 拉树、raw.githubusercontent.com 读文件；git 来源先浅克隆到缓存
-* 目录再当本地目录扫描；本地来源直接扫描目录。
+* @param owner 仓库 owner
+* @param repo 仓库名
+*/
+function githubCloneUrl(owner, repo) {
+	return `https://github.com/${owner}/${repo}.git`;
+}
+/**
+* 打开一棵仓库树。
 *
 * 走到这里说明磁盘缓存没有命中（过期，或只有一条轻量探测结论），所以三种来源
-* 都重新读一次最新内容：GitHub 重拉 tree、本地路径重扫目录、git 来源先
-* `git fetch` 更新克隆（离线时 `ensureGitClone` 保留旧克隆）。
+* 都重新读一次最新内容：本地路径重扫目录、远端来源先 `git fetch` 更新克隆
+* （失败时保留旧克隆并带 `warning`）。
+*
+* @param options.origin 规范化来源坐标
+* @param options.homes DSH home（克隆缓存目录在这里）
+* @param options.runGit 可注入的 git runner
 */
-async function openRepo({ origin, fetchImpl, token, homes, runGit }) {
-	if (origin.kind === "github") {
-		const tree = await fetchRepoTree({
-			owner: origin.owner,
-			repo: origin.repo,
-			token,
-			fetchImpl
-		});
-		if (!tree.ok) return tree;
-		return {
-			ok: true,
-			ref: tree.ref,
-			sha: tree.sha,
-			truncated: tree.truncated,
-			tree: tree.tree,
-			readFile: createGithubReader({
-				owner: origin.owner,
-				repo: origin.repo,
-				ref: tree.ref,
-				token,
-				fetchImpl
-			})
-		};
-	}
+async function openRepo({ origin, homes, runGit }) {
 	if (origin.kind === "local") return openLocalRepo(origin.root);
 	const cloned = await ensureGitClone({
 		homes,
-		url: origin.url,
+		url: origin.kind === "github" ? githubCloneUrl(origin.owner, origin.repo) : origin.url,
 		runGit,
 		update: true
 	});
@@ -3936,7 +3264,8 @@ async function openRepo({ origin, fetchImpl, token, homes, runGit }) {
 		sha: cloned.sha,
 		truncated: opened.truncated,
 		tree: opened.tree,
-		readFile: opened.readFile
+		readFile: opened.readFile,
+		...cloned.warning === void 0 ? {} : { warning: cloned.warning }
 	};
 }
 // .build/skills/repo/source.js
@@ -4007,203 +3336,33 @@ function originName(origin) {
 	const segment = origin.url.replace(/\/+$/u, "").replace(/\.git$/iu, "").split(/[/:]/u).filter((part) => part !== "").at(-1);
 	return segment === void 0 ? origin.url : segment;
 }
-// .build/skills/repo/groupings.js
-/**
-* npx skills 仓库的展示分组：读仓库根的清单，得到「skill 目录 → 插件名」。
-*
-* 与 `npx skills` CLI 的 `getPluginGroupings()` 一致：
-*
-* - 只读仓库根的 `.claude-plugin/marketplace.json` 与 `.claude-plugin/plugin.json`；
-* - 只认同仓库内的本地插件：`source` 必须缺省或以 `./` 开头，远程/对象 source 跳过；
-* - 只认清单里**显式声明**的 `skills` 目录（每项以 `./` 开头），其余 skill 不进组；
-* - 清单缺失、JSON 不合法或形状不对都不报错，当作没有分组 —— 分组只是展示优化，
-*   不能让整棵树失败。
-*
-* @module @buka/dsh-plugin-skills/repo/groupings
-*/
-/**
-* 读仓库根的插件清单，返回「skill 目录 → 插件名」，用于 npx 仓库的展示分组。
-*
-* 与 `npx skills` CLI 的 `getPluginGroupings()` 一致：
-*
-* - 只读仓库根的 `.claude-plugin/marketplace.json` 与 `.claude-plugin/plugin.json`；
-* - 只认同仓库内的本地插件：`source` 必须缺省或以 `./` 开头，远程/对象 source 跳过；
-* - 只认清单里**显式声明**的 `skills` 目录（每项以 `./` 开头），其余 skill 不进组；
-* - 清单缺失、JSON 不合法或形状不对都不报错，当作没有分组 —— 分组只是展示优化，
-*   不能让整棵树失败。
-*
-* @returns key 是仓库内 skill 目录（'' 表示仓库根），value 是插件名
-*/
-async function readSkillGroupings({ tree, reader }) {
-	const paths = new Set(treeBlobPaths(tree));
-	const groupings = /* @__PURE__ */ new Map();
-	if (paths.has(".claude-plugin/marketplace.json")) {
-		const manifest = await readJsonObject(reader, MARKETPLACE_PATH);
-		if (manifest !== null) applyMarketplaceGroupings(manifest, groupings);
-	}
-	if (paths.has(".claude-plugin/plugin.json")) {
-		const manifest = await readJsonObject(reader, PLUGIN_MANIFEST_PATH);
-		if (manifest !== null) applyPluginGroupings(manifest, groupings);
-	}
-	return groupings;
-}
-/**
-* 读一个仓库内 JSON 文件；读不到、不是 JSON 或顶层不是对象时返回 null。
-*/
-async function readJsonObject(reader, repoPath) {
-	let text;
-	try {
-		text = await reader.readFile(repoPath);
-	} catch {
-		return null;
-	}
-	if (typeof text !== "string") return null;
-	let data;
-	try {
-		data = JSON.parse(text);
-	} catch {
-		return null;
-	}
-	return data !== null && typeof data === "object" && !Array.isArray(data) ? data : null;
-}
-/**
-* marketplace 清单里的插件分组：每个插件的 `skills` 数组显式列出的目录。
-*/
-function applyMarketplaceGroupings(manifest, out) {
-	const metadata = manifest.metadata;
-	const pluginRoot = manifestDir(metadata?.pluginRoot);
-	if (pluginRoot === null) return;
-	const plugins = Array.isArray(manifest.plugins) ? manifest.plugins : [];
-	for (const entry of plugins) {
-		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-		const item = entry;
-		const name = normalizeGroupName(item.name);
-		if (name === null) continue;
-		const base = manifestDir(item.source);
-		if (base === null) continue;
-		for (const dir of declaredSkillDirs(item.skills, joinRepoPath(pluginRoot, base))) out.set(dir, name);
-	}
-}
-/**
-* 插件根 `.claude-plugin/plugin.json` 的分组：清单 name 就是组名，`skills`
-* 显式列出的目录相对插件根（仓库根）。
-*/
-function applyPluginGroupings(manifest, out) {
-	const name = normalizeGroupName(manifest.name);
-	if (name === null) return;
-	for (const dir of declaredSkillDirs(manifest.skills, "")) out.set(dir, name);
-}
-/**
-* 分组用的插件名：CLI 直接用清单里的 `name`，这里只 trim、限长并拒绝控制字符，
-* 不套 Claude Code 插件的命名规则（清单里更宽松的名字也照常分组）。
-*/
-function normalizeGroupName(value) {
-	if (typeof value !== "string") return null;
-	const text = value.trim();
-	if (text === "" || text.length > 300 || CONTROL_PATTERN.test(text)) return null;
-	return text;
-}
-/**
-* 解析清单里的一个本地目录：缺省表示插件根，字符串必须以 `./` 开头。
-*
-* 与 CLI 一致：undefined → 空串（插件根），合法 `./...` → 规范化后的相对路径，
-* 其它（`.`、`../x`、远程 source、非字符串）→ null（跳过这个 entry）。
-*
-* @returns 规范化相对路径（'' 表示根），或 null 表示跳过
-*/
-function manifestDir(value) {
-	if (value === void 0) return "";
-	if (typeof value !== "string" || !value.startsWith("./")) return null;
-	return normalizeManifestPath(value.slice(2));
-}
-/**
-* 清单里声明的 skills 路径列表（CLI 允许字符串或字符串数组）。
-*
-* @param base 相对于仓库根的插件根
-* @returns 仓库内 skill 目录
-*/
-function declaredSkillDirs(declared, base) {
-	const list = Array.isArray(declared) ? declared : typeof declared === "string" ? [declared] : [];
-	const dirs = [];
-	for (const item of list) {
-		if (typeof item !== "string" || !item.startsWith("./")) continue;
-		const rel = normalizeManifestPath(item.slice(2));
-		if (rel === null) continue;
-		dirs.push(joinRepoPath(base, rel));
-	}
-	return dirs;
-}
-/**
-* 规范化清单里的相对路径：去掉开头 / 结尾的多余 `/`，再要求它是安全的相对路径。
-*
-* @param value 已去掉 `./` 前缀的路径
-*/
-function normalizeManifestPath(value) {
-	const trimmed = value.replace(/^\/+|\/+$/gu, "");
-	if (trimmed === "") return "";
-	return normalizeRelativePath(trimmed);
-}
-/**
-* 拼两段仓库内相对路径，空串表示仓库根。
-*/
-function joinRepoPath(base, rel) {
-	if (base === "") return rel;
-	if (rel === "") return base;
-	return `${base}/${rel}`;
-}
 // .build/skills/repo/tree.js
 /**
-* 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按清单分组、排序。
+* 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按目录建树、排序。
 *
-* npx skills 仓库与 Claude Code marketplace 两条展示规则都在这里：
+* 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。展示树
+* 保留仓库里的物理目录结构，目录节点用真实仓库路径（如 `skills/engineering`），
+* skill 节点用完整路径；页面上的「全部安装」因此可以直接收集叶子路径。
+* `metadata.internal: true` 的内部 skill 不列。
 *
-* - npx：展示方式与 `npx skills add --list` 一致 —— 清单里显式归到插件的
-*   skill 放进以插件名命名的目录节点（同名插件的 skill 合并到同一组），其余
-*   skill 平铺在根上；**不按仓库的物理目录分组**。`metadata.internal: true`
-*   的内部 skill 默认不列（与 CLI 一致）；同名 skill 不去重（npx 的 GitHub
-*   快路径也只是逐个列出），保留它们是为了不隐藏仓库里真实存在的文件。
-* - marketplace：每个插件一个目录节点，skill 是它的直接子节点。
-*
-* 元数据走统一的 `reader.readFile()`：本地 / git 来源因此不碰网络，GitHub
-* 来源仍是 raw 请求 + frontmatter 解析 + 固定并发。
+* 元数据走统一的 `reader.readFile()`：本地路径与本地克隆都不碰网络。
 *
 * @module @buka/dsh-plugin-skills/repo/tree
 */
-/** 同时拉取 SKILL.md 的并发上限，避免一次打开几十个连接。 */
+/** 同时读取 SKILL.md 的并发上限，避免一次打开几十个文件 / 连接。 */
 const SKILL_MD_CONCURRENCY = 6;
 /**
-* 按分类结果把仓库内容拉成可展示的树；只用于完整展开，探测不需要。
+* 按仓库树把 skill 文件读成可展示的树。
 *
-* SKILL.md 元数据走同一个 `reader.readFile()`：本地 / git 来源因此不碰网络，
-* GitHub 来源仍是 raw 请求 + frontmatter 解析 + 6 并发。
-*
-* npx 分支还会读仓库根的 `.claude-plugin/plugin.json` / `marketplace.json`
-* 做展示分组（读不到或不合法就当没有分组，不影响列表）。marketplace 分支的
-* 插件清单在分类时已经解析过，这里直接用。
+* @param tree 仓库树
+* @param reader 仓库读取抽象（本地目录或浅克隆）
+* @param repoName 仓库名；`skills/SKILL.md` 缺名称时的兜底
 */
-async function loadRepoContent({ tree, reader, classification, repoName }) {
-	if (classification.kind === "npx-skills") return buildNpxTree(await mapLimit$1(findSkillMdPaths(tree), SKILL_MD_CONCURRENCY, (skillMd) => readSkillMetadata(skillMd, reader)), await readSkillGroupings({
-		tree,
-		reader
-	}), repoName);
-	const groups = collectMarketplaceSkills(tree, classification.marketplace);
-	const paths = groups.flatMap((group) => group.skills.map((skill) => skill.path));
-	const fetched = await mapLimit$1(paths, SKILL_MD_CONCURRENCY, (skillPath) => readSkillFile(reader, skillPath));
-	const metas = /* @__PURE__ */ new Map();
-	paths.forEach((skillPath, index) => {
-		metas.set(skillPath, fetched[index]);
-	});
-	return {
-		root: buildMarketplaceTree(groups, metas),
-		skills: paths.length
-	};
+async function loadRepoContent({ tree, reader, repoName }) {
+	return buildTree(await mapLimit$1(findSkillMdPaths(tree), SKILL_MD_CONCURRENCY, (skillMd) => readSkillMetadata(skillMd, reader)), repoName);
 }
 /**
 * 按仓库内完整路径读取并解析一个 SKILL.md；失败时 name/description 都留空。
-*
-* 这是 npx 与 marketplace 两条流程共用的底层：npx 流再根据完整路径算展示用的
-* 名称回退，marketplace 流直接用仓库完整路径。`reader` 屏蔽了来源差异
-* （GitHub raw、本地文件或 git 克隆目录里的文件）。
 *
 * @param skillMd 仓库内的完整 SKILL.md 路径
 */
@@ -4261,150 +3420,70 @@ async function mapLimit$1(items, limit, worker) {
 	return results;
 }
 /**
-* 把 npx skills 仓库的发现结果拼成展示树。
+* 把发现结果装配成按物理目录分层的树。
 *
-* 展示方式与 `npx skills add --list` 一致：清单里显式归到插件的 skill 放进
-* 以插件名命名的目录节点（同名插件的 skill 合并到同一组），其余 skill 平铺在
-* 根上；**不按仓库的物理目录分组**。`metadata.internal: true` 的内部 skill
-* 默认不列（与 CLI 一致）；同名 skill 不去重（npx 的 GitHub 快路径也只是逐个
-* 列出），保留它们是为了不隐藏仓库里真实存在的文件。
+* 目录与 skill 的 `path` 都保留仓库里的完整路径；目录名取目录段。skill 名称
+* 优先 frontmatter `name`，缺失时回退到所在目录名，`skills/SKILL.md` 回退到
+* 仓库名。
 *
-* - 目录节点的 `name` 与 `path` 都是插件名；
-* - skill 节点的 `path` 用仓库里的完整路径（如 `skills/engineering/x/SKILL.md`）；
-* - 名称缺失时用 skill 所在目录名兜底，根目录的 `SKILL.md` 用仓库名。
-*
-* @param groupings skill 目录 → 插件名（`readSkillGroupings()` 的结果）
+* @param entries 发现阶段读到的元数据
+* @param repoName 仓库名
 */
-function buildNpxTree(entries, groupings, repoName) {
-	const groups = /* @__PURE__ */ new Map();
-	const plain = [];
+function buildTree(entries, repoName) {
+	const root = {
+		name: "",
+		path: "skills",
+		dirs: /* @__PURE__ */ new Map(),
+		skills: []
+	};
 	let skills = 0;
 	for (const entry of entries) {
 		if (entry.internal === true) continue;
 		skills += 1;
+		const segments = entry.fullPath.split("/").slice(1, -1);
 		const node = {
 			type: "skill",
-			name: entry.name === "" ? fallbackSkillName(entry.fullPath, repoName) : entry.name,
+			name: entry.name === "" ? fallbackSkillName(segments, repoName) : entry.name,
 			path: entry.fullPath,
 			description: entry.description
 		};
-		const plugin = groupings.get(skillDirOf(entry.fullPath));
-		if (plugin === void 0) {
-			plain.push(node);
-			continue;
+		let current = root;
+		let pathSoFar = "skills";
+		for (const segment of segments) {
+			pathSoFar = `${pathSoFar}/${segment}`;
+			const existing = current.dirs.get(segment);
+			if (existing === void 0) {
+				const created = {
+					name: segment,
+					path: pathSoFar,
+					dirs: /* @__PURE__ */ new Map(),
+					skills: []
+				};
+				current.dirs.set(segment, created);
+				current = created;
+			} else current = existing;
 		}
-		const children = groups.get(plugin);
-		if (children === void 0) groups.set(plugin, [node]);
-		else children.push(node);
+		current.skills.push(node);
 	}
-	const root = [...[...groups].map(([name, children]) => ({
-		type: "dir",
-		name,
-		path: name,
-		children
-	})), ...plain];
-	sortTree(root);
 	return {
-		root,
+		root: finishDir(root),
 		skills
 	};
 }
 /**
-* SKILL.md 所在的仓库内目录；仓库根 `SKILL.md` 返回空串。
+* skill 名称缺失时的兜底：所在目录名；`skills/SKILL.md` 用仓库名。
 */
-function skillDirOf(skillMd) {
-	const slash = skillMd.lastIndexOf("/");
-	return slash < 0 ? "" : skillMd.slice(0, slash);
+function fallbackSkillName(segments, repoName) {
+	return segments.at(-1) ?? repoName;
 }
-/**
-* skill 名称缺失时的兜底：skill 目录名；仓库根 `SKILL.md` 用仓库名。
-*/
-function fallbackSkillName(skillMd, repoName) {
-	const dir = skillDirOf(skillMd);
-	if (dir === "") return repoName;
-	return dir.slice(dir.lastIndexOf("/") + 1);
-}
-/**
-* 把树里的 SKILL.md 按 marketplace 插件分组。
-*
-* 每个插件扫它 root 下的**所有** SKILL.md（不只是 `skills/` 一层）：marketplace
-* 的插件目录结构比 npx skills 自由，可能由 plugin.json 或 entry 指定自定义
-* skills 目录。按插件 root 从深到浅分配，每条完整路径只归第一个插件（根插件
-* 最后兜底）；`rel` 任一段落在 SKIP_DIRS 里的路径跳过。
-*
-* @param tree GitHub 树节点数组
-*/
-function collectMarketplaceSkills(tree, marketplace) {
-	const skillMds = allSkillMdPaths(tree);
-	const ordered = [...marketplace.plugins].sort((a, b) => pathDepth(b.root) - pathDepth(a.root));
-	const groups = [];
-	const claimed = /* @__PURE__ */ new Set();
-	for (const plugin of ordered) {
-		const skills = [];
-		for (const skillPath of skillMds) {
-			if (claimed.has(skillPath)) continue;
-			let rel;
-			if (plugin.root === "") rel = skillPath;
-			else {
-				if (!skillPath.startsWith(`${plugin.root}/`)) continue;
-				rel = skillPath.slice(plugin.root.length + 1);
-			}
-			if (rel.split("/").some((segment) => SKIP_DIRS$1.has(segment))) continue;
-			claimed.add(skillPath);
-			skills.push({
-				path: skillPath,
-				rel
-			});
-		}
-		if (skills.length > 0) groups.push({
-			pluginName: plugin.name,
-			pluginRoot: plugin.root,
-			skills
-		});
-	}
-	return groups;
-}
-/**
-* marketplace 预计的 skill 数量；探测用，不拉原文。
-*/
-function countMarketplaceSkills(tree, marketplace) {
-	return collectMarketplaceSkills(tree, marketplace).reduce((total, group) => total + group.skills.length, 0);
-}
-/**
-* 相对路径的深度；空串（仓库根）算 0。
-*/
-function pathDepth(root) {
-	return root === "" ? 0 : root.split("/").length;
-}
-/**
-* 建 marketplace 的插件分组树：每个插件一个目录节点，skill 是它的直接子节点。
-*
-* 目录节点的 `path` 是插件 root（仓库根用 `.`），skill 节点保留仓库完整路径。
-* skill 名称优先 frontmatter `name`；为空时回退到 `rel` 的倒数第二段目录名，
-* `rel` 不足两段（插件根 `SKILL.md`）时回退到插件名。
-*
-* @param metas key 是完整路径
-*/
-function buildMarketplaceTree(groups, metas) {
-	const nodes = groups.map((group) => ({
+/** 把中间节点转成展示节点并递归排序。 */
+function finishDir(builder) {
+	const nodes = [...[...builder.dirs.values()].map((dir) => ({
 		type: "dir",
-		name: group.pluginName,
-		path: group.pluginRoot === "" ? "." : group.pluginRoot,
-		children: group.skills.map((skill) => {
-			const meta = metas.get(skill.path) ?? {
-				name: "",
-				description: ""
-			};
-			const segments = skill.rel.split("/");
-			const fallback = segments.length >= 2 ? segments.at(-2) ?? group.pluginName : group.pluginName;
-			return {
-				type: "skill",
-				name: meta.name === "" ? fallback : meta.name,
-				path: skill.path,
-				description: meta.description
-			};
-		})
-	}));
+		name: dir.name,
+		path: dir.path,
+		children: finishDir(dir)
+	})), ...builder.skills];
 	sortTree(nodes);
 	return nodes;
 }
@@ -4414,14 +3493,14 @@ function buildMarketplaceTree(groups, metas) {
 function sortTree(nodes) {
 	nodes.sort((a, b) => {
 		if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-		return compareName$1(a.name, b.name);
+		return compareName(a.name, b.name);
 	});
 	for (const node of nodes) if (node.type === "dir") sortTree(node.children);
 }
 /**
 * 大小写不敏感的 `localeCompare`；完全相同时再用原始大小写稳定排序。
 */
-function compareName$1(a, b) {
+function compareName(a, b) {
 	const folded = a.localeCompare(b, void 0, { sensitivity: "base" });
 	return folded !== 0 ? folded : a.localeCompare(b);
 }
@@ -4429,58 +3508,29 @@ function compareName$1(a, b) {
 /**
 * 「收藏的来源里有哪些 skills」：拉取、缓存与建树的入口。
 *
-* 页面第二个 Tab 的收藏项可能指向一个包含多个 skill 的仓库，来源可以是 GitHub
-* 仓库、任意 git 远端或本地绝对路径。展开成 tree 的第一步都是拿到「仓库树 +
-* 按仓库内路径读文件」：
+* 收藏只支持仓库根 `skills/` 下（允许任意层级子目录）的 `SKILL.md`：
 *
-* - GitHub：`GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1` 拿整棵树，
-*   `https://raw.githubusercontent.com/.../SKILL.md` 拿文件原文；
-* - 任意 git 远端：先 `git clone --depth 1` 到缓存目录（`src/git-source.ts`），
-*   再把克隆目录当本地目录扫描；
+* - GitHub 仓库与任意 git 远端：先 `git clone --depth 1` 到 DSH home 下的缓存
+*   目录（`src/git-source.ts`），再把克隆目录当本地目录扫描；
 * - 本地绝对路径：直接扫描目录（`src/local-source.ts`）。
 *
 * 三种来源最终都收敛成 `{ tree, readFile }` 的读取抽象（`openRepo()`），后面的
-* 发现规则、分类与建树只认这个抽象，不再关心来源本身。
+* 发现规则与建树只认这个抽象，不再关心来源本身。GitHub 不再调用 API 列树，
+* 所有远端来源走同一条本地浅克隆路径。
 *
-* 发现规则与 `npx skills` CLI 的 `findSkillMdPaths()` 保持一致（文件名必须是
-* `SKILL.md`、优先级前缀、container 层级、跳过的目录），**展示方式也照 CLI 的
-* 清单来**：npx 仓库不按仓库的物理目录分组。像 `skills/<bucket>/<skill>/
-* SKILL.md` 这种 catalog 布局，bucket 只对发现有用，CLI 列出来的是扁平的 skill
-* 列表；这里同样把 skill 平铺在根上，只有仓库根的 `.claude-plugin/plugin.json`
-* 或 `.claude-plugin/marketplace.json` 里**显式声明**了某个 skill 目录属于哪个
-* 插件时，才按插件名分组（与 CLI 的 `getPluginGroupings()` 一致）。skill 节点的
-* `path` 仍保留仓库里的完整路径，方便排查。
-*
-* 收藏的仓库有两类，判定顺序固定（用户要求）：先按 `npx skills` 的优先级前缀
-* （标准布局）判定 npx skills 仓库；没命中再看仓库根有没有
-* `.claude-plugin/marketplace.json`，有合法清单就按 Claude Code marketplace
-* 处理，只列各本地插件子树里的 SKILL.md（commands / agents 不列，用户决策），
-* 每个插件一个目录节点；两者都不是时，npx 的兜底规则（任意不超过 6 段的
-* SKILL.md）仍然算 npx skills 仓库；最后才标记为不可用（`repo-unavailable`）。
-* 兜底排在 marketplace 之后，是因为它太宽松：`plugins/<plugin>/skills/<name>/
-* SKILL.md` 正好 5 段，会命中；若它在前，marketplace 永远显示成 npx。判定本身
-* 只看这棵树，不依赖清单文件；npx 仓库展开时才读清单做插件分组，判定不受影响。
-*
-* `probeRepoKind()` 只跑上面这套判定（只拉 tree，必要时拉 marketplace.json），
-* 给收藏卡片显示徽标用，不拉任何 SKILL.md 原文。探测写下的轻量结论用
-* `complete: false` 标记（`root` 固定为 `[]`），展开时才补成完整树。
+* 刷新克隆失败时保留旧克隆继续展示，并把错误原因作为 `warning` 带上；首次
+* 克隆失败（含找不到 git）才返回错误。
 *
 * 缓存放在 DSH home 下（`<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`），
 * 按规范化来源（`owner/repo`、本地绝对路径或 git 地址）的小写键存整棵树，TTL
-* 30 分钟；git 来源的克隆目录另由 `src/git-source.ts` 管理。缓存是**可重建的易失数据**：
-* 文件损坏、版本不符或单条结构不合法时都直接当作未命中并重拉重写，不像收藏
-* 文件那样拒绝覆盖。写入仍是原子写（同目录临时文件 + rename），避免留下半个
-* 文件。SKILL.md 拉取失败只影响那一个节点的名称/描述，不会让整棵树失败。
-* marketplace 的清单（`.claude-plugin/marketplace.json`）也随完整树一起缓存，
-* 这样「列出市场里有哪些插件」不必重拉：树里没有 skill 的插件不会建节点，
-* 但清单仍在，调用方可以列出它们并给一个空 skill 列表。
+* 30 分钟。缓存是**可重建的易失数据**：文件损坏、版本不符或单条结构不合法时
+* 都直接当作未命中并重拉重写，不像收藏文件那样拒绝覆盖。写入仍是原子写
+* （同目录临时文件 + rename），避免留下半个文件。
 *
-* 本模块只做两个入口的编排；实现按职责拆在 `src/repo/` 下：GitHub API
-* （`github.ts`）、来源坐标（`source.ts`）、三种来源的读取抽象（`reader.ts`）、
-* 发现规则与仓库分类（`discovery.ts`）、marketplace 清单（`marketplace.ts`）、
-* 展示分组（`groupings.ts`）、建树（`tree.ts`）、缓存（`cache.ts`）。依赖只有
-* Node 内置模块与这些本地模块，可单独测试；网络、时钟、git 子进程与缓存目录
-* 都从参数注入。
+* 本模块只做两个入口的编排；实现按职责拆在 `src/repo/` 下：来源坐标
+* （`source.ts`）、读取抽象（`reader.ts`）、发现规则与仓库分类
+* （`discovery.ts`）、建树（`tree.ts`）、缓存（`cache.ts`）。依赖只有 Node
+* 内置模块与这些本地模块，可单独测试；时钟、git 子进程与缓存目录都从参数注入。
 *
 * @module @buka/dsh-plugin-skills/repo-skills
 */
@@ -4489,43 +3539,35 @@ function compareName$1(a, b) {
 *
 * `source` 先经 `classifyRepoSource()` 解析成三种可列出的来源之一：GitHub 仓库、
 * 任意 git 远端、本地绝对路径；`@scope/pkg`、`notion` 与已知不是仓库的网页链接
-* （如 GitHub 子页面）返回 `unsupported-source`。缓存命中时完全不访问来源；
-* GitHub 来源依次尝试 `HEAD`、`main`、`master`，git 来源复用已经克隆的目录。
+* 返回 `unsupported-source`。缓存命中时完全不访问来源。
 *
-* 仓库分类顺序固定：npx skills → Claude Code marketplace → 不可用。用于展示
-* 的目录节点路径已经去掉容器前缀，skill 节点保留完整仓库路径；marketplace
-* 的根节点是「一个插件一个目录」。网络失败、限流、仓库不存在、找不到 git 等
-* 情况都返回 `{ ok: false, code, message }`，不向调用方抛异常；缓存写入失败
-* 则忽略，因为它随时可以重建。
+* 仓库分类只看树：根 `skills/` 下有 `SKILL.md` 就是标准 npx 仓库，否则不可用
+* （`repo-unavailable`）。网络失败、找不到 git、克隆失败等情况返回
+* `{ ok: false, code, message }`，不向调用方抛异常；缓存写入失败则忽略，因为
+* 它随时可以重建。刷新克隆失败时结果仍成功，并带 `warning`。
 *
 * 命中探测写下的轻量缓存（`complete: false`）时仍会重新拉一次 tree，把完整树
 * 补进缓存；命中 `kind: 'unavailable'` 且未过期时直接返回 `repo-unavailable`。
 */
-async function fetchRepoSkills({ homes = resolveHomes(), source, refresh = false, fetchImpl = fetch, token, now = Date.now(), ttlMs = REPO_SKILLS_CACHE_TTL_MS, runGit } = {}) {
+async function fetchRepoSkills({ homes = resolveHomes(), source, refresh = false, now = Date.now(), ttlMs = REPO_SKILLS_CACHE_TTL_MS, runGit } = {}) {
 	const request = await resolveTarget({
 		homes,
 		source,
-		token,
 		now
 	});
 	if (request.ok !== true) return request.failure;
-	const { origin, canonical, timestamp, resolvedToken, file, id, cached } = request;
+	const { origin, canonical, timestamp, file, id, cached } = request;
 	if (refresh !== true && isFresh(cached, timestamp, ttlMs)) {
 		if (cached.kind === "unavailable") return repoUnavailable();
 		if (cached.complete === true) return cachedResult(canonical, cached);
 	}
 	const reader = await openRepo({
 		origin,
-		fetchImpl,
-		token: resolvedToken,
 		homes,
 		runGit
 	});
 	if (!reader.ok) return reader;
-	const classification = await classifyRepo({
-		tree: reader.tree,
-		reader
-	});
+	const classification = classifyRepo(reader.tree);
 	if ("failure" in classification) return classification.failure;
 	if (classification.kind === "unavailable") {
 		try {
@@ -4545,7 +3587,6 @@ async function fetchRepoSkills({ homes = resolveHomes(), source, refresh = false
 	const content = await loadRepoContent({
 		tree: reader.tree,
 		reader,
-		classification,
 		repoName: originName(origin)
 	});
 	const entry = {
@@ -4557,8 +3598,7 @@ async function fetchRepoSkills({ homes = resolveHomes(), source, refresh = false
 		truncated: reader.truncated,
 		skills: content.skills,
 		complete: true,
-		root: content.root,
-		marketplace: classification.kind === "claude-code-marketplace" ? classification.marketplace : null
+		root: content.root
 	};
 	try {
 		await updateCache(file, (current) => ({
@@ -4577,52 +3617,41 @@ async function fetchRepoSkills({ homes = resolveHomes(), source, refresh = false
 		truncated: reader.truncated,
 		root: content.root,
 		skills: content.skills,
-		marketplace: entry.marketplace
+		...reader.warning === void 0 ? {} : { warning: reader.warning }
 	};
 }
 /**
-* 只探测一个来源属于哪种技能仓库，不拉任何 SKILL.md 原文。
+* 只探测一个来源属于哪种技能仓库，不拉任何 `SKILL.md` 原文。
 *
-* 收藏卡片打开后会自动调用它来显示徽标，所以这里只拿 tree（本地路径 / git 克隆
-* 是扫目录，GitHub 是拉 tree），必要时再读一份 `marketplace.json`。失败码与
-* `fetchRepoSkills` 完全一致；判定为不可用时返回 `repo-unavailable`（命中已缓存
-* 的不可用结论时同样不访问来源）。
+* 收藏卡片打开后会自动调用它来显示徽标，所以这里只拿树（远端是浅克隆的
+* 目录扫描、本地路径直接扫描）。失败码与 `fetchRepoSkills` 完全一致；判定为
+* 不可用时返回 `repo-unavailable`（命中已缓存的不可用结论时同样不访问来源）。
 *
 * 写缓存总是写轻量条目（`complete: false`，`root: []`），并且**不覆盖**已存在
 * 的完整树缓存：探测刷新不该把展开时拿到的完整数据降级掉。
 */
-async function probeRepoKind({ homes = resolveHomes(), source, refresh = false, fetchImpl = fetch, token, now = Date.now(), ttlMs = REPO_SKILLS_CACHE_TTL_MS, runGit } = {}) {
+async function probeRepoKind({ homes = resolveHomes(), source, refresh = false, now = Date.now(), ttlMs = REPO_SKILLS_CACHE_TTL_MS, runGit } = {}) {
 	const request = await resolveTarget({
 		homes,
 		source,
-		token,
 		now
 	});
 	if (request.ok !== true) return request.failure;
-	const { origin, canonical, timestamp, resolvedToken, file, id, cached } = request;
+	const { origin, canonical, timestamp, file, id, cached } = request;
 	if (refresh !== true && isFresh(cached, timestamp, ttlMs)) {
 		if (cached.kind === "unavailable") return repoUnavailable();
 		return probeResult(canonical, cached, true);
 	}
 	const reader = await openRepo({
 		origin,
-		fetchImpl,
-		token: resolvedToken,
 		homes,
 		runGit
 	});
 	if (!reader.ok) return reader;
-	const classification = await classifyRepo({
-		tree: reader.tree,
-		reader
-	});
+	const classification = classifyRepo(reader.tree);
 	if ("failure" in classification) return classification.failure;
 	const kind = classification.kind;
-	const marketplace = classification.kind === "claude-code-marketplace" ? classification.marketplace : null;
-	const skills = kind === "unavailable" ? 0 : kind === "npx-skills" ? findSkillMdPaths(reader.tree).length : countMarketplaceSkills(reader.tree, marketplace ?? {
-		name: "",
-		plugins: []
-	});
+	const skills = kind === "unavailable" ? 0 : findSkillMdPaths(reader.tree).length;
 	await writeProbeCache(file, id, lightEntry({
 		source: canonical,
 		kind,
@@ -4640,16 +3669,17 @@ async function probeRepoKind({ homes = resolveHomes(), source, refresh = false, 
 		ref: reader.ref,
 		sha: reader.sha,
 		fetchedAt: timestamp,
-		truncated: reader.truncated
+		truncated: reader.truncated,
+		...reader.warning === void 0 ? {} : { warning: reader.warning }
 	};
 }
 /**
-* 校验来源、解析 token 并读缓存：两个入口共用的前半段。
+* 校验来源并读缓存：两个入口共用的前半段。
 *
 * 来源种类由 `classifyRepoSource()` 判定：`web` / `package` 直接返回
 * `unsupported-source`（它们没有可列出的仓库树，也没有缓存条目）。
 */
-async function resolveTarget({ homes, source, token, now }) {
+async function resolveTarget({ homes, source, now }) {
 	const classified = classifyRepoSource(source);
 	if (!classified.ok) return {
 		ok: false,
@@ -4681,7 +3711,6 @@ async function resolveTarget({ homes, source, token, now }) {
 		url: canonical
 	};
 	const timestamp = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
-	const resolvedToken = resolveToken(token);
 	const file = repoSkillsCacheFile(homes);
 	const entries = await readCache(file);
 	const id = repoKey(canonical);
@@ -4690,7 +3719,6 @@ async function resolveTarget({ homes, source, token, now }) {
 		origin,
 		canonical,
 		timestamp,
-		resolvedToken,
 		file,
 		entries,
 		id,
@@ -4711,8 +3739,7 @@ function cachedResult(canonical, entry) {
 		cached: true,
 		truncated: entry.truncated,
 		root: entry.root,
-		skills: entry.skills,
-		marketplace: entry.marketplace ?? null
+		skills: entry.skills
 	};
 }
 /**
@@ -4744,9 +3771,691 @@ function lightEntry({ source, kind, tree, timestamp, skills }) {
 		truncated: tree.truncated,
 		skills,
 		complete: false,
-		root: [],
-		marketplace: null
+		root: []
 	};
+}
+// .build/skills/skill-hash.js
+/**
+* 已安装 skill 的内容哈希：与 `skills` CLI 的 `computedHash` 规则一致。
+*
+* `skills-lock.json` 记录了安装完成时 skill 目录的 `computedHash`。比较它和
+* 磁盘上的当前内容，就能判断本地是否被改过（`modified`），从而在更新时跳过
+* 用户的手工修改。
+*
+* 规则（见 `skills` 包 README 的 “Lock File Content Hash”）：
+*
+* 1. 收集目录里的文件，排除 `metadata.json` 与 `.git` / `__pycache__` /
+*    `__py_packages__` 目录；符号链接按它指向的内容计算，坏链、循环链与指向
+*    目录外的链接排除；
+* 2. 相对路径用 `/` 分隔；
+* 3. 文本文件（不含 NUL 字节）把 CRLF 换成 LF，二进制文件保持原样；
+* 4. 按路径的 UTF-8 字节排序（不是 locale 排序）；
+* 5. 依次喂入 `path`、NUL、内容字节数（十进制 ASCII）、NUL、内容，算 SHA-256；
+* 6. 输出小写十六进制。
+*
+* @module @buka/dsh-plugin-skills/skill-hash
+*/
+/** 不参与哈希的目录名。 */
+const SKIPPED_DIRS = /* @__PURE__ */ new Set([
+	".git",
+	"__pycache__",
+	"__py_packages__"
+]);
+/** 不参与哈希的文件名。 */
+const SKIPPED_FILES = /* @__PURE__ */ new Set(["metadata.json"]);
+/**
+* 计算一个 skill 目录的内容哈希。
+*
+* @param root skill 目录绝对路径
+*/
+async function computeSkillFolderHash(root) {
+	const files = await collectFiles(await promises.realpath(root));
+	files.sort((left, right) => Buffer.compare(Buffer.from(left.relativePath), Buffer.from(right.relativePath)));
+	const hash = createHash("sha256");
+	for (const file of files) {
+		hash.update(file.relativePath);
+		hash.update(Buffer.from([0]));
+		hash.update(String(file.content.length));
+		hash.update(Buffer.from([0]));
+		hash.update(file.content);
+	}
+	return hash.digest("hex");
+}
+/**
+* 递归收集目录里的文件；符号链接按目标处理，坏链 / 越界链接跳过。
+*
+* @param root 已展开符号链接的 skill 根目录
+*/
+async function collectFiles(root) {
+	const files = [];
+	const visited = /* @__PURE__ */ new Set();
+	async function walk(directory, prefix) {
+		let entries;
+		try {
+			entries = await promises.readdir(directory, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			const full = path.join(directory, entry.name);
+			const relativePath = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+			if (entry.isSymbolicLink()) {
+				let real;
+				try {
+					real = await promises.realpath(full);
+				} catch {
+					continue;
+				}
+				if (!isInside(root, real)) continue;
+				let stat;
+				try {
+					stat = await promises.stat(real);
+				} catch {
+					continue;
+				}
+				if (stat.isDirectory()) {
+					if (visited.has(real)) continue;
+					visited.add(real);
+					await walk(real, relativePath);
+				} else if (stat.isFile()) {
+					const content = await readHashable(real);
+					if (content !== null) files.push({
+						relativePath,
+						content
+					});
+				}
+				continue;
+			}
+			if (entry.isDirectory()) {
+				if (SKIPPED_DIRS.has(entry.name)) continue;
+				await walk(full, relativePath);
+				continue;
+			}
+			if (!entry.isFile() || SKIPPED_FILES.has(entry.name)) continue;
+			const content = await readHashable(full);
+			if (content !== null) files.push({
+				relativePath,
+				content
+			});
+		}
+	}
+	await walk(root, "");
+	return files;
+}
+/**
+* 读一个文件的哈希内容：文本文件统一换行，二进制保持原样。
+*
+* @param file 文件绝对路径
+*/
+async function readHashable(file) {
+	try {
+		const raw = await promises.readFile(file);
+		return raw.includes(0) ? raw : normalizeNewlines(raw);
+	} catch {
+		return null;
+	}
+}
+/**
+* 把 CRLF 换成 LF；直接按字节处理，避免重新解码破坏内容。
+*
+* @param raw 文件原始字节
+*/
+function normalizeNewlines(raw) {
+	const out = Buffer.allocUnsafe(raw.length);
+	let length = 0;
+	for (let index = 0; index < raw.length; index += 1) {
+		const byte = raw[index];
+		if (byte === 13 && raw[index + 1] === 10) continue;
+		out[length] = byte;
+		length += 1;
+	}
+	return out.subarray(0, length);
+}
+/**
+* `target` 是否在 `root` 之内（含 root 自身）。
+*/
+function isInside(root, target) {
+	const relative = path.relative(root, target);
+	return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+// .build/skills/skill-update.js
+/**
+* 已安装 skill 的检查与更新。
+*
+* 状态模型（不引入版本号）：
+*
+* - `update`：上游有更新；
+* - `modified`：本地文件与 lock 里的 `computedHash` 不一致（只对目标目录的
+*   项目级 skill 有意义，全局 lock 不记内容哈希）；
+* - `up-to-date`：已是最新；
+* - `unsupported-source`：来源不再可解析（典型是旧 Claude Code marketplace
+*   安装：skill 不在仓库根 `skills/` 下），无法再自动检查；
+* - `failed`：检查本身失败，带原因。
+*
+* 检查与更新复用 `skills` 包自带的 CLI（`skills check` / `skills update`），
+* 因为更新逻辑、来源解析与 lock 迁移都由它维护；调用时关闭遥测。全局作用域
+* 只在 `~/.agents` 是 DSH 扫描的全局根时可用——CLI 固定写自己的全局目录，
+* 路径不一致时宁可拒绝，也不改到用户看不到的位置。
+*
+* 更新只应用 `update`；`modified` 默认跳过并说明原因，绝不覆盖本地修改。
+* 手工安装（不在 npx lock 里）的条目不在候选内，也不参与检查 / 更新。
+*
+* @module @buka/dsh-plugin-skills/skill-update
+*/
+/** CLI 单次调用的超时：与安装流程的 180 s 保持一致。 */
+const SKILL_UPDATE_TIMEOUT_MS = 18e4;
+/** CLI 输出的上限；正常输出很小，这里只防异常刷屏。 */
+const MAX_OUTPUT_BYTES = 10485760;
+/** 项目级 lock 文件名与版本。 */
+const PROJECT_LOCK_FILE = "skills-lock.json";
+/**
+* 解析 `skills check` 的文本输出。
+*
+* CLI 没有 `--json`，但这两类行是稳定的：`↑ <name> has an update` 与
+* `✎ <name> has local changes`。解析前先去掉 ANSI 颜色码，避免名字里混入转义。
+*
+* @param output CLI 的 stdout + stderr
+*/
+function parseCheckOutput(output) {
+	const updates = /* @__PURE__ */ new Set();
+	const modified = /* @__PURE__ */ new Set();
+	const failedSources = [];
+	for (const rawLine of stripAnsi(output).split(/\r?\n/u)) {
+		const line = rawLine.trim();
+		const update = /^↑ (.+) has an update$/u.exec(line);
+		if (update?.[1] !== void 0) {
+			updates.add(update[1].trim());
+			continue;
+		}
+		const changed = /^✎ (.+) has local changes$/u.exec(line);
+		if (changed?.[1] !== void 0) {
+			modified.add(changed[1].trim());
+			continue;
+		}
+		const failed = /^✗ Failed to check skills from (.+)$/u.exec(line);
+		if (failed?.[1] !== void 0) failedSources.push(failed[1].trim());
+	}
+	return {
+		updates,
+		modified,
+		failedSources
+	};
+}
+/**
+* 去掉 ANSI 颜色 / 控制序列。
+*
+* @param text 原始文本
+*/
+function stripAnsi(text) {
+	return text.replace(/\u001b\[[0-9;]*m/gu, "");
+}
+/**
+* 解析 `skills` 包自带 CLI 的绝对路径。
+*
+* 通过包的 `exports` 子路径解析，插件被安装到 profile 后仍能取到同一份依赖。
+*/
+function resolveSkillsCliPath() {
+	return createRequire(import.meta.url).resolve("skills/bin/cli.mjs");
+}
+/**
+* 创建默认的 CLI 执行函数：`node <cli> ...args`，关闭遥测与颜色。
+*
+* 用 `node` 直接执行包的入口，不经过 `npx`，也不依赖 PATH 里的全局命令。
+*/
+function createSkillsCliRunner({ timeoutMs = SKILL_UPDATE_TIMEOUT_MS, cliPath = resolveSkillsCliPath(), env = process.env } = {}) {
+	return (args, options = {}) => new Promise((resolve) => {
+		execFile(process.execPath, [cliPath, ...args], {
+			...options.cwd === void 0 ? {} : { cwd: options.cwd },
+			timeout: timeoutMs,
+			maxBuffer: MAX_OUTPUT_BYTES,
+			env: {
+				...env,
+				DISABLE_TELEMETRY: "1",
+				DO_NOT_TRACK: "1",
+				NO_COLOR: "1",
+				FORCE_COLOR: "0"
+			}
+		}, (error, stdout, stderr) => {
+			resolve({
+				exitCode: error === null ? 0 : typeof error.code === "number" ? error.code ?? null : null,
+				stdout: String(stdout ?? ""),
+				stderr: String(stderr ?? ""),
+				...error === null ? {} : { error: error.message }
+			});
+		});
+	});
+}
+/**
+* 检查全局或某个目标目录里的 skill 状态。
+*
+* @param deps 仓库读取能力、CLI runner 与作用域
+*/
+async function checkSkills(deps) {
+	const { homes = resolveHomes(), catalog, cli = createSkillsCliRunner(), refresh } = deps;
+	const prepared = await collectCandidates({
+		homes,
+		dir: deps.dir
+	});
+	if (!prepared.ok) return prepared;
+	const { scope, candidates } = prepared;
+	if (candidates.length === 0) return {
+		ok: true,
+		scope,
+		...scope === "project" && deps.dir !== void 0 ? { dir: deps.dir } : {},
+		results: [],
+		message: "没有由 npx 管理、且仍安装在磁盘上的 skill，无需检查。"
+	};
+	if (scope === "global") {
+		const mismatch = globalHomeMismatch(homes);
+		if (mismatch !== null) return {
+			ok: false,
+			code: "unsupported-home",
+			message: mismatch
+		};
+	}
+	const checked = await runCheckCli({
+		scope,
+		dir: deps.dir,
+		cli
+	});
+	if (!checked.ok) return checked;
+	const { updates, modified, failedSources } = parseCheckOutput(checked.output);
+	const checks = await evaluateCandidates({
+		candidates,
+		updates,
+		modified,
+		failedSources,
+		catalog,
+		...refresh === void 0 ? {} : { refresh }
+	});
+	return {
+		ok: true,
+		scope,
+		...scope === "project" && deps.dir !== void 0 ? { dir: deps.dir } : {},
+		results: checks
+	};
+}
+/**
+* 检查并更新：只应用 `update` 状态，`modified` 默认跳过。
+*
+* 更新逐个执行，任何一个失败都不影响后面的；每个失败项带上 CLI 输出。
+* 没有可更新项时明确返回「已是最新」。
+*
+* @param deps 同 `checkSkills()`
+*/
+async function updateSkills(deps) {
+	const { homes = resolveHomes(), catalog, cli = createSkillsCliRunner(), refresh } = deps;
+	const prepared = await collectCandidates({
+		homes,
+		dir: deps.dir
+	});
+	if (!prepared.ok) return prepared;
+	const { scope, candidates } = prepared;
+	const base = {
+		scope,
+		...scope === "project" && deps.dir !== void 0 ? { dir: deps.dir } : {}
+	};
+	if (candidates.length === 0) return {
+		ok: true,
+		...base,
+		updated: [],
+		skipped: [],
+		failed: [],
+		message: "没有由 npx 管理、且仍安装在磁盘上的 skill，无需更新。"
+	};
+	if (scope === "global") {
+		const mismatch = globalHomeMismatch(homes);
+		if (mismatch !== null) return {
+			ok: false,
+			code: "unsupported-home",
+			message: mismatch
+		};
+	}
+	const checked = await runCheckCli({
+		scope,
+		dir: deps.dir,
+		cli
+	});
+	if (!checked.ok) return checked;
+	const { updates, modified, failedSources } = parseCheckOutput(checked.output);
+	const checks = await evaluateCandidates({
+		candidates,
+		updates,
+		modified,
+		failedSources,
+		catalog,
+		...refresh === void 0 ? {} : { refresh }
+	});
+	const updated = [];
+	const skipped = [];
+	const failed = [];
+	let attempted = 0;
+	for (const entry of checks) {
+		if (entry.status === "update") {
+			attempted += 1;
+			const result = await cli([
+				"update",
+				entry.name,
+				scope === "global" ? "-g" : "-p",
+				"-y"
+			], cliOptions(scope, deps.dir));
+			const output = [result.stdout, result.stderr].filter((text) => text !== "").join("\n");
+			if (result.exitCode === 0) {
+				updated.push({ name: entry.name });
+				continue;
+			}
+			failed.push({
+				name: entry.name,
+				message: result.exitCode === null ? `skills update 无法启动：${result.error ?? "未知原因"}` : `skills update 失败（退出码 ${result.exitCode}）`,
+				...output === "" ? {} : { output }
+			});
+			continue;
+		}
+		if (entry.status === "modified") {
+			skipped.push({
+				name: entry.name,
+				status: "modified",
+				reason: "本地文件已被修改，默认跳过更新，避免覆盖你的改动。"
+			});
+			continue;
+		}
+		if (entry.status === "unsupported-source") {
+			skipped.push({
+				name: entry.name,
+				status: "unsupported-source",
+				reason: "来源里已经没有可再解析的 skill（常见于旧 marketplace 安装），无法自动更新。"
+			});
+			continue;
+		}
+		if (entry.status === "failed") failed.push({
+			name: entry.name,
+			message: entry.message ?? "检查失败，已跳过更新。",
+			...entry.output === void 0 ? {} : { output: entry.output }
+		});
+	}
+	let message;
+	if (attempted === 0) message = skipped.length === 0 ? "所有 skill 都已是最新。" : `没有可更新的 skill（${skipped.length} 个已跳过）；其余已是最新。`;
+	else message = `已更新 ${updated.length} 个 skill${failed.length === 0 ? "。" : `，${failed.length} 个失败。`}`;
+	return {
+		ok: true,
+		...base,
+		updated,
+		skipped,
+		failed,
+		message
+	};
+}
+/**
+* 收集候选并确定作用域。
+*/
+async function collectCandidates({ homes, dir }) {
+	if (dir !== void 0) {
+		const project = await projectCandidates(dir);
+		return project.ok ? {
+			ok: true,
+			scope: "project",
+			candidates: project.candidates
+		} : project;
+	}
+	return {
+		ok: true,
+		scope: "global",
+		candidates: await globalCandidates(homes)
+	};
+}
+/** 全局候选：位于 `~/.agents/skills` 且出现在 npx lock 里的 skill。 */
+async function globalCandidates(homes) {
+	const snapshot = await collectGlobalSkills({ homes });
+	const candidates = [];
+	for (const skill of snapshot.skills) {
+		if (skill.managedByNpx !== true) continue;
+		const source = skill.npxSource ?? skill.npxSourceUrl;
+		if (typeof source !== "string" || source === "") continue;
+		candidates.push({
+			name: skill.name,
+			id: skill.id,
+			source,
+			sourceUrl: skill.npxSourceUrl,
+			installedPath: skill.path,
+			computedHash: null
+		});
+	}
+	return candidates;
+}
+/**
+* 项目级候选：目标目录的 `skills-lock.json` 里 tracked、且目录仍在的 skill。
+*
+* lock 里没有的目录按手工安装处理，不参与检查 / 更新。
+*/
+async function projectCandidates(dir) {
+	const lockPath = path.join(dir, PROJECT_LOCK_FILE);
+	let parsed;
+	try {
+		parsed = JSON.parse(await promises.readFile(lockPath, "utf8"));
+	} catch (error) {
+		if (error?.code === "ENOENT") return {
+			ok: true,
+			candidates: []
+		};
+		return {
+			ok: false,
+			code: "lock-unreadable",
+			message: `无法读取 ${lockPath}：${errorText(error)}`
+		};
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {
+		ok: false,
+		code: "lock-unreadable",
+		message: `${lockPath} 不是合法的 JSON 对象。`
+	};
+	const record = parsed;
+	if (record.version !== 1 && record.version !== 2 || record.skills === null || typeof record.skills !== "object" || Array.isArray(record.skills)) return {
+		ok: false,
+		code: "lock-unreadable",
+		message: `${lockPath} 的版本或结构不受支持。`
+	};
+	const candidates = [];
+	for (const [name, raw] of Object.entries(record.skills)) {
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const entry = raw;
+		const source = typeof entry.source === "string" ? entry.source : "";
+		if (source === "") continue;
+		const id = skillDirName(name);
+		if (id === "") continue;
+		const installedPath = path.join(dir, ".agents", "skills", id);
+		try {
+			await promises.access(path.join(installedPath, "SKILL.md"));
+		} catch {
+			continue;
+		}
+		candidates.push({
+			name,
+			id,
+			source,
+			sourceUrl: typeof entry.sourceUrl === "string" ? entry.sourceUrl : null,
+			installedPath,
+			computedHash: typeof entry.computedHash === "string" ? entry.computedHash : null
+		});
+	}
+	return {
+		ok: true,
+		candidates
+	};
+}
+/**
+* 跑一次 `skills check`。
+*
+* 退出码 1 是正常结论（发现更新或本地修改），0 表示没有；其它退出码或进程
+* 没启动起来时整体失败。
+*/
+async function runCheckCli({ scope, dir, cli }) {
+	const result = await cli([
+		"check",
+		scope === "global" ? "-g" : "-p",
+		"-y"
+	], cliOptions(scope, dir));
+	const output = [result.stdout, result.stderr].filter((text) => text !== "").join("\n");
+	if (result.exitCode === null || result.exitCode > 1) return {
+		ok: false,
+		code: "check-failed",
+		message: result.exitCode === null ? `skills check 无法启动：${result.error ?? "未知原因"}` : `skills check 失败（退出码 ${result.exitCode}）`,
+		...output === "" ? {} : { output }
+	};
+	return {
+		ok: true,
+		output
+	};
+}
+/**
+* 把 CLI 结论、来源可解析性与本地修改合成每个 skill 的状态。
+*
+* 来源不可解析（repo-unavailable / unsupported-source）或仓库根 `skills/` 下
+* 已经没有这个 skill 时记为 `unsupported-source`；读取来源本身失败记为
+* `failed`。CLI 检查失败的来源，其下候选也记为 `failed`。
+*/
+async function evaluateCandidates({ candidates, updates, modified, failedSources, catalog, refresh }) {
+	const sources = /* @__PURE__ */ new Map();
+	const loweredFailedSources = failedSources.map((source) => stripAnsi(source).toLowerCase());
+	const namesIn = (set, candidate) => {
+		for (const value of set) {
+			const lowered = value.toLowerCase();
+			if (lowered === candidate.name.toLowerCase() || lowered === candidate.id.toLowerCase()) return true;
+		}
+		return false;
+	};
+	const entries = [];
+	for (const candidate of candidates) {
+		let source = sources.get(candidate.source);
+		if (source === void 0) {
+			source = await resolveSourceSupport(catalog, candidate.source, refresh);
+			sources.set(candidate.source, source);
+		}
+		const state = source.state;
+		const supported = state !== "supported" || source.names.has(candidate.name.toLowerCase()) || source.names.has(candidate.id.toLowerCase());
+		if (state === "supported" && !supported) {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "unsupported-source",
+				message: "仓库根 skills/ 下已经找不到这个 skill（常见于旧 marketplace 安装）。"
+			});
+			continue;
+		}
+		const failedByCli = loweredFailedSources.length > 0 && loweredFailedSources.some((source) => source === candidate.source.toLowerCase() || candidate.sourceUrl !== null && source === candidate.sourceUrl.toLowerCase());
+		if (state === "unsupported") {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "unsupported-source",
+				message: "来源里已经没有可再解析的 skill（常见于旧 marketplace 安装）。"
+			});
+			continue;
+		}
+		if (state === "failed") {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "failed",
+				message: source.message ?? "无法读取来源。"
+			});
+			continue;
+		}
+		if (failedByCli) {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "failed",
+				message: "skills check 无法检查这个来源。"
+			});
+			continue;
+		}
+		if (namesIn(modified, candidate)) {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "modified"
+			});
+			continue;
+		}
+		if (namesIn(updates, candidate)) {
+			entries.push({
+				name: candidate.name,
+				source: candidate.source,
+				status: "update"
+			});
+			continue;
+		}
+		if (candidate.computedHash !== null) {
+			const current = await computeSkillFolderHash(candidate.installedPath).catch(() => null);
+			if (current !== null && current !== candidate.computedHash) {
+				entries.push({
+					name: candidate.name,
+					source: candidate.source,
+					status: "modified"
+				});
+				continue;
+			}
+		}
+		entries.push({
+			name: candidate.name,
+			source: candidate.source,
+			status: "up-to-date"
+		});
+	}
+	return entries;
+}
+async function resolveSourceSupport(catalog, source, refresh) {
+	let listed;
+	try {
+		listed = await catalog.listSkills({
+			source,
+			...refresh === void 0 ? {} : { refresh }
+		});
+	} catch (error) {
+		return {
+			state: "failed",
+			message: errorText(error),
+			names: /* @__PURE__ */ new Set()
+		};
+	}
+	if (!listed.ok) {
+		if (listed.code === "repo-unavailable" || listed.code === "unsupported-source") return {
+			state: "unsupported",
+			names: /* @__PURE__ */ new Set()
+		};
+		return {
+			state: "failed",
+			message: listed.message ?? "无法读取来源。",
+			names: /* @__PURE__ */ new Set()
+		};
+	}
+	const names = /* @__PURE__ */ new Set();
+	for (const skill of listed.skills ?? []) {
+		names.add(skill.name.toLowerCase());
+		names.add(skillDirName(skill.name).toLowerCase());
+	}
+	return {
+		state: "supported",
+		names
+	};
+}
+/**
+* 全局更新固定写 `~/.agents`；DSH 扫描别的目录时拒绝执行，避免改到看不见的位置。
+*/
+function globalHomeMismatch(homes) {
+	const canonical = path.join(os.homedir(), ".agents");
+	if (path.resolve(homes.agentsHome) === path.resolve(canonical)) return null;
+	return `skills CLI 只更新 ${path.join(canonical, "skills")}，而 DSH 现在扫描 ${path.join(homes.agentsHome, "skills")}（DSH_AGENTS_HOME）；为避免更新到看不见的位置，这里不执行。`;
+}
+/**
+* CLI 的 cwd 选项：项目级必须传目标目录，全局不传。
+*/
+function cliOptions(scope, dir) {
+	return scope === "project" && dir !== void 0 ? { cwd: dir } : void 0;
+}
+function errorText(error) {
+	if (error instanceof Error) return error.message;
+	return String(error);
 }
 // .build/skills/service.js
 /**
@@ -4759,23 +4468,24 @@ function lightEntry({ source, kind, tree, timestamp, skills }) {
 * export const inject = ['bukaSkills']
 * export function apply(ctx) {
 *   const repos = await ctx.bukaSkills.listRepositories()
+*   const checked = await ctx.bukaSkills.checkSkills({ dir: '/path/to/worker' })
 * }
 * ```
 *
-* 三个公开方法形成一条从「收藏」到「仓库内容」的链：
+* 公开方法：
 *
-* - `listRepositories()`：收藏的来源，附带探测出的类型（npx skills 仓库 /
-*   Claude Code marketplace / 不可用 / 暂时判不出）与预计 skill 数。来源可以是
-*   GitHub 仓库、任意 git 远端或本地绝对路径，都能探测与列出；
+* - `listRepositories()`：收藏的来源，附带探测出的类型（标准 npx 仓库 /
+*   不可用 / 暂时判不出）与预计 skill 数。来源可以是 GitHub 仓库、任意 git
+*   远端或本地绝对路径；远端一律浅克隆到本地缓存再扫描；
 * - `listSkills({ source })`：某个仓库里所有可安装的 skill（扁平列表）；
-* - `listPlugins({ source })`：Claude Code marketplace 里的插件，每个插件带
-*   自己的 skill 列表；对非 marketplace 仓库返回 `not-a-marketplace`。
+* - `checkSkills({ dir? })`：检查全局（省略 `dir`）或某个目标目录里的 skill
+*   状态（`update` / `modified` / `up-to-date` / `unsupported-source` /
+*   `failed`）；
+* - `updateSkills({ dir? })`：只应用 `update` 状态，`modified` 默认跳过。
 *
 * 所有仓库访问都复用 `src/repo-skills.ts` 的 TTL 缓存与错误码，并且按仓库
-* 来源合并并发请求：页面展开卡片、另一个插件同时调服务时，同一个仓库只会
-* 拉一次（GitHub 走 API，git 远端浅克隆，本地路径直接扫描）。
-* 服务本身不写任何状态，收藏的增删仍由本插件的路由负责（这是用户操作，不是
-* 对外能力）。
+* 来源合并并发请求。检查 / 更新与安装 / 卸载共用同一条串行队列：底层都会整份
+* 重写 `skills-lock.json`，并发执行会互相覆盖条目。
 *
 * 说明：这里用 `ctx.provide()` 注册实例，而不是 `export default class extends
 * Service`。原因是本包入口必须同时导出 `apply` 来注册路由与工具（Cordis 的
@@ -4796,33 +4506,29 @@ const PROBE_CONCURRENCY = 4;
 * @example
 * const service = new SkillsCatalogService()
 * const { repositories } = await service.listRepositories()
-* const markets = repositories.filter((one) => one.kind === 'claude-code-marketplace')
-* const { plugins } = await service.listPlugins({ source: markets[0].source })
+* const { results } = await service.checkSkills()
 */
 var SkillsCatalogService = class {
 	/** 同一来源的完整树请求合并表。 */
 	#treeInFlight = /* @__PURE__ */ new Map();
 	/** 同一来源的类型探测请求合并表。 */
 	#probeInFlight = /* @__PURE__ */ new Map();
+	/** 安装 / 卸载 / 检查 / 更新共用的串行队列。 */
+	#serialize;
 	/** DSH home 解析结果；收藏文件与缓存都放在它下面。 */
 	homes;
-	/** 默认网络实现；测试可以注入假 fetch。 */
-	fetchImpl;
-	constructor({ homes = resolveHomes(), fetchImpl = fetch } = {}) {
+	/** `skills` CLI 的执行函数。 */
+	cli;
+	constructor({ homes = resolveHomes(), serialize, cli } = {}) {
 		this.homes = homes;
-		this.fetchImpl = fetchImpl;
+		this.#serialize = serialize ?? createSerialQueue();
+		this.cli = cli;
 	}
 	/**
 	* 列出收藏的来源，并逐个探测类型与 skill 数量。
 	*
-	* 探测走 `probeRepoKind()`：GitHub 只拉仓库树（必要时再拉 marketplace.json），
-	* git 远端先浅克隆到缓存目录，本地绝对路径直接扫描目录；都不拉任何
-	* `SKILL.md` 原文。结论按 30 分钟 TTL 缓存，`refresh: true` 时绕过缓存重新
-	* 探测。同一条来源的并发探测会被合并。
-	*
 	* 失败不会让整个列表失败：条目退回 `kind: 'unknown'`，并带上探测错误码与
-	* 原因（npm 包名、GitHub 子页面等不可列出的来源也会落到这里），其他收藏照常
-	* 返回。
+	* 原因，其他收藏照常返回。
 	*/
 	async listRepositories({ refresh = false, ...io } = {}) {
 		const store = await listSavedRepos({ homes: this.homes });
@@ -4835,7 +4541,8 @@ var SkillsCatalogService = class {
 			if (probed.ok) return {
 				...repo,
 				kind: probed.kind,
-				skills: probed.skills
+				skills: probed.skills,
+				...probed.warning === void 0 ? {} : { warning: probed.warning }
 			};
 			if (probed.code === "repo-unavailable") return {
 				...repo,
@@ -4858,12 +4565,9 @@ var SkillsCatalogService = class {
 		};
 	}
 	/**
-	* 列出一个仓库里所有可安装的 skill。
+	* 列出一个仓库里所有可安装的 skill（扁平列表）。
 	*
-	* 列表扁平化：npx skills 仓库按 `npx skills` 的发现规则列，仓库清单里显式
-	* 声明的插件分组同样用 `plugin` 标出；Claude Code marketplace 把每个插件下
-	* 的 skill 一起列出来。结果与页面展开的树来自同一次拉取（同一份缓存），
-	* 所以两处不会互相矛盾。
+	* 结果与页面展开的树来自同一次拉取（同一份缓存），所以两处不会互相矛盾。
 	*/
 	async listSkills({ source, refresh = false, ...io } = {}) {
 		const fetched = await this.fetchRepositorySkills({
@@ -4881,65 +4585,51 @@ var SkillsCatalogService = class {
 			fetchedAt: fetched.fetchedAt,
 			cached: fetched.cached,
 			truncated: fetched.truncated,
-			skills: flattenSkillTree(fetched)
+			skills: flattenSkillTree(fetched.root),
+			...fetched.warning === void 0 ? {} : { warning: fetched.warning }
 		};
 	}
 	/**
-	* 列出 Claude Code marketplace 里声明的插件，每个插件带自己的 skill 列表。
+	* 检查全局或某个目标目录里的 skill 状态。
 	*
-	* 清单来自仓库根的 `.claude-plugin/marketplace.json`：没有 skill 的插件也会
-	* 出现（`skills: []`），因为它们可能只提供 commands / agents。对 npx skills
-	* 仓库、不可用仓库或探测失败的仓库返回 `not-a-marketplace` / 对应仓库错误，
-	* 调用方可以先调 `listRepositories()` 判断类型再调用。
+	* 与安装 / 卸载共用串行队列，避免检查时底层 CLI / lock 与其它写入交错。
+	*
+	* @param options `dir` 由调用方解析后传入；省略表示全局
 	*/
-	async listPlugins({ source, refresh = false, ...io } = {}) {
-		const fetched = await this.fetchRepositorySkills({
-			...io,
-			source,
-			refresh
-		});
-		if (!fetched.ok) return fetched;
-		if (fetched.kind !== "claude-code-marketplace") return {
-			ok: false,
-			code: "not-a-marketplace",
-			message: `${fetched.source} is ${fetched.kind}, not a Claude Code plugin marketplace.`
-		};
-		const treeByRoot = /* @__PURE__ */ new Map();
-		for (const node of fetched.root) if (node.type === "dir") treeByRoot.set(node.path, node);
-		const plugins = (fetched.marketplace?.plugins ?? []).map((plugin) => {
-			const node = treeByRoot.get(plugin.root === "" ? "." : plugin.root);
-			return {
-				name: plugin.name,
-				root: plugin.root,
-				description: plugin.description,
-				skills: node === void 0 ? [] : flattenSkills(node.children, plugin.name)
-			};
-		});
-		plugins.sort((a, b) => compareName(a.name, b.name));
-		return {
-			ok: true,
-			source: fetched.source,
-			kind: fetched.kind,
-			ref: fetched.ref,
-			sha: fetched.sha,
-			fetchedAt: fetched.fetchedAt,
-			cached: fetched.cached,
-			truncated: fetched.truncated,
-			plugins
-		};
+	checkSkills({ dir, refresh } = {}) {
+		return this.#serialize(() => checkSkills({
+			homes: this.homes,
+			catalog: this,
+			...dir === void 0 ? {} : { dir },
+			...refresh === void 0 ? {} : { refresh },
+			...this.cli === void 0 ? {} : { cli: this.cli }
+		}));
+	}
+	/**
+	* 检查并更新全局或某个目标目录里的 skill；只应用 `update` 状态。
+	*
+	* @param options `dir` 由调用方解析后传入；省略表示全局
+	*/
+	updateSkills({ dir, refresh } = {}) {
+		return this.#serialize(() => updateSkills({
+			homes: this.homes,
+			catalog: this,
+			...dir === void 0 ? {} : { dir },
+			...refresh === void 0 ? {} : { refresh },
+			...this.cli === void 0 ? {} : { cli: this.cli }
+		}));
 	}
 	/**
 	* 拉取一个仓库的完整 skills 树（带缓存与并发合并）。
 	*
-	* @internal 路由适配器用；其他插件优先用 `listSkills()` / `listPlugins()`。
+	* @internal 路由适配器用；其他插件优先用 `listSkills()`。
 	*/
 	fetchRepositorySkills({ source, refresh = false, ...io } = {}) {
 		return this.#coalesce(this.#treeInFlight, source, refresh, () => fetchRepoSkills({
 			...io,
 			homes: this.homes,
 			source,
-			refresh,
-			fetchImpl: io.fetchImpl ?? this.fetchImpl
+			refresh
 		}));
 	}
 	/**
@@ -4952,13 +4642,12 @@ var SkillsCatalogService = class {
 			...io,
 			homes: this.homes,
 			source,
-			refresh,
-			fetchImpl: io.fetchImpl ?? this.fetchImpl
+			refresh
 		}));
 	}
 	/**
-	* 同一来源的并发请求共用一次网络拉取；`refresh` 请求不合并，保证「刷新」
-	* 真的重新拉。请求 settle 后从表里移除，失败也不会留下毒化的 promise。
+	* 同一来源的并发请求共用一次读取；`refresh` 请求不合并，保证「刷新」真的
+	* 重新拉。请求 settle 后从表里移除，失败也不会留下毒化的 promise。
 	*/
 	#coalesce(inFlight, source, refresh, work) {
 		const key = String(source);
@@ -4975,33 +4664,20 @@ var SkillsCatalogService = class {
 	}
 };
 /**
-* 把 `fetchRepoSkills()` 返回的树摊平成 skill 列表。
-*
-* 树根的目录节点都是插件分组（marketplace 的插件，或 npx 仓库清单里显式
-* 声明的插件），用节点名作为 `plugin`；平铺在根上的 skill `plugin` 为 null。
+* 把展示树摊平成 skill 列表，保留树里的排序。
 */
-function flattenSkillTree(fetched) {
-	return fetched.root.flatMap((node) => node.type === "dir" ? flattenSkills(node.children, node.name) : flattenSkills([node], null));
-}
-/**
-* 深度优先摊平一棵树里的 skill 节点，保留树里的排序。
-*/
-function flattenSkills(nodes, plugin, out = []) {
-	for (const node of nodes) if (node.type === "skill") out.push({
-		name: node.name,
-		description: node.description,
-		path: node.path,
-		plugin
-	});
-	else flattenSkills(node.children, plugin, out);
+function flattenSkillTree(root) {
+	const out = [];
+	const walk = (nodes) => {
+		for (const node of nodes) if (node.type === "skill") out.push({
+			name: node.name,
+			description: node.description,
+			path: node.path
+		});
+		else walk(node.children);
+	};
+	walk(root);
 	return out;
-}
-/**
-* 与页面一致的大小写不敏感排序；完全相同时再用原始大小写稳定排序。
-*/
-function compareName(a, b) {
-	const folded = a.localeCompare(b, void 0, { sensitivity: "base" });
-	return folded !== 0 ? folded : a.localeCompare(b);
 }
 /**
 * 以固定并发跑一批异步任务，结果顺序与输入一致。
@@ -5147,27 +4823,26 @@ function registerTools(ctx, deps) {
 *
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
 *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
+*   `GET /buka-skills/check` 检查更新，`POST /buka-skills/update` 应用更新，
 *   `GET /buka-skills/targets` 列出可安装的打工人（可选的 `ctx.bukaWorkers`）与
 *   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
 *   里的一个 skill 安装到全局、某个打工人目录或某个工作区目录；
 *   `GET /buka-skills/repos` 列出用户收藏的仓库，
 *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
 *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
-*   `probe=1` 时只探测仓库类型：npx skills / Claude Code marketplace / 不可用）。
-*   收藏的仓库既可以是 npx skills 仓库，也可以是 Claude Code marketplace 仓库：
-*   前者按 `npx skills` 的发现规则列 SKILL.md，后者只列 marketplace 里各本地
-*   插件子树中的 SKILL.md（commands / agents 不列）。收藏来源可以是 GitHub
-*   仓库、任意 git 远端（Host 用 `git clone --depth 1` 拉到缓存目录再扫描）或
-*   本地绝对路径（直接扫描目录）。列表数据来自同一份磁盘扫描
-*   （`src/skill-store.ts`），收藏来自 `src/repo-store.ts` 的 JSON 文件，
-*   仓库 skills 由 `src/repo-skills.ts` 按 TTL 缓存仓库树，安装由
-*   `src/skill-install.ts` 交给 `npx skills add`（与卸载共用串行队列）；
+*   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。收藏只认仓库根
+*   `skills/` 下（任意层级子目录）的 SKILL.md；来源可以是 GitHub 仓库、任意
+*   git 远端（都浅克隆到本地缓存再扫描）或本地绝对路径（直接扫描目录）。
+*   列表数据来自同一份磁盘扫描（`src/skill-store.ts`），收藏来自
+*   `src/repo-store.ts` 的 JSON 文件，仓库 skills 由 `src/repo-skills.ts` 按
+*   TTL 缓存仓库树；安装 / 卸载走 `skills` 包的库 API，检查 / 更新走同一包
+*   自带的 CLI，四类写入共用一条串行队列；
 * - 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
 *   是不是 npx skills 装的」。安装与卸载都是写操作，只留给页面上的用户按钮，
 *   不开放给模型。
 * - 一个 Host Service `ctx.bukaSkills`（`src/service.ts`）：把收藏的仓库、
-*   仓库里的 skill 列表与 marketplace 插件列表开放给其他插件。页面与工具
-*   也复用同一个服务实例，因此两处的缓存与并发请求是同一份。
+*   仓库里的 skill 列表，以及按目录检查 / 更新的能力开放给其他插件。
+*   页面与工具也复用同一个服务实例，因此两处的缓存与并发请求是同一份。
 *
 * 本文件只做装配：路由在 `src/routes.ts`，模型工具在 `src/tools.ts`，快照读取
 * 在 `src/snapshot.ts`，请求体 / 响应工具在 `src/http.ts`，串行队列在
@@ -5187,21 +4862,20 @@ const inject = ["skills"];
 */
 function apply(ctx) {
 	const homes = resolveHomes();
-	const runNpx = createNpxRunner({
-		cwd: homes.agentsHome,
-		timeoutMs: 18e4,
-		missingMessage: `没有找到 npx。请先安装 Node.js（含 npm），或手动管理 ${path.join(homes.agentsHome, "skills")} 下的 skill。`
+	const serialize = createSerialQueue();
+	const catalog = new SkillsCatalogService({
+		homes,
+		serialize,
+		cli: createSkillsCliRunner()
 	});
-	const catalog = new SkillsCatalogService({ homes });
 	ctx.provide(SERVICE_NAME, catalog);
 	/** 读取一份已安装 skills 快照；路由与工具共用。 */
 	const snapshot = () => readSnapshot(ctx, homes);
 	registerRoutes(ctx, {
 		homes,
-		runNpx,
 		catalog,
 		readSnapshot: snapshot,
-		serializeNpx: createSerialQueue()
+		serializeSkills: serialize
 	});
 	registerTools(ctx, { readSnapshot: snapshot });
 }
