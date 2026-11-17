@@ -1,29 +1,29 @@
 /**
  * 从收藏的仓库把单个 skill 安装到全局、打工人或工作区。
  *
- * 安装走 `npx skills add`，而不是由本插件直接复制文件：仓库内容可能是 GitHub
- * API 读到的、git 克隆缓存里的或本地目录里的，`npx skills` 已经处理好了这些
- * 来源的全部差异（下载、二进制文件、lockfile、各 agent 目录的链接）。我们只
- * 负责三件事：
+ * 安装走 `skills` 包的库 API（`installSkills`），而不是运行时 spawn `npx`：
+ * 来源解析、下载、lockfile 与各 agent 目录的链接都由库维护。我们只负责三件事：
  *
  * 1. 只允许安装**收藏过**的来源，且该 skill 必须真的出现在 Host 读到的仓库列表里
  *    （浏览器传来的只是路径，名字与是否存在都以 Host 的列表为准）；
- * 2. 把 `npx skills add` 排进与卸载共用的串行队列（两者都会整份重写 lockfile）；
- * 3. 安装后确认目标真的落到了预期目录，退出码为 0 但文件不在时按失败上报，
- *    和卸载的「退出码 0 但目录仍在」对称。
+ * 2. 把安装排进与卸载 / 更新共用的串行队列（它们都会整份重写 lockfile）；
+ * 3. 安装后确认目标真的落到了预期目录，库报告成功但文件不在时按失败上报。
  *
  * 三个目标：
  *
  * - **全局**：`~/.agents/skills/<目录名>`，DSH 的 `user-agents` 根，对所有会话
- *   生效；设置了 `DSH_AGENTS_HOME` 指向别处时无法保证 `npx` 装到 DSH 会扫描的
+ *   生效；设置了 `DSH_AGENTS_HOME` 指向别处时无法保证库装到 DSH 会扫描的
  *   位置，这种配置下宁可不装。
  * - **打工人**：打工人目录下的 `.agents/skills` 与 `.claude/skills`（workers 插件
  *   的项目级 skills 约定）。
  * - **工作区**：工作区目录下的 `.agents/skills`，只对那个项目生效。
  *
- * 打工人 / 工作区目录由调用方从 Host 的登记表解析后传入，本模块不接触 DSH 服务；
- * 除 `install-targets.ts` 的类型外只依赖 Node 内置模块与同目录的纯 Node 模块，
- * 便于单独测试。
+ * 安装时把**原始来源**（GitHub 简写 / git URL / 本地路径）交给 `installSkills`，
+ * lock 里的来源因此仍是可再解析的上游身份，而不是本插件的克隆缓存路径。
+ *
+ * 打工人 / 工作区目录由调用方从 Host 的登记表解析后传入，本模块不接触 DSH
+ * 服务；除 `install-targets.ts` 的类型外只依赖 Node 内置模块与同目录的纯 Node
+ * 模块，便于单独测试。
  *
  * @module @buka/dsh-plugin-skills/skill-install
  */
@@ -32,39 +32,62 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import type { NpxResult } from '@buka/plugin-kit'
+import { installSkills as installSkillsLibrary } from 'skills'
 import type { InstallTargetKind, ResolvedInstallTarget } from './install-targets.ts'
 import { listSavedRepos, normalizeRepoSource, repoKey } from './repo-store.ts'
 import type { Homes, SkillScope } from './skill-store.ts'
 import { AGENTS_DIR, globalRoots, resolveHomes, scanRoot } from './skill-store.ts'
 
-/** skill 名 / 安装目录名的长度上限，与 `npx skills` 的 sanitizeName() 一致。 */
+/** skill 名 / 安装目录名的长度上限，与 `skills` CLI 的 sanitizeName() 一致。 */
 export const MAX_SKILL_NAME_LENGTH = 255
 
 /**
  * 一次「目录安装」最多接受多少个 skill。
  *
- * 页面把目录里所有 skill 的路径一起传上来，Host 逐个交给 `npx skills add`；
- * 这里只防页面构造超长请求，正常的插件 / 合集目录远达不到这个数量。
+ * 页面把目录里所有 skill 的路径一起传上来，Host 逐个交给安装库；这里只防页面
+ * 构造超长请求，正常的插件 / 合集目录远达不到这个数量。
  */
 export const MAX_GROUP_SKILLS = 200
 
-/**
- * 安装时指定的 `npx skills` agent。
- *
- * 不指定 agent 时（`-y`）CLI 会把 skill 装到**本机检测到的所有 agent** 目录里：
- * DSH 只关心 `~/.agents/skills`，而纯 DSH 机器上检测不到任何 agent 时它甚至会
- * 给全部 agent 各建一份链接。`universal` 是 CLI 自带的「通用 agent」，读写的就是
- * 规范副本 `~/.agents/skills`，指定它只写这一处，不碰其它 agent 目录。
- *
- * 新版本 CLI 若改掉了这个 agent 名，`npx skills add` 会以 `Invalid agents` 失败，
- * 调用方会退回不带 agent 的默认命令（见 `installGlobalSkill()` /
- * `installProjectSkill()`）。
- */
+/** 安装时指定的 agent：`universal` 读写 `~/.agents/skills`（项目里是 `.agents/skills`）。 */
 export const INSTALL_AGENT = 'universal'
 
-/** 安装 / 卸载共用的 npx 执行函数；第二个参数是这次命令的工作目录。 */
-export type InstallNpxRunner = (args: string[], cwd?: string) => Promise<NpxResult>
+/** 打工人额外落一份 `.claude/skills` 链接。 */
+export const WORKER_CLAUDE_AGENT = 'claude-code'
+
+/** 库 API 里用到的一小部分选项；显式声明便于测试注入假实现。 */
+export interface SkillsInstallOptions {
+  /** 要安装的 skill 名；缺省表示整个来源。 */
+  skills?: readonly string[]
+  /** `global` 或当前目录（`project`）。 */
+  scope?: 'project' | 'global'
+  /** 安装到哪些 agent；`universal` 对应 `.agents/skills`。 */
+  agents?: readonly string[]
+  /** 项目级安装的工作目录。 */
+  cwd?: string
+  /** 共享设置；本插件固定关闭遥测。 */
+  config?: { telemetry?: boolean }
+}
+
+/** 库返回的安装结果里本模块用到的部分。 */
+export interface SkillsInstallResult {
+  installed: ReadonlyArray<{
+    skill: string
+    agent: string
+    scope: string
+    mode: string
+    path: string
+    canonicalPath?: string
+  }>
+  failed: ReadonlyArray<{ skill: string; agent: string; code?: string; message: string }>
+  skipped: ReadonlyArray<{ skill: string; agent: string; reason: string }>
+}
+
+/** 可注入的安装函数；默认是 `skills` 包的 `installSkills`。 */
+export type SkillsInstaller = (
+  source: string,
+  options?: SkillsInstallOptions,
+) => Promise<SkillsInstallResult>
 
 /** 安装结果；成功时 `id` / `name` / `path` 说明装到了哪里。 */
 export interface SkillInstallResult {
@@ -79,7 +102,6 @@ export interface SkillInstallResult {
   scope?: 'agents'
   path?: string
   repo?: string
-  plugin?: string | null
 }
 
 /**
@@ -104,26 +126,23 @@ export type InstalledElsewhere =
 export interface InstallCatalog {
   listSkills(options: { source: string }): Promise<{
     ok: boolean
-    skills?: Array<{ name: string; description?: string; path: string; plugin?: string | null }>
+    skills?: Array<{ name: string; description?: string; path: string }>
     code?: string
     message?: string
   }>
 }
 
 /**
- * `npx skills` 的全局规范副本目录（`~/.agents/skills` 的上级），DSH 的
- * `user-agents` 根也在这里。`npx` 自己的规则是 `homedir()/.agents/skills`，
- * 不接受别的路径覆盖。
+ * 库的全局规范副本目录（`~/.agents/skills` 的上级），DSH 的 `user-agents`
+ * 根也在这里。`skills` 的规则是 `homedir()/.agents/skills`，不接受别的路径覆盖。
  */
 export function npxGlobalAgentsHome(): string {
   return path.join(os.homedir(), AGENTS_DIR)
 }
 
 /**
- * skill 名对应的安装目录名，规则与 `npx skills` 的 `sanitizeName()` 完全一致：
+ * skill 名对应的安装目录名，规则与 `skills` 的 `sanitizeName()` 完全一致：
  * 小写，非 `[a-z0-9._]` 的连续字符换成连字符，去掉首尾的 `.` 与 `-`，最多 255 字符。
- *
- * 用来在安装后确认真正的目录，也用于页面判断「这个 skill 是不是已经装过」。
  *
  * @param name skill 名
  * @returns 目录名；名字不合法时可能是空串
@@ -138,15 +157,14 @@ export function skillDirName(name: unknown): string {
 }
 
 /**
- * 这个 skill 名能不能交给 `npx skills add --skill`：
+ * 这个 skill 名能不能交给安装库：
  *
  * - 非空、不超过 255 字符；
- * - 不能以 `-` 或空白开头（会被命令行解析成选项）；
+ * - 不能以 `-` 或空白开头（会被当成命令行选项）；
  * - 不能含控制字符；
  * - 必须能 sanitize 出非空目录名。
  *
- * 空格是允许的：仓库里确实有 `Convex Best Practices` 这类带空格的名字，
- * `npx skills` 支持按引号传入的名字安装。
+ * 空格是允许的：仓库里确实有 `Convex Best Practices` 这类带空格的名字。
  *
  * @param name skill 名
  */
@@ -178,13 +196,6 @@ function errorText(error: unknown): string {
 
 /**
  * 两个全局根里是否已经有这个 skill（目录名或展示名命中）。
- *
- * 同一名字同时存在于 `~/.agents/skills` 与 `~/.dsh/skills` 时 DSH 会列两行，
- * 这里也当作已安装：再装一次要么出现第三份，要么被其中一个根遮住，先拒绝并
- * 让用户去「已安装」里处理。
- *
- * @param id 安装目录名
- * @param name skill 展示名
  */
 async function findInstalledElsewhere(
   homes: Homes,
@@ -206,21 +217,7 @@ async function findInstalledElsewhere(
 }
 
 /**
- * 这次失败是不是「CLI 不认识 `universal` agent」。
- *
- * CLI 的报错形如 `Invalid agents: universal`，并且退出码非 0；命中时退回不带
- * agent 的默认命令，而不是把一次可安装的请求判死。
- */
-function isInvalidAgentFailure(result: { message?: string; output?: string } | undefined): boolean {
-  const text = `${result?.message ?? ''}\n${result?.output ?? ''}`
-  return /Invalid agents?:/iu.test(text)
-}
-
-/**
  * 安装前共用的来源 / 名字校验：全局、打工人、工作区三处都必须过这一关。
- *
- * @param source 仓库来源
- * @param name skill 名
  */
 function checkSourceAndName(
   source: unknown,
@@ -254,50 +251,69 @@ function checkSourceAndName(
 }
 
 /**
- * `npx skills` 的全局副本目录与 DSH 扫描的目录是否一致；不一致时返回拒绝理由。
- *
- * 单条安装与目录批量安装共用这一条判断，避免两处文案分叉。
- *
- * @param homes 两个全局 skills 根目录
- * @param canonicalAgentsHome `npx skills` 会写入的全局目录（`~/.agents`）
+ * 库的全局副本目录与 DSH 扫描的目录是否一致；不一致时返回拒绝理由。
  */
 function globalHomeMismatch(homes: Homes, canonicalAgentsHome: string): string | null {
   if (path.resolve(canonicalAgentsHome) === path.resolve(homes.agentsHome)) return null
-  return `npx skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, 'skills')}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, 'skills')}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`
+  return `skills 把全局 skill 装到 ${path.join(canonicalAgentsHome, 'skills')}，而 DSH 现在扫描的是 ${path.join(homes.agentsHome, 'skills')}（DSH_AGENTS_HOME）；为避免装到看不见的位置，这里不执行安装`
 }
 
 /**
- * 把单个 skill 从某个 `npx skills` 来源安装到全局 `~/.agents/skills`。
+ * 安装后的结果核对：库报告成功的条目里选 universal（或第一个），确认目标
+ * 目录里真的有 `SKILL.md`。
+ */
+async function installedPathOf(
+  result: SkillsInstallResult,
+  fallbackDir: string,
+  id: string,
+): Promise<{ ok: true; path: string } | { ok: false; message: string }> {
+  if (result.failed.length > 0) {
+    const first = result.failed[0]
+    return {
+      ok: false,
+      message: `${first?.skill ?? ''}（${first?.agent ?? ''}）：${first?.message ?? '安装失败'}`,
+    }
+  }
+  const chosen = result.installed.find((one) => one.agent === INSTALL_AGENT) ?? result.installed[0]
+  const target = chosen?.canonicalPath ?? chosen?.path ?? path.join(fallbackDir, id)
+  if (!(await pathExists(path.join(target, 'SKILL.md')))) {
+    return { ok: false, message: `安装已结束，但没有在 ${target} 找到 SKILL.md` }
+  }
+  return { ok: true, path: target }
+}
+
+/**
+ * 把单个 skill 从某个来源安装到全局 `~/.agents/skills`。
  *
  * 失败码：
  *
- * - `invalid-source`：来源为空或以 `-` 开头（会被当成命令选项）；
- * - `invalid-skill-name`：名字不能安全地交给 `npx skills add --skill`；
- * - `no-runner`：调用方没给执行能力；
- * - `unsupported-home`：`DSH_AGENTS_HOME` 指到了 `npx` 不会写入的位置；
+ * - `invalid-source`：来源为空或以 `-` 开头；
+ * - `invalid-skill-name`：名字不能安全地交给安装库；
+ * - `no-installer`：调用方没给安装能力；
+ * - `unsupported-home`：`DSH_AGENTS_HOME` 指到了库不会写入的位置；
  * - `scan-failed`：读全局 skills 目录失败，无法判断是否已安装；
  * - `already-installed`：两个全局根里已经有同名 skill；
- * - `npx-failed`：`npx skills add` 失败，`output` 带命令输出；
- * - `install-incomplete`：命令退出码为 0 但目标目录或 `SKILL.md` 不在。
+ * - `install-failed`：安装库失败，`output` 带库返回的失败说明；
+ * - `install-incomplete`：库报告成功但目标目录 / `SKILL.md` 不在。
  */
 export async function installGlobalSkill({
   homes = resolveHomes(),
   canonicalAgentsHome = npxGlobalAgentsHome(),
   source,
   name,
-  runNpx,
+  install = installSkillsLibrary,
 }: {
   homes?: Homes
   canonicalAgentsHome?: string
   source?: unknown
   name?: unknown
-  runNpx: InstallNpxRunner
+  install?: SkillsInstaller
 }): Promise<SkillInstallResult> {
   const checked = checkSourceAndName(source, name)
   if (!checked.ok) return checked.result
   const { source: trimmedSource, name: skillName } = checked
-  if (typeof runNpx !== 'function') {
-    return { ok: false, code: 'no-runner', message: '缺少执行 npx 的能力' }
+  if (typeof install !== 'function') {
+    return { ok: false, code: 'no-installer', message: '缺少安装 skill 的能力' }
   }
   if (path.resolve(canonicalAgentsHome) !== path.resolve(homes.agentsHome)) {
     return {
@@ -320,42 +336,24 @@ export async function installGlobalSkill({
     }
   }
 
-  let result: NpxResult
+  let result: SkillsInstallResult
   try {
-    result = await runNpx([
-      'add',
-      trimmedSource,
-      '--skill',
-      skillName,
-      '--global',
-      '--yes',
-      '-a',
-      INSTALL_AGENT,
-    ])
-    if (!result?.ok && isInvalidAgentFailure(result)) {
-      // 旧 / 未来版本的 CLI 不认识 `universal`：退回它自己的默认选择。
-      result = await runNpx(['add', trimmedSource, '--skill', skillName, '--global', '--yes'])
-    }
+    result = await install(trimmedSource, {
+      skills: [skillName],
+      scope: 'global',
+      agents: [INSTALL_AGENT],
+      config: { telemetry: false },
+    })
   } catch (error) {
-    return { ok: false, code: 'npx-failed', message: errorText(error) }
-  }
-  if (!result?.ok) {
-    return {
-      ok: false,
-      code: 'npx-failed',
-      message: result?.message ?? 'npx skills add 失败',
-      output: result?.output ?? '',
-    }
+    return { ok: false, code: 'install-failed', message: errorText(error) }
   }
 
-  // npx 可能把目录名 sanitize 成另一个名字；按 CLI 的规则算出来再确认 SKILL.md 在。
-  const target = path.join(canonicalAgentsHome, 'skills', id)
-  if (!(await pathExists(path.join(target, 'SKILL.md')))) {
+  const target = await installedPathOf(result, path.join(canonicalAgentsHome, 'skills'), id)
+  if (!target.ok) {
     return {
       ok: false,
-      code: 'install-incomplete',
-      message: `npx skills add 已退出，但没有在 ${target} 找到 SKILL.md`,
-      output: result.output ?? '',
+      code: result.failed.length > 0 ? 'install-failed' : 'install-incomplete',
+      message: target.message,
     }
   }
 
@@ -365,47 +363,40 @@ export async function installGlobalSkill({
     name: skillName,
     target: 'global',
     scope: 'agents',
-    path: target,
-    output: result.output ?? '',
+    path: target.path,
+    output: '',
   }
 }
 
 /**
- * 把单个 skill 从某个 `npx skills` 来源安装到打工人或工作区目录。
+ * 把单个 skill 从某个来源安装到打工人或工作区目录。
  *
  * 目标目录由调用方（`install-targets.ts`）从 Host 的登记表解析，浏览器不能
  * 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个打工人 /
- * 工作区是正常操作，重复执行交给 `npx skills` 自己处理。
+ * 工作区是正常操作，重复执行交给安装库自己处理。
  *
  * 打工人目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
- * （`-a universal -a claude-code`）；工作区只写 DSH 会扫描的 `.agents/skills`，
- * 不碰用户其它 agent 目录。
- *
- * 失败码在全局安装的基础上增加：
- *
- * - `invalid-target`：目标目录为空；
- * - `missing-target`：目标目录不存在或不是目录；
- * - `no-target`：调用方没给目标目录；
- * - `npx-failed` / `install-incomplete`：与全局安装相同。
+ * （`agents: ['universal', 'claude-code']`）；工作区只写 DSH 会扫描的
+ * `.agents/skills`，不碰用户其它 agent 目录。
  */
 export async function installProjectSkill({
   targetDir,
   target = 'workspace',
   source,
   name,
-  runNpx,
+  install = installSkillsLibrary,
 }: {
   targetDir?: unknown
   target?: 'worker' | 'workspace'
   source?: unknown
   name?: unknown
-  runNpx: InstallNpxRunner
+  install?: SkillsInstaller
 }): Promise<SkillInstallResult> {
   const checked = checkSourceAndName(source, name)
   if (!checked.ok) return checked.result
   const { source: trimmedSource, name: skillName } = checked
-  if (typeof runNpx !== 'function') {
-    return { ok: false, code: 'no-runner', message: '缺少执行 npx 的能力' }
+  if (typeof install !== 'function') {
+    return { ok: false, code: 'no-installer', message: '缺少安装 skill 的能力' }
   }
   if (typeof targetDir !== 'string' || targetDir.trim() === '') {
     return { ok: false, code: 'no-target', message: '缺少安装目标目录' }
@@ -422,38 +413,27 @@ export async function installProjectSkill({
     return { ok: false, code: 'missing-target', message: `目标路径不是目录：${directory}` }
   }
 
-  const agents = target === 'worker' ? ['universal', 'claude-code'] : ['universal']
-  const args = ['add', trimmedSource, '--skill', skillName]
-  for (const agent of agents) args.push('-a', agent)
-  args.push('-y')
-
-  let result: NpxResult
+  const agents = target === 'worker' ? [INSTALL_AGENT, WORKER_CLAUDE_AGENT] : [INSTALL_AGENT]
+  let result: SkillsInstallResult
   try {
-    result = await runNpx(args, directory)
-    if (!result?.ok && isInvalidAgentFailure(result)) {
-      // 旧 / 未来版本的 CLI 不认识指定的 agent：退回它自己的默认选择。
-      result = await runNpx(['add', trimmedSource, '--skill', skillName, '-y'], directory)
-    }
+    result = await install(trimmedSource, {
+      skills: [skillName],
+      scope: 'project',
+      cwd: directory,
+      agents,
+      config: { telemetry: false },
+    })
   } catch (error) {
-    return { ok: false, code: 'npx-failed', message: errorText(error) }
-  }
-  if (!result?.ok) {
-    return {
-      ok: false,
-      code: 'npx-failed',
-      message: result?.message ?? 'npx skills add 失败',
-      output: result?.output ?? '',
-    }
+    return { ok: false, code: 'install-failed', message: errorText(error) }
   }
 
   const id = skillDirName(skillName)
-  const targetPath = path.join(directory, AGENTS_DIR, 'skills', id)
-  if (!(await pathExists(path.join(targetPath, 'SKILL.md')))) {
+  const targetPath = await installedPathOf(result, path.join(directory, AGENTS_DIR, 'skills'), id)
+  if (!targetPath.ok) {
     return {
       ok: false,
-      code: 'install-incomplete',
-      message: `npx skills add 已退出，但没有在 ${targetPath} 找到 SKILL.md`,
-      output: result.output ?? '',
+      code: result.failed.length > 0 ? 'install-failed' : 'install-incomplete',
+      message: targetPath.message,
     }
   }
 
@@ -462,8 +442,8 @@ export async function installProjectSkill({
     id,
     name: skillName,
     target,
-    path: targetPath,
-    output: result.output ?? '',
+    path: targetPath.path,
+    output: '',
   }
 }
 
@@ -471,7 +451,6 @@ export async function installProjectSkill({
 interface CatalogSkill {
   name: string
   path: string
-  plugin?: string | null
 }
 
 /** 单条安装与目录安装共用的前半段结果。 */
@@ -615,7 +594,7 @@ export async function installSavedSkill({
   worker,
   workspace,
   resolveTarget,
-  runNpx,
+  install = installSkillsLibrary,
 }: {
   homes?: Homes
   canonicalAgentsHome?: string
@@ -627,7 +606,7 @@ export async function installSavedSkill({
   worker?: unknown
   workspace?: unknown
   resolveTarget?: InstallTargetResolver
-  runNpx: InstallNpxRunner
+  install?: SkillsInstaller
 }): Promise<SkillInstallResult> {
   if (target !== 'global' && target !== 'worker' && target !== 'workspace') {
     return { ok: false, code: 'invalid-target', message: `未知的安装目标：${String(target)}` }
@@ -666,10 +645,10 @@ export async function installSavedSkill({
       canonicalAgentsHome,
       source: repoSource,
       name: match.name,
-      runNpx,
+      install,
     })
     if (!installed.ok) return installed
-    return { ...installed, repo: repoSource, plugin: match.plugin ?? null }
+    return { ...installed, repo: repoSource }
   }
 
   const installed = await installProjectSkill({
@@ -677,10 +656,10 @@ export async function installSavedSkill({
     target,
     source: repoSource,
     name: match.name,
-    runNpx,
+    install,
   })
   if (!installed.ok) return installed
-  return { ...installed, repo: repoSource, plugin: match.plugin ?? null }
+  return { ...installed, repo: repoSource }
 }
 
 /** 一次「目录安装」里每个 skill 的最终去向。 */
@@ -703,13 +682,7 @@ export interface SkillGroupInstallResult {
 /**
  * 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的打工人 / 工作区。
  *
- * 浏览器传的是目录里各个 skill 的仓库路径（树的叶子路径），Host 逐个回到这次
- * 读到的仓库列表里核对，再交给自己串行队列里的安装；目录节点本身不是仓库路径，
- * 所以不能让 Host 按目录前缀自己找 skill。
- *
- * 全局安装会跳过已经装过的 skill（与单条安装的 `already-installed` 对应），
- * 这样「装全部」在部分装过时仍然可用；项目级安装每次都装，不跳过。任何一个
- * skill 失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
+ * 任何一个失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
  * 有失败时整体 `ok: false`，`message` 列出每个失败的名字与原因。
  */
 export async function installSavedSkillGroup({
@@ -722,7 +695,7 @@ export async function installSavedSkillGroup({
   worker,
   workspace,
   resolveTarget,
-  runNpx,
+  install = installSkillsLibrary,
 }: {
   homes?: Homes
   canonicalAgentsHome?: string
@@ -734,7 +707,7 @@ export async function installSavedSkillGroup({
   worker?: unknown
   workspace?: unknown
   resolveTarget?: InstallTargetResolver
-  runNpx: InstallNpxRunner
+  install?: SkillsInstaller
 }): Promise<SkillGroupInstallResult> {
   if (target !== 'global' && target !== 'worker' && target !== 'workspace') {
     return {
@@ -766,7 +739,7 @@ export async function installSavedSkillGroup({
       `目录安装需要一组 skill 路径（最多 ${MAX_GROUP_SKILLS} 个），且不能为空`,
     )
   }
-  if (typeof runNpx !== 'function') return settle('no-runner', '缺少执行 npx 的能力')
+  if (typeof install !== 'function') return settle('no-installer', '缺少安装 skill 的能力')
   if (target === 'global') {
     const mismatch = globalHomeMismatch(homes, canonicalAgentsHome)
     if (mismatch !== null) return settle('unsupported-home', mismatch)
@@ -811,14 +784,14 @@ export async function installSavedSkillGroup({
             canonicalAgentsHome,
             source: repoSource,
             name: skill.name,
-            runNpx,
+            install,
           })
         : await installProjectSkill({
             targetDir: targetDir ?? '',
             target,
             source: repoSource,
             name: skill.name,
-            runNpx,
+            install,
           })
     if (one.ok) {
       const entry: SkillGroupInstallResult['installed'][number] = { name: skill.name }
@@ -833,7 +806,7 @@ export async function installSavedSkillGroup({
     }
     failed.push({
       name: skill.name,
-      code: one.code ?? 'npx-failed',
+      code: one.code ?? 'install-failed',
       message: one.message ?? '安装失败',
     })
   }
@@ -841,7 +814,7 @@ export async function installSavedSkillGroup({
   if (failed.length > 0) {
     return {
       ok: false,
-      code: failed[0]?.code ?? 'npx-failed',
+      code: failed[0]?.code ?? 'install-failed',
       message: failed.map((one) => `${one.name}（${one.message}）`).join('；'),
       batch: true,
       target,

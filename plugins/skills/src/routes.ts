@@ -5,6 +5,8 @@
  *
  * - `GET /buka-skills/list` 列出全局 skills；
  * - `POST /buka-skills/uninstall` 卸载一个；
+ * - `GET /buka-skills/check` 检查全局 skill 的更新；
+ * - `POST /buka-skills/update` 应用可用的更新；
  * - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
  *   （`ctx.workspaceRegistry`）；
  * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
@@ -13,7 +15,7 @@
  * - `POST /buka-skills/repos` 收藏一个，
  * - `POST /buka-skills/repos/remove` 移除一个，
  * - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
- *   `probe=1` 时只探测仓库类型：npx skills / Claude Code marketplace / 不可用）。
+ *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。
  *
  * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
  * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -22,7 +24,6 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { NpxRunner } from '@buka/plugin-kit'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { describeError, parseQuery, readJsonBody, sendJson, sendMethodNotAllowed } from './http.ts'
@@ -33,6 +34,7 @@ import type { SkillGroupInstallResult, SkillInstallResult } from './skill-instal
 import { installSavedSkill, installSavedSkillGroup } from './skill-install.ts'
 import type { GlobalSkillsSnapshot, Homes } from './skill-store.ts'
 import { uninstallGlobalSkill } from './skill-store.ts'
+import type { SkillUpdateResult } from './skill-update.ts'
 
 /** 页面读取列表用的路由；浏览器一半按同一常量访问。 */
 const LIST_ROUTE = '/buka-skills/list'
@@ -55,6 +57,12 @@ const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
 /** 收藏仓库的 skills 树路由。 */
 const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
 
+/** 已安装 skill 的检查路由。 */
+const CHECK_ROUTE = '/buka-skills/check'
+
+/** 已安装 skill 的更新路由。 */
+const UPDATE_ROUTE = '/buka-skills/update'
+
 /** 请求体里本插件认识的可选字段；其余字段忽略。 */
 interface RequestBody {
   scope?: unknown
@@ -74,14 +82,12 @@ interface RequestBody {
 export interface RouteDeps {
   /** 两个全局 skills 根目录。 */
   readonly homes: Homes
-  /** 执行 `npx skills` 的函数（cwd 已绑定到 agentsHome）。 */
-  readonly runNpx: NpxRunner
-  /** 仓库级缓存与并发合并所在的对外服务。 */
+  /** 仓库级缓存、并发合并与检查 / 更新所在的对外服务。 */
   readonly catalog: SkillsCatalogService
   /** 读一份已安装 skills 快照。 */
   readonly readSnapshot: () => Promise<GlobalSkillsSnapshot>
-  /** 安装 / 卸载共用的串行队列。 */
-  readonly serializeNpx: <T>(work: () => Promise<T>) => Promise<T>
+  /** 安装 / 卸载 / 检查 / 更新共用的串行队列。 */
+  readonly serializeSkills: <T>(work: () => Promise<T>) => Promise<T>
 }
 
 /**
@@ -91,7 +97,7 @@ export interface RouteDeps {
  * @param deps 入口装配好的共享依赖
  */
 export function registerRoutes(ctx: Context, deps: RouteDeps): void {
-  const { homes, runNpx, catalog, readSnapshot, serializeNpx } = deps
+  const { homes, catalog, readSnapshot, serializeSkills } = deps
 
   // ---- HTTP 路由：浏览器一半的列表与卸载 ---------------------------------
 
@@ -147,12 +153,11 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             if (body === undefined) return
             const fields = body as RequestBody | null
             try {
-              const result = await serializeNpx(() =>
+              const result = await serializeSkills(() =>
                 uninstallGlobalSkill({
                   homes,
                   scope: fields?.scope,
                   id: fields?.id,
-                  runNpx,
                 }),
               )
               if (result.ok) {
@@ -202,7 +207,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
     // 只接受收藏过的来源；skill 是否存在、叫什么以 Host 这次读到的仓库列表
     // 为准（浏览器只传仓库路径）。安装目标默认全局；打工人 / 工作区由
     // `resolveInstallTarget()` 从登记表解析成目录。三类安装与卸载共用串行队列，
-    // 避免同时改写 npx skills 的 lockfile。
+    // 避免同时改写共享的 skills lockfile。
 
     webCtx.effect(
       () =>
@@ -219,30 +224,29 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             if (body === undefined) return
             const fields = body as RequestBody | null
             try {
-              const result = await serializeNpx<SkillGroupInstallResult | SkillInstallResult>(() =>
-                Array.isArray(fields?.paths)
-                  ? installSavedSkillGroup({
-                      homes,
-                      catalog,
-                      source: fields?.source,
-                      skillPaths: fields?.paths,
-                      target: fields?.target,
-                      worker: fields?.worker,
-                      workspace: fields?.workspace,
-                      resolveTarget: (request) => resolveInstallTarget(webCtx, request),
-                      runNpx,
-                    })
-                  : installSavedSkill({
-                      homes,
-                      catalog,
-                      source: fields?.source,
-                      skillPath: fields?.path,
-                      target: fields?.target,
-                      worker: fields?.worker,
-                      workspace: fields?.workspace,
-                      resolveTarget: (request) => resolveInstallTarget(webCtx, request),
-                      runNpx,
-                    }),
+              const result = await serializeSkills<SkillGroupInstallResult | SkillInstallResult>(
+                () =>
+                  Array.isArray(fields?.paths)
+                    ? installSavedSkillGroup({
+                        homes,
+                        catalog,
+                        source: fields?.source,
+                        skillPaths: fields?.paths,
+                        target: fields?.target,
+                        worker: fields?.worker,
+                        workspace: fields?.workspace,
+                        resolveTarget: (request) => resolveInstallTarget(webCtx, request),
+                      })
+                    : installSavedSkill({
+                        homes,
+                        catalog,
+                        source: fields?.source,
+                        skillPath: fields?.path,
+                        target: fields?.target,
+                        worker: fields?.worker,
+                        workspace: fields?.workspace,
+                        resolveTarget: (request) => resolveInstallTarget(webCtx, request),
+                      }),
               )
               if (result.ok) {
                 const count =
@@ -265,7 +269,63 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       `buka-skills: POST ${INSTALL_ROUTE}`,
     )
 
-    // ---- 收藏的仓库（npx skills 与 Claude Code marketplace）----------------
+    // ---- 已安装 skill 的检查 / 更新 ---------------------------------------
+    // 检查与更新都会读 / 写共享的 lockfile，和其它安装类请求排同一条队列。
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: CHECK_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'GET') {
+              sendMethodNotAllowed(res, 'GET')
+              return
+            }
+            try {
+              const result = await catalog.checkSkills({})
+              sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result)
+            } catch (error) {
+              sendJson(res, 500, { ok: false, message: describeError(error) })
+            }
+          },
+        }),
+      `buka-skills: GET ${CHECK_ROUTE}`,
+    )
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: UPDATE_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'POST') {
+              sendMethodNotAllowed(res, 'POST')
+              return
+            }
+            try {
+              const result: SkillUpdateResult | { ok: false; code: string; message: string } =
+                await catalog.updateSkills({})
+              if (result.ok) {
+                webCtx.logger?.info?.(
+                  'buka-skills: 更新完成（%d 个成功，%d 个失败）',
+                  result.updated.length,
+                  result.failed.length,
+                )
+              }
+              sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result)
+            } catch (error) {
+              sendJson(res, 500, { ok: false, message: describeError(error) })
+            }
+          },
+        }),
+      `buka-skills: POST ${UPDATE_ROUTE}`,
+    )
+
+    // ---- 收藏的仓库 --------------------------------------------------------
+
     // 收藏是用户自己的书签：写入同一个 JSON 文件，和已安装列表互不影响。
     // 写操作排成队列，避免两次「添加」互相覆盖整个文件。
 
@@ -443,6 +503,19 @@ function installStatusFor(code: string | undefined): number {
 }
 
 /**
+ * 检查 / 更新的失败码 → HTTP 状态码。
+ *
+ * `unsupported-home` 是本机环境配置问题（500）；`check-failed` / `lock-unreadable`
+ * 是当前状态无法完成（409 / 502）。其它校验类错误按 400。
+ */
+function updateStatusFor(code: string | undefined): number {
+  if (code === 'invalid-dir' || code === 'invalid-source') return 400
+  if (code === 'lock-unreadable') return 409
+  if (code === 'unsupported-home') return 500
+  return 502
+}
+
+/**
  * 收藏操作的失败码 → HTTP 状态码。
  *
  * `duplicate` 与 `store-unreadable` 都是 409：请求本身合法，只是当前状态
@@ -460,8 +533,8 @@ function repoStatusFor(code: string | undefined): number {
  *
  * `unsupported-source` 用 400：来源本身合法，但这个来源（npm 包名 / 已知不是
  * 仓库的网页链接）没有可以让 Host 列举的仓库树，请求方不该重试。
- * `repo-unavailable` 用 422：请求格式没问题，只是这个仓库既不是 npx skills
- * 也不是 Claude Code marketplace，改来源才有意义。
+ * `repo-unavailable` 用 422：请求格式没问题，只是这个仓库根 `skills/` 下没有
+ * 可安装的 skill，改来源才有意义。
  *
  * `git-unavailable`（本机没有 git）用 500：这是 Host 环境问题，与来源无关；
  * `git-failed`（clone/fetch 失败）用 502：上游 git 服务或网络的问题，和 GitHub

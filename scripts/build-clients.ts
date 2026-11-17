@@ -35,7 +35,7 @@ const BASELINE_MODULES = ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/
 const HARNESS_MODULES = /^@deepseek-ai\//
 
 /** 由 DSH 运行时提供的包：宿主一半只引用、不打包。 */
-const HOST_EXTERNAL = [/^@deepseek-ai\//, /^node:/]
+const HOST_EXTERNAL = [/^@deepseek-ai\//, /^node:/, /^skills(?:\/|$)/]
 
 interface PluginManifest {
   readonly name: string
