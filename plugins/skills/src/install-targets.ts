@@ -5,11 +5,13 @@
  * 宿主服务，不能由浏览器传路径：
  *
  * - 打工人：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
- *   目录存在的打工人；机器人没有目录，装不了项目级 skill。
+ *   目录存在的打工人；机器人没有目录，装不了项目级 skill。引用键是不可变的
+ *   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
+ *   `name`。
  * - 工作区：`ctx.workspaceRegistry`（DSH 自带）的 `list()`，取已注册工作区的
  *   规范路径与标题。
  *
- * 安装时按名字 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
+ * 安装时按标识符 / 路径在这两份列表里重新解析，解析结果只来自 Host 这次读到的
  * 登记表。浏览器传来的字符串永远只当日志里的选择依据，不会被直接拼进
  * `npx skills add` 的工作目录。
  *
@@ -22,6 +24,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
+import { workerIdentityLabel } from '@buka/plugin-ui/worker-label'
 import type { Context } from '@deepseek-ai/cordis'
 
 /** workers 插件 Host 服务的最小形状；只用到列出打工人。 */
@@ -34,8 +37,9 @@ interface WorkspaceRegistryLike {
   list?(): unknown
 }
 
-/** 一个可安装的打工人。 */
+/** 一个可安装的打工人；`id` 是引用键，`name` 是原值为空的展示名。 */
 export interface WorkerInstallTarget {
+  readonly id: string
   readonly name: string
   readonly path: string
   readonly description: string
@@ -94,11 +98,25 @@ function optionalService<T>(ctx: Context, name: string): T | undefined {
 }
 
 /**
- * 规范化打工人列表：只要智能体、目录存在、名字与路径都非空的条目。
+ * 取一条打工人记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
+ *
+ * `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
+ * workers 才用它兜底。
+ *
+ * @param record `bukaWorkers.list()` 的一条记录
+ */
+function workerKeyOf(record: Record<string, unknown>): string {
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  if (id !== '') return id
+  return typeof record.name === 'string' ? record.name.trim() : ''
+}
+
+/**
+ * 规范化打工人列表：只要智能体、目录存在、标识符与路径都非空的条目。
  *
  * workers 插件的 `list()` 返回 `workers` 数组，字段随版本可能增减；这里按字段
  * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
- * 确认一次目录）。
+ * 确认一次目录）。`name` 可以为空，按原值带回页面展示。
  *
  * @param result `bukaWorkers.list()` 的返回值
  */
@@ -106,23 +124,24 @@ function normalizeWorkers(result: unknown): WorkerInstallTarget[] {
   const workers = (result as { workers?: unknown } | null | undefined)?.workers
   if (!Array.isArray(workers)) return []
 
-  const byName = new Map<string, WorkerInstallTarget>()
+  const byKey = new Map<string, WorkerInstallTarget>()
   for (const value of workers) {
     if (value === null || typeof value !== 'object') continue
     const record = value as Record<string, unknown>
     // 机器人没有目录，装不了项目级 skill。
     if (record.driver === 'robot' || record.exists === false) continue
-    const name = typeof record.name === 'string' ? record.name.trim() : ''
+    const key = workerKeyOf(record)
     const workerPath = typeof record.path === 'string' ? record.path.trim() : ''
-    if (name === '' || workerPath === '' || byName.has(name)) continue
-    byName.set(name, {
-      name,
+    if (key === '' || workerPath === '' || byKey.has(key)) continue
+    byKey.set(key, {
+      id: key,
+      name: typeof record.name === 'string' ? record.name : '',
       path: workerPath,
       description: typeof record.description === 'string' ? record.description : '',
     })
   }
 
-  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name))
+  return [...byKey.values()].sort((left, right) => left.id.localeCompare(right.id))
 }
 
 /**
@@ -205,7 +224,7 @@ export async function listInstallTargets(ctx: Context): Promise<InstallTargetsSn
  * 确认目标目录仍然存在，并把解析结果整理成安装流程使用的形状。
  *
  * @param directory 候选目录
- * @param label 展示名（打工人名 / 工作区标题）
+ * @param label 展示标签（打工人按「名称 · 标识符」消歧，工作区用标题）
  */
 async function confirmDirectory(directory: string, label: string): Promise<ResolvedInstallTarget> {
   let stat: Awaited<ReturnType<typeof fs.stat>>
@@ -223,7 +242,8 @@ async function confirmDirectory(directory: string, label: string): Promise<Resol
 /**
  * 安装时把浏览器选中的目标解析成一个可信目录。
  *
- * - 打工人按名字在 `ctx.bukaWorkers` 的列表里找；
+ * - 打工人按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+ *   浏览器传的仍是 `name`）；
  * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
  *
  * 找不到、服务缺失或目录已消失都返回稳定的错误码，由路由映射成 HTTP 状态码。
@@ -236,9 +256,9 @@ export async function resolveInstallTarget(
   request: { target: unknown; worker?: unknown; workspace?: unknown },
 ): Promise<ResolvedInstallTarget> {
   if (request?.target === 'worker') {
-    const name = typeof request.worker === 'string' ? request.worker.trim() : ''
-    if (name === '') {
-      return { ok: false, code: 'invalid-target', message: '缺少打工人名称' }
+    const wanted = typeof request.worker === 'string' ? request.worker.trim() : ''
+    if (wanted === '') {
+      return { ok: false, code: 'invalid-target', message: '缺少打工人标识符' }
     }
     const workers = await readWorkers(ctx)
     if (!workers.available) {
@@ -251,15 +271,15 @@ export async function resolveInstallTarget(
     if (workers.error !== null) {
       return { ok: false, code: 'workers-unavailable', message: workers.error }
     }
-    const found = workers.items.find((worker) => worker.name === name)
+    const found = workers.items.find((worker) => worker.id === wanted)
     if (found === undefined) {
       return {
         ok: false,
         code: 'unknown-worker',
-        message: `没有找到这个打工人（可能只支持智能体）：${name}`,
+        message: `没有找到这个打工人（可能只支持智能体）：${wanted}`,
       }
     }
-    return confirmDirectory(found.path, found.name)
+    return confirmDirectory(found.path, workerIdentityLabel(found))
   }
 
   if (request?.target === 'workspace') {

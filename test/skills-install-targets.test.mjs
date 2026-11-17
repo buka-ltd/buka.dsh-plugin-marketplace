@@ -3,7 +3,8 @@
  *
  * 守卫几件容易回归的事：
  * - 目标列表只来自 Host 服务：打工人的机器人、缺目录的条目会被过滤；
- * - 安装时按名字 / 路径回登记表重新解析，浏览器传的路径不会直接当工作目录；
+ * - 打工人按不可变标识符做键，展示名可以为空；旧版只有 `name` 时退回 `name`；
+ * - 安装时按标识符 / 路径回登记表重新解析，浏览器传的路径不会直接当工作目录；
  * - 服务缺失、登记表读不了、目录消失都有稳定错误码，页面能给出说明。
  */
 
@@ -13,6 +14,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { targetKeyOf, targetLabelOf } from '../plugins/skills/src/client/keys.ts'
 import { listInstallTargets, resolveInstallTarget } from '../plugins/skills/src/install-targets.ts'
 
 /**
@@ -190,4 +192,117 @@ test('服务缺失 / 读取失败 / 目录消失时返回稳定错误码', async
     { workers: targets.workers.available, workspaces: targets.workspaces.available },
     { workers: false, workspaces: false },
   )
+})
+
+test('目标列表：以标识符为键，展示名为空也保留，旧版只有 name 时退回 name', async () => {
+  const { root, dir } = await makeDir('repo')
+  try {
+    const ctx = fakeContext({
+      bukaWorkers: {
+        async list() {
+          return {
+            workers: [
+              { id: 'qa', name: '', driver: 'agent', path: dir, exists: true, description: 'QA' },
+              { id: 'writer', name: '写作助手', driver: 'agent', path: dir, exists: true },
+              // 旧版 workers 只返回 name，没有 id。
+              { name: 'legacy', driver: 'agent', path: dir, exists: true },
+              {
+                id: 'qa',
+                name: '重复标识符',
+                driver: 'agent',
+                path: path.join(root, 'duplicate'),
+                exists: true,
+              },
+              { id: 'clock', name: 'clock', driver: 'robot', path: '', exists: false },
+              { id: 'no-path', name: '没有目录', driver: 'agent', path: '', exists: true },
+              { id: 'gone', name: '已删除', driver: 'agent', path: dir, exists: false },
+            ],
+          }
+        },
+      },
+    })
+
+    const targets = await listInstallTargets(ctx)
+    assert.deepEqual(
+      targets.workers.items,
+      [
+        { id: 'legacy', name: 'legacy', path: dir, description: '' },
+        { id: 'qa', name: '', path: dir, description: 'QA' },
+        { id: 'writer', name: '写作助手', path: dir, description: '' },
+      ],
+      '展示名为空不应丢弃打工人；机器人、缺路径、目录不存在与重复标识符仍被过滤，并按键排序',
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('解析打工人：按标识符匹配，名称只作展示，旧版退回 name', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-targets-'))
+  const qaDir = path.join(root, 'qa')
+  const writerDir = path.join(root, 'writer')
+  const legacyDir = path.join(root, 'legacy')
+  try {
+    for (const dir of [qaDir, writerDir, legacyDir]) {
+      await fs.mkdir(dir, { recursive: true })
+    }
+    const ctx = fakeContext({
+      bukaWorkers: {
+        async list() {
+          return {
+            workers: [
+              { id: 'qa', name: '', driver: 'agent', path: qaDir, exists: true },
+              { id: 'writer', name: '写作助手', driver: 'agent', path: writerDir, exists: true },
+              { name: 'legacy', driver: 'agent', path: legacyDir, exists: true },
+              { id: 'clock', name: 'clock', driver: 'robot', path: '', exists: false },
+            ],
+          }
+        },
+      },
+    })
+
+    assert.deepEqual(await resolveInstallTarget(ctx, { target: 'worker', worker: 'qa' }), {
+      ok: true,
+      path: qaDir,
+      label: 'qa',
+    })
+    assert.deepEqual(await resolveInstallTarget(ctx, { target: 'worker', worker: 'writer' }), {
+      ok: true,
+      path: writerDir,
+      label: '写作助手 · writer',
+    })
+    assert.deepEqual(await resolveInstallTarget(ctx, { target: 'worker', worker: 'legacy' }), {
+      ok: true,
+      path: legacyDir,
+      label: 'legacy',
+    })
+
+    // 有标识符之后 name 不再能被当成引用键。
+    const byName = await resolveInstallTarget(ctx, { target: 'worker', worker: '写作助手' })
+    assert.equal(byName.code, 'unknown-worker')
+
+    const unknown = await resolveInstallTarget(ctx, { target: 'worker', worker: 'nobody' })
+    assert.equal(unknown.code, 'unknown-worker')
+
+    const empty = await resolveInstallTarget(ctx, { target: 'worker', worker: '   ' })
+    assert.equal(empty.code, 'invalid-target')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('弹窗标签：打工人用标识符作键，标签按「名称 · 标识符」消歧', () => {
+  assert.equal(targetKeyOf('worker', { id: 'qa', name: '' }), 'qa')
+  assert.equal(targetKeyOf('worker', { id: 'qa', name: '质量保障' }), 'qa')
+  assert.equal(targetKeyOf('worker', { name: '软件工程师' }), '软件工程师')
+
+  assert.equal(targetLabelOf('worker', { id: 'qa', name: '' }), 'qa')
+  assert.equal(targetLabelOf('worker', { id: 'qa', name: '质量保障' }), '质量保障 · qa')
+  assert.equal(targetLabelOf('worker', { id: 'qa', name: 'qa' }), 'qa')
+  assert.equal(targetLabelOf('worker', { name: '软件工程师' }), '软件工程师')
+
+  // 工作区目标的键与标签行为不变。
+  assert.equal(targetKeyOf('workspace', { path: '/repo' }), '/repo')
+  assert.equal(targetLabelOf('workspace', { title: '示例仓库', path: '/repo' }), '示例仓库')
+  assert.equal(targetLabelOf('workspace', { title: '', path: '/repo' }), '/repo')
 })

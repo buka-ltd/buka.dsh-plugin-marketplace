@@ -65,6 +65,7 @@ interface RequestBody {
   /** 目录安装：目录里每个 skill 的仓库路径；与 `path` 二选一。 */
   paths?: unknown
   target?: unknown
+  /** 打工人目标的标识符；旧版 workers 没有 `id` 时是它的名字。 */
   worker?: unknown
   workspace?: unknown
 }
@@ -172,8 +173,8 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
 
     // ---- 可安装目标：打工人 / 工作区 ---------------------------------------
     // 两份列表都来自 Host 的登记表（可选的 `bukaWorkers` 服务与 DSH 的
-    // `workspaceRegistry`），浏览器只拿到名字 / 标题 / 路径，安装时再把选中的
-    // 字符串换回可信目录。
+    // `workspaceRegistry`），浏览器只拿到标识符、名称 / 标题与路径，安装时再把
+    // 选中的字符串换回可信目录。
 
     webCtx.effect(
       () =>

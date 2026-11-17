@@ -59,8 +59,14 @@ export interface SkillTreeLeaf {
 /** 「安装到」对话框的类型。 */
 export type TargetDialogKind = 'worker' | 'workspace'
 
-/** Host `GET /buka-skills/targets` 返回的一个打工人。 */
+/**
+ * Host `GET /buka-skills/targets` 返回的一个打工人。
+ *
+ * `id` 是不可变标识符（引用键）；`name` 是可选展示名，可能为空串；旧版
+ * workers 没有 `id` 时 Host 已把 `name` 填进 `id`。
+ */
 export interface WorkerInstallTarget {
+  readonly id: string
   readonly name: string
   readonly path: string
   readonly description?: string
