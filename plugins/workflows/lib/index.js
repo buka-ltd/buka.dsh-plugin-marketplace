@@ -5569,6 +5569,7 @@ var WorkflowEngine = class {
 				if (this.sessionTasks.get(input.sessionId)?.taskId === input.taskId) this.sessionTasks.delete(input.sessionId);
 			}
 		};
+		let waiting = false;
 		execution.stopPoll = poll(this.options.pollIntervalMs, async () => {
 			const task = this.store.getTask(input.taskId);
 			if (task === void 0 || task.status !== "running") {
@@ -5577,6 +5578,13 @@ var WorkflowEngine = class {
 			}
 			const snapshot = readHandleResult(input.handle, input.startSeq);
 			if (!snapshot.turnEnded) return false;
+			if (input.kind !== "assistant" && snapshot.stopReason === "completed") {
+				if (!waiting) {
+					waiting = true;
+					this.logger?.info?.(`buka-workflows: task ${input.taskId} is waiting for the session to continue after the turn completed`);
+				}
+				return false;
+			}
 			finish();
 			if (input.kind === "assistant") await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker);
 			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
@@ -6088,7 +6096,7 @@ async function runMigrations(options) {
 const PLUGIN_CACHE_DIR = "dsh-plugin-workflows";
 /** 默认数据目录名。 */
 const DEFAULTS = {
-	/** 不设默认超时：任务耗时取决于模型速度与任务大小，硬截止容易误杀。 */
+	/** 不设默认超时：任务耗时取决于模型速度与任务大小，硬截止容易误杀；0 也允许任务无限等待会话回复。 */
 	taskTimeoutMs: 0,
 	pollIntervalMs: 1500,
 	maxAttachmentBytes: 8388608,
@@ -6103,7 +6111,7 @@ const DEFAULTS = {
 /** 插件配置。 */
 const Config = z.object({
 	dataDir: z.string().default(defaultDataDir()).description("插件数据目录：渲染后的 prompt、结果全文、作业附件与迁移标记。作业 / 任务元数据在 storageDomain 里。支持 ~ 前缀。"),
-	taskTimeoutMs: z.number().step(1).min(0).default(DEFAULTS.taskTimeoutMs).description("单个任务的默认硬超时（毫秒）；0 表示不超时。"),
+	taskTimeoutMs: z.number().step(1).min(0).default(DEFAULTS.taskTimeoutMs).description("单个任务的默认硬超时（毫秒）；0 表示不超时，任务可以一直等待会话回复。"),
 	pollIntervalMs: z.number().step(1).min(100).default(DEFAULTS.pollIntervalMs).description("观察任务会话是否结束轮的轮询间隔（毫秒）。"),
 	maxAttachmentBytes: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentBytes).description("单个附件的字节上限。"),
 	maxAttachmentsPerTask: z.number().step(1).min(1).default(DEFAULTS.maxAttachmentsPerTask).description("一次任务完成最多提交的附件数量。"),

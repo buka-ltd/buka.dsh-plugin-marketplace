@@ -18,7 +18,7 @@ const PLUGIN_CACHE_DIR = 'dsh-plugin-workflows'
 
 /** 默认数据目录名。 */
 const DEFAULTS = {
-  /** 不设默认超时：任务耗时取决于模型速度与任务大小，硬截止容易误杀。 */
+  /** 不设默认超时：任务耗时取决于模型速度与任务大小，硬截止容易误杀；0 也允许任务无限等待会话回复。 */
   taskTimeoutMs: 0,
   pollIntervalMs: 1500,
   maxAttachmentBytes: 8 * 1024 * 1024,
@@ -74,7 +74,7 @@ export const Config = z.object({
     .step(1)
     .min(0)
     .default(DEFAULTS.taskTimeoutMs)
-    .description('单个任务的默认硬超时（毫秒）；0 表示不超时。'),
+    .description('单个任务的默认硬超时（毫秒）；0 表示不超时，任务可以一直等待会话回复。'),
   pollIntervalMs: z
     .number()
     .step(1)
