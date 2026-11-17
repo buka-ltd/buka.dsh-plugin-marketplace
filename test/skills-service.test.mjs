@@ -95,6 +95,38 @@ test('同一来源的并发 listSkills 共用一次读取', async (t) => {
   assert.deepEqual(a, b)
 })
 
+test('runSerialized：对外暴露的入口与检查 / 更新共用同一条串行队列', async (t) => {
+  const homes = await tempHomes(t)
+  const order = []
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  let queue = Promise.resolve()
+  const serialize = (work) => {
+    const run = queue.then(work, work)
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+  const service = new SkillsCatalogService({ homes, serialize })
+
+  const first = service.runSerialized(async () => {
+    order.push('start-1')
+    await gate
+    order.push('end-1')
+  })
+  const second = service.runSerialized(async () => {
+    order.push('start-2')
+  })
+  release()
+  await Promise.all([first, second])
+
+  assert.deepEqual(order, ['start-1', 'end-1', 'start-2'], '第二段等第一段结束才执行')
+})
+
 test('checkSkills / updateSkills：经串行队列委托，dir 原样传给 CLI', async (t) => {
   const homes = await tempHomes(t)
   const target = path.join(homes.dshHome, '..', 'worker')

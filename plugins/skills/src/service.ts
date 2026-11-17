@@ -21,7 +21,9 @@
  * - `checkSkills({ dir? })`：检查全局（省略 `dir`）或某个目标目录里的 skill
  *   状态（`update` / `modified` / `up-to-date` / `unsupported-source` /
  *   `failed`）；
- * - `updateSkills({ dir? })`：只应用 `update` 状态，`modified` 默认跳过。
+ * - `updateSkills({ dir? })`：只应用 `update` 状态，`modified` 默认跳过；
+ * - `runSerialized(work)`：借用同一条串行队列执行一段写入，供其他插件在写
+ *   同一份 `skills-lock.json` 前排队。
  *
  * 所有仓库访问都复用 `src/repo-skills.ts` 的 TTL 缓存与错误码，并且按仓库
  * 来源合并并发请求。检查 / 更新与安装 / 卸载共用同一条串行队列：底层都会整份
@@ -258,6 +260,18 @@ export class SkillsCatalogService {
         ...(this.cli === undefined ? {} : { cli: this.cli }),
       }),
     )
+  }
+
+  /**
+   * 用安装 / 卸载 / 检查 / 更新共用的串行队列执行一段工作。
+   *
+   * 其他插件在重写同一份 `skills-lock.json` 前，应通过这里排队，避免与
+   * Skills 插件自己的写入并发。
+   *
+   * @param work 要排队执行的工作
+   */
+  runSerialized<T>(work: () => Promise<T>): Promise<T> {
+    return this.#serialize(work)
   }
 
   /**

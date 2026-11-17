@@ -11,6 +11,8 @@
 import type { ServerResponse } from 'node:http'
 import { createNpxRunner, parseSkillList } from '@buka/plugin-kit'
 import type { Context } from '@deepseek-ai/cordis'
+import { preferSharedQueue } from '../serial-runner.ts'
+import type { SerialQueueService } from '../serial-runner.ts'
 import { updateWorkersSequentially } from '../skill-update-batch.ts'
 import { reportSkillUpdate } from '../skill-update-report.ts'
 import { ensureClaudeLink, listWorkers, scanProjectSkills } from '../worker-store.ts'
@@ -114,17 +116,47 @@ export interface SkillRouteDeps {
 }
 
 /** Skills 插件的 Host Service 里本路由用到的部分。 */
-interface SkillsUpdateService {
+interface SkillsHostService extends SerialQueueService {
   updateSkills?(options: { dir: string }): Promise<unknown>
 }
 
+/** 确认服务能检查 / 更新时的形状：`updateSkills` 一定存在。 */
+type SkillsUpdateService = SkillsHostService & {
+  updateSkills: NonNullable<SkillsHostService['updateSkills']>
+}
+
 /** 从 web 上下文取可选的 `bukaSkills` 服务；插件没装时返回 null。 */
-function skillsService(ctx: Context): SkillsUpdateService | null {
+function skillsService(ctx: Context): SkillsHostService | null {
   try {
-    return (ctx.get?.('bukaSkills') ?? null) as SkillsUpdateService | null
+    return (ctx.get?.('bukaSkills') ?? null) as SkillsHostService | null
   } catch {
     return null
   }
+}
+
+/**
+ * 取检查 / 更新所需的服务；插件没装或版本太旧时写好 503 并返回 null。
+ *
+ * @param ctx web 上下文
+ * @param res 响应
+ * @param action 失败文案里的动作描述
+ */
+function requireSkillsService(
+  ctx: Context,
+  res: ServerResponse,
+  action: string,
+): SkillsUpdateService | null {
+  const service = skillsService(ctx)
+  if (service !== null && typeof service.updateSkills === 'function') {
+    return service as SkillsUpdateService
+  }
+  sendError(
+    res,
+    503,
+    'skills-unavailable',
+    `没有找到 Skills 插件（@buka/dsh-plugin-skills），无法${action} skills。`,
+  )
+  return null
 }
 
 /**
@@ -151,8 +183,9 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
   })
 
   // npx skills 会整份重写工作区里的 skills-lock.json；同一工作区的安装与移除
-  // 并发执行会互相覆盖条目。这里把 npx 调用排成一条全局队列，页面上的并发
-  // 点击也安全（与 skills 插件的卸载队列同一做法）。
+  // 并发执行会互相覆盖条目。优先借用 Skills 服务的共用队列（与它的安装 /
+  // 卸载 / 检查 / 更新同一条）；插件没装时退回这条本地队列，至少保证本页面
+  // 内的写入不并发。
   let npxQueue: Promise<unknown> = Promise.resolve()
   function serializeNpx<T>(work: () => Promise<T>): Promise<T> {
     const run = npxQueue.then(work, work)
@@ -161,6 +194,11 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
       () => undefined,
     )
     return run
+  }
+
+  /** 每次请求重新取服务：插件可能晚于路由启动。 */
+  function serialRunner(): <T>(work: () => Promise<T>) => Promise<T> {
+    return preferSharedQueue(skillsService(webCtx), serializeNpx)
   }
 
   /** 把 resolveWorker 的错误写成响应。 */
@@ -204,7 +242,8 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
           try {
             // CLI 只提供给人看的文本清单（`--json` 不能与 `--list` 同用），
             // 这里解析出 skill 名与描述；安装时再用 `--skill <name>` 选择。
-            const result = await serializeNpx(() =>
+            // 写入走 Skills 服务的共用队列（没装时用本地队列）。
+            const result = await serialRunner()(() =>
               runNpxList(['add', source, '--list'], resolved.worker.path),
             )
             if (!result.ok) {
@@ -296,7 +335,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             for (const skill of selected) args.push('--skill', skill)
             args.push('-a', 'universal', '-a', 'claude-code', '-y')
 
-            const result = await serializeNpx(() => runNpx(args, resolved.worker.path))
+            const result = await serialRunner()(() => runNpx(args, resolved.worker.path))
             if (!result.ok) {
               sendJson(res, 502, {
                 ok: false,
@@ -355,7 +394,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
           }
 
           try {
-            const result = await serializeNpx(() =>
+            const result = await serialRunner()(() =>
               runNpx(['remove', skillName, '-y'], resolved.worker.path),
             )
             if (!result.ok) {
@@ -404,16 +443,8 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             sendWorkerError(res, resolved.error)
             return
           }
-          const service = skillsService(webCtx)
-          if (service === null || typeof service.updateSkills !== 'function') {
-            sendError(
-              res,
-              503,
-              'skills-unavailable',
-              '没有找到 Skills 插件（@buka/dsh-plugin-skills），无法检查或更新这个打工人的 skills。',
-            )
-            return
-          }
+          const service = requireSkillsService(webCtx, res, '检查或更新这个打工人的')
+          if (service === null) return
 
           try {
             const result = await service.updateSkills({ dir: resolved.worker.path })
@@ -459,16 +490,8 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             sendMethodNotAllowed(res, 'POST')
             return
           }
-          const service = skillsService(webCtx)
-          if (service === null || typeof service.updateSkills !== 'function') {
-            sendError(
-              res,
-              503,
-              'skills-unavailable',
-              '没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新打工人的 skills。',
-            )
-            return
-          }
+          const service = requireSkillsService(webCtx, res, '更新打工人的')
+          if (service === null) return
 
           try {
             const listed = await listWorkers({
