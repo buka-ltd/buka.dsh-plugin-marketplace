@@ -46,3 +46,14 @@ export function attachmentUrl(
   if (mode === 'preview' || mode === 'inline') params.set('mode', mode)
   return `${ATTACHMENT_ROUTE}?${params.toString()}`
 }
+
+/**
+ * 附件的绝对 inline 地址：Markdown 渲染器只接受绝对 URL，这里按页面 base 补全。
+ *
+ * @param jobId 作业 id
+ * @param attachmentId 附件 id
+ * @returns 绝对 inline 地址
+ */
+export function absoluteAttachmentUrl(jobId: unknown, attachmentId: unknown): string {
+  return new URL(attachmentUrl(jobId, attachmentId, 'inline'), document.baseURI).href
+}

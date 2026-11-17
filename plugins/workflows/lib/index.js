@@ -360,6 +360,8 @@ const DEFAULT_MAX_TASK_ATTACHMENTS_BYTES = 67108864;
 const DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 32768;
 /** 页面附件预览一次读取的文本上限：64 KiB。 */
 const DEFAULT_PREVIEW_TEXT_BYTES = 65536;
+/** 页面附件预览一次读取的 Markdown 上限：1 MiB（需完整渲染，比普通文本宽）。 */
+const DEFAULT_PREVIEW_MARKDOWN_BYTES = 1048576;
 /** 附件清单里文件名允许的最大 UTF-8 字节数。 */
 const MAX_NAME_BYTES = 160;
 /** 描述允许的最大字符数。 */
@@ -429,7 +431,8 @@ function sanitizeAttachmentName(value, fallbackSource = "") {
 	return name === "" ? "attachment" : name;
 }
 /**
-* 预览类型：按扩展名先划分可 inline 的图片 / PDF，其余交给文本嗅探。
+* 预览类型：按扩展名先划分可 inline 的图片 / PDF，Markdown 单独一类，其余交给
+* 文本嗅探。
 *
 * @param name 附件文件名
 * @returns 预览类型与对应的 MIME
@@ -439,6 +442,10 @@ function attachmentPreviewInfo(name) {
 	if (extension === ".pdf") return {
 		kind: "pdf",
 		mime: "application/pdf"
+	};
+	if (extension === ".md" || extension === ".markdown") return {
+		kind: "markdown",
+		mime: "text/markdown"
 	};
 	const mime = IMAGE_MIME_BY_EXTENSION.get(extension);
 	if (mime !== void 0) return {
@@ -6693,7 +6700,8 @@ function registerWorkflowRoutes({ ctx, ready }) {
 			const mode = params.get("mode") ?? "download";
 			if (jobId === "" || attachmentId === "") return sendError(res, 400, "invalid-id", "jobId and attachmentId are required");
 			if (mode !== "download" && mode !== "preview" && mode !== "inline") return sendError(res, 400, "invalid-mode", "mode must be download, preview or inline");
-			const opened = (await ready()).openAttachment(jobId, attachmentId);
+			const engine = await ready();
+			const opened = engine.openAttachment(jobId, attachmentId);
 			if (opened === null) return sendError(res, 404, "not-found", "attachment not found");
 			const preview = attachmentPreviewInfo(opened.record.name);
 			if (mode === "download") {
@@ -6720,7 +6728,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 				});
 				return;
 			}
-			if (preview.kind !== "text") {
+			if (preview.kind !== "text" && preview.kind !== "markdown") {
 				sendJson(res, 200, {
 					ok: true,
 					attachment: {
@@ -6732,7 +6740,8 @@ function registerWorkflowRoutes({ ctx, ready }) {
 				});
 				return;
 			}
-			const range = await readAttachmentRange(opened.file, { maxBytes: DEFAULT_PREVIEW_TEXT_BYTES });
+			const maxBytes = preview.kind === "markdown" ? DEFAULT_PREVIEW_MARKDOWN_BYTES : DEFAULT_PREVIEW_TEXT_BYTES;
+			const range = await readAttachmentRange(opened.file, { maxBytes });
 			if (range.text === null) {
 				sendJson(res, 200, {
 					ok: true,
@@ -6745,18 +6754,23 @@ function registerWorkflowRoutes({ ctx, ready }) {
 				});
 				return;
 			}
+			const attachment = {
+				name: opened.record.name,
+				bytes: opened.record.bytes,
+				kind: preview.kind,
+				mime: preview.mime,
+				text: range.text,
+				truncated: range.truncated,
+				read: range.read,
+				offset: range.offset
+			};
+			if (preview.kind === "markdown") attachment.images = engine.listJobAttachments(jobId).filter((record) => attachmentPreviewInfo(record.name).kind === "image").map((record) => ({
+				id: record.id,
+				name: record.name
+			}));
 			sendJson(res, 200, {
 				ok: true,
-				attachment: {
-					name: opened.record.name,
-					bytes: opened.record.bytes,
-					kind: "text",
-					mime: "text/plain",
-					text: range.text,
-					truncated: range.truncated,
-					read: range.read,
-					offset: range.offset
-				}
+				attachment
 			});
 		});
 	});

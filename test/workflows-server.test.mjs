@@ -14,7 +14,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { visibleAttachmentsForTask } from '../plugins/workflows/src/attachments/index.ts'
+import {
+  attachmentPreviewInfo,
+  visibleAttachmentsForTask,
+} from '../plugins/workflows/src/attachments/index.ts'
 import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
@@ -2480,6 +2483,156 @@ test('attachments: a task result attaches files and downstream tasks can read th
       const qa = taskAt(store, job.id, 'qa')
       assert.equal(visibleAttachmentsForTask(tasks, qa.id, attachments).length, 1)
       assert.equal(visibleAttachmentsForTask(tasks, 'task-unrelated', attachments).length, 0)
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('附件预览分类：Markdown 扩展名归入 markdown 类型，其余不变', () => {
+  assert.deepEqual(attachmentPreviewInfo('report.md'), { kind: 'markdown', mime: 'text/markdown' })
+  assert.deepEqual(attachmentPreviewInfo('REPORT.MARKDOWN'), {
+    kind: 'markdown',
+    mime: 'text/markdown',
+  })
+  assert.deepEqual(attachmentPreviewInfo('notes.txt'), { kind: 'text', mime: 'text/plain' })
+  assert.deepEqual(attachmentPreviewInfo('chart.png'), { kind: 'image', mime: 'image/png' })
+  assert.deepEqual(attachmentPreviewInfo('doc.pdf'), { kind: 'pdf', mime: 'application/pdf' })
+})
+
+test('附件预览路由：markdown 附件返回全文与同作业图片清单，超限截断、二进制降级', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-md-workspace-'))
+  try {
+    await fs.mkdir(path.join(workspace, 'artifacts'), { recursive: true })
+    const reportText = '# 交付报告\n\n正文 **加粗**。\n'
+    await fs.writeFile(path.join(workspace, 'artifacts', 'report.md'), reportText, 'utf8')
+    await fs.writeFile(
+      path.join(workspace, 'artifacts', 'big.md'),
+      Buffer.alloc(1024 * 1024 + 1, 0x61),
+    )
+    await fs.writeFile(path.join(workspace, 'artifacts', 'figure.png'), 'fake-png', 'utf8')
+    await fs.writeFile(
+      path.join(workspace, 'artifacts', 'binary.md'),
+      Buffer.from([0x50, 0x4b, 0x00, 0x03, 0x04]),
+    )
+    const workers = makeWorkers([
+      { id: '软件工程师', name: '', driver: 'agent', path: workspace },
+      { id: '质量保障工程师', name: '', driver: 'agent', path: workspace },
+    ])
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-md-'))
+    try {
+      const domain = new FakeDomain()
+      const store = new WorkflowStore({ domain, dataDir })
+      await store.init()
+      const engine = new WorkflowEngine({
+        ctx: {},
+        store,
+        options: makeOptions(dataDir, { maxAttachmentBytes: 2 * 1024 * 1024 }),
+        logger: undefined,
+        workers: () => workers,
+        delivery: makeDelivery(),
+      })
+      await engine.start()
+      const workflow = await engine.saveWorkflow({ definition: reviewDefinition() })
+      await engine.setWorkflowActive(workflow.id, true)
+      const job = await engine.createJobFromHuman({
+        workflowId: workflow.id,
+        content: { requirement: 'x' },
+      })
+      await waitFor(() => workers.dispatched.length === 1)
+      const devSession = workers.dispatched[0].sessionId
+      await engine.completeTaskFromSession({
+        sessionId: devSession,
+        text: '',
+        attachments: [
+          { path: 'artifacts/report.md', name: 'report.md' },
+          { path: 'artifacts/big.md', name: 'big.md' },
+          { path: 'artifacts/figure.png', name: 'figure.png' },
+          { path: 'artifacts/binary.md', name: 'binary.md' },
+        ],
+      })
+      const records = store.listAttachments(job.id)
+      const byName = new Map(records.map((record) => [record.name, record]))
+
+      // 入库记录：markdown 附件的 mime 记为 text/markdown。
+      assert.equal(byName.get('report.md').mime, 'text/markdown')
+      assert.equal(byName.get('figure.png').mime, 'image/png')
+
+      const registered = []
+      registerWorkflowRoutes({
+        ctx: {
+          inject(_names, callback) {
+            callback({
+              webServer: {
+                register(route) {
+                  registered.push(route)
+                  return () => {}
+                },
+              },
+              connection: { requestRejection: () => undefined },
+              effect: (fn) => fn(),
+              logger: undefined,
+            })
+          },
+        },
+        ready: async () => engine,
+      })
+      const attachmentRoute = registered.find(
+        (entry) => entry.path === '/buka-workflows/attachment',
+      )
+      assert.ok(attachmentRoute, 'the attachment route is registered')
+
+      /** 发一个 GET preview 请求。 */
+      const preview = async (attachmentId) => {
+        const req = {
+          method: 'GET',
+          url: `/buka-workflows/attachment?jobId=${job.id}&attachmentId=${attachmentId}&mode=preview`,
+          headers: {},
+          async *[Symbol.asyncIterator]() {},
+        }
+        const res = {
+          statusCode: 200,
+          headers: {},
+          setHeader(name, value) {
+            this.headers[name] = value
+          },
+          end(body) {
+            this.body = body
+          },
+        }
+        await attachmentRoute.handler(req, res)
+        return { status: res.statusCode, payload: JSON.parse(res.body) }
+      }
+
+      const report = byName.get('report.md')
+      let response = await preview(report.id)
+      assert.equal(response.status, 200)
+      assert.equal(response.payload.ok, true)
+      assert.equal(response.payload.attachment.kind, 'markdown')
+      assert.equal(response.payload.attachment.mime, 'text/markdown')
+      assert.equal(response.payload.attachment.text, reportText)
+      assert.equal(response.payload.attachment.truncated, false)
+      assert.deepEqual(response.payload.attachment.images, [
+        { id: byName.get('figure.png').id, name: 'figure.png' },
+      ])
+
+      const big = byName.get('big.md')
+      response = await preview(big.id)
+      assert.equal(response.payload.attachment.kind, 'markdown')
+      assert.equal(response.payload.attachment.truncated, true)
+      assert.equal(response.payload.attachment.text.length, 1024 * 1024)
+
+      const binary = byName.get('binary.md')
+      response = await preview(binary.id)
+      assert.equal(response.payload.attachment.kind, 'binary')
+      assert.equal(response.payload.attachment.mime, null)
+
+      const figure = byName.get('figure.png')
+      response = await preview(figure.id)
+      assert.equal(response.payload.attachment.kind, 'image')
+      assert.equal(response.payload.attachment.mime, 'image/png')
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true })
     }

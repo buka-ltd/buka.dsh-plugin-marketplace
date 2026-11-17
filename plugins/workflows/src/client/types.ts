@@ -474,14 +474,22 @@ export interface AttachmentViewState {
   error: string | null
 }
 
+/** 同作业附件库里可被 Markdown 相对图片按名匹配的图片附件引用。 */
+export interface AttachmentImageRef {
+  id: string
+  name: string
+}
+
 /** 附件预览（沿用旧附件路由的 `kind` 语义）。 */
 export interface JobAttachmentPreview {
   name?: string
   bytes?: number
-  kind?: 'text' | 'image' | 'pdf' | 'binary'
+  kind?: 'text' | 'image' | 'pdf' | 'binary' | 'markdown'
   mime?: string
   text?: string
   truncated?: boolean
+  /** markdown 附件的同作业图片附件清单，正文里的相对图片按文件名匹配它。 */
+  images?: AttachmentImageRef[]
 }
 
 /** 页面全部状态。 */

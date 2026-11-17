@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import {
   attachmentPreviewInfo,
+  DEFAULT_PREVIEW_MARKDOWN_BYTES,
   DEFAULT_PREVIEW_TEXT_BYTES,
   readAttachmentRange,
 } from '../attachments/index.ts'
@@ -385,7 +386,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
         )
         return
       }
-      if (preview.kind !== 'text') {
+      if (preview.kind !== 'text' && preview.kind !== 'markdown') {
         sendJson(res, 200, {
           ok: true,
           attachment: {
@@ -397,7 +398,9 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
         })
         return
       }
-      const range = await readAttachmentRange(opened.file, { maxBytes: DEFAULT_PREVIEW_TEXT_BYTES })
+      const maxBytes =
+        preview.kind === 'markdown' ? DEFAULT_PREVIEW_MARKDOWN_BYTES : DEFAULT_PREVIEW_TEXT_BYTES
+      const range = await readAttachmentRange(opened.file, { maxBytes })
       if (range.text === null) {
         sendJson(res, 200, {
           ok: true,
@@ -410,19 +413,34 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
         })
         return
       }
-      sendJson(res, 200, {
-        ok: true,
-        attachment: {
-          name: opened.record.name,
-          bytes: opened.record.bytes,
-          kind: 'text',
-          mime: 'text/plain',
-          text: range.text,
-          truncated: range.truncated,
-          read: range.read,
-          offset: range.offset,
-        },
-      })
+      const attachment: {
+        name: string
+        bytes: number
+        kind: 'text' | 'markdown'
+        mime: string
+        text: string
+        truncated: boolean
+        read: number
+        offset: number
+        images?: { id: string; name: string }[]
+      } = {
+        name: opened.record.name,
+        bytes: opened.record.bytes,
+        kind: preview.kind,
+        mime: preview.mime,
+        text: range.text,
+        truncated: range.truncated,
+        read: range.read,
+        offset: range.offset,
+      }
+      if (preview.kind === 'markdown') {
+        // Markdown 正文引用的相对图片按文件名匹配同作业附件库里的图片附件。
+        attachment.images = engine
+          .listJobAttachments(jobId)
+          .filter((record) => attachmentPreviewInfo(record.name).kind === 'image')
+          .map((record) => ({ id: record.id, name: record.name }))
+      }
+      sendJson(res, 200, { ok: true, attachment })
     })
   })
 }

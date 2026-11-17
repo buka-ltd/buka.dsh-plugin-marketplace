@@ -530,6 +530,12 @@ window.__ModuleLoader__.load({
     	attachmentPreviewTruncated: "Only the beginning of the file is shown.",
     	attachmentPreviewEmpty: "The file is empty.",
     	attachmentPreviewPdfHint: "The PDF is embedded above; download it to keep a copy.",
+    	attachmentMarkdownCodeCopy: "Copy",
+    	attachmentMarkdownCodeCopied: "Copied",
+    	attachmentMarkdownCodeTitle: "Code",
+    	attachmentMarkdownCodeWrap: "Wrap",
+    	attachmentMarkdownCodeUnwrap: "Unwrap",
+    	attachmentMarkdownFootnotes: "Footnotes",
     	taskDrawerTitle: "Task",
     	taskPosition: "Position",
     	taskType: "Type",
@@ -817,6 +823,12 @@ window.__ModuleLoader__.load({
     	attachmentPreviewTruncated: "仅展示文件开头的一部分。",
     	attachmentPreviewEmpty: "文件内容为空。",
     	attachmentPreviewPdfHint: "PDF 已在上方内嵌显示；需要副本请下载。",
+    	attachmentMarkdownCodeCopy: "复制",
+    	attachmentMarkdownCodeCopied: "已复制",
+    	attachmentMarkdownCodeTitle: "代码",
+    	attachmentMarkdownCodeWrap: "换行",
+    	attachmentMarkdownCodeUnwrap: "不换行",
+    	attachmentMarkdownFootnotes: "脚注",
     	taskDrawerTitle: "任务详情",
     	taskPosition: "岗位",
     	taskType: "类型",
@@ -1261,6 +1273,16 @@ window.__ModuleLoader__.load({
     	});
     	if (mode === "preview" || mode === "inline") params.set("mode", mode);
     	return `${ATTACHMENT_ROUTE}?${params.toString()}`;
+    }
+    /**
+    * 附件的绝对 inline 地址：Markdown 渲染器只接受绝对 URL，这里按页面 base 补全。
+    *
+    * @param jobId 作业 id
+    * @param attachmentId 附件 id
+    * @returns 绝对 inline 地址
+    */
+    function absoluteAttachmentUrl(jobId, attachmentId) {
+    	return new URL(attachmentUrl(jobId, attachmentId, "inline"), document.baseURI).href;
     }
     // .build/workflows/client/model.js
     /**
@@ -2370,9 +2392,32 @@ window.__ModuleLoader__.load({
     		} else if (preview.kind === "text") {
     			const text = typeof preview.text === "string" ? preview.text : "";
     			body.push(text === "" ? h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewEmpty")) : h("pre", { className: "buka-workflows-pre" }, text));
-    			if (preview.truncated === true) body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewTruncated")));
+    		} else if (preview.kind === "markdown") {
+    			const text = typeof preview.text === "string" ? preview.text : "";
+    			if (text === "") body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewEmpty")));
+    			else {
+    				const labels = {
+    					code: {
+    						copyLabel: t("attachmentMarkdownCodeCopy"),
+    						copiedLabel: t("attachmentMarkdownCodeCopied"),
+    						toolbarLabels: {
+    							codeLabel: t("attachmentMarkdownCodeTitle"),
+    							wrapLabel: t("attachmentMarkdownCodeWrap"),
+    							unwrapLabel: t("attachmentMarkdownCodeUnwrap")
+    						}
+    					},
+    					footnotes: t("attachmentMarkdownFootnotes")
+    				};
+    				body.push(h(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
+    					text,
+    					streaming: false,
+    					labels,
+    					pathImages: { resolve: (value) => resolveMarkdownImage(jobId, preview.images, value) }
+    				}));
+    			}
     		} else if (preview.kind === "binary") body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewBinary")));
     		else body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewUnsupported")));
+    		if ((preview.kind === "text" || preview.kind === "markdown") && preview.truncated === true) body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewTruncated")));
     	}
     	return h(ClientModal, {
     		open: true,
@@ -2398,6 +2443,43 @@ window.__ModuleLoader__.load({
     function jobIdOf$1(page) {
     	if (page.state.route.kind === "job") return page.state.route.jobId;
     	return page.state.job.data?.job?.id ?? "";
+    }
+    /**
+    * 把 Markdown 正文里的相对图片目标解析成同作业附件库图片附件的 inline URL。
+    * 只按文件名（路径最后一段）精确匹配；未命中返回 `undefined`，渲染器保留原目标。
+    *
+    * @param jobId 作业 id
+    * @param images preview 响应带回的同作业图片附件清单
+    * @param destination 正文里原样书写的图片目标
+    * @returns inline URL 或 undefined
+    */
+    function resolveMarkdownImage(jobId, images, destination) {
+    	const name = markdownImageName(destination);
+    	if (name === void 0 || images === void 0) return void 0;
+    	const hit = images.find((image) => image.name === name);
+    	if (hit === void 0) return void 0;
+    	return absoluteAttachmentUrl(jobId, hit.id);
+    }
+    /**
+    * 从图片目标里取出文件名：去掉查询 / 片段、解码百分号转义、取路径最后一段；
+    * 带协议（http 等，Windows 盘符除外）或解码失败时返回 undefined。
+    *
+    * @param destination 正文里原样书写的图片目标
+    * @returns 文件名或 undefined
+    */
+    function markdownImageName(destination) {
+    	const suffix = destination.search(/[?#]/u);
+    	const raw = suffix === -1 ? destination : destination.slice(0, suffix);
+    	if (raw.length === 0) return void 0;
+    	let decoded;
+    	try {
+    		decoded = decodeURIComponent(raw);
+    	} catch {
+    		return;
+    	}
+    	if (/^[a-z][a-z\d+.-]*:/iu.test(decoded) && !/^[a-z]:[/\\]/iu.test(decoded)) return void 0;
+    	const segment = decoded.replace(/\\/gu, "/").split("/").pop();
+    	return segment === void 0 || segment === "" ? void 0 : segment;
     }
     // .build/workflows/client/avatars.js
     /**

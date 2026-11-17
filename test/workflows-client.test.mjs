@@ -112,6 +112,7 @@ async function loadClient() {
   const components = {}
   let css = ''
   globalThis.document = {
+    baseURI: 'http://localhost/',
     createElement() {
       return {
         dataset: {},
@@ -1318,6 +1319,86 @@ test('新建作业：需求在前、结构化输入按契约渲染', async () =>
     (node) => typeof node.props?.onClick === 'function' && textOf(node).includes('启动作业'),
   )
   assert.ok(submit !== null, 'submit button should render')
+})
+
+test('附件抽屉：Markdown 附件经 MarkdownText 渲染，相对图片解析到同作业图片附件', async () => {
+  const client = await loadClient()
+  const { tree } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'outputs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    attachment: {
+      id: 'att-md-1',
+      name: 'delivery.md',
+      status: 'ready',
+      data: {
+        kind: 'markdown',
+        mime: 'text/markdown',
+        text: '# 交付说明',
+        truncated: false,
+        images: [
+          { id: 'att-img-1', name: 'figure.png' },
+          { id: 'att-img-2', name: 'photo.jpg' },
+        ],
+      },
+      error: null,
+    },
+  })
+  const markdown = findBy(
+    tree,
+    (node) => typeof node.type === 'function' && node.type.name === 'MarkdownText',
+  )
+  assert.ok(markdown !== null, 'markdown attachments render through MarkdownText')
+  assert.equal(markdown.props.text, '# 交付说明')
+  assert.equal(markdown.props.streaming, false)
+  assert.equal(markdown.props.labels.code.copyLabel, '复制')
+  assert.equal(markdown.props.labels.code.copiedLabel, '已复制')
+  assert.equal(markdown.props.labels.code.toolbarLabels.codeLabel, '代码')
+  assert.equal(markdown.props.labels.code.toolbarLabels.wrapLabel, '换行')
+  assert.equal(markdown.props.labels.code.toolbarLabels.unwrapLabel, '不换行')
+  assert.equal(markdown.props.labels.footnotes, '脚注')
+
+  const resolve = markdown.props.pathImages.resolve
+  const figure = resolve('figure.png')
+  assert.equal(typeof figure, 'string')
+  assert.match(figure, /buka-workflows\/attachment/u)
+  assert.match(figure, /att-img-1/u)
+  assert.match(figure, /mode=inline/u)
+  assert.equal(resolve('./figure.png'), figure, '相对路径按文件名匹配')
+  assert.equal(resolve('assets/photo.jpg'), resolve('photo.jpg'), '只按文件名精确匹配')
+  assert.equal(resolve('missing.png'), undefined, '没有同名图片附件时不改写目标')
+  assert.equal(resolve('https://example.com/x.png'), undefined, '远程图片交给渲染器原样处理')
+})
+
+test('附件抽屉：Markdown 附件截断与空文件提示照旧', async () => {
+  const client = await loadClient()
+  const truncated = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'outputs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    attachment: {
+      id: 'att-md-2',
+      name: 'big.md',
+      status: 'ready',
+      data: { kind: 'markdown', mime: 'text/markdown', text: '# x', truncated: true },
+      error: null,
+    },
+  })
+  assert.match(truncated.texts.join(' '), /仅展示文件开头的一部分/u)
+
+  const empty = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'outputs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    attachment: {
+      id: 'att-md-3',
+      name: 'empty.md',
+      status: 'ready',
+      data: { kind: 'markdown', mime: 'text/markdown', text: '', truncated: false },
+      error: null,
+    },
+  })
+  assert.match(empty.texts.join(' '), /文件内容为空/u)
 })
 
 test('资产：资产池按来源任务分组，最终交付物带标记', async () => {

@@ -36,6 +36,9 @@ export const DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 32 * 1024
 /** 页面附件预览一次读取的文本上限：64 KiB。 */
 export const DEFAULT_PREVIEW_TEXT_BYTES = 64 * 1024
 
+/** 页面附件预览一次读取的 Markdown 上限：1 MiB（需完整渲染，比普通文本宽）。 */
+export const DEFAULT_PREVIEW_MARKDOWN_BYTES = 1024 * 1024
+
 /** 附件清单里文件名允许的最大 UTF-8 字节数。 */
 const MAX_NAME_BYTES = 160
 
@@ -63,7 +66,7 @@ export interface AttachmentRequest {
 
 /** 预览类型与对应的 MIME。 */
 export interface AttachmentPreviewInfo {
-  kind: 'image' | 'pdf' | 'text'
+  kind: 'image' | 'pdf' | 'text' | 'markdown'
   mime: string
 }
 
@@ -173,7 +176,8 @@ export function sanitizeAttachmentName(value: unknown, fallbackSource = ''): str
 }
 
 /**
- * 预览类型：按扩展名先划分可 inline 的图片 / PDF，其余交给文本嗅探。
+ * 预览类型：按扩展名先划分可 inline 的图片 / PDF，Markdown 单独一类，其余交给
+ * 文本嗅探。
  *
  * @param name 附件文件名
  * @returns 预览类型与对应的 MIME
@@ -181,6 +185,9 @@ export function sanitizeAttachmentName(value: unknown, fallbackSource = ''): str
 export function attachmentPreviewInfo(name: unknown): AttachmentPreviewInfo {
   const extension = path.extname(typeof name === 'string' ? name : '').toLowerCase()
   if (extension === '.pdf') return { kind: 'pdf', mime: 'application/pdf' }
+  if (extension === '.md' || extension === '.markdown') {
+    return { kind: 'markdown', mime: 'text/markdown' }
+  }
   const mime = IMAGE_MIME_BY_EXTENSION.get(extension)
   if (mime !== undefined) return { kind: 'image', mime }
   return { kind: 'text', mime: 'text/plain' }
