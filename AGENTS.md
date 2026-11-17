@@ -6,7 +6,7 @@
 - [索引格式](docs/agent-rules/index-format.md)：改 `market.json` / `locale`、动发布地址、排查「Discover 里看不到 / 装不上」前阅读。
 - [插件编写规范](docs/agent-rules/plugin-authoring.md)：新增或修改 `plugins/**` 的源码、清单、补丁层前阅读。
 - [常用命令](docs/agent-rules/commands.md)：构建、类型检查、校验、本地预览前阅读。
-- [Git 操作约束](docs/agent-rules/git.md)：执行任何 git 命令前阅读。
+- [Git 规范](docs/agent-rules/git-conventions.md)：执行任何 git 命令前阅读。
 
 ## 硬约束
 
@@ -17,7 +17,7 @@
 - **索引由脚本生成，不手写。** 索引字段来自 `plugins/<dir>/package.json`、该插件的 `locale` 与 `market.json`，以及 git；不要往 `dist/` 里手填内容。`dist/` 与 `.build/` 都不进版本库。
 - **首次工作先安装依赖。** 仓库现在有构建依赖，先跑 `pnpm install`。Node.js 要求 `>=22.20`，pnpm 版本见根 `package.json` 的 `packageManager`。
 
-提交与推送由用户发起，见 [Git 操作约束](docs/agent-rules/git.md)。
+提交与推送由用户发起，见 [Git 规范](docs/agent-rules/git-conventions.md)。
 
 ## Agent skills
 

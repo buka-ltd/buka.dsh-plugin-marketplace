@@ -100,6 +100,6 @@ dist/、.build/              # 构建产物，gitignored
 ## 文档
 
 - [AGENTS.md](AGENTS.md)：仓库协作规则的索引与硬约束。
-- [docs/agent-rules/](docs/agent-rules/)：项目结构、索引格式、插件编写、常用命令、Git 操作约束。
+- [docs/agent-rules/](docs/agent-rules/)：项目结构、索引格式、插件编写、常用命令、Git 规范。
 - [GLOSSARY.md](GLOSSARY.md)：本仓库的术语表；写文档、提交信息时用这里的词。
 - [docs/adr/](docs/adr/)：已经采纳的架构决策（TypeScript 化、locale 单一来源、兼容范围等）。
