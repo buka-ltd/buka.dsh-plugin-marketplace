@@ -3,7 +3,14 @@
  */
 
 import { TabLabel } from '@buka/plugin-ui'
-import { Button, SegmentedTabs, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button,
+  type MarkdownLabels,
+  MarkdownText,
+  SegmentedTabs,
+  StateDot,
+  Tag,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import React from 'react'
 
 import { h } from '../element.ts'
@@ -424,6 +431,34 @@ function schemaTypeLabel(schema: JsonSchema): string {
 }
 
 /**
+ * Markdown 正文的本地化 chrome：代码块复制 / 换行按钮与脚注标题。
+ * 任务内容与附件预览共用同一套文案。
+ *
+ * @param t 翻译函数
+ * @returns MarkdownText 的 labels
+ */
+export function markdownLabels(t: Translate): MarkdownLabels {
+  return {
+    code: {
+      copyLabel: t('markdownCodeCopy'),
+      copiedLabel: t('markdownCodeCopied'),
+      toolbarLabels: {
+        codeLabel: t('markdownCodeTitle'),
+        wrapLabel: t('markdownCodeWrap'),
+        unwrapLabel: t('markdownCodeUnwrap'),
+      },
+    },
+    footnotes: t('markdownFootnotes'),
+  }
+}
+
+/** 只读值的展示选项。 */
+export interface ReadonlyValueOptions {
+  /** 字符串值按 Markdown 渲染；任务内容常是长文本，卡片里排版更好读。 */
+  markdown?: boolean
+}
+
+/**
  * 只读展示一个值：有 schema 时按字段逐行展示、字段名用说明替代；没有 schema
  * 时按对象自身的键逐行展示。展示层不重复渲染原始 JSON。
  *
@@ -431,6 +466,7 @@ function schemaTypeLabel(schema: JsonSchema): string {
  * @param schema 契约
  * @param value 值
  * @param emptyText 空值提示
+ * @param options 展示选项
  * @returns React 元素
  */
 export function renderReadonlyValue(
@@ -438,11 +474,14 @@ export function renderReadonlyValue(
   schema: JsonSchema | null | undefined,
   value: unknown,
   emptyText: string,
+  options?: ReadonlyValueOptions,
 ): React.ReactElement {
   const { t } = page
   if (value === undefined || value === null) {
     return h('p', { className: 'buka-workflows-hint' }, emptyText)
   }
+  const renderField = (fieldValue: unknown): React.ReactNode =>
+    options?.markdown === true ? renderMarkdownValue(fieldValue, t) : renderValue(fieldValue, t)
   if (!isRecord(value)) {
     return h(
       'div',
@@ -450,7 +489,7 @@ export function renderReadonlyValue(
       h(
         'div',
         { className: 'buka-workflows-valueRow' },
-        h('div', { className: 'buka-workflows-valueValue' }, renderValue(value, t)),
+        h('div', { className: 'buka-workflows-valueValue' }, renderField(value)),
       ),
     )
   }
@@ -479,9 +518,19 @@ export function renderReadonlyValue(
             ? null
             : h('code', { className: 'buka-workflows-inlineCode' }, entry.name),
         ),
-        h('div', { className: 'buka-workflows-valueValue' }, renderValue(value[entry.name], t)),
+        h('div', { className: 'buka-workflows-valueValue' }, renderField(value[entry.name])),
       )
     }),
+  )
+}
+
+/** 字符串值走 Markdown；其它类型（数字、布尔、对象）保持原来的只读展示。 */
+function renderMarkdownValue(value: unknown, t: Translate): React.ReactNode {
+  if (typeof value !== 'string' || value.trim() === '') return renderValue(value, t)
+  return h(
+    'div',
+    { className: 'buka-workflows-markdown' },
+    h(MarkdownText, { text: value, streaming: false, labels: markdownLabels(t) }),
   )
 }
 

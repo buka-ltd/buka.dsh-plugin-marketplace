@@ -239,6 +239,8 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-select{width:100%;padding:var(--buka-space-2, 8px) var(--buka-space-2, 8px);border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-l0);color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px)}
 .buka-workflows-taskForm{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px)}
 .buka-workflows-contractBody{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);min-width:0}
+.buka-workflows-contentCard{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);min-width:0}
+.buka-workflows-markdown{min-width:0;white-space:normal}
 .buka-workflows-tagRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap}
 .buka-workflows-initialList{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);margin:0;padding:0;list-style:none}
 .buka-workflows-initialRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}

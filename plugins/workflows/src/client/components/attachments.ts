@@ -4,7 +4,6 @@
 
 import {
   Button,
-  type MarkdownLabels,
   type MarkdownPathImages,
   MarkdownText,
   StateDot,
@@ -16,7 +15,7 @@ import { formatBytes } from '../format.ts'
 import type { AppContext } from '../page-context.ts'
 import { absoluteAttachmentUrl, attachmentUrl } from '../request.ts'
 import type { AttachmentImageRef } from '../types.ts'
-import { renderDrawerHead } from './parts.ts'
+import { markdownLabels, renderDrawerHead } from './parts.ts'
 
 /** 附件预览抽屉。 */
 export function renderAttachmentDrawer(page: AppContext): React.ReactElement | null {
@@ -96,22 +95,12 @@ export function renderAttachmentDrawer(page: AppContext): React.ReactElement | n
       if (text === '') {
         body.push(h('p', { className: 'buka-workflows-hint' }, t('attachmentPreviewEmpty')))
       } else {
-        const labels: MarkdownLabels = {
-          code: {
-            copyLabel: t('attachmentMarkdownCodeCopy'),
-            copiedLabel: t('attachmentMarkdownCodeCopied'),
-            toolbarLabels: {
-              codeLabel: t('attachmentMarkdownCodeTitle'),
-              wrapLabel: t('attachmentMarkdownCodeWrap'),
-              unwrapLabel: t('attachmentMarkdownCodeUnwrap'),
-            },
-          },
-          footnotes: t('attachmentMarkdownFootnotes'),
-        }
         const pathImages: MarkdownPathImages = {
           resolve: (value) => resolveMarkdownImage(jobId, preview.images, value),
         }
-        body.push(h(MarkdownText, { text, streaming: false, labels, pathImages }))
+        body.push(
+          h(MarkdownText, { text, streaming: false, labels: markdownLabels(t), pathImages }),
+        )
       }
     } else if (preview.kind === 'binary') {
       body.push(h('p', { className: 'buka-workflows-hint' }, t('attachmentPreviewBinary')))

@@ -145,8 +145,10 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
         t('taskContentTitle'),
         h(
           'div',
-          { className: 'buka-workflows-contractBody' },
-          renderReadonlyValue(page, contentSchema, task.content ?? null, t('taskContentEmpty')),
+          { className: 'buka-workflows-contentCard' },
+          renderReadonlyValue(page, contentSchema, task.content ?? null, t('taskContentEmpty'), {
+            markdown: true,
+          }),
         ),
       ),
     )
@@ -374,6 +376,7 @@ function renderFinalDeliverable(page: AppContext, task: TaskDetail): React.React
         isRecord(endSchema) ? (endSchema as JsonSchema) : null,
         task.content ?? null,
         t('taskContentEmpty'),
+        { markdown: true },
       ),
     ),
   )

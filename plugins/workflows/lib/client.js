@@ -580,12 +580,12 @@ window.__ModuleLoader__.load({
     	attachmentPreviewTruncated: "Only the beginning of the file is shown.",
     	attachmentPreviewEmpty: "The file is empty.",
     	attachmentPreviewPdfHint: "The PDF is embedded above; download it to keep a copy.",
-    	attachmentMarkdownCodeCopy: "Copy",
-    	attachmentMarkdownCodeCopied: "Copied",
-    	attachmentMarkdownCodeTitle: "Code",
-    	attachmentMarkdownCodeWrap: "Wrap",
-    	attachmentMarkdownCodeUnwrap: "Unwrap",
-    	attachmentMarkdownFootnotes: "Footnotes",
+    	markdownCodeCopy: "Copy",
+    	markdownCodeCopied: "Copied",
+    	markdownCodeTitle: "Code",
+    	markdownCodeWrap: "Wrap",
+    	markdownCodeUnwrap: "Unwrap",
+    	markdownFootnotes: "Footnotes",
     	taskDrawerTitle: "Task",
     	taskPosition: "Position",
     	taskType: "Type",
@@ -878,12 +878,12 @@ window.__ModuleLoader__.load({
     	attachmentPreviewTruncated: "仅展示文件开头的一部分。",
     	attachmentPreviewEmpty: "文件内容为空。",
     	attachmentPreviewPdfHint: "PDF 已在上方内嵌显示；需要副本请下载。",
-    	attachmentMarkdownCodeCopy: "复制",
-    	attachmentMarkdownCodeCopied: "已复制",
-    	attachmentMarkdownCodeTitle: "代码",
-    	attachmentMarkdownCodeWrap: "换行",
-    	attachmentMarkdownCodeUnwrap: "不换行",
-    	attachmentMarkdownFootnotes: "脚注",
+    	markdownCodeCopy: "复制",
+    	markdownCodeCopied: "已复制",
+    	markdownCodeTitle: "代码",
+    	markdownCodeWrap: "换行",
+    	markdownCodeUnwrap: "不换行",
+    	markdownFootnotes: "脚注",
     	taskDrawerTitle: "任务详情",
     	taskPosition: "岗位",
     	taskType: "类型",
@@ -2327,6 +2327,27 @@ window.__ModuleLoader__.load({
     	return typeof type === "string" && type !== "" ? type : "any";
     }
     /**
+    * Markdown 正文的本地化 chrome：代码块复制 / 换行按钮与脚注标题。
+    * 任务内容与附件预览共用同一套文案。
+    *
+    * @param t 翻译函数
+    * @returns MarkdownText 的 labels
+    */
+    function markdownLabels(t) {
+    	return {
+    		code: {
+    			copyLabel: t("markdownCodeCopy"),
+    			copiedLabel: t("markdownCodeCopied"),
+    			toolbarLabels: {
+    				codeLabel: t("markdownCodeTitle"),
+    				wrapLabel: t("markdownCodeWrap"),
+    				unwrapLabel: t("markdownCodeUnwrap")
+    			}
+    		},
+    		footnotes: t("markdownFootnotes")
+    	};
+    }
+    /**
     * 只读展示一个值：有 schema 时按字段逐行展示、字段名用说明替代；没有 schema
     * 时按对象自身的键逐行展示。展示层不重复渲染原始 JSON。
     *
@@ -2334,12 +2355,14 @@ window.__ModuleLoader__.load({
     * @param schema 契约
     * @param value 值
     * @param emptyText 空值提示
+    * @param options 展示选项
     * @returns React 元素
     */
-    function renderReadonlyValue(page, schema, value, emptyText) {
+    function renderReadonlyValue(page, schema, value, emptyText, options) {
     	const { t } = page;
     	if (value === void 0 || value === null) return h("p", { className: "buka-workflows-hint" }, emptyText);
-    	if (!isRecord(value)) return h("div", { className: "buka-workflows-values" }, h("div", { className: "buka-workflows-valueRow" }, h("div", { className: "buka-workflows-valueValue" }, renderValue(value, t))));
+    	const renderField = (fieldValue) => options?.markdown === true ? renderMarkdownValue(fieldValue, t) : renderValue(fieldValue, t);
+    	if (!isRecord(value)) return h("div", { className: "buka-workflows-values" }, h("div", { className: "buka-workflows-valueRow" }, h("div", { className: "buka-workflows-valueValue" }, renderField(value))));
     	const fields = schemaFields(schema);
     	const entries = fields.length > 0 ? fields.map((field) => ({
     		name: field.name,
@@ -2354,7 +2377,16 @@ window.__ModuleLoader__.load({
     		return h("div", {
     			key: entry.name,
     			className: "buka-workflows-valueRow"
-    		}, h("span", { className: "buka-workflows-valueKey" }, description === "" ? entry.name : description, description === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, entry.name)), h("div", { className: "buka-workflows-valueValue" }, renderValue(value[entry.name], t)));
+    		}, h("span", { className: "buka-workflows-valueKey" }, description === "" ? entry.name : description, description === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, entry.name)), h("div", { className: "buka-workflows-valueValue" }, renderField(value[entry.name])));
+    	}));
+    }
+    /** 字符串值走 Markdown；其它类型（数字、布尔、对象）保持原来的只读展示。 */
+    function renderMarkdownValue(value, t) {
+    	if (typeof value !== "string" || value.trim() === "") return renderValue(value, t);
+    	return h("div", { className: "buka-workflows-markdown" }, h(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
+    		text: value,
+    		streaming: false,
+    		labels: markdownLabels(t)
     	}));
     }
     /** 单个值的展示。 */
@@ -2452,26 +2484,12 @@ window.__ModuleLoader__.load({
     		} else if (preview.kind === "markdown") {
     			const text = typeof preview.text === "string" ? preview.text : "";
     			if (text === "") body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewEmpty")));
-    			else {
-    				const labels = {
-    					code: {
-    						copyLabel: t("attachmentMarkdownCodeCopy"),
-    						copiedLabel: t("attachmentMarkdownCodeCopied"),
-    						toolbarLabels: {
-    							codeLabel: t("attachmentMarkdownCodeTitle"),
-    							wrapLabel: t("attachmentMarkdownCodeWrap"),
-    							unwrapLabel: t("attachmentMarkdownCodeUnwrap")
-    						}
-    					},
-    					footnotes: t("attachmentMarkdownFootnotes")
-    				};
-    				body.push(h(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
-    					text,
-    					streaming: false,
-    					labels,
-    					pathImages: { resolve: (value) => resolveMarkdownImage(jobId, preview.images, value) }
-    				}));
-    			}
+    			else body.push(h(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
+    				text,
+    				streaming: false,
+    				labels: markdownLabels(t),
+    				pathImages: { resolve: (value) => resolveMarkdownImage(jobId, preview.images, value) }
+    			}));
     		} else if (preview.kind === "binary") body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewBinary")));
     		else body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewUnsupported")));
     		if ((preview.kind === "text" || preview.kind === "markdown") && preview.truncated === true) body.push(h("p", { className: "buka-workflows-hint" }, t("attachmentPreviewTruncated")));
@@ -4682,7 +4700,7 @@ window.__ModuleLoader__.load({
     	}
     	if (!isEnd) {
     		const contentSchema = isRecord(typeDefinition?.content) ? typeDefinition.content : null;
-    		elements.push(renderSection(t("taskContentTitle"), h("div", { className: "buka-workflows-contractBody" }, renderReadonlyValue(page, contentSchema, task.content ?? null, t("taskContentEmpty")))));
+    		elements.push(renderSection(t("taskContentTitle"), h("div", { className: "buka-workflows-contentCard" }, renderReadonlyValue(page, contentSchema, task.content ?? null, t("taskContentEmpty"), { markdown: true }))));
     	}
     	const deps = Array.isArray(task.deps) ? task.deps : [];
     	if (deps.length > 0) elements.push(renderSection(t("taskDepsTitle"), h("ul", { className: "buka-workflows-depList" }, ...deps.map((dep) => h("li", {
@@ -4771,7 +4789,7 @@ window.__ModuleLoader__.load({
     function renderFinalDeliverable(page, task) {
     	const { t, state } = page;
     	const endSchema = currentJobDefinition(state)?.end?.content;
-    	return renderSection(t("finalDeliverableTitle"), h("div", { className: "buka-workflows-deliverable" }, renderReadonlyValue(page, isRecord(endSchema) ? endSchema : null, task.content ?? null, t("taskContentEmpty"))));
+    	return renderSection(t("finalDeliverableTitle"), h("div", { className: "buka-workflows-deliverable" }, renderReadonlyValue(page, isRecord(endSchema) ? endSchema : null, task.content ?? null, t("taskContentEmpty"), { markdown: true })));
     }
     /** 执行记录的一行。 */
     function renderAttempt(page, attempt) {
@@ -10047,6 +10065,8 @@ window.__ModuleLoader__.load({
     .buka-workflows-select{width:100%;padding:var(--buka-space-2, 8px) var(--buka-space-2, 8px);border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-l0);color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px)}
     .buka-workflows-taskForm{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px)}
     .buka-workflows-contractBody{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);min-width:0}
+    .buka-workflows-contentCard{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);min-width:0}
+    .buka-workflows-markdown{min-width:0;white-space:normal}
     .buka-workflows-tagRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap}
     .buka-workflows-initialList{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);margin:0;padding:0;list-style:none}
     .buka-workflows-initialRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}

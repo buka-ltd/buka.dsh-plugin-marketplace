@@ -70,7 +70,7 @@ export const Toast = () => null
 export const SegmentedTabs = (props) => h('div', props, ...(props.items ?? []).map((item) => h('span', { key: item.value }, item.label)))
 export const Modal = (props) => (props.open === false ? null : h('div', { className: props.className }, ...(props.children ?? []), props.footer ?? null))
 export const Menu = (props) => h('span', { className: 'x-menu' }, props.anchor)
-export const MarkdownText = () => null
+export const MarkdownText = (props) => h('span', { className: 'x-markdown' }, props.text)
 export const CodeBlock = () => null
 export const FileTypeIcon = () => null
 export const ReadBlock = () => null
@@ -1321,6 +1321,30 @@ test('任务抽屉：输入按契约、结果与操作', async () => {
   assert.match(text, /通道: 开始研发/u, 'header carries the inbound channel')
   assert.match(text, /软件工程师/u, 'worker tasks show only the executor')
   assert.match(text, /更多信息/u, 'audit details are folded away')
+})
+
+test('任务抽屉：任务内容放进卡片并交给 MarkdownText 渲染', async () => {
+  const client = await loadClient()
+  const content = { requirement: '## 实现登录页\n\n- 支持 **记住我**\n- 提交失败要有提示' }
+  const { tree } = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    taskId: 'task-1',
+    task: { status: 'ready', data: { ...TASK_DETAIL.task, content }, error: null },
+  })
+  const card = findBy(tree, (node) =>
+    String(node.props?.className ?? '')
+      .split(/\s+/)
+      .includes('buka-workflows-contentCard'),
+  )
+  assert.ok(card !== null, 'task content sits in a card')
+  const markdown = findBy(
+    card,
+    (node) => typeof node.type === 'function' && node.type.name === 'MarkdownText',
+  )
+  assert.ok(markdown !== null, 'task content renders through MarkdownText')
+  assert.equal(markdown.props.text, content.requirement, 'Markdown keeps the raw source text')
 })
 
 test('节点任务抽屉：岗位身份、任务数与任务卡', async () => {
