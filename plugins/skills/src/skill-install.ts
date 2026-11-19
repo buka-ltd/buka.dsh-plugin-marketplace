@@ -332,7 +332,7 @@ export async function installGlobalSkill({
     return {
       ok: false,
       code: 'already-installed',
-      message: `这个 skill 已经全局安装（${existing.scope}）：${existing.id}；如需重装，请先在「已安装」里卸载`,
+      message: `这个 skill 已经全局安装（${existing.scope}）：${existing.id}；如需重装，请先在「全局技能」里卸载`,
     }
   }
 

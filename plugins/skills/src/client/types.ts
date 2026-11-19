@@ -73,12 +73,14 @@ export interface SavedSnapshot {
   readonly repo?: SavedRepo
 }
 
-/** 树里的 skill 叶子。 */
+/** 树里的 skill 叶子；`path` 是包含 SKILL.md 的目录路径。 */
 export interface SkillTreeLeaf {
   readonly type: 'skill'
   readonly name: string
   readonly path: string
   readonly description?: string
+  /** 这个 skill 目录下嵌套的 skill / 目录；通常为空。 */
+  readonly children?: SkillTreeChild[]
 }
 
 /** 「安装到」对话框的类型。 */
@@ -198,13 +200,13 @@ export interface SkillsPageState {
   readonly t: Translate
   /** 当前 Tab。 */
   readonly tab: PageTab
-  /** 「已安装」列表状态。 */
+  /** 「全局技能」列表状态。 */
   readonly installed: LoadedState<InstalledSnapshot>
-  /** 「已安装」列表数据。 */
+  /** 「全局技能」列表数据。 */
   readonly installedData: InstalledSnapshot | null
-  /** 「收藏」列表状态。 */
+  /** 「技能仓库」列表状态。 */
   readonly saved: LoadedState<SavedSnapshot>
-  /** 「收藏」列表数据。 */
+  /** 「技能仓库」列表数据。 */
   readonly savedData: SavedSnapshot | null
   /** 已安装的 skill（扁平列表）。 */
   readonly skills: InstalledSkill[]
@@ -230,8 +232,6 @@ export interface SkillsPageState {
   readonly checkMessage: string | null
   /** 是否有可更新的 skill。 */
   readonly hasUpdates: boolean
-  /** 检查全局 skill 的更新。 */
-  readonly checkUpdates: () => Promise<void>
   /** 应用可用的更新。 */
   readonly updateSkills: () => Promise<void>
   /** 正在二次确认的 skill 行键。 */
@@ -290,7 +290,7 @@ export interface SkillsPageState {
   readonly toggleDir: (repo: RepoRef, dirPath: string) => void
   /** 卸载一条 skill。 */
   readonly uninstall: (entry: InstalledSkill) => Promise<void>
-  /** 只重读「已安装」列表。 */
+  /** 只重读「全局技能」列表。 */
   readonly refreshInstalled: () => Promise<void>
   /** 安装树里的一个 skill。 */
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>

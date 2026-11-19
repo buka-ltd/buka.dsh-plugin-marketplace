@@ -1,7 +1,7 @@
 /**
  * 给浏览器一半的侧边栏「Skills」页面用的包内 HTTP 路由。
  *
- * 七个路由：
+ * 路由：
  *
  * - `GET /buka-skills/list` 列出全局 skills；
  * - `POST /buka-skills/uninstall` 卸载一个；
@@ -15,7 +15,9 @@
  * - `POST /buka-skills/repos` 收藏一个，
  * - `POST /buka-skills/repos/remove` 移除一个，
  * - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
- *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。
+ *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）；
+ * - `GET /buka-skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
+ *   过期时先回旧图、再在后台静默更新。
  *
  * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
  * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -28,6 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { describeError, parseQuery, readJsonBody, sendJson, sendMethodNotAllowed } from './http.ts'
 import { listInstallTargets, resolveInstallTarget } from './install-targets.ts'
+import { createIconCache, ICON_ROUTE } from './repo-icons.ts'
 import { addSavedRepo, listSavedRepos, removeSavedRepo } from './repo-store.ts'
 import type { SkillsCatalogService } from './service.ts'
 import type { SkillGroupInstallResult, SkillInstallResult } from './skill-install.ts'
@@ -98,6 +101,8 @@ export interface RouteDeps {
  */
 export function registerRoutes(ctx: Context, deps: RouteDeps): void {
   const { homes, catalog, readSnapshot, serializeSkills } = deps
+  // 仓库头像：按 owner 落盘缓存，页面每次只问本路由。
+  const icons = createIconCache({ homes })
 
   // ---- HTTP 路由：浏览器一半的列表与卸载 ---------------------------------
 
@@ -433,6 +438,46 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
           },
         }),
       `buka-skills: GET ${REPO_SKILLS_ROUTE}`,
+    )
+
+    // ---- 仓库头像 ----------------------------------------------------------
+    // 页面只请求本路由；磁盘缓存命中时直接返回，过期时也在后台静默更新，
+    // 不让一次头像刷新阻塞列表渲染。
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ICON_ROUTE,
+          handler: async (req, res) => {
+            if (rejected(req, res)) return
+            if (req.method !== 'GET') {
+              sendMethodNotAllowed(res, 'GET')
+              return
+            }
+            const query = parseQuery(req)
+            try {
+              const image = await icons.load(query.get('owner') ?? '')
+              if (image === null) {
+                res.statusCode = 404
+                res.setHeader('cache-control', 'no-store')
+                res.end()
+                return
+              }
+              res.statusCode = 200
+              res.setHeader('content-type', image.contentType)
+              res.setHeader('content-length', String(image.data.byteLength))
+              // 浏览器短暂缓存；过期后重新问 Host，Host 仍然先回磁盘缓存。
+              res.setHeader('cache-control', 'private, max-age=300')
+              res.end(image.data)
+            } catch {
+              res.statusCode = 500
+              res.setHeader('cache-control', 'no-store')
+              res.end()
+            }
+          },
+        }),
+      `buka-skills: GET ${ICON_ROUTE}`,
     )
   })
 }

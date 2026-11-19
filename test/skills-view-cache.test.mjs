@@ -62,7 +62,7 @@ const source = normalize(readClientSource(CLIENT_BUILD))
 
 test('收藏页缓存键是带版本的 dsh. 键，版本不符按没有缓存处理', () => {
   assert.ok(source.includes("const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'"), '缓存键变了或丢了')
-  assert.ok(source.includes('const VIEW_CACHE_VERSION = 2'), '缓存格式版本丢了')
+  assert.ok(source.includes('const VIEW_CACHE_VERSION = 3'), '缓存格式版本丢了')
   // TS 版本从 JSON.parse 的结果取了类型化的 `record` 再比较，变量名不再是 `parsed`；
   // 只按「取 version 与常量比较」定位，不绑局部变量名。
   assert.match(

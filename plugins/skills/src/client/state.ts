@@ -1,5 +1,5 @@
 /**
- * 页面状态与请求：一个 Hook 管住「已安装」与「收藏」两个面板的数据。
+ * 页面状态与请求：一个 Hook 管住「技能仓库」与「全局技能」两个面板的数据。
  *
  * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
  * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
@@ -72,7 +72,7 @@ import { readViewCache, writeViewCache } from './view-cache.ts'
  * @param t 翻译函数
  */
 function useSkillsPageState(t: Translate): SkillsPageState {
-  const [tab, setTab] = React.useState<PageTab>('installed')
+  const [tab, setTab] = React.useState<PageTab>('repos')
   const [installed, setInstalled] = React.useState<LoadedState<InstalledSnapshot>>({
     data: null,
     error: null,
@@ -84,6 +84,9 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     loading: true,
   })
   const [reloadKey, setReloadKey] = React.useState(0)
+  // 检查更新是自动的：每次列表（首次挂载 / 点「刷新」）落地后查一次，
+  // 安装后的局部重读不再重复检查。这个标记表示「这一轮列表还没查过」。
+  const pendingCheckRef = React.useRef(true)
   const [notice, setNotice] = React.useState<Notice | null>(null)
   const [busy, setBusy] = React.useState<string | null>(null)
   // 检查 / 更新的状态：结果按已安装行的键（scope:id）存，行内直接显示状态标记。
@@ -135,6 +138,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   // 数据一起刷新，切 Tab 时不再发请求。
   React.useEffect(() => {
     let cancelled = false
+    pendingCheckRef.current = true
     setInstalled((prev) => ({ ...prev, loading: true, error: null }))
     setSaved((prev) => ({ ...prev, loading: true, error: null }))
     requestJson<InstalledSnapshot>(LIST_ROUTE).then(
@@ -167,6 +171,17 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const storeCorrupt = savedData !== null && savedData.corrupt === true
   const loading = tab === 'installed' ? installed.loading : saved.loading
   const hasUpdates = Object.values(checkResults).some((entry) => entry.status === 'update')
+
+  // 列表落地后自动检查更新：页面打开、点「刷新」都会走到这里。检查是只读的，
+  // 结果只更新行内状态标记；安装 / 更新后的局部列表重读不会再次触发。
+  React.useEffect(() => {
+    if (installed.loading || installedData === null) return
+    if (!pendingCheckRef.current) return
+    if (checking || updating) return
+    pendingCheckRef.current = false
+    if (skills.length === 0) return
+    void checkUpdates()
+  }, [installed.loading, installedData, skills.length, checking, updating])
 
   // 已安装的 skill 来自哪些仓库：收藏行据此标「已安装」。
   const installedRepos = React.useMemo(() => {
@@ -219,7 +234,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     writeViewCache({ expandedRepos, collapsedDirs, trees })
   }, [expandedRepos, collapsedDirs, trees])
 
-  // 从本地缓存恢复出来的树可能已经过期：切到「收藏」Tab 后，用 Host 的磁盘
+  // 从本地缓存恢复出来的树可能已经过期：切到「技能仓库」Tab 后，用 Host 的磁盘
   // 缓存（必要时才重新拉取仓库）在后台校正。请求期间保留旧树，不会从
   // 「有列表」退回「加载中」。只做一次，之后由展开动作与「刷新」按钮触发。
   const revalidatedRef = React.useRef(false)
@@ -231,7 +246,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     }
   }, [tab, savedData])
 
-  // 切到「收藏」Tab 后静默探测每个可列出 skills 的收藏的仓库类型：这是
+  // 切到「技能仓库」Tab 后静默探测每个可列出 skills 的收藏的仓库类型：这是
   // 轻量请求（Host 只读仓库树 / 本地克隆），不阻塞列表渲染，
   // 结果只影响标题行的徽标。已经探测过（含探测中、探测失败）的卡片不重复
   // 发请求，想强制重探走顶部「刷新」。
@@ -399,7 +414,8 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 检查全局 skill 的更新；结果只影响「已安装」面板的状态标记与提示。
+   * 检查全局 skill 的更新；由列表落地后的自动检查调用，结果只影响「全局技能」
+   * 面板的状态标记与提示。
    */
   async function checkUpdates(): Promise<void> {
     if (checking || updating) return
@@ -446,8 +462,8 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 只重读「已安装」列表：安装成功后调用，让新 skill 立刻出现在第一页，
-   * 收藏页的「已安装」标记也随之更新。不刷新仓库树与探测，省掉一轮网络请求。
+   * 只重读「全局技能」列表：安装成功后调用，让新 skill 立刻出现在列表里，
+   * 技能仓库页的「已安装」标记也随之更新。不刷新仓库树与探测，省掉一轮网络请求。
    */
   async function refreshInstalled(): Promise<void> {
     try {
@@ -759,7 +775,6 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     checkResults,
     checkMessage,
     hasUpdates,
-    checkUpdates,
     updateSkills,
     confirming,
     setConfirming,

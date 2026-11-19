@@ -286,15 +286,21 @@ window.__ModuleLoader__.load({
     const PANEL_ID = "buka-skills";
     /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
     const SAVE_FORM_ID = "buka-skills-save-form";
-    /** Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。 */
+    /**
+    * Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。
+    *
+    * 「技能仓库」在前、默认选中；「全局技能」列出已安装的 skill。
+    */
     const TABS = [{
-    	value: "installed",
-    	id: "buka-skills-tab-installed",
-    	panelId: "buka-skills-panel-installed"
-    }, {
     	value: "repos",
+    	labelKey: "tabRepos",
     	id: "buka-skills-tab-repos",
     	panelId: "buka-skills-panel-repos"
+    }, {
+    	value: "installed",
+    	labelKey: "tabInstalled",
+    	id: "buka-skills-tab-installed",
+    	panelId: "buka-skills-panel-installed"
     }];
     // .build/skills/client/api.js
     /**
@@ -314,6 +320,7 @@ window.__ModuleLoader__.load({
     const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
     const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
     const CHECK_ROUTE = "/buka-skills/check";
+    const ICON_ROUTE = "/buka-skills/icon";
     const UPDATE_ROUTE = "/buka-skills/update";
     /**
     * 取错误上的 `code` 字段（Host 的失败响应带它）。
@@ -366,23 +373,22 @@ window.__ModuleLoader__.load({
     * @param node Host 返回的树节点
     */
     function countSkills(node) {
-    	if (node.type === "skill") return 1;
-    	const children = Array.isArray(node.children) ? node.children : [];
-    	let total = 0;
-    	for (const child of children) total += countSkills(child);
+    	let total = node.type === "skill" ? 1 : 0;
+    	for (const child of Array.isArray(node.children) ? node.children : []) total += countSkills(child);
     	return total;
     }
     /**
-    * 一个树节点里的全部 skill 叶子；目录按深度优先展开。
+    * 一个树节点里的全部 skill 叶子；目录与 skill 子节点按深度优先展开。
     *
     * 目录行上的「全部安装」用它收集要装的 skill；目录节点的 `path` 只是展示
-    * 分组键（npx 仓库是插件名，marketplace 是插件根），不能当仓库路径用。
+    * 分组键，skill 叶子的 `path` 是包含 SKILL.md 的目录路径，直接交给安装路由。
     *
     * @param node Host 返回的树节点
     */
     function skillLeavesOf(node) {
-    	if (node.type === "skill") return [node];
-    	return (Array.isArray(node.children) ? node.children : []).flatMap((child) => skillLeavesOf(child));
+    	const children = Array.isArray(node.children) ? node.children : [];
+    	if (node.type === "skill") return [node, ...children.flatMap((child) => skillLeavesOf(child))];
+    	return children.flatMap((child) => skillLeavesOf(child));
     }
     /**
     * 对话框里一类目标的条目；快照缺字段时当作空列表。
@@ -438,6 +444,7 @@ window.__ModuleLoader__.load({
     *
     * 只做纯字符串判断：是否可打开网页、是否能让 Host 去列 skills。真正的来源
     * 分类在 Host 的 `repo-store.ts`，这里只按同一套规则给页面做即时反馈。
+    * 仓库头像的缓存与更新在 Host（`/buka-skills/icon`），这里只拼请求地址。
     *
     * @module @buka/dsh-plugin-skills/client/repo-source
     */
@@ -509,12 +516,22 @@ window.__ModuleLoader__.load({
     	return "";
     }
     /**
-    * 仓库图标地址：GitHub 的 owner 头像；没有可靠图标时返回空串，调用方回退到
-    * 内置图标。只拼 GitHub 官方域名，来源里的 owner 已由正则限定字符集。
+    * 仓库图标地址：Host 的头像缓存路由；没有可靠 owner 时返回空串，调用方回退到
+    * 内置图标。Host 命中磁盘缓存就直接返回，未命中才去 GitHub 拉一次。
     *
     * @param value 来源或来源链接
     */
     function repoIconUrl(value) {
+    	const owner = githubOwnerOf(value);
+    	return owner === "" ? "" : `${ICON_ROUTE}?owner=${encodeURIComponent(owner)}`;
+    }
+    /**
+    * 直连 GitHub 的头像地址。只在 Host 图标路由不可用时作为退路：旧版 Host 还没
+    * 注册 `/buka-skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
+    *
+    * @param value 来源或来源链接
+    */
+    function repoDirectIconUrl(value) {
     	const owner = githubOwnerOf(value);
     	return owner === "" ? "" : `https://github.com/${owner}.png?size=80`;
     }
@@ -562,10 +579,10 @@ window.__ModuleLoader__.load({
     /**
     * 本地缓存的格式版本；版本不符就当没有缓存，不做迁移。
     *
-    * v2：npx 仓库的树改为按 `npx skills` 清单平铺/按插件分组（不再按仓库物理
-    * 目录分组），v1 缓存里的旧树形状已经不对，直接丢弃重新拉。
+    * v3：技能叶子改为包含 SKILL.md 的目录（v2 及更早缓存里的叶子指向 SKILL.md
+    * 文件，还会多套一层目录），旧树直接丢弃重新拉。
     */
-    const VIEW_CACHE_VERSION = 2;
+    const VIEW_CACHE_VERSION = 3;
     /**
     * 取 localStorage；隐私模式、没有 window 或 storage 被禁用时返回 null。
     * 缓存是可重建的页面状态，任何访问失败都不该让页面挂掉。
@@ -676,7 +693,7 @@ window.__ModuleLoader__.load({
     }
     // .build/skills/client/state.js
     /**
-    * 页面状态与请求：一个 Hook 管住「已安装」与「收藏」两个面板的数据。
+    * 页面状态与请求：一个 Hook 管住「技能仓库」与「全局技能」两个面板的数据。
     *
     * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
     * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
@@ -694,7 +711,7 @@ window.__ModuleLoader__.load({
     * @param t 翻译函数
     */
     function useSkillsPageState(t) {
-    	const [tab, setTab] = react.default.useState("installed");
+    	const [tab, setTab] = react.default.useState("repos");
     	const [installed, setInstalled] = react.default.useState({
     		data: null,
     		error: null,
@@ -706,6 +723,7 @@ window.__ModuleLoader__.load({
     		loading: true
     	});
     	const [reloadKey, setReloadKey] = react.default.useState(0);
+    	const pendingCheckRef = react.default.useRef(true);
     	const [notice, setNotice] = react.default.useState(null);
     	const [busy, setBusy] = react.default.useState(null);
     	const [checking, setChecking] = react.default.useState(false);
@@ -737,6 +755,7 @@ window.__ModuleLoader__.load({
     	const [probes, setProbes] = react.default.useState({});
     	react.default.useEffect(() => {
     		let cancelled = false;
+    		pendingCheckRef.current = true;
     		setInstalled((prev) => ({
     			...prev,
     			loading: true,
@@ -784,6 +803,20 @@ window.__ModuleLoader__.load({
     	const storeCorrupt = savedData !== null && savedData.corrupt === true;
     	const loading = tab === "installed" ? installed.loading : saved.loading;
     	const hasUpdates = Object.values(checkResults).some((entry) => entry.status === "update");
+    	react.default.useEffect(() => {
+    		if (installed.loading || installedData === null) return;
+    		if (!pendingCheckRef.current) return;
+    		if (checking || updating) return;
+    		pendingCheckRef.current = false;
+    		if (skills.length === 0) return;
+    		checkUpdates();
+    	}, [
+    		installed.loading,
+    		installedData,
+    		skills.length,
+    		checking,
+    		updating
+    	]);
     	const installedRepos = react.default.useMemo(() => {
     		const keys = /* @__PURE__ */ new Set();
     		for (const skill of skills) for (const value of [skill.npxSource, skill.npxSourceUrl]) {
@@ -1029,7 +1062,8 @@ window.__ModuleLoader__.load({
     		return indexed;
     	}
     	/**
-    	* 检查全局 skill 的更新；结果只影响「已安装」面板的状态标记与提示。
+    	* 检查全局 skill 的更新；由列表落地后的自动检查调用，结果只影响「全局技能」
+    	* 面板的状态标记与提示。
     	*/
     	async function checkUpdates() {
     		if (checking || updating) return;
@@ -1068,8 +1102,8 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 只重读「已安装」列表：安装成功后调用，让新 skill 立刻出现在第一页，
-    	* 收藏页的「已安装」标记也随之更新。不刷新仓库树与探测，省掉一轮网络请求。
+    	* 只重读「全局技能」列表：安装成功后调用，让新 skill 立刻出现在列表里，
+    	* 技能仓库页的「已安装」标记也随之更新。不刷新仓库树与探测，省掉一轮网络请求。
     	*/
     	async function refreshInstalled() {
     		try {
@@ -1367,7 +1401,6 @@ window.__ModuleLoader__.load({
     		checkResults,
     		checkMessage,
     		hasUpdates,
-    		checkUpdates,
     		updateSkills,
     		confirming,
     		setConfirming,
@@ -1414,10 +1447,15 @@ window.__ModuleLoader__.load({
     }
     // .build/skills/client/components/repo-avatar.js
     /**
-    * 仓库头像：GitHub owner 的头像图片，拿不到头像时回退到调用方给的内置图标。
+    * 仓库头像：Host 图标缓存路由返回的 GitHub owner 头像，拿不到时回退到调用方
+    * 给的内置图标。
     *
-    * 头像只用于识别来源，不承载文案，所以 `alt` 留空并按装饰图处理；加载失败
-    * （离线、被 CSP 拦下、来源不是 GitHub）时不再重试，直接显示内置图标。失败
+    * 加载顺序：Host 图标缓存路由 → 直连 GitHub → 内置图标。旧版 Host 还没注册
+    * 图标路由时（或路由暂时不可用）自动退回直连，避免页面上的头像整体消失。
+    *
+    * Host 有磁盘缓存时直接返回；缓存过期也在后台静默更新，不阻塞列表渲染。
+    * 头像只用于识别来源，不承载文案，所以 `alt` 留空并按装饰图处理；最终加载
+    * 失败（离线、来源不是 GitHub、两次都拉不到）时不再重试，显示内置图标。失败
     * 记在具体的 URL 上，来源换了会重新尝试。
     *
     * @module @buka/dsh-plugin-skills/client/components/repo-avatar
@@ -1428,12 +1466,15 @@ window.__ModuleLoader__.load({
     * @param props 来源、尺寸与回退图标
     */
     function RepoAvatar(props) {
-    	const url = repoIconUrl(props.source);
-    	const [failedUrl, setFailedUrl] = (0, react.useState)(null);
-    	if (url === "" || failedUrl === url) return props.fallback;
+    	const routeUrl = repoIconUrl(props.source);
+    	const directUrl = repoDirectIconUrl(props.source);
+    	const [failedRoute, setFailedRoute] = (0, react.useState)(null);
+    	const [failedDirect, setFailedDirect] = (0, react.useState)(null);
+    	const src = failedRoute === routeUrl && directUrl !== "" ? directUrl : routeUrl;
+    	if (routeUrl === "" || failedDirect === src || failedRoute === routeUrl && directUrl === "") return props.fallback;
     	return h("img", {
     		className: "buka-skills-avatar",
-    		src: url,
+    		src,
     		alt: "",
     		"aria-hidden": true,
     		width: props.size,
@@ -1441,17 +1482,20 @@ window.__ModuleLoader__.load({
     		loading: "lazy",
     		decoding: "async",
     		referrerPolicy: "no-referrer",
-    		onError: () => setFailedUrl(url)
+    		onError: () => {
+    			if (src === routeUrl) setFailedRoute(routeUrl);
+    			else setFailedDirect(src);
+    		}
     	});
     }
     // .build/skills/client/components/installed-panel.js
     /**
-    * 「已安装」面板：两个全局根下的 skill 卡片、检查 / 更新入口、lockfile 提示
-    * 与卸载按钮。
+    * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与更新入口、
+    * lockfile 提示与卸载按钮。
     *
-    * 检查结果按 `update` / `modified` / `up-to-date` / `unsupported-source` /
-    * `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用按钮。数据与动作由
-    * 页面状态（`useSkillsPageState`）提供。
+    * 检查由页面在列表落地后自动发起，结果按 `update` / `modified` / `up-to-date` /
+    * `unsupported-source` / `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用
+    * 按钮。数据与动作由页面状态（`useSkillsPageState`）提供。
     *
     * @module @buka/dsh-plugin-skills/client/components/installed-panel
     */
@@ -1540,12 +1584,12 @@ window.__ModuleLoader__.load({
     	}, t("uninstall"));
     }
     /**
-    * 「已安装」页：卡片列表、lockfile 提示与卸载按钮。
+    * 「全局技能」页：卡片列表、lockfile 提示与卸载按钮。
     *
     * @param state 页面状态与动作
     */
     function renderInstalled(state) {
-    	const { t, skills, busy, checking, updating, checkResults, checkMessage, hasUpdates, checkUpdates, updateSkills, confirming, setConfirming, uninstall, installed, installedData } = state;
+    	const { t, skills, busy, checking, updating, checkResults, checkMessage, hasUpdates, updateSkills, confirming, setConfirming, uninstall, installed, installedData } = state;
     	const anyCheckBusy = checking || updating;
     	const rows = skills.map((entry) => {
     		const source = sourceTagOf(entry, t);
@@ -1580,19 +1624,16 @@ window.__ModuleLoader__.load({
     		className: "buka-skills-emptyIcon",
     		"aria-hidden": true
     	}, h(IconSkillOutlineRegular, { size: 28 })), h("p", { className: "buka-skills-emptyTitle" }, t("empty")), h("p", { className: "buka-skills-emptyHint" }, t("emptyHint")), rootsTip);
-    	return h("div", { className: "buka-skills-panel" }, h("div", { className: "buka-skills-panelActions" }, checkMessage === null ? null : h("p", {
+    	return h("div", { className: "buka-skills-panel" }, h("div", { className: "buka-skills-panelActions" }, checking ? h("p", {
+    		className: "buka-skills-statusWithDot",
+    		role: "status"
+    	}, h(StateDot, {
+    		state: "ongoing",
+    		size: 13
+    	}), t("checkingUpdates")) : checkMessage === null ? null : h("p", {
     		className: "buka-skills-meta",
     		role: "status"
     	}, checkMessage), h(Button, {
-    		variant: "outline",
-    		size: "sm",
-    		icon: checking ? h(StateDot, {
-    			state: "ongoing",
-    			size: 13
-    		}) : h(IconRefreshOutlineRegular, { size: 13 }),
-    		disabled: anyCheckBusy,
-    		onClick: () => void checkUpdates()
-    	}, checking ? t("checkingUpdates") : t("checkUpdates")), h(Button, {
     		variant: "primary",
     		size: "sm",
     		icon: updating ? h(StateDot, {
@@ -1819,7 +1860,8 @@ window.__ModuleLoader__.load({
     	}
     	/**
     	* 递归渲染树节点：目录可折叠并带「全部安装」，skill 是叶子（名称 + 一行
-    	* 描述 + 三个安装入口）。
+    	* 描述 + 三个安装入口）。skill 叶子下如果还有嵌套 skill（目录自己带
+    	* SKILL.md 又套了子 skill），子节点继续按树渲染在行下方。
     	*
     	* @param repo 一条收藏
     	* @param node Host 返回的树节点
@@ -1844,6 +1886,7 @@ window.__ModuleLoader__.load({
     		const description = typeof node.description === "string" ? node.description : "";
     		const installed = installedSkillKeys.has(skillKeyOf(node.name));
     		const busy = installing === installKeyOf(repo, node);
+    		const children = Array.isArray(node.children) ? node.children : [];
     		return h("li", {
     			className: "buka-skills-treeItem",
     			key: node.path
@@ -1853,7 +1896,7 @@ window.__ModuleLoader__.load({
     		}, h("span", {
     			className: "buka-skills-treeSkillIcon",
     			"aria-hidden": true
-    		}, h(IconSkillOutlineRegular, { size: 14 })), h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), renderActions(repo, node, installed, busy, () => installSkill(repo, node))));
+    		}, h(IconSkillOutlineRegular, { size: 14 })), h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), renderActions(repo, node, installed, busy, () => installSkill(repo, node))), children.length === 0 ? null : h("ul", { className: "buka-skills-treeGroup" }, ...children.map((child) => renderTreeNode(repo, child))));
     	}
     	return {
     		renderTree,
@@ -1893,7 +1936,7 @@ window.__ModuleLoader__.load({
     	}
     }
     /**
-    * 「收藏」页：卡片列表与「已安装」标记；新增走标题行右侧的「收藏」按钮。
+    * 「技能仓库」页：卡片列表与「已安装」标记；新增走标题行右侧的「收藏」按钮。
     *
     * @param state 页面状态与动作
     */
@@ -2114,12 +2157,12 @@ window.__ModuleLoader__.load({
     		onChange: (value) => switchTab(value),
     		items: [{
     			value: TABS[0].value,
-    			label: t("tabInstalled"),
+    			label: t(TABS[0].labelKey),
     			id: TABS[0].id,
     			panelId: TABS[0].panelId
     		}, {
     			value: TABS[1].value,
-    			label: t("tabRepos"),
+    			label: t(TABS[1].labelKey),
     			id: TABS[1].id,
     			panelId: TABS[1].panelId
     		}]
@@ -2175,13 +2218,13 @@ window.__ModuleLoader__.load({
     	title: "Skills",
     	subtitle: "Manage the global skills shared by every session, and save the sources you install from.",
     	tabsLabel: "Skill sections",
-    	tabInstalled: "Installed",
-    	tabRepos: "Saved",
+    	tabInstalled: "Global skills",
+    	tabRepos: "Skill repositories",
     	refresh: "Refresh",
     	loading: "Loading…",
     	loadFailed: "Request failed:",
     	empty: "No global skills are installed.",
-    	emptyHint: "Pick a source in the Saved tab to install one, or run npx skills add in a terminal.",
+    	emptyHint: "Pick a source in the Skill repositories tab to install one, or run npx skills add in a terminal.",
     	badgeNpx: "npx skills",
     	badgeManual: "manual",
     	uninstall: "Uninstall",
@@ -2258,7 +2301,6 @@ window.__ModuleLoader__.load({
     	treeRefreshWarning: "Could not refresh the local clone; showing the cached copy:",
     	kindNpx: "npx skills",
     	kindUnavailable: "unavailable",
-    	checkUpdates: "Check for updates",
     	checkingUpdates: "Checking…",
     	updateSkills: "Update",
     	updatingSkills: "Updating…",
@@ -2277,13 +2319,13 @@ window.__ModuleLoader__.load({
     	title: "Skills",
     	subtitle: "管理对所有会话生效的全局 skills，并收藏常用的来源。",
     	tabsLabel: "Skills 页面分区",
-    	tabInstalled: "已安装",
-    	tabRepos: "收藏",
+    	tabInstalled: "全局技能",
+    	tabRepos: "技能仓库",
     	refresh: "刷新",
     	loading: "正在读取…",
     	loadFailed: "请求失败：",
     	empty: "还没有安装任何全局 skill。",
-    	emptyHint: "在「收藏」里挑一个来源安装，或在终端运行 npx skills add。",
+    	emptyHint: "在「技能仓库」里挑一个来源安装，或在终端运行 npx skills add。",
     	badgeNpx: "npx skills",
     	badgeManual: "manual",
     	uninstall: "卸载",
@@ -2360,7 +2402,6 @@ window.__ModuleLoader__.load({
     	treeRefreshWarning: "刷新本地克隆失败，当前显示的是缓存副本：",
     	kindNpx: "npx skills",
     	kindUnavailable: "不可用",
-    	checkUpdates: "检查更新",
     	checkingUpdates: "检查中…",
     	updateSkills: "更新",
     	updatingSkills: "更新中…",
@@ -2382,7 +2423,7 @@ window.__ModuleLoader__.load({
     * 主题 token 和 DSH 的圆角/焦点 token，不写死色值。
     *
     * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
-    * 「已安装」比视口高、出现滚动条，「收藏」没有；滚动条一出现/一消失，
+    * 「全局技能」比视口高、出现滚动条，「技能仓库」没有；滚动条一出现/一消失，
     * 内容盒就窄/宽一个滚动条宽度，居中的标题、Tab 行和列表整体左右平移
     * 半个滚动条宽度——切 Tab 时看起来就是整页左右抖一下。`scrollbar-gutter:
     * stable` 常驻预留滚动条槽位，两个 Tab 内容盒等宽，版面不再跟着滚动条跳。
@@ -2409,6 +2450,7 @@ window.__ModuleLoader__.load({
     .buka-skills-panel{display:flex;flex-direction:column;gap:16px}
     .buka-skills-panelActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
     .buka-skills-panelActions>.buka-skills-meta{flex:1 1 auto}
+    .buka-skills-panelActions>.buka-skills-statusWithDot{flex:1 1 auto}
     .buka-skills-status{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
     .buka-skills-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
     .buka-skills-failure{color:var(--dsw-alias-state-error-primary);align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}
@@ -2497,21 +2539,22 @@ window.__ModuleLoader__.load({
     *
     * 页面顶部只有两个 Tab，不放说明文字：
     *
-    * - 「已安装」：两个全局 skills 根目录下现有的 skill，标注哪些由 skills 库
-    *   管理，并提供检查 / 更新与按来源选择的卸载入口；检查结果按
-    *   `update` / `modified` / `up-to-date` / `unsupported-source` / `failed`
-    *   在行内标出；
-    * - 「收藏」：用户自己记下的 skill 来源（`owner/repo`、GitHub/GitLab 等 git
-    *   地址、本地绝对路径或包名），用于以后安装时随手取用；点标题打开仓库，
-    *   卡片右侧的「删除」按钮与已安装列表的卸载按钮同款（outline + 危险色）。
-    *   来源只认仓库根 `skills/` 下（任意层级）的 SKILL.md：打开收藏页后会对
-    *   每个可列出 skills 的收藏静默探测仓库类型（`probe=1`，只读仓库树，不阻塞
+    * - 「技能仓库」（默认选中）：用户自己记下的 skill 来源（`owner/repo`、
+    *   GitHub/GitLab 等 git 地址、本地绝对路径或包名），用于以后安装时随手
+    *   取用；点标题打开仓库，卡片右侧的「删除」按钮与已安装列表的卸载按钮
+    *   同款（outline + 危险色）。
+    *   来源只认仓库根 `skills/` 下（任意层级）的 SKILL.md：打开技能仓库后会对
+    *   每个可列出 skills 的仓库静默探测类型（`probe=1`，只读仓库树，不阻塞
     *   列表），标题行标出「npx skills」或「不可用」。展开后的每个 skill 右侧有
     *   三个入口：「全局安装」「安装到执行者」「安装到工作区」。后两个打开对话框，
     *   分别列出 `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
     *   工作区；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾
     *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个
     *   skill 交给 Host 逐个安装，已装过的跳过。
+    * - 「全局技能」：两个全局 skills 根目录下现有的 skill，标注哪些由 skills 库
+    *   管理，并提供按来源选择的卸载入口。列表落地后自动检查更新，结果按
+    *   `update` / `modified` / `up-to-date` / `unsupported-source` / `failed`
+    *   在行内标出；有更新时页面提供「更新」按钮。
     *
     * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
     * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。

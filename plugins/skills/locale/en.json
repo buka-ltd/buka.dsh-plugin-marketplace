@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Buka Skills",
-    "description": "Adds a Skills page to the sidebar: Installed lists the skills installed globally for every DSH session, marks the ones the skills library manages, and checks or applies updates through the same library; Saved keeps a personal list of skill sources, probes each listable source as a standard npx repository (only SKILL.md under the root skills/ directory) or unavailable, and expands the usable ones into a cached tree. Any skill or directory can be installed globally, into a worker, or into a registered workspace; install, uninstall and update share one queue, and the workers page can update one worker or every worker in sequence.",
+    "description": "Adds a Skills page to the sidebar: Skill repositories keeps a personal list of skill sources, probes each listable source as a standard npx repository (only SKILL.md under the root skills/ directory) or unavailable, and expands the usable ones into a cached tree; any skill or directory can be installed globally, into a worker, or into a registered workspace. Global skills lists the skills installed globally for every DSH session, marks the ones the skills library manages, and checks for updates automatically once the list loads. Install, uninstall and update share one queue, and the workers page can update one worker at a time or every worker in sequence.",
     "detail": "docs/DETAIL.md"
   }
 }

@@ -132,20 +132,49 @@ test('发现：只认仓库根 skills/ 下任意深度的 SKILL.md，根与 agen
   assert.ok(clone.args.includes('--single-branch'))
   assert.ok(clone.args.includes('--no-tags'))
 
-  // 展示树保留物理目录结构：skills/top 与 skills/deep/nested。
-  const top = result.root.find((node) => node.type === 'dir' && node.name === 'top')
-  assert.ok(top, '顶层目录 top 应在根上')
+  // 含 SKILL.md 的目录本身就是技能叶子；不含 SKILL.md 的目录只做分组。
+  const top = result.root.find((node) => node.type === 'skill' && node.name === 'top')
+  assert.ok(top, 'skills/top 应直接是根上的技能叶子')
   assert.equal(top.path, 'skills/top')
-  assert.deepEqual(
-    top.children.map((node) => ({ name: node.name, path: node.path })),
-    [{ name: 'top', path: 'skills/top/SKILL.md' }],
-  )
+  assert.deepEqual(top.children, [], '叶子下没有嵌套 skill 时 children 为空')
   const deep = result.root.find((node) => node.type === 'dir' && node.name === 'deep')
-  assert.ok(deep)
+  assert.ok(deep, 'skills/deep 不含 SKILL.md，应保留为分组目录')
+  assert.equal(deep.path, 'skills/deep')
   const nested = deep.children[0]
-  assert.equal(nested.type, 'dir')
-  assert.equal(nested.children[0].name, 'nested')
-  assert.equal(nested.children[0].description, 'Nested skill')
+  assert.equal(nested.type, 'skill')
+  assert.equal(nested.name, 'nested')
+  assert.equal(nested.path, 'skills/deep/nested')
+  assert.equal(nested.description, 'Nested skill')
+})
+
+test('建树：目录自己带 SKILL.md 时是叶子，嵌套 skill 挂在叶子的 children 下', async (t) => {
+  const { homes, root } = await tempHomes(t)
+  const fixture = path.join(root, 'nested-fixture')
+  await writeRel(fixture, 'skills/SKILL.md', skillFile('root-skill'))
+  await writeRel(fixture, 'skills/top/SKILL.md', skillFile('top'))
+  await writeRel(fixture, 'skills/parent/SKILL.md', skillFile('parent'))
+  await writeRel(fixture, 'skills/parent/child/SKILL.md', skillFile('child'))
+  const git = createGit({ fixture })
+
+  const result = await fetchRepoSkills({ homes, source: 'acme/nested', runGit: git.runGit })
+  assert.equal(result.ok, true)
+  assert.equal(result.skills, 4)
+  if (!result.ok) return
+  assert.equal(result.root.length, 1, '根目录自己的 SKILL.md 用一个叶子包住其余节点')
+  const [rootSkill] = result.root
+  assert.equal(rootSkill.type, 'skill')
+  assert.equal(rootSkill.name, 'root-skill')
+  assert.equal(rootSkill.path, 'skills')
+  assert.deepEqual(
+    rootSkill.children.map((node) => ({ type: node.type, name: node.name, path: node.path })),
+    [
+      { type: 'skill', name: 'parent', path: 'skills/parent' },
+      { type: 'skill', name: 'top', path: 'skills/top' },
+    ],
+  )
+  const parent = rootSkill.children[0]
+  assert.equal(parent.children[0].name, 'child')
+  assert.equal(parent.children[0].path, 'skills/parent/child')
 })
 
 test('GitHub 简写与链接收敛成同一来源与缓存键，命中缓存不重复克隆', async (t) => {

@@ -1,10 +1,10 @@
 /**
- * 「已安装」面板：两个全局根下的 skill 卡片、检查 / 更新入口、lockfile 提示
- * 与卸载按钮。
+ * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与更新入口、
+ * lockfile 提示与卸载按钮。
  *
- * 检查结果按 `update` / `modified` / `up-to-date` / `unsupported-source` /
- * `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用按钮。数据与动作由
- * 页面状态（`useSkillsPageState`）提供。
+ * 检查由页面在列表落地后自动发起，结果按 `update` / `modified` / `up-to-date` /
+ * `unsupported-source` / `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用
+ * 按钮。数据与动作由页面状态（`useSkillsPageState`）提供。
  *
  * @module @buka/dsh-plugin-skills/client/components/installed-panel
  */
@@ -16,7 +16,6 @@ import { entryKey } from '../keys.ts'
 import {
   Button,
   h,
-  IconRefreshOutlineRegular,
   IconSkillOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
@@ -140,7 +139,7 @@ function rowActions(entry: InstalledSkill, state: RowActionsState): ReactElement
 }
 
 /**
- * 「已安装」页：卡片列表、lockfile 提示与卸载按钮。
+ * 「全局技能」页：卡片列表、lockfile 提示与卸载按钮。
  *
  * @param state 页面状态与动作
  */
@@ -154,7 +153,6 @@ function renderInstalled(state: SkillsPageState): ReactElement {
     checkResults,
     checkMessage,
     hasUpdates,
-    checkUpdates,
     updateSkills,
     confirming,
     setConfirming,
@@ -259,22 +257,16 @@ function renderInstalled(state: SkillsPageState): ReactElement {
     h(
       'div',
       { className: 'buka-skills-panelActions' },
-      checkMessage === null
-        ? null
-        : h('p', { className: 'buka-skills-meta', role: 'status' }, checkMessage),
-      h(
-        Button,
-        {
-          variant: 'outline',
-          size: 'sm',
-          icon: checking
-            ? h(StateDot, { state: 'ongoing', size: 13 })
-            : h(IconRefreshOutlineRegular, { size: 13 }),
-          disabled: anyCheckBusy,
-          onClick: () => void checkUpdates(),
-        },
-        checking ? t('checkingUpdates') : t('checkUpdates'),
-      ),
+      checking
+        ? h(
+            'p',
+            { className: 'buka-skills-statusWithDot', role: 'status' },
+            h(StateDot, { state: 'ongoing', size: 13 }),
+            t('checkingUpdates'),
+          )
+        : checkMessage === null
+          ? null
+          : h('p', { className: 'buka-skills-meta', role: 'status' }, checkMessage),
       h(
         Button,
         {

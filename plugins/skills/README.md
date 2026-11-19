@@ -2,8 +2,8 @@
 
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
-- **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；可以检查更新、应用更新，并按来源决定卸载方式；
-- **收藏**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个执行者或某个已注册工作区。
+- **技能仓库**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个执行者或某个已注册工作区；
+- **全局技能**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；列表加载后自动检查更新，有更新时可一键应用，并按来源决定卸载方式。
 
 页面之外，插件把收藏、仓库内容与按目录检查 / 更新的能力开放成 Host Service `ctx.bukaSkills`，见下方[对外服务](#对外服务host-service)。
 
@@ -13,7 +13,7 @@
 
 - 安装与卸载用库 API：`installSkills` / `removeSkills`；
 - 检查与更新用同一个包自带的 CLI（`node <skills>/bin/cli.mjs check|update`），调用时设置 `DISABLE_TELEMETRY=1`、`NO_COLOR=1`；
-- 仓库发现与「已安装」列表仍由插件自己扫描：`skills` 的 `resolveSource` / `listSkills` 只认它自己的 agent 目录与默认发现规则，无法满足「只认仓库根 `skills/`」、`DSH_AGENTS_HOME` / `DSH_HOME` 两个全局根、持久克隆缓存与刷新失败保留旧克隆这些约束；发现规则与库、CLI 对齐，安装 / 卸载仍复用库的 lock 语义；
+- 仓库发现与「全局技能」列表仍由插件自己扫描：`skills` 的 `resolveSource` / `listSkills` 只认它自己的 agent 目录与默认发现规则，无法满足「只认仓库根 `skills/`」、`DSH_AGENTS_HOME` / `DSH_HOME` 两个全局根、持久克隆缓存与刷新失败保留旧克隆这些约束；发现规则与库、CLI 对齐，安装 / 卸载仍复用库的 lock 语义；
 - 运行时不再 spawn `npx`，也不再出现「找不到 npx」一类提示。
 
 `scripts/build-clients.ts` 把 `skills` 保持为外部依赖，不打包进 `lib/index.js`。
@@ -27,15 +27,15 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 | `user-agents` | `~/.agents/skills`（可用 `DSH_AGENTS_HOME` 覆盖） | skills 库、手工安装 |
 | `user-dsh`    | `~/.dsh/skills`（可用 `DSH_HOME` 覆盖）           | 手工安装            |
 
-页面对这两个目录做与 DSH 相同的一层扫描：`<name>/SKILL.md` 目录或平铺的 `<name>.md`。工作区里的 `项目/.agents/skills` 只对那个项目生效，不在「已安装」里列出。
+页面对这两个目录做与 DSH 相同的一层扫描：`<name>/SKILL.md` 目录或平铺的 `<name>.md`。工作区里的 `项目/.agents/skills` 只对那个项目生效，不在「全局技能」里列出。
 
 每个 skill 显示名称、描述、来源根与安装来源标签。描述优先取 DSH skills 注册表解析出的 frontmatter；注册表拿不到时回退到直接读 `SKILL.md` 的 `description`。
 
-## 已安装：检查与更新
+## 全局技能：检查与更新
 
 `skills` 的全局 lockfile 记录安装来源：默认 `~/.agents/.skill-lock.json`，设置了 `XDG_STATE_HOME` 时是 `$XDG_STATE_HOME/skills/.skill-lock.json`（版本 3）。判定一个 skill 由库管理需要两条同时成立：位于 `~/.agents/skills` 下，**且**名字出现在 lockfile 里。`~/.dsh/skills` 下的 skill 永远按手工安装处理。
 
-「检查更新」按 skill 返回五种状态：
+页面在列表加载后自动检查（页面打开、点「刷新」各触发一次），按 skill 返回五种状态：
 
 | 状态                 | 含义                                                                         |
 | -------------------- | ---------------------------------------------------------------------------- |
@@ -60,9 +60,9 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 
 两种方式都会在执行后确认目标真的消失。lockfile 存在却解析不了时，`~/.agents` 下的 skill 拒绝卸载（无法判断归属），`~/.dsh` 下的仍可本地删除。
 
-## 收藏
+## 技能仓库
 
-第二个 Tab 是用户自己的书签，和已安装列表互不影响：
+「技能仓库」是页面默认打开的 Tab，用来记下用户自己的书签，和全局技能列表互不影响：
 
 - 点标题行右侧的「收藏」按钮弹出对话框，填仓库与备注后提交；仓库支持 `owner/repo`、GitHub/GitLab 等网页链接、任意 git 地址（`https://`、`ssh://`、`git://`、`git@host:path`）、本地绝对路径（含 `file://`），以及安装库支持的包名（如 `notion`、`@scope/pkg`）；
 - 来源在写入前规范化：`https://github.com/foo/bar.git`、`www.github.com/foo/bar` 都会收敛成 `foo/bar`，本地路径做 `path.normalize` 并去掉尾部斜杠；再用小写值去重；
@@ -83,9 +83,11 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 - **任意 git 地址**：`git clone --depth 1 --single-branch --no-tags` 到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/git/<url 的 sha256 前 32 位>/`；
 - **本地绝对路径**：直接扫描目录（跳过 `node_modules`、`.git`、`dist`、`build` 等，有深度 / 条数 / 单文件大小上限）。
 
-展开仓库时读每个 `SKILL.md` 的 frontmatter 并建树：目录节点保留仓库里的物理目录结构，skill 节点保留完整仓库路径。名称取 frontmatter `name`，缺失时回退目录名。
+展开仓库时读每个 `SKILL.md` 的 frontmatter 并建树：一个包含 `SKILL.md` 的目录就是技能叶子，叶子路径是该目录（如 `skills/engineering/code-review`），不再为 `SKILL.md` 文件单独建节点；不含 `SKILL.md` 的目录只作分组，保留物理目录结构。名称取 frontmatter `name`，缺失时回退目录名。目录自己带 `SKILL.md` 又套了子 skill 时，子 skill 挂在叶子的 `children` 下。
 
-判定与树都会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 6），TTL 30 分钟；探测只写轻量结论（不写整棵树），展开时补全；缓存写入串行化，探测不会覆盖完整树。页面「刷新」绕过缓存重新判定 / 重拉已展开仓库。刷新本地克隆失败时保留旧克隆继续展示，并在结果 `warning` 里报告原因。
+判定与树都会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 7），TTL 30 分钟；探测只写轻量结论（不写整棵树），展开时补全；缓存写入串行化，探测不会覆盖完整树。页面「刷新」绕过缓存重新判定 / 重拉已展开仓库。刷新本地克隆失败时保留旧克隆继续展示，并在结果 `warning` 里报告原因。
+
+仓库卡片与来源标签的 GitHub owner 头像也会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/icons/`：页面请求 `GET /buka-skills/icon?owner=…`，Host 命中缓存时直接返回；缓存超过 30 分钟仍先回旧图，再在后台静默拉新图写回，不阻塞列表渲染。没有缓存时才同步拉一次。Host 路由不可用时（例如升级后还没重启 DSH，旧 Host 没有这条路由）页面退回直连 GitHub，两者都失败才显示内置图标。
 
 ## 一键安装
 
@@ -110,14 +112,14 @@ Host 侧的约束：
 
 workers 插件通过 `ctx.bukaSkills` 提供更新入口（目录由调用方解析后传入）：
 
-- 单个执行者的 Skills 页签有「更新」按钮；
+- 进入单个执行者的「技能」页签时自动检查，有更新的 skill 在行内单独「更新」，没有全局更新按钮；
 - 列表页工具栏有「更新全部执行者」：只对智能体、目录存在且有 skill 的 worker 顺序执行，机器人 / 空 skill 的 worker 跳过；单个失败不中断，最后汇总每个 worker 的结果。
 
 ## 页面与路由
 
 侧边栏出现一个「Skills」图标。视觉与控件复用 DSH 的基座模块，布局照 Plugins 页面。页面只做展示与触发，数据都走 Host 路由：
 
-`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET /buka-skills/check`、`POST /buka-skills/update`、`GET /buka-skills/targets`、`POST /buka-skills/install`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`。
+`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET /buka-skills/check`、`POST /buka-skills/update`、`GET /buka-skills/targets`、`POST /buka-skills/install`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`、`GET /buka-skills/icon?owner=…`。
 
 展开状态与上次拿到的树缓存在浏览器 localStorage（`dsh.buka-skills.view.v1`）。
 
@@ -139,12 +141,12 @@ export function apply(ctx) {
 
 ### 方法
 
-| 方法                               | 返回                                                                         | 说明                                                                                                  |
-| ---------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `listRepositories({ refresh? })`   | `{ file, exists, corrupt, repositories }`                                    | 收藏的仓库；每条带 `kind`（`npx-skills` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因 |
-| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path }`                                 |
-| `checkSkills({ dir? })`            | `{ ok: true, scope, results[, message] }`                                    | 检查全局（省略 `dir`）或某个目标目录；每条 `{ name, source, status, message? }`                       |
-| `updateSkills({ dir? })`           | `{ ok: true, scope, updated, skipped, failed, message }`                     | 只应用 `update`；`modified` 跳过并说明；失败项带 `message` / `output`                                 |
+| 方法                               | 返回                                                                         | 说明                                                                                                     |
+| ---------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `listRepositories({ refresh? })`   | `{ file, exists, corrupt, repositories }`                                    | 收藏的仓库；每条带 `kind`（`npx-skills` / `unavailable` / `unknown`）、预计 `skills` 数与探测失败原因    |
+| `listSkills({ source, refresh? })` | `{ ok: true, source, kind, ref, sha, fetchedAt, cached, truncated, skills }` | 仓库里所有可安装 skill 的扁平列表；每条 `{ name, description, path }`，`path` 是包含 SKILL.md 的目录     |
+| `checkSkills({ dir? })`            | `{ ok: true, scope, results[, message] }`                                    | 检查全局（省略 `dir`）或某个目标目录；每条 `{ name, source, status, message? }`                          |
+| `updateSkills({ dir?, skills? })`  | `{ ok: true, scope, updated, skipped, failed, message }`                     | 只应用 `update`；`skills` 按名字把候选收窄到指定项；`modified` 跳过并说明；失败项带 `message` / `output` |
 
 本地路径来源的 `ref` 是 `worktree`、`sha` 为空串；远端来源的 `ref` 是 `HEAD`、`sha` 取克隆当前的提交号。失败统一返回 `{ ok: false, code, message }`：`invalid-source`、`unsupported-source`、`repo-not-found`、`rate-limited`、`fetch-failed`、`repo-unavailable`、`git-unavailable`、`git-failed`，检查 / 更新另加 `check-failed`、`lock-unreadable`、`unsupported-home`。
 
@@ -167,16 +169,17 @@ export function apply(ctx) {
 | `src/npx-lock.ts`                              | `skills` 全局 lockfile 的位置与记录解析                                                                |
 | `src/repo-store.ts`                            | 收藏来源规范化 / 分类 / 去重 / 原子读写                                                                |
 | `src/repo-skills.ts`、`src/repo/**`            | 仓库发现与缓存：只认根 `skills/`，远端浅克隆，本地扫描，请求合并与 TTL 缓存                            |
+| `src/repo-icons.ts`                            | GitHub owner 头像缓存：磁盘优先、过期后台静默更新                                                      |
 | `src/git-source.ts`                            | git 克隆缓存与刷新；刷新失败保留旧克隆并返回 warning                                                   |
 | `src/local-source.ts`                          | 本地目录读取抽象：递归遍历与限定在根目录内的文件读取                                                   |
 | `src/install-targets.ts`                       | 执行者 / 工作区目标解析                                                                                |
 | `src/routes.ts`、`src/tools.ts`、`src/http.ts` | 包内路由、只读工具与请求 / 响应辅助                                                                    |
-| `src/client/**`                                | 两个 Tab（已安装 / 收藏）、页面状态、请求、词典与样式                                                  |
+| `src/client/**`                                | 两个 Tab（技能仓库 / 全局技能）、页面状态、请求、词典与样式                                            |
 | `lib/index.js`、`lib/client.js`                | 构建产物：Host / 浏览器一半的运行文件；不手改                                                          |
 
 ## 已知限制
 
-- 「已安装」页只列出全局根目录；项目级 skills 不在这里列出，由执行者 / 工作区自己负责。
+- 「全局技能」页只列出全局根目录；项目级 skills 不在这里列出，由执行者 / 工作区自己负责。
 - 检查 / 更新复用 `skills` CLI 的文本输出（`↑ … has an update` / `✎ … has local changes`），状态解析依赖固定版本 `1.9.0`；升级 `skills` 时要同步核对 `parseCheckOutput()`。
 - 全局检查 / 更新固定写 `~/.agents`；`DSH_AGENTS_HOME` 指到别处时拒绝执行。
 - 本地修改只在项目级（带 `skills-lock.json` 内容哈希）时能识别；全局 lock 不记内容哈希。

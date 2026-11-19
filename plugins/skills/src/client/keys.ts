@@ -58,24 +58,28 @@ function installKeyOf(repo: { readonly id: string }, node: { readonly path?: unk
  * @param node Host 返回的树节点
  */
 function countSkills(node: SkillTreeChild): number {
-  if (node.type === 'skill') return 1
-  const children = Array.isArray(node.children) ? node.children : []
-  let total = 0
-  for (const child of children) total += countSkills(child)
+  // skill 叶子通常没有 children；目录自己带 SKILL.md 又套了子 skill 时，
+  // 子 skill 也要计入「全部安装」的数量。
+  let total = node.type === 'skill' ? 1 : 0
+  for (const child of Array.isArray(node.children) ? node.children : []) {
+    total += countSkills(child)
+  }
   return total
 }
 
 /**
- * 一个树节点里的全部 skill 叶子；目录按深度优先展开。
+ * 一个树节点里的全部 skill 叶子；目录与 skill 子节点按深度优先展开。
  *
  * 目录行上的「全部安装」用它收集要装的 skill；目录节点的 `path` 只是展示
- * 分组键（npx 仓库是插件名，marketplace 是插件根），不能当仓库路径用。
+ * 分组键，skill 叶子的 `path` 是包含 SKILL.md 的目录路径，直接交给安装路由。
  *
  * @param node Host 返回的树节点
  */
 function skillLeavesOf(node: SkillTreeChild): SkillTreeLeaf[] {
-  if (node.type === 'skill') return [node]
   const children = Array.isArray(node.children) ? node.children : []
+  if (node.type === 'skill') {
+    return [node, ...children.flatMap((child) => skillLeavesOf(child))]
+  }
   return children.flatMap((child) => skillLeavesOf(child))
 }
 

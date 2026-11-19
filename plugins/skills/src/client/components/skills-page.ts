@@ -138,13 +138,13 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
             items: [
               {
                 value: TABS[0].value,
-                label: t('tabInstalled'),
+                label: t(TABS[0].labelKey),
                 id: TABS[0].id,
                 panelId: TABS[0].panelId,
               },
               {
                 value: TABS[1].value,
-                label: t('tabRepos'),
+                label: t(TABS[1].labelKey),
                 id: TABS[1].id,
                 panelId: TABS[1].panelId,
               },

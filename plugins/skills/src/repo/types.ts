@@ -21,12 +21,14 @@ export interface DirNode {
   children: TreeNode[]
 }
 
-/** skill 节点；`path` 是仓库里的完整路径。 */
+/** skill 节点；`path` 是包含 SKILL.md 的目录在仓库里的完整路径。 */
 export interface SkillNode {
   type: 'skill'
   name: string
   path: string
   description: string
+  /** 这个 skill 目录下嵌套的 skill / 目录；通常为空。 */
+  children: TreeNode[]
 }
 
 /** 展示树节点。 */

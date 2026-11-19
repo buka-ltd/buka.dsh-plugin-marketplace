@@ -19,6 +19,7 @@ const REPOS_ROUTE = '/buka-skills/repos'
 const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
 const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
 const CHECK_ROUTE = '/buka-skills/check'
+const ICON_ROUTE = '/buka-skills/icon'
 const UPDATE_ROUTE = '/buka-skills/update'
 
 /**
@@ -32,6 +33,7 @@ function errorCode(failure: unknown): string | undefined {
 export {
   CHECK_ROUTE,
   errorCode,
+  ICON_ROUTE,
   INSTALL_ROUTE,
   LIST_ROUTE,
   messageOf,

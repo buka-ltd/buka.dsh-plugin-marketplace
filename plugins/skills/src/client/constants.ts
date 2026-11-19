@@ -15,10 +15,24 @@ const PANEL_ID = 'buka-skills'
 /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
 const SAVE_FORM_ID = 'buka-skills-save-form'
 
-/** Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。 */
+/**
+ * Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。
+ *
+ * 「技能仓库」在前、默认选中；「全局技能」列出已安装的 skill。
+ */
 const TABS = [
-  { value: 'installed', id: 'buka-skills-tab-installed', panelId: 'buka-skills-panel-installed' },
-  { value: 'repos', id: 'buka-skills-tab-repos', panelId: 'buka-skills-panel-repos' },
+  {
+    value: 'repos',
+    labelKey: 'tabRepos',
+    id: 'buka-skills-tab-repos',
+    panelId: 'buka-skills-panel-repos',
+  },
+  {
+    value: 'installed',
+    labelKey: 'tabInstalled',
+    id: 'buka-skills-tab-installed',
+    panelId: 'buka-skills-panel-installed',
+  },
 ] as const
 
 /** 页面 Tab 的取值。 */

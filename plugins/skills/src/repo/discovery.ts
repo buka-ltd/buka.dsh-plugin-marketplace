@@ -6,9 +6,10 @@
  * `.codex/skills` 等）与 Claude Code marketplace 的插件目录都不算可安装来源；
  * 一个 `SKILL.md` 都没有的仓库标记为不可用。
  *
- * 发现结果保留仓库里的完整路径（如 `skills/engineering/review/SKILL.md`），
- * 展示树与安装流程都用它做唯一定位。`node_modules`、`.git` 等目录不参与发现，
- * 避免把仓库里的依赖或元数据当成 skill。
+ * 发现结果保留 SKILL.md 在仓库里的完整路径（如
+ * `skills/engineering/review/SKILL.md`）；建树时把它的父目录转成技能叶子，
+ * 展示树与安装流程都用目录路径做唯一定位。`node_modules`、`.git` 等目录不
+ * 参与发现，避免把仓库里的依赖或元数据当成 skill。
  *
  * @module @buka/dsh-plugin-skills/repo/discovery
  */

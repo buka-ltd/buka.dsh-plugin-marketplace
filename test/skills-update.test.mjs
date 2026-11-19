@@ -121,8 +121,8 @@ const catalog = {
       return {
         ok: true,
         skills: [
-          { name: 'update', description: '', path: 'skills/update/SKILL.md' },
-          { name: 'modified', description: '', path: 'skills/modified/SKILL.md' },
+          { name: 'update', description: '', path: 'skills/update' },
+          { name: 'modified', description: '', path: 'skills/modified' },
         ],
       }
     }
@@ -226,6 +226,52 @@ test('updateSkills：只应用 update，modified / unsupported / failed 跳过�
   assert.deepEqual(updateCalls, [
     { args: ['update', 'update', '-p', '-y'], options: { cwd: worker } },
   ])
+})
+
+test('updateSkills：skills 过滤只处理指定的一项', async (t) => {
+  const root = await tempDir(t)
+  const worker = await makeWorker(path.join(root, 'worker'))
+  const fake = fakeCli()
+
+  const updated = await updateSkills({
+    homes: workerHomes(root),
+    catalog,
+    cli: fake.cli,
+    dir: worker,
+    skills: ['update'],
+  })
+  assert.equal(updated.ok, true)
+  if (!updated.ok) return
+  assert.deepEqual(updated.updated, [{ name: 'update' }])
+  assert.deepEqual(updated.skipped, [], '过滤后不再报告别的 skill')
+  assert.deepEqual(updated.failed, [])
+  const updateCalls = fake.calls.filter((one) => one.args[0] === 'update')
+  assert.deepEqual(updateCalls, [
+    { args: ['update', 'update', '-p', '-y'], options: { cwd: worker } },
+  ])
+})
+
+test('updateSkills：skills 过滤掉不可更新项时不跑 update', async (t) => {
+  const root = await tempDir(t)
+  const worker = await makeWorker(path.join(root, 'worker'))
+  const fake = fakeCli()
+
+  const updated = await updateSkills({
+    homes: workerHomes(root),
+    catalog,
+    cli: fake.cli,
+    dir: worker,
+    skills: ['nope'],
+  })
+  assert.equal(updated.ok, true)
+  if (!updated.ok) return
+  assert.deepEqual(updated.updated, [])
+  assert.match(updated.message, /没有要更新的 skill/u)
+  assert.equal(
+    fake.calls.filter((one) => one.args[0] === 'update').length,
+    0,
+    '没有匹配项就不执行 skills update',
+  )
 })
 
 test('updateSkills：没有可更新项时明确返回「已是最新」', async (t) => {

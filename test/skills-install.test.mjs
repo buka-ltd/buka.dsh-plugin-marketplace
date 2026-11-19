@@ -263,8 +263,8 @@ test('页面入口：只安装收藏过的来源，skill 必须在 Host 读到�
     listSkills: async () => ({
       ok: true,
       skills: [
-        { name: 'alpha', description: '', path: 'skills/alpha/SKILL.md' },
-        { name: 'beta', description: '', path: 'skills/beta/SKILL.md' },
+        { name: 'alpha', description: '', path: 'skills/alpha' },
+        { name: 'beta', description: '', path: 'skills/beta' },
       ],
     }),
   }
@@ -274,7 +274,7 @@ test('页面入口：只安装收藏过的来源，skill 必须在 Host 读到�
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: 'acme/other',
-    skillPath: 'skills/alpha/SKILL.md',
+    skillPath: 'skills/alpha',
     install: fake.install,
   })
   assert.equal(notSaved.ok, false)
@@ -285,7 +285,7 @@ test('页面入口：只安装收藏过的来源，skill 必须在 Host 读到�
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: repoDir,
-    skillPath: 'skills/nope/SKILL.md',
+    skillPath: 'skills/nope',
     install: fake.install,
   })
   assert.equal(notFound.ok, false)
@@ -296,7 +296,7 @@ test('页面入口：只安装收藏过的来源，skill 必须在 Host 读到�
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: repoDir,
-    skillPath: 'skills/alpha/SKILL.md',
+    skillPath: 'skills/alpha',
     install: fake.install,
   })
   assert.equal(installed.ok, true)
@@ -315,7 +315,7 @@ test('安装到执行者：Host 解析目录后才交给安装库', async (t) =>
   const catalog = {
     listSkills: async () => ({
       ok: true,
-      skills: [{ name: 'demo', description: '', path: 'skills/demo/SKILL.md' }],
+      skills: [{ name: 'demo', description: '', path: 'skills/demo' }],
     }),
   }
   const calls = []
@@ -338,7 +338,7 @@ test('安装到执行者：Host 解析目录后才交给安装库', async (t) =>
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: 'acme/demo',
-    skillPath: 'skills/demo/SKILL.md',
+    skillPath: 'skills/demo',
     target: 'worker',
     worker: 'writer',
     resolveTarget: async (request) => {
@@ -356,7 +356,7 @@ test('安装到执行者：Host 解析目录后才交给安装库', async (t) =>
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: 'acme/demo',
-    skillPath: 'skills/demo/SKILL.md',
+    skillPath: 'skills/demo',
     target: 'worker',
     worker: 'ghost',
     resolveTarget: async () => ({ ok: false, code: 'unknown-worker', message: '没有这个执行者' }),
@@ -373,9 +373,9 @@ test('目录安装：逐个安装、已装过跳过、单个失败不中断', as
     listSkills: async () => ({
       ok: true,
       skills: [
-        { name: 'alpha', description: '', path: 'skills/alpha/SKILL.md' },
-        { name: 'beta', description: '', path: 'skills/beta/SKILL.md' },
-        { name: 'gamma', description: '', path: 'skills/gamma/SKILL.md' },
+        { name: 'alpha', description: '', path: 'skills/alpha' },
+        { name: 'beta', description: '', path: 'skills/beta' },
+        { name: 'gamma', description: '', path: 'skills/gamma' },
       ],
     }),
   }
@@ -414,7 +414,7 @@ test('目录安装：逐个安装、已装过跳过、单个失败不中断', as
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: 'acme/demo',
-    skillPaths: ['skills/alpha/SKILL.md', 'skills/beta/SKILL.md'],
+    skillPaths: ['skills/alpha', 'skills/beta'],
     install,
   })
   assert.equal(result.ok, false, '有一个失败就整体失败')
@@ -431,7 +431,7 @@ test('目录安装：逐个安装、已装过跳过、单个失败不中断', as
     canonicalAgentsHome: homes.agentsHome,
     catalog,
     source: 'acme/demo',
-    skillPaths: ['skills/alpha/SKILL.md'],
+    skillPaths: ['skills/alpha'],
     install,
   })
   assert.equal(skipped.ok, true)
@@ -445,7 +445,7 @@ test('目录安装：路径形状、数量上限与未知 skill 在调用安装�
   const catalog = {
     listSkills: async () => ({
       ok: true,
-      skills: [{ name: 'alpha', description: '', path: 'skills/alpha/SKILL.md' }],
+      skills: [{ name: 'alpha', description: '', path: 'skills/alpha' }],
     }),
   }
   const base = {
@@ -461,14 +461,11 @@ test('目录安装：路径形状、数量上限与未知 skill 在调用安装�
 
   const tooMany = await installSavedSkillGroup({
     ...base,
-    skillPaths: Array.from(
-      { length: MAX_GROUP_SKILLS + 1 },
-      (_, index) => `skills/${index}/SKILL.md`,
-    ),
+    skillPaths: Array.from({ length: MAX_GROUP_SKILLS + 1 }, (_, index) => `skills/${index}`),
   })
   assert.equal(tooMany.code, 'invalid-skill-paths')
 
-  const unknown = await installSavedSkillGroup({ ...base, skillPaths: ['skills/nope/SKILL.md'] })
+  const unknown = await installSavedSkillGroup({ ...base, skillPaths: ['skills/nope'] })
   assert.equal(unknown.code, 'skill-not-found')
   assert.equal(fake.calls.length, 0)
 })

@@ -127,6 +127,13 @@ export interface SkillUpdateDeps {
   readonly cli?: SkillsCliRunner
   /** 绕过仓库缓存重新拉取来源。 */
   readonly refresh?: boolean
+  /**
+   * 只更新这些 skill（按名字过滤候选）；省略表示全部候选。
+   *
+   * 页面上的行内「更新」用它把一次更新收窄到一个 skill；检查仍然看全部，
+   * 所以状态标记不会因为过滤而丢。未知名字会被忽略。
+   */
+  readonly skills?: readonly string[]
 }
 
 /** 检查 / 更新的候选：一条由 npx lock 管理、且仍装在磁盘上的 skill。 */
@@ -313,7 +320,12 @@ export async function updateSkills(
   const { homes = resolveHomes(), catalog, cli = createSkillsCliRunner(), refresh } = deps
   const prepared = await collectCandidates({ homes, dir: deps.dir })
   if (!prepared.ok) return prepared
-  const { scope, candidates } = prepared
+  const { scope } = prepared
+  const only = deps.skills === undefined ? undefined : new Set(deps.skills)
+  const candidates =
+    only === undefined
+      ? prepared.candidates
+      : prepared.candidates.filter((candidate) => only.has(candidate.name))
   const base = {
     scope,
     ...(scope === 'project' && deps.dir !== undefined ? { dir: deps.dir } : {}),
@@ -325,7 +337,10 @@ export async function updateSkills(
       updated: [],
       skipped: [],
       failed: [],
-      message: '没有由 npx 管理、且仍安装在磁盘上的 skill，无需更新。',
+      message:
+        only !== undefined && prepared.candidates.length > 0
+          ? '没有要更新的 skill。'
+          : '没有由 npx 管理、且仍安装在磁盘上的 skill，无需更新。',
     }
   }
   if (scope === 'global') {

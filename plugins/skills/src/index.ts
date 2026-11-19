@@ -5,7 +5,8 @@
  *
  * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
  *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
- *   `GET /buka-skills/check` 检查更新，`POST /buka-skills/update` 应用更新，
+ *   `GET /buka-skills/icon` 返回缓存的 GitHub owner 头像（过期后台静默更新），
+ *   `GET /buka-skills/check` 供页面自动检查更新，`POST /buka-skills/update` 应用更新，
  *   `GET /buka-skills/targets` 列出可安装的执行者（可选的 `ctx.bukaWorkers`）与
  *   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
  *   里的一个 skill 安装到全局、某个执行者目录或某个工作区目录；

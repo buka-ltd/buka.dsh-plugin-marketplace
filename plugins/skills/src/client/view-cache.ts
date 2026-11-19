@@ -24,10 +24,10 @@ const VIEW_CACHE_KEY = 'dsh.buka-skills.view.v1'
 /**
  * 本地缓存的格式版本；版本不符就当没有缓存，不做迁移。
  *
- * v2：npx 仓库的树改为按 `npx skills` 清单平铺/按插件分组（不再按仓库物理
- * 目录分组），v1 缓存里的旧树形状已经不对，直接丢弃重新拉。
+ * v3：技能叶子改为包含 SKILL.md 的目录（v2 及更早缓存里的叶子指向 SKILL.md
+ * 文件，还会多套一层目录），旧树直接丢弃重新拉。
  */
-const VIEW_CACHE_VERSION = 2
+const VIEW_CACHE_VERSION = 3
 
 /**
  * 取 localStorage；隐私模式、没有 window 或 storage 被禁用时返回 null。

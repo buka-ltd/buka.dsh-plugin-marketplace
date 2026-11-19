@@ -21,7 +21,8 @@
  * - `checkSkills({ dir? })`：检查全局（省略 `dir`）或某个目标目录里的 skill
  *   状态（`update` / `modified` / `up-to-date` / `unsupported-source` /
  *   `failed`）；
- * - `updateSkills({ dir? })`：只应用 `update` 状态，`modified` 默认跳过；
+ * - `updateSkills({ dir?, skills? })`：只应用 `update` 状态，`modified` 默认
+ *   跳过；`skills` 按名字把候选收窄到指定项（页面行内更新用）；
  * - `runSerialized(work)`：借用同一条串行队列执行一段写入，供其他插件在写
  *   同一份 `skills-lock.json` 前排队。
  *
@@ -69,7 +70,7 @@ const PROBE_CONCURRENCY = 4
 /** 对外暴露的仓库类型。`unknown` 表示探测失败，具体原因在 `code` / `error`。 */
 export type RepositoryKind = RepoKind | 'unknown'
 
-/** 一个可安装 skill；`path` 是它在仓库里的完整路径。 */
+/** 一个可安装 skill；`path` 是包含 SKILL.md 的目录在仓库里的完整路径。 */
 export interface SkillRef {
   name: string
   description: string
@@ -128,6 +129,8 @@ export interface SkillScopeOptions {
   dir?: string
   /** 绕过仓库缓存重新拉取来源。 */
   refresh?: boolean
+  /** 只更新这些 skill（按名字过滤候选）；省略表示全部。仅 `updateSkills` 使用。 */
+  skills?: readonly string[]
 }
 
 /** 服务构造参数。 */
@@ -250,6 +253,7 @@ export class SkillsCatalogService {
   updateSkills({
     dir,
     refresh,
+    skills,
   }: SkillScopeOptions = {}): Promise<SkillUpdateResult | SkillUpdateFailure> {
     return this.#serialize(() =>
       updateSkills({
@@ -257,6 +261,7 @@ export class SkillsCatalogService {
         catalog: this,
         ...(dir === undefined ? {} : { dir }),
         ...(refresh === undefined ? {} : { refresh }),
+        ...(skills === undefined ? {} : { skills }),
         ...(this.cli === undefined ? {} : { cli: this.cli }),
       }),
     )
@@ -340,9 +345,9 @@ function flattenSkillTree(root: TreeNode[]): SkillRef[] {
     for (const node of nodes) {
       if (node.type === 'skill') {
         out.push({ name: node.name, description: node.description, path: node.path })
-      } else {
-        walk(node.children)
       }
+      // skill 叶子下也可能挂着嵌套 skill（目录自己带 SKILL.md 又套了子 skill）。
+      walk(node.children)
     }
   }
   walk(root)

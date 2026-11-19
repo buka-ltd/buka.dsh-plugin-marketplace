@@ -20,10 +20,10 @@ import type { Homes } from '../skill-store.ts'
 import type { CacheEntry, RepoKind, TreeNode } from './types.ts'
 
 /**
- * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v5 及更早版本支持 Claude Code
- * marketplace 与物理目录分组，与现在的「只认根 skills/」不一致）。
+ * 缓存文件格式版本；不匹配的缓存直接丢弃重建（v6 及更早的树把 SKILL.md 文件
+ * 当成 skill 叶子，v7 起叶子是包含 SKILL.md 的目录）。
  */
-export const REPO_SKILLS_CACHE_VERSION = 6
+export const REPO_SKILLS_CACHE_VERSION = 7
 
 /** 缓存有效期：30 分钟。仓库树变化不频繁，过期后按需重拉。 */
 export const REPO_SKILLS_CACHE_TTL_MS = 30 * 60 * 1000
@@ -121,11 +121,10 @@ function isValidTree(root: unknown): root is TreeNode[] {
       if (node === null || typeof node !== 'object') return false
       const record = node as Record<string, unknown>
       if (typeof record.name !== 'string' || typeof record.path !== 'string') return false
-      if (record.type === 'dir') {
+      if (record.type === 'dir' || record.type === 'skill') {
         if (!Array.isArray(record.children)) return false
+        if (record.type === 'skill' && typeof record.description !== 'string') return false
         stack.push({ nodes: record.children, depth: depth + 1 })
-      } else if (record.type === 'skill') {
-        if (typeof record.description !== 'string') return false
       } else {
         return false
       }

@@ -445,6 +445,209 @@ async function resolveInstallTarget(ctx, request) {
 		message: `未知的安装目标：${String(request?.target)}`
 	};
 }
+// .build/skills/repo-icons.js
+/**
+* 仓库头像缓存：把 GitHub owner 的头像落盘到 DSH home，页面通过包内路由读取。
+*
+* 头像只用来识别来源。以前页面直接把 `<img>` 指向 `github.com/<owner>.png`，
+* 每次打开页面都要重新走一次外网；这里改成 Host 先查本地缓存：
+*
+* - 有缓存：立刻返回旧图，不访问外网；
+* - 缓存超过 TTL：仍然立刻返回旧图，同时在后台静默拉一次新图写回；
+* - 没有缓存：同步拉一次，失败就让页面回退到内置图标。
+*
+* 缓存按 owner 去重（GitHub 仓库头像就是 owner 头像），一个 owner 一个文件。
+* 图标是可重建的易失数据：文件损坏、内容不是支持的图片格式时按未命中处理；
+* 写入是同目录临时文件 + rename，读到的永远是完整图片。
+*
+* @module @buka/dsh-plugin-skills/repo-icons
+*/
+/** 页面读取仓库头像用的路由。 */
+const ICON_ROUTE = "/buka-skills/icon";
+/** 拉头像的超时：头像很小，10 秒足够。 */
+const ICON_FETCH_TIMEOUT_MS = 1e4;
+/** 头像大小上限；GitHub 的 80px 头像远小于这个值。 */
+const MAX_ICON_BYTES = 524288;
+/** 缓存目录与文件名（owner 小写后加固定后缀）。 */
+const ICON_DIR = "icons";
+const ICON_SUFFIX = ".img";
+/** 合法的 GitHub owner：首字符字母数字，其余只允许字母数字、点、下划线、连字符。 */
+const OWNER_PATTERN$1 = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+/**
+* owner 是否安全：只允许 GitHub 用户名 / 组织名里的字符，避免拼出缓存路径之外
+* 的文件名。
+*/
+function isSafeIconOwner(value) {
+	return typeof value === "string" && value.length <= 100 && OWNER_PATTERN$1.test(value);
+}
+/** 头像缓存目录。 */
+function iconCacheDir(homes) {
+	return path.join(homes.dshHome, "buka-skills", "cache", ICON_DIR);
+}
+/** 一个 owner 的缓存文件路径；owner 统一小写，大小写不同的写法共用同一份缓存。 */
+function iconCacheFile(homes, owner) {
+	return path.join(iconCacheDir(homes), `${owner.toLowerCase()}${ICON_SUFFIX}`);
+}
+/** PNG 文件头。 */
+const PNG_SIGNATURE = Buffer.from([
+	137,
+	80,
+	78,
+	71,
+	13,
+	10,
+	26,
+	10
+]);
+/**
+* 从图片头判断类型；只接受页面能安全显示的位图格式。
+*
+* @param data 图片字节
+*/
+function sniffContentType(data) {
+	if (data.length >= 8 && data.subarray(0, 8).equals(PNG_SIGNATURE)) return "image/png";
+	if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "image/jpeg";
+	if (data.length >= 6 && data.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";
+	if (data.length >= 12 && data.subarray(0, 4).toString("latin1") === "RIFF" && data.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+	return null;
+}
+/**
+* 读缓存；文件缺失、损坏、不是支持的图片或超过大小上限都按未命中处理。
+*
+* @param file 缓存文件
+*/
+async function readCachedIcon(file) {
+	try {
+		const stats = await promises.stat(file);
+		if (!stats.isFile() || stats.size === 0 || stats.size > MAX_ICON_BYTES) return null;
+		const data = await promises.readFile(file);
+		const contentType = sniffContentType(data);
+		if (contentType === null) return null;
+		return {
+			data,
+			contentType,
+			mtimeMs: stats.mtimeMs
+		};
+	} catch {
+		return null;
+	}
+}
+/**
+* 原子写图标：同目录临时文件 → rename；失败时清理临时文件。
+*
+* @param file 目标文件
+* @param data 图片字节
+*/
+async function writeIconAtomic(file, data) {
+	const dir = path.dirname(file);
+	await promises.mkdir(dir, {
+		recursive: true,
+		mode: 448
+	});
+	const temporary = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		await promises.writeFile(temporary, data, { mode: 384 });
+		try {
+			await promises.chmod(temporary, 384);
+		} catch {}
+		await promises.rename(temporary, file);
+	} catch (error) {
+		try {
+			await promises.rm(temporary, { force: true });
+		} catch {}
+		throw error;
+	}
+}
+/**
+* 从 GitHub 拉一张 owner 头像。
+*
+* 只接受能嗅探出 PNG / JPEG / GIF / WebP 的响应；网络失败、非 2xx、超大响应
+* 都返回 null，由调用方回退到缓存或内置图标。
+*
+* @param owner GitHub owner（调用方已校验）
+* @param fetchImpl 可注入的 fetch
+*/
+async function fetchGithubIcon(owner, fetchImpl) {
+	let response;
+	try {
+		response = await fetchImpl(`https://github.com/${owner}.png?size=80`, {
+			redirect: "follow",
+			headers: {
+				accept: "image/*",
+				"user-agent": "buka-dsh-plugin-skills"
+			},
+			signal: AbortSignal.timeout(ICON_FETCH_TIMEOUT_MS)
+		});
+	} catch {
+		return null;
+	}
+	if (!response.ok) return null;
+	const declared = Number(response.headers.get("content-length") ?? "");
+	if (Number.isFinite(declared) && declared > MAX_ICON_BYTES) return null;
+	let data;
+	try {
+		data = Buffer.from(await response.arrayBuffer());
+	} catch {
+		return null;
+	}
+	if (data.length === 0 || data.length > MAX_ICON_BYTES) return null;
+	const contentType = sniffContentType(data);
+	return contentType === null ? null : {
+		data,
+		contentType
+	};
+}
+/**
+* 建一个图标缓存实例。
+*
+* @param deps DSH home 与可注入的 fetch / 时钟
+*/
+function createIconCache(deps) {
+	const fetchImpl = deps.fetch ?? fetch;
+	const now = deps.now ?? Date.now;
+	const inFlight = /* @__PURE__ */ new Map();
+	/**
+	* 拉取并写回一张头像；同一 owner 的并发调用合并。
+	*
+	* @param owner 已校验的 owner
+	*/
+	function refresh(owner) {
+		const key = owner.toLowerCase();
+		const existing = inFlight.get(key);
+		if (existing !== void 0) return existing;
+		const run = (async () => {
+			const image = await fetchGithubIcon(owner, fetchImpl);
+			if (image === null) return null;
+			try {
+				await writeIconAtomic(iconCacheFile(deps.homes, owner), image.data);
+			} catch {}
+			return image;
+		})();
+		inFlight.set(key, run);
+		const clear = () => {
+			if (inFlight.get(key) === run) inFlight.delete(key);
+		};
+		run.then(clear, clear);
+		return run;
+	}
+	async function load(owner) {
+		if (!isSafeIconOwner(owner)) return null;
+		const cached = await readCachedIcon(iconCacheFile(deps.homes, owner));
+		if (cached === null) return refresh(owner);
+		if (now() - cached.mtimeMs >= 18e5) refresh(owner).catch(() => {});
+		return {
+			data: cached.data,
+			contentType: cached.contentType
+		};
+	}
+	async function whenIdle() {
+		await Promise.allSettled([...inFlight.values()]);
+	}
+	return {
+		load,
+		whenIdle
+	};
+}
 process.platform;
 // packages/plugin-kit/lib/store.js
 /**
@@ -1061,7 +1264,7 @@ async function uninstallGlobalSkill({ homes = resolveHomes(), scope, id, remove 
 /**
 * 「收藏的 skill 来源」的读写。
 *
-* 页面第二个 Tab 让用户记下以后想用的 skill 来源，方便随时取用。这份清单是
+* 「技能仓库」Tab 让用户记下以后想用的 skill 来源，方便随时取用。这份清单是
 * 用户自己的书签，和已安装的 skill 无关：装不装、装在哪，仍由 `npx skills` 决定。
 *
 * 来源分五类（`classifyRepoSource()`）：
@@ -1694,7 +1897,7 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 	if (existing.status === "installed") return {
 		ok: false,
 		code: "already-installed",
-		message: `这个 skill 已经全局安装（${existing.scope}）：${existing.id}；如需重装，请先在「已安装」里卸载`
+		message: `这个 skill 已经全局安装（${existing.scope}）：${existing.id}；如需重装，请先在「全局技能」里卸载`
 	};
 	let result;
 	try {
@@ -2103,7 +2306,7 @@ function requestedSkillPaths(value) {
 /**
 * 给浏览器一半的侧边栏「Skills」页面用的包内 HTTP 路由。
 *
-* 七个路由：
+* 路由：
 *
 * - `GET /buka-skills/list` 列出全局 skills；
 * - `POST /buka-skills/uninstall` 卸载一个；
@@ -2117,7 +2320,9 @@ function requestedSkillPaths(value) {
 * - `POST /buka-skills/repos` 收藏一个，
 * - `POST /buka-skills/repos/remove` 移除一个，
 * - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
-*   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。
+*   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）；
+* - `GET /buka-skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
+*   过期时先回旧图、再在后台静默更新。
 *
 * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
 * （`connection.requestRejection`）：只接受本机、已认证的浏览器请求。
@@ -2150,6 +2355,7 @@ const UPDATE_ROUTE = "/buka-skills/update";
 */
 function registerRoutes(ctx, deps) {
 	const { homes, catalog, readSnapshot, serializeSkills } = deps;
+	const icons = createIconCache({ homes });
 	ctx.inject(["webServer", "connection"], (webCtx) => {
 		/** 复用 web 组合的信任栅栏；被拒绝时已经写好响应。 */
 		function rejected(req, res) {
@@ -2427,6 +2633,36 @@ function registerRoutes(ctx, deps) {
 				}
 			}
 		}), `buka-skills: GET ${REPO_SKILLS_ROUTE}`);
+		webCtx.effect(() => webCtx.webServer.register({
+			kind: "exact",
+			path: ICON_ROUTE,
+			handler: async (req, res) => {
+				if (rejected(req, res)) return;
+				if (req.method !== "GET") {
+					sendMethodNotAllowed(res, "GET");
+					return;
+				}
+				const query = parseQuery(req);
+				try {
+					const image = await icons.load(query.get("owner") ?? "");
+					if (image === null) {
+						res.statusCode = 404;
+						res.setHeader("cache-control", "no-store");
+						res.end();
+						return;
+					}
+					res.statusCode = 200;
+					res.setHeader("content-type", image.contentType);
+					res.setHeader("content-length", String(image.data.byteLength));
+					res.setHeader("cache-control", "private, max-age=300");
+					res.end(image.data);
+				} catch {
+					res.statusCode = 500;
+					res.setHeader("cache-control", "no-store");
+					res.end();
+				}
+			}
+		}), `buka-skills: GET ${ICON_ROUTE}`);
 	});
 }
 /**
@@ -2560,7 +2796,7 @@ async function readCache(file) {
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 	const record = parsed;
-	if (record.version !== 6) return {};
+	if (record.version !== 7) return {};
 	if (record.entries === null || typeof record.entries !== "object" || Array.isArray(record.entries)) return {};
 	const entries = {};
 	for (const [id, raw] of Object.entries(record.entries)) {
@@ -2618,14 +2854,13 @@ function isValidTree(root) {
 			if (node === null || typeof node !== "object") return false;
 			const record = node;
 			if (typeof record.name !== "string" || typeof record.path !== "string") return false;
-			if (record.type === "dir") {
+			if (record.type === "dir" || record.type === "skill") {
 				if (!Array.isArray(record.children)) return false;
+				if (record.type === "skill" && typeof record.description !== "string") return false;
 				stack.push({
 					nodes: record.children,
 					depth: depth + 1
 				});
-			} else if (record.type === "skill") {
-				if (typeof record.description !== "string") return false;
 			} else return false;
 		}
 	}
@@ -2685,7 +2920,7 @@ function updateCache(file, update) {
 */
 async function writeCache(file, entries) {
 	await writeJsonAtomic(file, {
-		version: 6,
+		version: 7,
 		entries
 	}, { dirMode: 448 });
 }
@@ -3340,10 +3575,13 @@ function originName(origin) {
 /**
 * 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按目录建树、排序。
 *
-* 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。展示树
-* 保留仓库里的物理目录结构，目录节点用真实仓库路径（如 `skills/engineering`），
-* skill 节点用完整路径；页面上的「全部安装」因此可以直接收集叶子路径。
-* `metadata.internal: true` 的内部 skill 不列。
+* 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。一个
+* 包含 `SKILL.md` 的目录就是技能叶子：叶子用该目录的仓库路径（如
+* `skills/engineering/code-review`），不再为 `SKILL.md` 文件单独建节点；
+* 不含 `SKILL.md` 的目录只作分组，保留物理目录结构。叶子下如果还有嵌套
+* skill（目录自己带 `SKILL.md` 又套了子 skill），它们挂在叶子的 `children`
+* 上。页面上的「全部安装」因此可以直接收集叶子路径。`metadata.internal: true`
+* 的内部 skill 不列。
 *
 * 元数据走统一的 `reader.readFile()`：本地路径与本地克隆都不碰网络。
 *
@@ -3422,9 +3660,9 @@ async function mapLimit$1(items, limit, worker) {
 /**
 * 把发现结果装配成按物理目录分层的树。
 *
-* 目录与 skill 的 `path` 都保留仓库里的完整路径；目录名取目录段。skill 名称
-* 优先 frontmatter `name`，缺失时回退到所在目录名，`skills/SKILL.md` 回退到
-* 仓库名。
+* 一个目录只要有自己的 `SKILL.md`，它就是技能叶子：节点路径取目录路径，
+* 不再生成 `SKILL.md` 子节点。目录里的其它子目录（含子 skill）作为叶子的
+* `children`；没有 `SKILL.md` 的目录只当分组。
 *
 * @param entries 发现阶段读到的元数据
 * @param repoName 仓库名
@@ -3434,19 +3672,13 @@ function buildTree(entries, repoName) {
 		name: "",
 		path: "skills",
 		dirs: /* @__PURE__ */ new Map(),
-		skills: []
+		skill: void 0
 	};
 	let skills = 0;
 	for (const entry of entries) {
 		if (entry.internal === true) continue;
 		skills += 1;
 		const segments = entry.fullPath.split("/").slice(1, -1);
-		const node = {
-			type: "skill",
-			name: entry.name === "" ? fallbackSkillName(segments, repoName) : entry.name,
-			path: entry.fullPath,
-			description: entry.description
-		};
 		let current = root;
 		let pathSoFar = "skills";
 		for (const segment of segments) {
@@ -3457,17 +3689,56 @@ function buildTree(entries, repoName) {
 					name: segment,
 					path: pathSoFar,
 					dirs: /* @__PURE__ */ new Map(),
-					skills: []
+					skill: void 0
 				};
 				current.dirs.set(segment, created);
 				current = created;
 			} else current = existing;
 		}
-		current.skills.push(node);
+		current.skill = entry;
 	}
 	return {
-		root: finishDir(root),
+		root: finishRoot(root, repoName),
 		skills
+	};
+}
+/**
+* 把中间根节点转成展示列表。根目录 `skills` 自己不单独显示：它有自己的
+* SKILL.md 时，根部那个 skill 用 `children` 包住其余节点。
+*/
+function finishRoot(builder, repoName) {
+	const children = finishChildren(builder, repoName);
+	if (builder.skill === void 0) return children;
+	return [skillNodeOf(builder, repoName, children)];
+}
+/**
+* 递归装配一个目录下的子节点：有 `SKILL.md` 的子目录是 skill 叶子，否则是
+* 分组目录。
+*/
+function finishChildren(builder, repoName) {
+	const nodes = [];
+	for (const dir of builder.dirs.values()) {
+		const children = finishChildren(dir, repoName);
+		nodes.push(dir.skill === void 0 ? {
+			type: "dir",
+			name: dir.name,
+			path: dir.path,
+			children
+		} : skillNodeOf(dir, repoName, children));
+	}
+	sortTree(nodes);
+	return nodes;
+}
+/** 把一个带 `SKILL.md` 的目录装配成 skill 节点；名称缺失时回退目录名。 */
+function skillNodeOf(builder, repoName, children) {
+	const entry = builder.skill;
+	const segments = builder.path.split("/").slice(1);
+	return {
+		type: "skill",
+		name: entry.name === "" ? fallbackSkillName(segments, repoName) : entry.name,
+		path: builder.path,
+		description: entry.description,
+		children
 	};
 }
 /**
@@ -3476,26 +3747,16 @@ function buildTree(entries, repoName) {
 function fallbackSkillName(segments, repoName) {
 	return segments.at(-1) ?? repoName;
 }
-/** 把中间节点转成展示节点并递归排序。 */
-function finishDir(builder) {
-	const nodes = [...[...builder.dirs.values()].map((dir) => ({
-		type: "dir",
-		name: dir.name,
-		path: dir.path,
-		children: finishDir(dir)
-	})), ...builder.skills];
-	sortTree(nodes);
-	return nodes;
-}
 /**
-* 递归排序：目录在前、skill 在后，同类按 `name` 的大小写不敏感升序。
+* 递归排序：目录在前、skill 在后，同类按 `name` 的大小写不敏感升序；
+* 叶子下嵌套的子节点同样递归排序。
 */
 function sortTree(nodes) {
 	nodes.sort((a, b) => {
 		if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
 		return compareName(a.name, b.name);
 	});
-	for (const node of nodes) if (node.type === "dir") sortTree(node.children);
+	for (const node of nodes) sortTree(node.children);
 }
 /**
 * 大小写不敏感的 `localeCompare`；完全相同时再用原始大小写稳定排序。
@@ -4090,7 +4351,9 @@ async function updateSkills(deps) {
 		dir: deps.dir
 	});
 	if (!prepared.ok) return prepared;
-	const { scope, candidates } = prepared;
+	const { scope } = prepared;
+	const only = deps.skills === void 0 ? void 0 : new Set(deps.skills);
+	const candidates = only === void 0 ? prepared.candidates : prepared.candidates.filter((candidate) => only.has(candidate.name));
 	const base = {
 		scope,
 		...scope === "project" && deps.dir !== void 0 ? { dir: deps.dir } : {}
@@ -4101,7 +4364,7 @@ async function updateSkills(deps) {
 		updated: [],
 		skipped: [],
 		failed: [],
-		message: "没有由 npx 管理、且仍安装在磁盘上的 skill，无需更新。"
+		message: only !== void 0 && prepared.candidates.length > 0 ? "没有要更新的 skill。" : "没有由 npx 管理、且仍安装在磁盘上的 skill，无需更新。"
 	};
 	if (scope === "global") {
 		const mismatch = globalHomeMismatch(homes);
@@ -4481,7 +4744,8 @@ function errorText(error) {
 * - `checkSkills({ dir? })`：检查全局（省略 `dir`）或某个目标目录里的 skill
 *   状态（`update` / `modified` / `up-to-date` / `unsupported-source` /
 *   `failed`）；
-* - `updateSkills({ dir? })`：只应用 `update` 状态，`modified` 默认跳过；
+* - `updateSkills({ dir?, skills? })`：只应用 `update` 状态，`modified` 默认
+*   跳过；`skills` 按名字把候选收窄到指定项（页面行内更新用）；
 * - `runSerialized(work)`：借用同一条串行队列执行一段写入，供其他插件在写
 *   同一份 `skills-lock.json` 前排队。
 *
@@ -4612,12 +4876,13 @@ var SkillsCatalogService = class {
 	*
 	* @param options `dir` 由调用方解析后传入；省略表示全局
 	*/
-	updateSkills({ dir, refresh } = {}) {
+	updateSkills({ dir, refresh, skills } = {}) {
 		return this.#serialize(() => updateSkills({
 			homes: this.homes,
 			catalog: this,
 			...dir === void 0 ? {} : { dir },
 			...refresh === void 0 ? {} : { refresh },
+			...skills === void 0 ? {} : { skills },
 			...this.cli === void 0 ? {} : { cli: this.cli }
 		}));
 	}
@@ -4682,12 +4947,14 @@ var SkillsCatalogService = class {
 function flattenSkillTree(root) {
 	const out = [];
 	const walk = (nodes) => {
-		for (const node of nodes) if (node.type === "skill") out.push({
-			name: node.name,
-			description: node.description,
-			path: node.path
-		});
-		else walk(node.children);
+		for (const node of nodes) {
+			if (node.type === "skill") out.push({
+				name: node.name,
+				description: node.description,
+				path: node.path
+			});
+			walk(node.children);
+		}
 	};
 	walk(root);
 	return out;
@@ -4836,7 +5103,8 @@ function registerTools(ctx, deps) {
 *
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
 *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
-*   `GET /buka-skills/check` 检查更新，`POST /buka-skills/update` 应用更新，
+*   `GET /buka-skills/icon` 返回缓存的 GitHub owner 头像（过期后台静默更新），
+*   `GET /buka-skills/check` 供页面自动检查更新，`POST /buka-skills/update` 应用更新，
 *   `GET /buka-skills/targets` 列出可安装的执行者（可选的 `ctx.bukaWorkers`）与
 *   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
 *   里的一个 skill 安装到全局、某个执行者目录或某个工作区目录；

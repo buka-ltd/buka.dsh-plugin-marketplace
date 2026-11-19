@@ -6,7 +6,7 @@
  * 主题 token 和 DSH 的圆角/焦点 token，不写死色值。
  *
  * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
- * 「已安装」比视口高、出现滚动条，「收藏」没有；滚动条一出现/一消失，
+ * 「全局技能」比视口高、出现滚动条，「技能仓库」没有；滚动条一出现/一消失，
  * 内容盒就窄/宽一个滚动条宽度，居中的标题、Tab 行和列表整体左右平移
  * 半个滚动条宽度——切 Tab 时看起来就是整页左右抖一下。`scrollbar-gutter:
  * stable` 常驻预留滚动条槽位，两个 Tab 内容盒等宽，版面不再跟着滚动条跳。
@@ -34,6 +34,7 @@ const CSS = `
 .buka-skills-panel{display:flex;flex-direction:column;gap:16px}
 .buka-skills-panelActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .buka-skills-panelActions>.buka-skills-meta{flex:1 1 auto}
+.buka-skills-panelActions>.buka-skills-statusWithDot{flex:1 1 auto}
 .buka-skills-status{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
 .buka-skills-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .buka-skills-failure{color:var(--dsw-alias-state-error-primary);align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}

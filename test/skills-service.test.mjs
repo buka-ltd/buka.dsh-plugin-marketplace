@@ -66,7 +66,7 @@ test('listRepositories：分类、失败降级并沿用收藏顺序', async (t) 
   assert.equal(listed.repositories[2].skills, 2)
 })
 
-test('listSkills：只摊平根 skills/ 下的树，保留完整路径', async (t) => {
+test('listSkills：只摊平根 skills/ 下的树，叶子用包含 SKILL.md 的目录路径', async (t) => {
   const homes = await tempHomes(t)
   const repo = await makeRepo(path.join(homes.dshHome, '..', 'repo'))
   const service = new SkillsCatalogService({ homes })
@@ -78,11 +78,30 @@ test('listSkills：只摊平根 skills/ 下的树，保留完整路径', async (
   assert.deepEqual(
     listed.skills.map((one) => ({ name: one.name, path: one.path })),
     [
-      { name: 'alpha', path: 'skills/alpha/SKILL.md' },
-      { name: 'beta', path: 'skills/group/beta/SKILL.md' },
+      { name: 'beta', path: 'skills/group/beta' },
+      { name: 'alpha', path: 'skills/alpha' },
     ],
   )
   assert.equal('plugin' in listed.skills[0], false, '不再有 marketplace 的插件分组字段')
+})
+
+test('listSkills：skill 叶子下的嵌套 skill 也会摊平', async (t) => {
+  const homes = await tempHomes(t)
+  const repo = path.join(homes.dshHome, '..', 'nested')
+  await writeRel(repo, 'skills/parent/SKILL.md', skillFile('parent'))
+  await writeRel(repo, 'skills/parent/child/SKILL.md', skillFile('child'))
+  const service = new SkillsCatalogService({ homes })
+
+  const listed = await service.listSkills({ source: repo })
+  assert.equal(listed.ok, true)
+  if (!listed.ok) return
+  assert.deepEqual(
+    listed.skills.map((one) => ({ name: one.name, path: one.path })),
+    [
+      { name: 'parent', path: 'skills/parent' },
+      { name: 'child', path: 'skills/parent/child' },
+    ],
+  )
 })
 
 test('同一来源的并发 listSkills 共用一次读取', async (t) => {

@@ -284,7 +284,8 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
 
   /**
    * 递归渲染树节点：目录可折叠并带「全部安装」，skill 是叶子（名称 + 一行
-   * 描述 + 三个安装入口）。
+   * 描述 + 三个安装入口）。skill 叶子下如果还有嵌套 skill（目录自己带
+   * SKILL.md 又套了子 skill），子节点继续按树渲染在行下方。
    *
    * @param repo 一条收藏
    * @param node Host 返回的树节点
@@ -336,6 +337,7 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
     const description = typeof node.description === 'string' ? node.description : ''
     const installed = installedSkillKeys.has(skillKeyOf(node.name))
     const busy = installing === installKeyOf(repo, node)
+    const children = Array.isArray(node.children) ? node.children : []
     return h(
       'li',
       { className: 'buka-skills-treeItem', key: node.path },
@@ -357,6 +359,13 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
         ),
         renderActions(repo, node, installed, busy, () => installSkill(repo, node)),
       ),
+      children.length === 0
+        ? null
+        : h(
+            'ul',
+            { className: 'buka-skills-treeGroup' },
+            ...children.map((child) => renderTreeNode(repo, child)),
+          ),
     )
   }
 

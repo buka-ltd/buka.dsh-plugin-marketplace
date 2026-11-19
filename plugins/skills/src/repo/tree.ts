@@ -1,10 +1,13 @@
 /**
  * 把仓库内容装配成可展示的树：读 SKILL.md 元数据、按目录建树、排序。
  *
- * 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。展示树
- * 保留仓库里的物理目录结构，目录节点用真实仓库路径（如 `skills/engineering`），
- * skill 节点用完整路径；页面上的「全部安装」因此可以直接收集叶子路径。
- * `metadata.internal: true` 的内部 skill 不列。
+ * 只处理一种布局：仓库根 `skills/` 下的 skill（允许任意层级子目录）。一个
+ * 包含 `SKILL.md` 的目录就是技能叶子：叶子用该目录的仓库路径（如
+ * `skills/engineering/code-review`），不再为 `SKILL.md` 文件单独建节点；
+ * 不含 `SKILL.md` 的目录只作分组，保留物理目录结构。叶子下如果还有嵌套
+ * skill（目录自己带 `SKILL.md` 又套了子 skill），它们挂在叶子的 `children`
+ * 上。页面上的「全部安装」因此可以直接收集叶子路径。`metadata.internal: true`
+ * 的内部 skill 不列。
  *
  * 元数据走统一的 `reader.readFile()`：本地路径与本地克隆都不碰网络。
  *
@@ -13,14 +16,7 @@
 
 import { parseFrontmatter, parseFrontmatterInternal } from '../frontmatter.ts'
 import { findSkillMdPaths } from './discovery.ts'
-import type {
-  DirNode,
-  RepoTreeEntry,
-  SkillFileMeta,
-  SkillMetadata,
-  SkillNode,
-  TreeNode,
-} from './types.ts'
+import type { RepoTreeEntry, SkillFileMeta, SkillMetadata, SkillNode, TreeNode } from './types.ts'
 
 /** 同时读取 SKILL.md 的并发上限，避免一次打开几十个文件 / 连接。 */
 const SKILL_MD_CONCURRENCY = 6
@@ -119,20 +115,21 @@ async function mapLimit<T, R>(
   return results
 }
 
-/** 建树时的中间目录节点：子节点按名字去重后再装配成展示节点。 */
+/** 建树时的中间目录节点：子目录按名字去重，`SKILL.md` 记在目录自己身上。 */
 interface DirBuilder {
   name: string
   path: string
   dirs: Map<string, DirBuilder>
-  skills: SkillNode[]
+  /** 这个目录里的 SKILL.md 元数据；没有（或 internal 被跳过）时是分组目录。 */
+  skill: SkillMetadata | undefined
 }
 
 /**
  * 把发现结果装配成按物理目录分层的树。
  *
- * 目录与 skill 的 `path` 都保留仓库里的完整路径；目录名取目录段。skill 名称
- * 优先 frontmatter `name`，缺失时回退到所在目录名，`skills/SKILL.md` 回退到
- * 仓库名。
+ * 一个目录只要有自己的 `SKILL.md`，它就是技能叶子：节点路径取目录路径，
+ * 不再生成 `SKILL.md` 子节点。目录里的其它子目录（含子 skill）作为叶子的
+ * `children`；没有 `SKILL.md` 的目录只当分组。
  *
  * @param entries 发现阶段读到的元数据
  * @param repoName 仓库名
@@ -141,21 +138,14 @@ function buildTree(
   entries: SkillMetadata[],
   repoName: string,
 ): { root: TreeNode[]; skills: number } {
-  const root: DirBuilder = { name: '', path: 'skills', dirs: new Map(), skills: [] }
+  const root: DirBuilder = { name: '', path: 'skills', dirs: new Map(), skill: undefined }
   let skills = 0
 
   for (const entry of entries) {
     if (entry.internal === true) continue
     skills += 1
-    // 路径一定以 `skills/` 开头，切掉这段后按目录分段；最后一段是 SKILL.md。
+    // 路径一定以 `skills/` 开头，切掉这段与最后的 `SKILL.md` 后按目录分段。
     const segments = entry.fullPath.split('/').slice(1, -1)
-    const name = entry.name === '' ? fallbackSkillName(segments, repoName) : entry.name
-    const node: SkillNode = {
-      type: 'skill',
-      name,
-      path: entry.fullPath,
-      description: entry.description,
-    }
     let current = root
     let pathSoFar = 'skills'
     for (const segment of segments) {
@@ -166,7 +156,7 @@ function buildTree(
           name: segment,
           path: pathSoFar,
           dirs: new Map(),
-          skills: [],
+          skill: undefined,
         }
         current.dirs.set(segment, created)
         current = created
@@ -174,10 +164,52 @@ function buildTree(
         current = existing
       }
     }
-    current.skills.push(node)
+    current.skill = entry
   }
 
-  return { root: finishDir(root), skills }
+  return { root: finishRoot(root, repoName), skills }
+}
+
+/**
+ * 把中间根节点转成展示列表。根目录 `skills` 自己不单独显示：它有自己的
+ * SKILL.md 时，根部那个 skill 用 `children` 包住其余节点。
+ */
+function finishRoot(builder: DirBuilder, repoName: string): TreeNode[] {
+  const children = finishChildren(builder, repoName)
+  if (builder.skill === undefined) return children
+  return [skillNodeOf(builder, repoName, children)]
+}
+
+/**
+ * 递归装配一个目录下的子节点：有 `SKILL.md` 的子目录是 skill 叶子，否则是
+ * 分组目录。
+ */
+function finishChildren(builder: DirBuilder, repoName: string): TreeNode[] {
+  const nodes: TreeNode[] = []
+  for (const dir of builder.dirs.values()) {
+    const children = finishChildren(dir, repoName)
+    nodes.push(
+      dir.skill === undefined
+        ? { type: 'dir', name: dir.name, path: dir.path, children }
+        : skillNodeOf(dir, repoName, children),
+    )
+  }
+  sortTree(nodes)
+  return nodes
+}
+
+/** 把一个带 `SKILL.md` 的目录装配成 skill 节点；名称缺失时回退目录名。 */
+function skillNodeOf(builder: DirBuilder, repoName: string, children: TreeNode[]): SkillNode {
+  const entry = builder.skill as SkillMetadata
+  const segments = builder.path.split('/').slice(1)
+  const name = entry.name === '' ? fallbackSkillName(segments, repoName) : entry.name
+  return {
+    type: 'skill',
+    name,
+    path: builder.path,
+    description: entry.description,
+    children,
+  }
 }
 
 /**
@@ -187,30 +219,16 @@ function fallbackSkillName(segments: string[], repoName: string): string {
   return segments.at(-1) ?? repoName
 }
 
-/** 把中间节点转成展示节点并递归排序。 */
-function finishDir(builder: DirBuilder): TreeNode[] {
-  const dirs: DirNode[] = [...builder.dirs.values()].map((dir) => ({
-    type: 'dir',
-    name: dir.name,
-    path: dir.path,
-    children: finishDir(dir),
-  }))
-  const nodes: TreeNode[] = [...dirs, ...builder.skills]
-  sortTree(nodes)
-  return nodes
-}
-
 /**
- * 递归排序：目录在前、skill 在后，同类按 `name` 的大小写不敏感升序。
+ * 递归排序：目录在前、skill 在后，同类按 `name` 的大小写不敏感升序；
+ * 叶子下嵌套的子节点同样递归排序。
  */
 function sortTree(nodes: TreeNode[]): void {
   nodes.sort((a, b) => {
     if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
     return compareName(a.name, b.name)
   })
-  for (const node of nodes) {
-    if (node.type === 'dir') sortTree(node.children)
-  }
+  for (const node of nodes) sortTree(node.children)
 }
 
 /**

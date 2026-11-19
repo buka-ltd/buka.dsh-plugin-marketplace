@@ -3,9 +3,12 @@
  *
  * 只做纯字符串判断：是否可打开网页、是否能让 Host 去列 skills。真正的来源
  * 分类在 Host 的 `repo-store.ts`，这里只按同一套规则给页面做即时反馈。
+ * 仓库头像的缓存与更新在 Host（`/buka-skills/icon`），这里只拼请求地址。
  *
  * @module @buka/dsh-plugin-skills/client/repo-source
  */
+
+import { ICON_ROUTE } from './api.ts'
 
 /** GitHub owner 的写法：网页链接、SCP 地址与已经规范化的 `owner/repo`。 */
 const GITHUB_OWNER_PATTERNS = [
@@ -77,12 +80,23 @@ function githubOwnerOf(value: unknown): string {
 }
 
 /**
- * 仓库图标地址：GitHub 的 owner 头像；没有可靠图标时返回空串，调用方回退到
- * 内置图标。只拼 GitHub 官方域名，来源里的 owner 已由正则限定字符集。
+ * 仓库图标地址：Host 的头像缓存路由；没有可靠 owner 时返回空串，调用方回退到
+ * 内置图标。Host 命中磁盘缓存就直接返回，未命中才去 GitHub 拉一次。
  *
  * @param value 来源或来源链接
  */
 function repoIconUrl(value: unknown): string {
+  const owner = githubOwnerOf(value)
+  return owner === '' ? '' : `${ICON_ROUTE}?owner=${encodeURIComponent(owner)}`
+}
+
+/**
+ * 直连 GitHub 的头像地址。只在 Host 图标路由不可用时作为退路：旧版 Host 还没
+ * 注册 `/buka-skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
+ *
+ * @param value 来源或来源链接
+ */
+function repoDirectIconUrl(value: unknown): string {
   const owner = githubOwnerOf(value)
   return owner === '' ? '' : `https://github.com/${owner}.png?size=80`
 }
@@ -119,4 +133,4 @@ function isListableSource(source: unknown): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/u.test(text)
 }
 
-export { isListableSource, normalizeRepo, repoIconUrl, repoLabel, repoUrl }
+export { isListableSource, normalizeRepo, repoDirectIconUrl, repoIconUrl, repoLabel, repoUrl }
