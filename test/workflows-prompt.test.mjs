@@ -61,3 +61,43 @@ test('prompt: an empty definition produces no user prompt and degrades to a sing
     assert.doesNotMatch(sections.prompt, /## 任务类型的定义/u)
   }
 })
+
+test('prompt: create mode tells the executor to create worktrees itself', () => {
+  const task = { content: { request: '实现登录页' } }
+  const taskType = { definition: '先读代码。' }
+  const sections = buildExecutionPromptSections({ task, taskType, worktree: 'create' })
+
+  assert.match(sections.context, /## 工作树/u)
+  assert.match(sections.context, /`create_worktree`/u)
+  assert.match(sections.context, /多个仓库/u)
+  assert.match(sections.context, /`working_directory`/u)
+  assert.match(sections.prompt, /## 工作树/u)
+  assert.ok(
+    sections.prompt.indexOf('## 工作流规则') < sections.prompt.indexOf('## 工作树'),
+    'worktree rules follow the workflow rules',
+  )
+  assert.ok(
+    sections.prompt.indexOf('## 工作树') < sections.prompt.indexOf('## 任务类型的定义'),
+    'worktree rules precede the task type definition',
+  )
+  assert.equal(sections.userPrompt, '先读代码。', 'the definition stays a user message')
+})
+
+test('prompt: guard mode asks the user about dirty files without creating a worktree', () => {
+  const task = { content: { request: '实现登录页' } }
+  const sections = buildExecutionPromptSections({ task, taskType: {}, worktree: 'guard' })
+  assert.match(sections.context, /## 工作区/u)
+  assert.match(sections.context, /本任务不创建新的工作树/u)
+  assert.match(sections.context, /未提交的修改/u)
+  assert.match(sections.context, /必须停下来询问用户/u)
+  assert.doesNotMatch(sections.prompt, /`create_worktree`/u)
+})
+
+test('prompt: no worktree rules appear without a worktree setting', () => {
+  const task = { content: { request: '实现登录页' } }
+  for (const worktree of [undefined, null]) {
+    const sections = buildExecutionPromptSections({ task, taskType: {}, worktree })
+    assert.doesNotMatch(sections.prompt, /## 工作树/u)
+    assert.doesNotMatch(sections.prompt, /工作树/u)
+  }
+})

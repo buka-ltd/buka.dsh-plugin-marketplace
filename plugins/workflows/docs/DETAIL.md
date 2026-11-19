@@ -24,6 +24,7 @@ History: the plugin used to be `@buka/dsh-plugin-robots` (later renamed workers)
   - **definition**: preset information written by the orchestrator — what this kind of task is, what to do, facts about external systems (for example each service's pipeline); the executor reads it;
   - **content schema**: the format of the task content a creator must supply;
   - for human positions: **actions**, an optional assistant (named by worker identifier), and an optional plan mode;
+  - an optional **worktree mode** (`worktree`) on agent positions: `none` injects no worktree prompt (omitting it means none), `guard` creates nothing and only requires the executor to check the current workspace and every repository it will modify, stopping to ask the user when anything is uncommitted, and `create` tells the executor to call `create_worktree` itself for every repository it modifies (a task may touch several repositories, each created from its own repository directory). `create` requires both the worktree service (`ctx.worktrees`) and the `create_worktree` tool; without them it degrades to `guard`;
   - a robot position's task types must also declare a `content` schema that covers the program's input contract (v1's clock reads an object with a required `until`): saving the workflow checks the declaration, and task creation plus execution re-check the actual content;
   - a robot position's **creates**: creation declarations the engine executes when the robot finishes a task; each created task depends on the finished task and its content template may only use `{{content.*}}`. This is how a clock wait hands off to real work.
 - **Task content**: the concrete thing a creator writes for one task, as a string or an object; the engine validates it against the task type content schema, so a bad creator is rejected at creation time instead of failing the executor.
@@ -68,11 +69,12 @@ History: the plugin used to be `@buka/dsh-plugin-robots` (later renamed workers)
 
 ## Execution prompt
 
-An executor (agent task or assistant) sees exactly three sections, in this order:
+An executor (agent task or assistant) sees these sections in a fixed order:
 
 1. **Workflow rules**: engine-injected capabilities — read / write assets, create follow-up tasks with `buka_task_targets` / `buka_task_create`, submit with `buka_task_complete`;
-2. **Task type definition**: the task type `definition`, where the preset facts live;
-3. **Task content**: what the creator wrote for this task (a string as-is, an object as JSON).
+2. **Worktree rules** (only when a task type's `worktree` is not `none`): when `create` takes effect they tell the executor to call `create_worktree` itself for each repository it changes, creating one per repository and switching with `working_directory`; when `guard` applies (explicitly chosen, or `create` degraded) they say no new worktree is created and require the executor to check the workspace and every repository it will modify, stopping to ask the user when there are uncommitted changes;
+3. **Task type definition**: the task type `definition`, where the preset facts live;
+4. **Task content**: what the creator wrote for this task (a string as-is, an object as JSON).
 
 Position labels, channel ids, job numbers, dependency lists and attachment lists never enter the prompt: they belong to the page and orchestration layers, so the executor is not exposed to the position / channel vocabulary of workflow authoring. Templates are only evaluated in definition-declared creations (human actions and the start node `next`) and may use `{{content.<path>}}` (the content of the task being completed) and `{{input.<path>}}` (the action form).
 
@@ -137,6 +139,7 @@ The two tabs link to each other: "Open job" in the worker delete dialog just wri
 ## Dependencies and storage
 
 - Worker registration and task sessions ship in this plugin (the `ctx.bukaWorkers` service); workflow metadata needs `ctx.storageDomain` (shipped by the base composition).
+- **The worktree capability is optional**: a task type's `worktree: "create"` needs the DSH worktree plugin (`ctx.worktrees` plus the `create_worktree` tool, usually provided by the "change request and worktree" bundle). Without it the definition still saves and execution degrades to `"guard"`; `"none"` and `"guard"` need no worktree capability. The plugin never creates a checkout up front: the executor creates its own worktrees per repository.
 - Worker data lives under `~/.cache/dsh-plugin-workers/` (`workers.json` registry plus `workers/<id>/` directories); workflows / jobs / tasks / attempts / attachment metadata live in the `buka_workflow` domain; large texts and attachment files live under `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`.
 - **Version policy**: the current definition version is v8. v7 workflow definitions are migrated to v8 when the store opens (the executor `name` field becomes `id`, the value is unchanged); the migration is idempotent. Workflows on any other version stay in the list with a "needs upgrade" tag and cannot start jobs; upgrading means rewriting the definition in the current format from the orchestrator. Job snapshots are not migrated: v7 jobs keep the old `name` fields and stay readable and resumable.
 

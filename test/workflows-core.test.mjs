@@ -33,6 +33,7 @@ import {
   TERMINAL_TASK_STATUSES,
 } from '../plugins/workflows/src/domain/status.ts'
 import { assertRobotContent, buildInitialTasks } from '../plugins/workflows/src/engine/tasks.ts'
+import { worktreeToolAvailable } from '../plugins/workflows/src/engine/worktree.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
 import { toV7, toV8 } from './workflows-fixture-v7.mjs'
 
@@ -418,6 +419,41 @@ const EXPECTED_TASK_TRANSITIONS = {
   blocked: ['cancelled', 'pending'],
   cancelled: ['pending'],
 }
+
+test('engine: worktree capability needs both the service and the model tool', () => {
+  const context = (tools, worktrees) => ({
+    get(name) {
+      if (name === 'tools') return tools
+      if (name === 'worktrees') return worktrees
+      return undefined
+    },
+  })
+  const registeredTool = { get: () => ({ name: 'create_worktree' }) }
+  const service = { create() {} }
+
+  assert.equal(worktreeToolAvailable(context(registeredTool, service)), true)
+  assert.equal(
+    worktreeToolAvailable(context({ get: () => undefined }, service)),
+    false,
+    'the service alone cannot be called by the executor',
+  )
+  assert.equal(
+    worktreeToolAvailable(context(registeredTool, undefined)),
+    false,
+    'the tool alone has no worktree runtime behind it',
+  )
+  assert.equal(worktreeToolAvailable({}), false)
+  assert.equal(worktreeToolAvailable(undefined), false)
+  assert.equal(
+    worktreeToolAvailable({
+      get() {
+        throw new Error('boom')
+      },
+    }),
+    false,
+    'a broken probe degrades to unavailable',
+  )
+})
 
 test('domain: task status transitions match the state machine', () => {
   for (const [from, allowed] of Object.entries(EXPECTED_TASK_TRANSITIONS)) {
@@ -921,6 +957,60 @@ test('definition: robot positions must cover the program content contract', () =
     change(definition)
     expectIssue(validateWorkflowDefinition(definition, { workers }), pathPattern, messagePattern)
   }
+})
+
+test('definition: worktree is a three-value mode on agent task types', () => {
+  const workers = sampleWorkers()
+  for (const mode of ['guard', 'create']) {
+    const definition = sampleDefinition()
+    definition.positions[1].taskTypes[0].worktree = mode
+    const validated = expectOk(validateWorkflowDefinition(definition, { workers }))
+    assert.equal(
+      findTaskType(validated, 'dev.implement')?.worktree,
+      mode,
+      `${mode} is kept on the normalized definition`,
+    )
+  }
+
+  // none 与省略等价：不写入规范化定义。
+  for (const raw of ['none', undefined, null]) {
+    const definition = sampleDefinition()
+    definition.positions[1].taskTypes[0].worktree = raw
+    const normalized = expectOk(validateWorkflowDefinition(definition, { workers }))
+    assert.equal(findTaskType(normalized, 'dev.implement')?.worktree, undefined)
+  }
+
+  // 布尔值、未知字符串、人岗位、机器人岗位都拒绝。
+  const cases = [
+    [
+      (d) => (d.positions[1].taskTypes[0].worktree = true),
+      /positions\[1\]\.taskTypes\[0\]\.worktree/,
+      /must be "none", "guard", or "create"/,
+    ],
+    [
+      (d) => (d.positions[1].taskTypes[0].worktree = 'yes'),
+      /positions\[1\]\.taskTypes\[0\]\.worktree/,
+      /must be "none", "guard", or "create"/,
+    ],
+    [
+      (d) => (d.positions[3].taskTypes[0].worktree = 'guard'),
+      /positions\[3\]\.taskTypes\[0\]\.worktree/,
+      /only valid on agent positions/,
+    ],
+  ]
+  for (const [change, pathPattern, messagePattern] of cases) {
+    const candidate = sampleDefinition()
+    change(candidate)
+    expectIssue(validateWorkflowDefinition(candidate, { workers }), pathPattern, messagePattern)
+  }
+
+  const robot = sampleClockDefinition()
+  robot.positions[0].taskTypes[0].worktree = 'create'
+  expectIssue(
+    validateWorkflowDefinition(robot, { workers }),
+    /positions\[0\]\.taskTypes\[0\]\.executor/,
+    /worktree requires an agent executor/,
+  )
 })
 
 test('definition: robot executors must use a known program', () => {

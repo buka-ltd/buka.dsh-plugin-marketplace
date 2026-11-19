@@ -160,6 +160,9 @@ export interface ActionDefinition {
   readonly creates: readonly CreationDefinition[]
 }
 
+/** 任务类型的工作树模式：不注入 / 保护检查 / 主动创建。 */
+export type WorktreeMode = 'none' | 'guard' | 'create'
+
 /** 一个任务类型。 */
 export interface TaskTypeDefinition {
   readonly id: string
@@ -189,6 +192,16 @@ export interface TaskTypeDefinition {
   readonly assistant?: string | null | undefined
   /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
   readonly mode?: 'plan' | null | undefined
+  /**
+   * 仅智能体岗位的工作树模式。
+   *
+   * - `none`：不注入任何工作树提示词（省略等同于 `none`）；
+   * - `guard`：不创建工作树，只要求执行者检查工作区是否干净，有未提交修改就
+   *   停下来问用户；
+   * - `create`：要求执行者按仓库自己调用 `create_worktree`；宿主没有启用
+   *   工作树能力时自动降级为 `guard`。
+   */
+  readonly worktree?: WorktreeMode | undefined
 }
 
 /** 一个岗位：图上的节点，给人看清流程结构；主体 + 任务类型。 */

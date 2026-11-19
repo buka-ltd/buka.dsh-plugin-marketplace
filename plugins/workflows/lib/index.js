@@ -1892,6 +1892,7 @@ function readTaskType(entry, path, positionId, executor, workers, seenTypes, iss
 	const creates = readRobotCreates(entry.creates, `${path}.creates`, executor, workers, issues);
 	const assistant = readAssistant(entry.assistant, `${path}.assistant`, positionId, id, executor, workers, issues);
 	const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues);
+	const worktree = readWorktree(entry.worktree, `${path}.worktree`, path, executor, workers, issues);
 	if (label === null) return null;
 	const taskType = {
 		id,
@@ -1901,7 +1902,8 @@ function readTaskType(entry, path, positionId, executor, workers, seenTypes, iss
 		...actions === void 0 ? {} : { actions },
 		...creates === void 0 ? {} : { creates },
 		...assistant === void 0 ? {} : { assistant },
-		...mode === void 0 ? {} : { mode }
+		...mode === void 0 ? {} : { mode },
+		...worktree === void 0 ? {} : { worktree }
 	};
 	if (content !== null || entry.content === void 0 || entry.content === null) checkRobotContent(taskType, path, executor, workers, issues);
 	return taskType;
@@ -2082,6 +2084,35 @@ function readMode(raw, path, ownerPath, executor, workers, issues) {
 		return;
 	}
 	return "plan";
+}
+/**
+* 解析工作树模式；只对智能体岗位有效。
+*
+* 三个取值：`none`（不注入提示词，等价于省略，任何岗位都接受）、`guard`
+* （只做工作区保护检查）、`create`（让执行者自己创建 worktree）。后两者只对
+* 智能体岗位有效。这里只校验配置形状，不校验宿主是否启用了工作树插件：定义
+* 可能在启用插件的机器上编写、在没启用的组合里执行，也可能反过来。真正生效
+* 与否由执行时探测；`create` 不可用时降级为 `guard`。
+*/
+function readWorktree(raw, path, ownerPath, executor, workers, issues) {
+	if (raw === void 0 || raw === null) return void 0;
+	if (raw !== "none" && raw !== "guard" && raw !== "create") {
+		issues.add(path, "must be \"none\", \"guard\", or \"create\"");
+		return;
+	}
+	if (raw === "none") return void 0;
+	if (executor === null) return void 0;
+	if (executor.kind !== "worker") {
+		issues.add(path, "worktree is only valid on agent positions");
+		return;
+	}
+	const executorId = executorRef(executor);
+	const worker = executorId === null ? void 0 : workers.get(executorId);
+	if (worker === void 0 || worker.driver !== "agent") {
+		issues.add(`${ownerPath}.executor`, "worktree requires an agent executor");
+		return;
+	}
+	return raw;
 }
 /** 解析通道列表。 */
 function readChannels(raw, positionById, typeById, issues) {
@@ -2851,16 +2882,19 @@ function assertJobTransition(jobId, from, to) {
 /**
 * 任务执行上下文组装。
 *
-* 一个任务 = 一条全新会话。执行提示词只包含三段，顺序固定：
+* 一个任务 = 一条全新会话。执行提示词包含固定顺序的几段：
 *
 * 1. 工作流基准规则（引擎注入的能力说明：读写资产、创建后续任务、提交结果）；
-* 2. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
-* 3. 任务内容：创建者这一次给出的东西。
+* 2. 工作树规则（仅任务类型的 `worktree` 不是 `none` 时出现：`create` 要求
+*    执行者自己按仓库调用 `create_worktree`，`guard` 只要求发现未提交修改时
+*    先停下来问用户）；
+* 3. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
+* 4. 任务内容：创建者这一次给出的东西。
 *
 * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
 * 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
 *
-* 派发时三段拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
+* 派发时拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
 * 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
 * prompt 文件仍保存完整文本。
 *
@@ -2876,6 +2910,10 @@ const BASELINE_RULES = [
 	"- 创建后续任务：`buka_task_targets` 列出当前可创建的任务，`buka_task_create` 按 `target` 和 `content` 创建（不传 `deps` 时默认依赖本任务）；是否需要创建、创建什么，见下面的任务类型的定义。",
 	"- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。"
 ].join("\n");
+/** 工作树生效时的规则：执行者自己按仓库调用 `create_worktree`，不要直接改原检出。 */
+const WORKTREE_RULES = ["## 工作树", "本任务需要改动代码时，不要直接修改原检出：先进入要修改的仓库目录，调用 `create_worktree` 新建并进入它的 Git 工作树，之后的读写和命令都在这个工作树里进行。任务涉及多个仓库时，对每个仓库分别创建 worktree；需要换仓库时先用 `working_directory` 切到那个仓库的目录。同一个仓库只创建一个工作树，任务结束前不要删除检出。"].join("\n");
+/** 保护检查规则：不创建 worktree，先看工作区有没有未提交的修改，有就停下来问。 */
+const WORKTREE_GUARD_RULES = ["## 工作区", "本任务不创建新的工作树。开始前先检查当前工作区以及任务要修改的每个仓库是否有未提交的修改；如果有，必须停下来询问用户，得到明确答复前不要开始改动。"].join("\n");
 /** 人任务助理的基准规则：代人处理，动作由人确认。 */
 const ASSISTANT_RULES = [
 	"## 工作流规则",
@@ -2918,6 +2956,12 @@ function positionLabel(definition, positionId) {
 	if (positionId === "end") return "结束";
 	return positionOf(definition, positionId)?.label ?? positionId;
 }
+/** 工作树段：按实际形态选一条规则；没有配置工作树返回 null。 */
+function worktreeSection(mode) {
+	if (mode === "create") return WORKTREE_RULES;
+	if (mode === "guard") return WORKTREE_GUARD_RULES;
+	return null;
+}
 /** 有内容时给出一段；空串 / 缺省时整段省略。 */
 function textSection(title, text) {
 	const trimmed = typeof text === "string" ? text.trim() : "";
@@ -2947,11 +2991,17 @@ function buildExecutionPromptSections(input) {
 	const { taskType, task } = input;
 	const definition = typeof taskType.definition === "string" ? taskType.definition.trim() : "";
 	const content = contentSection(task.content);
+	const worktree = worktreeSection(input.worktree);
 	return {
-		context: joinSections([BASELINE_RULES, content]),
+		context: joinSections([
+			BASELINE_RULES,
+			worktree,
+			content
+		]),
 		userPrompt: definition === "" ? null : definition,
 		prompt: joinSections([
 			BASELINE_RULES,
+			worktree,
 			definition === "" ? null : `## 任务类型的定义\n${definition}`,
 			content
 		])
@@ -3207,7 +3257,8 @@ function jobDefinition(definition, workers) {
 				...taskType.actions === void 0 ? {} : { actions: taskType.actions },
 				...taskType.creates === void 0 ? {} : { creates: taskType.creates },
 				...taskType.assistant === void 0 ? {} : { assistant: taskType.assistant },
-				...taskType.mode === void 0 ? {} : { mode: taskType.mode }
+				...taskType.mode === void 0 ? {} : { mode: taskType.mode },
+				...taskType.worktree === void 0 ? {} : { worktree: taskType.worktree }
 			}))
 		})),
 		channels: definition.channels,
@@ -3745,6 +3796,31 @@ function buildInitialTasks(input) {
 	}
 	return created;
 }
+// .build/workflows/engine/worktree.js
+/**
+* 工作树能力探测。
+*
+* 任务类型上的 `worktree` 开关不自己建检出：执行者可能同时改动多个仓库，
+* 具体从哪个仓库、建几个 worktree 由执行者按任务判断。插件只负责确认宿主
+* 同时提供了工作树服务与 `create_worktree` 工具，并在提示词里教执行者使用；
+* 缺少任一能力时忽略开关，改用工作区保护提示。
+*
+* 探测放在执行时而不是保存定义时：插件可能后装 / 卸载，同一份定义在不同
+* 组合里应当按实际能力执行。
+*
+* @module @buka/dsh-plugin-workflows/engine/worktree
+*/
+/** 宿主是否同时启用了工作树服务和 `create_worktree` 模型工具。 */
+function worktreeToolAvailable(ctx) {
+	try {
+		const tools = ctx?.get?.("tools");
+		if (typeof tools?.get !== "function") return false;
+		if (tools.get("create_worktree") === void 0) return false;
+		return typeof (ctx?.get?.("worktrees"))?.create === "function";
+	} catch {
+		return false;
+	}
+}
 // .build/workflows/engine/engine.js
 /**
 * 工作流引擎：作业创建、调度、执行、派发校验、结算、取消、重试与恢复。
@@ -3812,6 +3888,7 @@ var WorkflowEngine = class {
 	logger;
 	workersOf;
 	delivery;
+	worktreeAvailableOf;
 	active = /* @__PURE__ */ new Map();
 	sessionTasks = /* @__PURE__ */ new Map();
 	busyAssistants = /* @__PURE__ */ new Set();
@@ -3826,6 +3903,7 @@ var WorkflowEngine = class {
 		this.logger = deps.logger;
 		this.workersOf = deps.workers;
 		this.delivery = deps.delivery;
+		this.worktreeAvailableOf = deps.worktreeAvailable ?? (() => worktreeToolAvailable(deps.ctx));
 	}
 	/** 启动引擎：刷新执行者登记表并恢复未完成的作业。 */
 	async start() {
@@ -3884,6 +3962,20 @@ var WorkflowEngine = class {
 	/** 取执行者登记表（按标识符）。 */
 	async workers() {
 		return await this.refreshWorkers();
+	}
+	/**
+	* 宿主有没有工作树能力（`ctx.worktrees` 服务 + `create_worktree` 工具）。
+	*
+	* 探测放在执行时而不是保存定义时：插件可能后装 / 卸载，同一份定义在不同
+	* 组合里应当按实际能力执行。探测抛错按「没有启用」处理。
+	*/
+	worktreeAvailable() {
+		try {
+			return this.worktreeAvailableOf() === true;
+		} catch (error) {
+			this.logger?.warn?.(`buka-workflows: could not detect the worktree plugin: ${describeError$4(error)}`);
+			return false;
+		}
 	}
 	/**
 	* 校验并保存工作流定义：没有 id 时新建（默认启用），有 id 时追加一个版本。
@@ -5381,9 +5473,11 @@ var WorkflowEngine = class {
 			return null;
 		}
 		const planMode = taskType.mode === "plan";
+		const worktree = taskType.worktree === "create" ? this.worktreeAvailable() ? "create" : "guard" : taskType.worktree === "guard" ? "guard" : void 0;
 		const sections = buildExecutionPromptSections({
 			task,
-			taskType
+			taskType,
+			...worktree === void 0 ? {} : { worktree }
 		});
 		const prompt = sections.prompt;
 		const attempt = await this.createAttempt({
@@ -12107,6 +12201,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
               "content": { "field": "{{content.until}}" } }
           ],
           "assistant": "<assistant worker identifier>" | null, "mode": "plan" | null,
+          "worktree": "none" | "guard" | "create",   // agent positions only
           "actions": [   // human positions only
             { "id": "pass", "label": "通过",
               "input": <JSON Schema object: the form the human fills, optional>,
@@ -12122,7 +12217,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
+Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
 /**
 * 注册全部工作流工具。
 *

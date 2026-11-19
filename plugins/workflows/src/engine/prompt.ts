@@ -1,16 +1,19 @@
 /**
  * 任务执行上下文组装。
  *
- * 一个任务 = 一条全新会话。执行提示词只包含三段，顺序固定：
+ * 一个任务 = 一条全新会话。执行提示词包含固定顺序的几段：
  *
  * 1. 工作流基准规则（引擎注入的能力说明：读写资产、创建后续任务、提交结果）；
- * 2. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
- * 3. 任务内容：创建者这一次给出的东西。
+ * 2. 工作树规则（仅任务类型的 `worktree` 不是 `none` 时出现：`create` 要求
+ *    执行者自己按仓库调用 `create_worktree`，`guard` 只要求发现未提交修改时
+ *    先停下来问用户）；
+ * 3. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
+ * 4. 任务内容：创建者这一次给出的东西。
  *
  * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
  * 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
  *
- * 派发时三段拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
+ * 派发时拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
  * 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
  * prompt 文件仍保存完整文本。
  *
@@ -29,10 +32,20 @@ import type {
   WorkflowDefinition,
 } from '../domain/types.ts'
 
+/**
+ * 任务类型配置了工作树模式时，执行提示词里的工作树段。
+ *
+ * - `create`：宿主启用了工作树能力，要求执行者自己按仓库调用 `create_worktree`；
+ * - `guard`：只做工作区保护检查（显式选择，或 `create` 在能力缺失时降级）。
+ */
+export type WorktreePromptMode = 'create' | 'guard'
+
 /** 任务执行提示的组装入参。 */
 export interface ExecutionPromptInput {
   readonly task: TaskRecord
   readonly taskType: TaskTypeDefinition
+  /** 任务类型要求工作树时的实际形态；没有配置时不传。 */
+  readonly worktree?: WorktreePromptMode | undefined
 }
 
 /** 基准规则：能力说明，不暴露岗位 / 通道。 */
@@ -42,6 +55,18 @@ const BASELINE_RULES = [
   '- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。',
   '- 创建后续任务：`buka_task_targets` 列出当前可创建的任务，`buka_task_create` 按 `target` 和 `content` 创建（不传 `deps` 时默认依赖本任务）；是否需要创建、创建什么，见下面的任务类型的定义。',
   '- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。',
+].join('\n')
+
+/** 工作树生效时的规则：执行者自己按仓库调用 `create_worktree`，不要直接改原检出。 */
+const WORKTREE_RULES = [
+  '## 工作树',
+  '本任务需要改动代码时，不要直接修改原检出：先进入要修改的仓库目录，调用 `create_worktree` 新建并进入它的 Git 工作树，之后的读写和命令都在这个工作树里进行。任务涉及多个仓库时，对每个仓库分别创建 worktree；需要换仓库时先用 `working_directory` 切到那个仓库的目录。同一个仓库只创建一个工作树，任务结束前不要删除检出。',
+].join('\n')
+
+/** 保护检查规则：不创建 worktree，先看工作区有没有未提交的修改，有就停下来问。 */
+const WORKTREE_GUARD_RULES = [
+  '## 工作区',
+  '本任务不创建新的工作树。开始前先检查当前工作区以及任务要修改的每个仓库是否有未提交的修改；如果有，必须停下来询问用户，得到明确答复前不要开始改动。',
 ].join('\n')
 
 /** 人任务助理的基准规则：代人处理，动作由人确认。 */
@@ -91,6 +116,13 @@ export function positionLabel(definition: WorkflowDefinition, positionId: string
   if (positionId === 'start') return '开始'
   if (positionId === 'end') return '结束'
   return positionOf(definition, positionId)?.label ?? positionId
+}
+
+/** 工作树段：按实际形态选一条规则；没有配置工作树返回 null。 */
+function worktreeSection(mode: WorktreePromptMode | undefined): string | null {
+  if (mode === 'create') return WORKTREE_RULES
+  if (mode === 'guard') return WORKTREE_GUARD_RULES
+  return null
 }
 
 /** 有内容时给出一段；空串 / 缺省时整段省略。 */
@@ -146,11 +178,13 @@ export function buildExecutionPromptSections(input: ExecutionPromptInput): Execu
   const { taskType, task } = input
   const definition = typeof taskType.definition === 'string' ? taskType.definition.trim() : ''
   const content = contentSection(task.content)
+  const worktree = worktreeSection(input.worktree)
   return {
-    context: joinSections([BASELINE_RULES, content]),
+    context: joinSections([BASELINE_RULES, worktree, content]),
     userPrompt: definition === '' ? null : definition,
     prompt: joinSections([
       BASELINE_RULES,
+      worktree,
       definition === '' ? null : `## 任务类型的定义\n${definition}`,
       content,
     ]),

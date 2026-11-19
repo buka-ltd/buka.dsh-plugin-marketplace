@@ -74,6 +74,12 @@ export interface EngineDeps {
   /** 每次调用时现取 workers 服务（插件可能后装 / 卸载）。 */
   readonly workers: () => WorkersServiceLike | null
   readonly delivery: SessionDelivery
+  /**
+   * 宿主是否提供工作树能力（工作树服务 + `create_worktree` 工具）。
+   *
+   * 默认按 `ctx` 探测；测试或嵌入方可以覆盖。
+   */
+  readonly worktreeAvailable?: (() => boolean) | undefined
 }
 
 /** 引擎对外抛出的输入 / 状态错误。 */

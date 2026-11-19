@@ -683,6 +683,9 @@ async function setup(definition, overrides = {}) {
     logger: overrides.logger,
     workers: () => workers,
     delivery,
+    ...(overrides.worktreeAvailable === undefined
+      ? {}
+      : { worktreeAvailable: overrides.worktreeAvailable }),
   })
   await engine.start()
   const workflow = await engine.saveWorkflow({ definition })
@@ -731,6 +734,86 @@ test('engine: the start task id can be used as a storageDomain record key', asyn
     assert.equal(start.id, START_TASK_ID)
     const dev = tasks.find((task) => task.position === 'dev')
     assert.deepEqual(dev.deps, [START_TASK_ID])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: worktree create tells the executor to create worktrees itself', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].worktree = 'create'
+  const env = await setup(definition, { worktreeAvailable: () => true })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '在独立工作树里实现' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const request = env.workers.dispatched[0].request
+    assert.match(request.prompt, /## 工作树/u)
+    assert.match(request.prompt, /`create_worktree`/u)
+    assert.match(request.prompt, /多个仓库/u)
+    assert.match(request.prompt, /working_directory/u)
+    assert.doesNotMatch(request.prompt, /必须停下来询问用户/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: worktree create degrades to guard when the plugin is unavailable', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].worktree = 'create'
+  const env = await setup(definition)
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '在独立工作树里实现' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const request = env.workers.dispatched[0].request
+    assert.match(request.prompt, /## 工作区/u)
+    assert.match(request.prompt, /本任务不创建新的工作树/u)
+    assert.match(request.prompt, /未提交的修改/u)
+    assert.match(request.prompt, /必须停下来询问用户/u)
+    assert.doesNotMatch(request.prompt, /`create_worktree`/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: worktree guard never creates a worktree even with the plugin enabled', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].worktree = 'guard'
+  const env = await setup(definition, { worktreeAvailable: () => true })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '检查工作区' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const request = env.workers.dispatched[0].request
+    assert.match(request.prompt, /## 工作区/u)
+    assert.match(request.prompt, /本任务不创建新的工作树/u)
+    assert.doesNotMatch(request.prompt, /`create_worktree`/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: worktree none injects no worktree prompt', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].worktree = 'none'
+  const env = await setup(definition, { worktreeAvailable: () => true })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '不注入工作树提示' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const prompt = env.workers.dispatched[0].request.prompt
+    assert.doesNotMatch(prompt, /## 工作树/u)
+    assert.doesNotMatch(prompt, /## 工作区/u)
+    assert.doesNotMatch(prompt, /create_worktree/u)
   } finally {
     await env.cleanup()
   }

@@ -431,6 +431,11 @@ function renderTaskType(
             )
           : null,
         type.mode === 'plan' ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
+        type.worktree === 'guard'
+          ? h(Tag, { tone: 'info' }, t('taskTypeWorktreeGuard'))
+          : type.worktree === 'create'
+            ? h(Tag, { tone: 'info' }, t('taskTypeWorktree'))
+            : null,
       ),
     ),
     typeof type.definition === 'string' && type.definition !== ''

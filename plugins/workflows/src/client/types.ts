@@ -173,6 +173,8 @@ export interface TaskTypeDefinition {
   /** 仅人岗位：点名的助理执行者标识符。 */
   assistant?: string | null
   mode?: string | null
+  /** 仅智能体岗位：`none` 不注入、`guard` 保护检查、`create` 让执行者建 worktree。 */
+  worktree?: 'none' | 'guard' | 'create'
 }
 
 /** 岗位定义（工作流定义快照里的一份）。 */

@@ -436,6 +436,8 @@ window.__ModuleLoader__.load({
     	taskTypeCreates: "Creates",
     	taskTypeAssistant: "Assistant",
     	taskTypeModePlan: "Plan",
+    	taskTypeWorktree: "New worktree",
+    	taskTypeWorktreeGuard: "Worktree guard",
     	taskTypeUnset: "—",
     	schemaNoFields: "No fields.",
     	schemaFieldRequired: "required",
@@ -732,6 +734,8 @@ window.__ModuleLoader__.load({
     	taskTypeCreates: "完成后创建",
     	taskTypeAssistant: "助理",
     	taskTypeModePlan: "计划",
+    	taskTypeWorktree: "新建工作树",
+    	taskTypeWorktreeGuard: "工作树保护",
     	taskTypeUnset: "—",
     	schemaNoFields: "没有字段。",
     	schemaFieldRequired: "必填",
@@ -2798,7 +2802,7 @@ window.__ModuleLoader__.load({
     	return h("article", {
     		key: id === "" ? type.label ?? "type" : id,
     		className: "buka-workflows-typeCard"
-    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
+    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null, type.worktree === "guard" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktreeGuard")) : type.worktree === "create" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktree")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
     		text: type.definition,
     		className: "buka-workflows-typeDesc",
     		expandLabel: t("expandText"),

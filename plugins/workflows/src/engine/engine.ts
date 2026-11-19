@@ -92,6 +92,7 @@ import {
 } from './tasks.ts'
 import type { EngineDeps, TurnSnapshot, WorkerHandleLike, WorkersServiceLike } from './types.ts'
 import { describeError, WorkflowError } from './types.ts'
+import { worktreeToolAvailable } from './worktree.ts'
 
 /** 任务结果文本在记录里的预览上限。 */
 const RESULT_PREVIEW_BYTES = 4096
@@ -224,6 +225,7 @@ export class WorkflowEngine {
   private readonly logger: LoggerLike | undefined
   private readonly workersOf: () => WorkersServiceLike | null
   private readonly delivery: EngineDeps['delivery']
+  private readonly worktreeAvailableOf: () => boolean
   private readonly active = new Map<string, ActiveExecution>()
   private readonly sessionTasks = new Map<string, { jobId: string; taskId: string }>()
   private readonly busyAssistants = new Set<string>()
@@ -239,6 +241,7 @@ export class WorkflowEngine {
     this.logger = deps.logger
     this.workersOf = deps.workers
     this.delivery = deps.delivery
+    this.worktreeAvailableOf = deps.worktreeAvailable ?? (() => worktreeToolAvailable(deps.ctx))
   }
 
   // ---------------------------------------------------------------------
@@ -316,6 +319,23 @@ export class WorkflowEngine {
   /** 取执行者登记表（按标识符）。 */
   private async workers(): Promise<Map<string, WorkerInfo>> {
     return await this.refreshWorkers()
+  }
+
+  /**
+   * 宿主有没有工作树能力（`ctx.worktrees` 服务 + `create_worktree` 工具）。
+   *
+   * 探测放在执行时而不是保存定义时：插件可能后装 / 卸载，同一份定义在不同
+   * 组合里应当按实际能力执行。探测抛错按「没有启用」处理。
+   */
+  private worktreeAvailable(): boolean {
+    try {
+      return this.worktreeAvailableOf() === true
+    } catch (error) {
+      this.logger?.warn?.(
+        `buka-workflows: could not detect the worktree plugin: ${describeError(error)}`,
+      )
+      return false
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -2239,7 +2259,21 @@ export class WorkflowEngine {
       return null
     }
     const planMode = taskType.mode === 'plan'
-    const sections = buildExecutionPromptSections({ task, taskType })
+    // `create` 只在宿主真的有工作树能力时生效；能力缺失时降级为 `guard`。
+    // `guard` 是显式选择，不依赖插件；`none` / 省略不注入任何工作树提示词。
+    const worktree =
+      taskType.worktree === 'create'
+        ? this.worktreeAvailable()
+          ? 'create'
+          : 'guard'
+        : taskType.worktree === 'guard'
+          ? 'guard'
+          : undefined
+    const sections = buildExecutionPromptSections({
+      task,
+      taskType,
+      ...(worktree === undefined ? {} : { worktree }),
+    })
     const prompt = sections.prompt
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
     const promptFile = await this.store

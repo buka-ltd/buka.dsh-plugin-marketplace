@@ -293,6 +293,7 @@ export function jobDefinition(
         ...(taskType.creates === undefined ? {} : { creates: taskType.creates }),
         ...(taskType.assistant === undefined ? {} : { assistant: taskType.assistant }),
         ...(taskType.mode === undefined ? {} : { mode: taskType.mode }),
+        ...(taskType.worktree === undefined ? {} : { worktree: taskType.worktree }),
       })),
     })),
     channels: definition.channels,

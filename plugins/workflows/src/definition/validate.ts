@@ -363,6 +363,7 @@ function readTaskType(
     issues,
   )
   const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues)
+  const worktree = readWorktree(entry.worktree, `${path}.worktree`, path, executor, workers, issues)
   if (label === null) return null
   const taskType: TaskTypeDefinition = {
     id,
@@ -373,6 +374,7 @@ function readTaskType(
     ...(creates === undefined ? {} : { creates }),
     ...(assistant === undefined ? {} : { assistant }),
     ...(mode === undefined ? {} : { mode }),
+    ...(worktree === undefined ? {} : { worktree }),
   }
   // content 写坏了已经报过错，不再叠一条「缺 content schema」。
   if (content !== null || entry.content === undefined || entry.content === null) {
@@ -626,6 +628,43 @@ function readMode(
     return undefined
   }
   return 'plan'
+}
+
+/**
+ * 解析工作树模式；只对智能体岗位有效。
+ *
+ * 三个取值：`none`（不注入提示词，等价于省略，任何岗位都接受）、`guard`
+ * （只做工作区保护检查）、`create`（让执行者自己创建 worktree）。后两者只对
+ * 智能体岗位有效。这里只校验配置形状，不校验宿主是否启用了工作树插件：定义
+ * 可能在启用插件的机器上编写、在没启用的组合里执行，也可能反过来。真正生效
+ * 与否由执行时探测；`create` 不可用时降级为 `guard`。
+ */
+function readWorktree(
+  raw: unknown,
+  path: string,
+  ownerPath: string,
+  executor: ExecutorSpec | null,
+  workers: ReadonlyMap<string, WorkerInfo>,
+  issues: Issues,
+): 'guard' | 'create' | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (raw !== 'none' && raw !== 'guard' && raw !== 'create') {
+    issues.add(path, 'must be "none", "guard", or "create"')
+    return undefined
+  }
+  if (raw === 'none') return undefined
+  if (executor === null) return undefined
+  if (executor.kind !== 'worker') {
+    issues.add(path, 'worktree is only valid on agent positions')
+    return undefined
+  }
+  const executorId = executorRef(executor)
+  const worker = executorId === null ? undefined : workers.get(executorId)
+  if (worker === undefined || worker.driver !== 'agent') {
+    issues.add(`${ownerPath}.executor`, 'worktree requires an agent executor')
+    return undefined
+  }
+  return raw
 }
 
 /** 解析通道列表。 */
