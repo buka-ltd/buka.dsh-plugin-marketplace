@@ -69,12 +69,14 @@ export const StateDot = () => null
 export const Toast = () => null
 export const SegmentedTabs = (props) => h('div', props, ...(props.items ?? []).map((item) => h('span', { key: item.value }, item.label)))
 export const Modal = (props) => (props.open === false ? null : h('div', { className: props.className }, ...(props.children ?? []), props.footer ?? null))
+export const Menu = (props) => h('span', { className: 'x-menu' }, props.anchor)
 export const MarkdownText = () => null
 export const CodeBlock = () => null
 export const FileTypeIcon = () => null
 export const ReadBlock = () => null
 export const languageForPath = () => ''
 export const IconChevronRightOutlineRegular = () => null
+export const IconChevronDownOutlineRegular = () => null
 export const IconCloseOutlineRegular = () => null
 export const IconRefreshOutlineRegular = () => null
 export const IconWarningOutlineRegular = () => null

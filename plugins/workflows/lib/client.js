@@ -6646,7 +6646,9 @@ window.__ModuleLoader__.load({
     		case "invalid-source": return t("errInvalidSource");
     		case "invalid-skill": return t("errInvalidSkill");
     		case "invalid-skills": return t("errInvalidSkills");
-    		case "list-unparsed": return t("errListUnparsed");
+    		case "not-saved": return t("errSourceNotSaved");
+    		case "repos-unreadable": return t("errReposUnreadable");
+    		case "skill-not-found": return t("errSkillNotFound");
     		case "npx-failed": return t("errNpxFailed");
     		case "skills-unavailable": return t("errSkillsUnavailable");
     		case "update-failed": return t("errUpdateFailed");
@@ -6752,11 +6754,6 @@ window.__ModuleLoader__.load({
     const NS = "buka-workers";
     /** 「创建执行者」对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
     const CREATE_FORM_ID = "buka-workers-create-form";
-    /**
-    * 「重命名执行者」对话框里表单的 id：页脚「保存」按钮通过 `form` 提交它，
-    * 这样回车与点保存走同一套校验。
-    */
-    const RENAME_FORM_ID = "buka-workers-rename-form";
     /** 与 Host 一半（`src/workers/` 的 `/buka-workers/*` 路由）的路由常量保持一致。 */
     const LIST_ROUTE = "/buka-workers/list";
     const CREATE_ROUTE = "/buka-workers/create";
@@ -6769,20 +6766,29 @@ window.__ModuleLoader__.load({
     const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
     const REMOVE_ROUTE = "/buka-workers/remove";
     const REVEAL_ROUTE = "/buka-workers/reveal";
+    /**
+    * DSH 内置 `@deepseek-ai/dsh-client-ui-open-in-app` 的跨插件 HTTP 契约：
+    * 应用清单、应用图标与「用某个应用打开目录」。不在插件间 import，只在浏览器
+    * 里 fetch 这三个包内路由；路由不可用（Web / headless / 非桌面组合）时页面
+    * 退回 `/buka-workers/reveal`。
+    */
+    const OPEN_IN_APP_APPS_ROUTE = "/open-in-app/apps";
+    const OPEN_IN_APP_OPEN_ROUTE = "/open-in-app/open";
+    const OPEN_IN_APP_ICON_ROUTE = "/open-in-app/icon";
+    /** 与内置 open-in-app 共享的「上次选中的应用」localStorage 键（JSON 字符串）。 */
+    const OPEN_IN_APP_CHOICE_KEY = "dsh.open-in-app.choice";
+    const SKILL_REPOS_ROUTE = "/buka-workers/skills/repos";
     const AVAILABLE_ROUTE = "/buka-workers/skills/available";
     const INSTALL_ROUTE = "/buka-workers/skills/install";
     const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
+    const SKILL_CHECK_ROUTE = "/buka-workers/skills/check";
     const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
     const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
     /**
-    * Skills 插件（`@buka/dsh-plugin-skills`）的收藏仓库路由。
-    *
-    * 两个插件不互相 import，只通过同一个 webServer 的包内路由通信：这里只读
-    * 收藏清单（GET），Skills 插件没安装时请求 404，页面就把「收藏夹」整块隐藏。
-    * 这是跨插件契约，改动时要和 `plugins/skills/lib/index.js` 同步。
+    * 来源只来自 Skills 插件的「技能仓库」：两个插件不互相 import，Host 通过
+    * `ctx.bukaSkills` 读收藏、`listSkills()` 读仓库内容；浏览器不再手填来源。
     */
-    const SKILLS_REPOS_ROUTE = "/buka-skills/repos";
-    /** 详情页的页签；id / panelId 与 `SegmentedTabs` 的 ARIA 契约一致。 */
+    /** 详情页的页签；id / panelId 与 `DetailTabs` 的 ARIA 契约一致。 */
     const TABS = [
     	{
     		value: "settings",
@@ -6800,8 +6806,6 @@ window.__ModuleLoader__.load({
     		panelId: "buka-workers-panel-skills"
     	}
     ];
-    /** 安装对话框里来源表单的 id：回车触发表单提交，读出候选 skills。 */
-    const INSTALL_FORM_ID = "buka-workers-install-form";
     /** 「更换头像」对话框里表单的 id：页脚「保存」按钮通过 `form` 属性提交它。 */
     const AVATAR_FORM_ID = "buka-workers-avatar-form";
     /**
@@ -6815,7 +6819,8 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/workers/actions/detail.js
     /**
-    * 「执行者」详情页的动作：更换头像、改展示名、保存职责描述。
+    * 「执行者」详情页的动作：更换头像，以及设置页签里展示名 / 职责 / 模型的
+    * 自动保存。
     *
     * @module @buka/dsh-plugin-workflows/workers/client/actions/detail
     */
@@ -6824,7 +6829,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createDetailActions(state, t) {
-    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, selectedWorker, setRenameDraft, setRenameError, setRenameOpen, renameSaving, renameDraft, setRenameSaving, selectedId, descriptionDraft, setDescriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, setModelDraft, modelSaving, setModelSaving, setModelError, patchWorker, flash, reload, corrupt } = state;
+    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, nameDraft, nameSaving, setNameSaving, setNameError, selectedId, descriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, modelSaving, setModelSaving, setModelError, patchWorker, flash } = state;
     	/**
     	* 打开「更换头像」对话框：草稿从执行者当前头像开始。
     	*
@@ -6867,58 +6872,35 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 打开「重命名执行者」对话框：草稿从当前展示名开始，用户直接改成新名称。
-    	* 登记文件损坏或写操作进行中时不打开（入口按钮也会禁用）；目录缺失不影响
-    	* 改展示名。
+    	* 展示名的规范化（与 Host 一致：折叠空白并 trim），用来判断有没有改动。
+    	* 空串表示清空名称，展示时回退到标识符。
     	*/
-    	function openRenameDialog() {
-    		if (selectedWorker === null || mutating || corrupt) return;
-    		setRenameDraft(selectedWorker.name);
-    		setRenameError(null);
-    		setRenameOpen(true);
-    	}
-    	/** 关闭「重命名执行者」对话框；保存中不响应关闭。 */
-    	function closeRenameDialog() {
-    		if (renameSaving) return;
-    		setRenameOpen(false);
-    		setRenameError(null);
+    	function normalizedWorkerName(value) {
+    		return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
     	}
     	/**
-    	* 改展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
-    	* 工作区的标题同步成新名称。成功后只局部更新列表里的这一条，`selectedId`
-    	* 不变，详情页留在同一个执行者上；失败留在对话框里提示。
-    	*
+    	* 保存展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
+    	* 工作区的标题由 Host 同步。设置页签没有保存按钮，成功后只局部更新列表里的
+    	* 这一条；失败提示留在区块里。
     	*/
-    	async function renameWorker(event) {
-    		event.preventDefault();
-    		if (selectedWorker === null || renameSaving) return;
-    		const previousName = selectedWorker.name;
-    		const nextName = renameDraft.trim();
-    		if (nextName === previousName) {
-    			setRenameError(t("renameSame"));
-    			return;
-    		}
-    		setRenameSaving(true);
-    		setRenameError(null);
+    	async function saveWorkerName() {
+    		if (selectedId === null || nameSaving) return;
+    		setNameSaving(true);
+    		setNameError(null);
     		try {
     			const saved = (await requestJson(RENAME_ROUTE, {
     				method: "POST",
     				body: JSON.stringify({
-    					id: selectedWorker.id,
-    					name: nextName
+    					id: selectedId,
+    					name: nameDraft
     				})
     			}))?.worker;
-    			const savedName = typeof saved?.name === "string" ? saved.name : nextName;
-    			patchWorker(selectedWorker.id, { name: savedName });
-    			setRenameOpen(false);
-    			setRenameDraft("");
-    			const display = savedName === "" ? selectedWorker.id : savedName;
-    			flash("success", `${t("renamed")} ${display}`);
-    			reload();
+    			const savedName = typeof saved?.name === "string" ? saved.name : normalizedWorkerName(nameDraft);
+    			patchWorker(selectedId, { name: savedName });
     		} catch (failure) {
-    			setRenameError(`${t("renameSaveFailed")} ${failureText(t, failure)}`);
+    			setNameError(`${t("nameSaveFailed")} ${failureText(t, failure)}`);
     		} finally {
-    			setRenameSaving(false);
+    			setNameSaving(false);
     		}
     	}
     	/**
@@ -6930,7 +6912,11 @@ window.__ModuleLoader__.load({
     	}
     	/**
     	* 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `buka_workers`
-    	* 工具读它，决定是否把节点交给这个执行者；保存成功后只局部更新列表。
+    	* 工具读它，决定是否把节点交给这个执行者。
+    	*
+    	* 设置页签没有保存按钮：页面在输入停下后自动调用这里，所以成功后只局部
+    	* 更新列表，不改写正在编辑的草稿（改写会吞掉保存期间继续输入的内容）。
+    	* 失败提示留在区块里。
     	*/
     	async function saveDescription() {
     		if (selectedId === null || descriptionSaving) return;
@@ -6946,8 +6932,6 @@ window.__ModuleLoader__.load({
     			}))?.worker?.description;
     			const next = typeof saved === "string" ? saved : normalizedDescription(descriptionDraft);
     			patchWorker(selectedId, { description: next });
-    			setDescriptionDraft(next);
-    			flash("success", t("descriptionSaved"));
     		} catch (failure) {
     			setDescriptionError(`${t("descriptionSaveFailed")} ${failureText(t, failure)}`);
     		} finally {
@@ -6957,6 +6941,8 @@ window.__ModuleLoader__.load({
     	/**
     	* 保存智能体的模型选择；`null` 表示跟随宿主默认模型。
     	*
+    	* 与职责一样由页面在改动后自动调用，成功后只局部更新列表；草稿保持用户
+    	* 刚选的值，避免把保存期间继续改动的选择覆盖回旧值。
     	*/
     	async function saveWorkerModel() {
     		if (selectedId === null || modelSaving) return;
@@ -6971,8 +6957,6 @@ window.__ModuleLoader__.load({
     				})
     			}))?.worker?.model ?? null;
     			patchWorker(selectedId, { model: saved });
-    			setModelDraft(saved);
-    			flash("success", t("modelSaved"));
     		} catch (failure) {
     			setModelError(`${t("modelSaveFailed")} ${failureText(t, failure)}`);
     		} finally {
@@ -6983,9 +6967,8 @@ window.__ModuleLoader__.load({
     		openAvatarDialog,
     		closeAvatarDialog,
     		saveAvatar,
-    		openRenameDialog,
-    		closeRenameDialog,
-    		renameWorker,
+    		normalizedWorkerName,
+    		saveWorkerName,
     		normalizedDescription,
     		saveDescription,
     		saveWorkerModel
@@ -7002,34 +6985,57 @@ window.__ModuleLoader__.load({
     *
     */
     function createSkillActions(state, t) {
-    	const { favourites, setFavourites, setInstallOpen, installCandidates, setInstallCandidates, installSource, setInstallSource, installSelected, setInstallSelected, setInstallError, installing, setInstalling, selectedWorker, patchWorker, reload, flash, corrupt, removing, setRemoving, setConfirmingSkill, setSkillError, updatingSkills, setUpdatingSkills, updatingAllSkills, setUpdatingAllSkills } = state;
+    	const { installRepos, setInstallRepos, setInstallOpen, installCandidates, setInstallCandidates, installSource, setInstallSource, installSelected, setInstallSelected, setInstallError, installing, setInstalling, selectedWorker, patchWorker, reload, flash, corrupt, removing, setRemoving, setConfirmingSkill, setSkillError, setSkillChecks, updatingSkill, setUpdatingSkill, updatingAllSkills, setUpdatingAllSkills } = state;
+    	/** 候选清单请求序号：切换仓库时旧响应不能覆盖新仓库的清单。 */
+    	let candidatesSequence = 0;
     	/**
-    	* 读 Skills 插件的收藏仓库。只读它已经存在的 `GET /buka-skills/repos`：
-    	* 两个插件之间不 import，这个路由回 404（插件没装）或任何失败都按
-    	* 「没有收藏夹」处理，页面不显示这一块也不报错。
+    	* 读 Skills 插件的「技能仓库」。Host 通过 `ctx.bukaSkills` 读收藏，插件没装
+    	* 或版本太旧时回 503；页面据此显示安装提示，而不是让用户手填第三方来源。
     	*/
-    	function loadFavourites() {
-    		if (favourites.status === "loading" || favourites.status === "ready") return;
-    		setFavourites((prev) => ({
-    			...prev,
-    			status: "loading"
-    		}));
-    		requestJson(SKILLS_REPOS_ROUTE).then((body) => {
-    			const repos = (Array.isArray(body?.repos) ? body.repos : []).filter((repo) => repo !== null && typeof repo === "object" && typeof repo.source === "string" && repo.source !== "").map((repo) => ({
-    				id: typeof repo.id === "string" && repo.id !== "" ? repo.id : repo.source ?? "",
-    				source: repo.source ?? "",
-    				note: typeof repo.note === "string" ? repo.note : ""
+    	async function loadInstallRepos() {
+    		if (installRepos.status === "loading") return;
+    		setInstallRepos({
+    			status: "loading",
+    			repos: [],
+    			corrupt: false,
+    			error: null
+    		});
+    		try {
+    			const body = await requestJson(SKILL_REPOS_ROUTE);
+    			const repos = (Array.isArray(body?.repositories) ? body.repositories : []).filter((repo) => repo !== null && typeof repo === "object" && typeof repo.source === "string" && repo.source !== "").map((repo) => ({
+    				id: typeof repo.id === "string" && repo.id !== "" ? repo.id : repo.source,
+    				source: repo.source,
+    				note: typeof repo.note === "string" ? repo.note : "",
+    				kind: typeof repo.kind === "string" && repo.kind !== "" ? repo.kind : "unknown",
+    				skills: typeof repo.skills === "number" && Number.isFinite(repo.skills) ? repo.skills : null
     			}));
-    			setFavourites({
+    			setInstallRepos({
     				status: "ready",
-    				repos
+    				repos,
+    				corrupt: body?.corrupt === true,
+    				error: null
     			});
-    		}, () => setFavourites({
-    			status: "unavailable",
-    			repos: []
-    		}));
+    			const first = repos.find((repo) => repo.kind !== "unavailable") ?? repos[0];
+    			if (body?.corrupt !== true && first !== void 0) loadCandidates(first.source);
+    		} catch (failure) {
+    			if (errorCode(failure) === "skills-unavailable") {
+    				setInstallRepos({
+    					status: "unavailable",
+    					repos: [],
+    					corrupt: false,
+    					error: null
+    				});
+    				return;
+    			}
+    			setInstallRepos({
+    				status: "error",
+    				repos: [],
+    				corrupt: false,
+    				error: failureText(t, failure)
+    			});
+    		}
     	}
-    	/** 打开「安装 skills」对话框：清掉上一次的来源、候选与勾选，并按需加载收藏夹。 */
+    	/** 打开「安装 skills」对话框：清掉上一次的来源、候选与勾选，再读技能仓库。 */
     	function openInstallDialog() {
     		if (installing || corrupt) return;
     		setInstallSource("");
@@ -7043,11 +7049,18 @@ window.__ModuleLoader__.load({
     		setInstallSelected([]);
     		setInstallError(null);
     		setInstallOpen(true);
-    		loadFavourites();
+    		loadInstallRepos();
+    	}
+    	/** 换一个收藏仓库：重新读它的 skill 清单。 */
+    	function selectInstallRepo(source) {
+    		if (installing) return;
+    		if (source === installSource && installCandidates.status === "ready") return;
+    		loadCandidates(source);
     	}
     	/** 关闭「安装 skills」对话框；安装中不响应关闭，避免请求回来时状态错位。 */
     	function closeInstallDialog() {
     		if (installing) return;
+    		candidatesSequence += 1;
     		setInstallOpen(false);
     		setInstallError(null);
     	}
@@ -7057,6 +7070,7 @@ window.__ModuleLoader__.load({
     	*/
     	async function loadCandidates(sourceOverride) {
     		if (installing || selectedWorker === null) return;
+    		const sequence = ++candidatesSequence;
     		const value = (sourceOverride ?? installSource).trim();
     		if (value === "") {
     			setInstallCandidates({
@@ -7076,6 +7090,7 @@ window.__ModuleLoader__.load({
     			error: null,
     			output: ""
     		});
+    		setInstallSelected([]);
     		setInstallError(null);
     		try {
     			const body = await requestJson(AVAILABLE_ROUTE, {
@@ -7085,6 +7100,7 @@ window.__ModuleLoader__.load({
     					source: value
     				})
     			});
+    			if (sequence !== candidatesSequence) return;
     			const skills = (Array.isArray(body?.skills) ? body.skills : []).filter((skill) => skill !== null && typeof skill === "object" && typeof skill.name === "string" && skill.name !== "");
     			const installed = new Set((Array.isArray(body?.installed) ? body.installed : []).map((name) => String(name)));
     			for (const skill of skillsOf(selectedWorker)) installed.add(String(skill.name));
@@ -7097,6 +7113,7 @@ window.__ModuleLoader__.load({
     			});
     			setInstallSelected(skills.filter((skill) => !installed.has(skill.name)).map((skill) => skill.name));
     		} catch (failure) {
+    			if (sequence !== candidatesSequence) return;
     			setInstallCandidates({
     				status: "error",
     				skills: [],
@@ -7153,6 +7170,7 @@ window.__ModuleLoader__.load({
     			});
     			setInstallOpen(false);
     			flash("success", `${t("skillInstalled")} ${installSource.trim()}`);
+    			checkWorkerSkills(selectedWorker);
     		} catch (failure) {
     			setInstallError({
     				message: failureText(t, failure),
@@ -7163,18 +7181,64 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 更新一个执行者的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
-    	* 检查并更新目录，`modified` 会跳过。逐项失败时路由回 200 但 `ok:false`，
-    	* 页面展示第一个失败 skill 的原因与输出；整体失败走请求异常分支。
+    	* 自动检查一个执行者的项目级 skills：进入「技能」页签、安装 / 移除 / 更新
+    	* 之后调用。只读，不写 lockfile；结果按 skill 名交给行内状态标记。
+    	*
+    	* 响应回来时只接受当前执行者的结果：切走再切回时旧请求不能覆盖新状态。
     	*/
-    	async function updateWorkerSkills(worker) {
-    		if (updatingSkills || updatingAllSkills) return;
-    		setUpdatingSkills(true);
+    	async function checkWorkerSkills(worker) {
+    		setSkillChecks((prev) => ({
+    			...prev,
+    			workerId: worker.id,
+    			status: "loading",
+    			error: null
+    		}));
+    		try {
+    			const body = await requestJson(SKILL_CHECK_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({ id: worker.id })
+    			});
+    			const results = {};
+    			for (const entry of Array.isArray(body?.check?.results) ? body.check.results : []) {
+    				const name = typeof entry?.name === "string" ? entry.name : "";
+    				const status = typeof entry?.status === "string" ? entry.status : "";
+    				if (name === "" || status === "") continue;
+    				results[name] = {
+    					name,
+    					status,
+    					...typeof entry?.message === "string" && entry.message !== "" ? { message: entry.message } : {}
+    				};
+    			}
+    			setSkillChecks((prev) => prev.workerId === worker.id ? {
+    				workerId: worker.id,
+    				status: "ready",
+    				results,
+    				error: null
+    			} : prev);
+    		} catch (failure) {
+    			setSkillChecks((prev) => prev.workerId === worker.id ? {
+    				...prev,
+    				status: "error",
+    				error: messageOf$1(failure)
+    			} : prev);
+    		}
+    	}
+    	/**
+    	* 行内更新一个 skill：Host 把 `skills` 收窄到这一项，`modified` 会被跳过。
+    	* 逐项失败时路由回 200 但 `ok:false`，页面展示原因与输出；不论成功失败都
+    	* 重新检查一次，让行内状态回到磁盘上的真实版本。
+    	*/
+    	async function updateSkill(worker, skill) {
+    		if (updatingSkill !== null || updatingAllSkills) return;
+    		setUpdatingSkill(skill.name);
     		setSkillError(null);
     		try {
     			const body = await requestUpdateJson(SKILL_UPDATE_ROUTE, {
     				method: "POST",
-    				body: JSON.stringify({ id: worker.id })
+    				body: JSON.stringify({
+    					id: worker.id,
+    					skills: [skill.name]
+    				})
     			});
     			if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills });
     			const summary = body.update;
@@ -7187,17 +7251,19 @@ window.__ModuleLoader__.load({
     					output: typeof first?.output === "string" ? first.output : ""
     				});
     				flash("error", message);
-    				return;
+    			} else {
+    				const updated = Array.isArray(summary?.updated) ? summary.updated.length : 0;
+    				const note = typeof summary?.message === "string" ? summary.message : "";
+    				flash("success", updated === 0 && note !== "" ? note : `${t("skillUpdated")} ${skill.name}`);
     			}
-    			const message = summary?.message;
-    			flash("success", typeof message === "string" && message !== "" ? message : t("skillsUpToDate"));
+    			await checkWorkerSkills(worker);
     		} catch (failure) {
     			setSkillError({
     				message: failureText(t, failure),
     				output: outputOf(failure)
     			});
     		} finally {
-    			setUpdatingSkills(false);
+    			setUpdatingSkill(null);
     		}
     	}
     	/**
@@ -7205,7 +7271,7 @@ window.__ModuleLoader__.load({
     	* 顺序执行，单个失败不中断；页面用汇总提示结果并刷新列表。
     	*/
     	async function updateAllWorkers() {
-    		if (updatingSkills || updatingAllSkills) return;
+    		if (updatingSkill !== null || updatingAllSkills) return;
     		setUpdatingAllSkills(true);
     		try {
     			const body = await requestJson(SKILL_UPDATE_ALL_ROUTE, { method: "POST" });
@@ -7242,6 +7308,7 @@ window.__ModuleLoader__.load({
     			patchWorker(worker.id, { skills: Array.isArray(body.skills) ? body.skills : [] });
     			setConfirmingSkill(null);
     			flash("success", `${t("skillRemoved")} ${skill.name}`);
+    			checkWorkerSkills(worker);
     		} catch (failure) {
     			setSkillError({
     				message: failureText(t, failure),
@@ -7252,15 +7319,16 @@ window.__ModuleLoader__.load({
     		}
     	}
     	return {
-    		loadFavourites,
     		openInstallDialog,
+    		selectInstallRepo,
     		closeInstallDialog,
     		loadCandidates,
     		toggleCandidate,
     		selectAllCandidates,
     		installSelectedSkills,
     		removeSkill,
-    		updateWorkerSkills,
+    		checkWorkerSkills,
+    		updateSkill,
     		updateAllWorkers
     	};
     }
@@ -7278,7 +7346,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createWorkerActions(state, t) {
-    	const { setBusy, flash, reload, service, mutating, creating, createId, setCreateId, createName, setCreateName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, deleteDialog, setDeleteDialog, selectedId, setSelectedId, corrupt, setDraftDescription, setDraftAvatar } = state;
+    	const { setBusy, flash, reload, service, mutating, creating, createId, setCreateId, createName, setCreateName, draftDescription, draftAvatar, nextAvatarId, setDialogOpen, setCreateError, setCreating, deleteDialog, setDeleteDialog, selectedId, setSelectedId, corrupt, setDraftDescription, setDraftAvatar, setOpenInAppChoice } = state;
     	/**
     	* 打开执行者会话：只有已挂载（有 workspaceId）才能打开；否则提示先挂载。
     	* 打开走 DSH 的 `uiWorkspace.openWorkspace(workspaceId)`。
@@ -7328,6 +7396,42 @@ window.__ModuleLoader__.load({
     		} catch (failure) {
     			const extra = errorCode(failure) === "reveal-failed" ? "" : ` ${failureText(t, failure)}`;
     			flash("error", `${t("revealFailed")}${extra}`);
+    		} finally {
+    			setBusy(null);
+    		}
+    	}
+    	/**
+    	* 用 DSH 内置 open-in-app 的能力打开执行者目录。
+    	*
+    	* 应用清单由页面从 `GET /open-in-app/apps` 读出；这里 `POST
+    	* /open-in-app/open` 按应用启动。成功不弹提示（应用窗口本身就是反馈），
+    	* 选中的应用写回内置客户端同一个 localStorage 键，和 DSH 其他「用应用打开」
+    	* 入口保持同一选择；失败用 Toast 说明。路由不可用时页面本来就会退回
+    	* `revealWorker`，不会走到这里。
+    	*/
+    	async function openWorkerWith(worker, appId) {
+    		if (mutating || appId === "") return;
+    		if (isRobotWorker(worker)) {
+    			flash("error", t("robotReadOnly"));
+    			return;
+    		}
+    		setBusy(`reveal:${worker.id}`);
+    		try {
+    			const response = await fetch(OPEN_IN_APP_OPEN_ROUTE, {
+    				method: "POST",
+    				headers: { "content-type": "application/json" },
+    				body: JSON.stringify({
+    					app: appId,
+    					path: worker.path
+    				})
+    			});
+    			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    			setOpenInAppChoice(appId);
+    			try {
+    				window.localStorage.setItem(OPEN_IN_APP_CHOICE_KEY, JSON.stringify(appId));
+    			} catch {}
+    		} catch (failure) {
+    			flash("error", `${t("openInAppFailed")} ${messageOf$1(failure)}`);
     		} finally {
     			setBusy(null);
     		}
@@ -7544,6 +7648,7 @@ window.__ModuleLoader__.load({
     	return {
     		openWorker,
     		revealWorker,
+    		openWorkerWith,
     		mountWorker,
     		openCreateDialog,
     		closeCreateDialog,
@@ -7563,6 +7668,13 @@ window.__ModuleLoader__.load({
     *
     * @module @buka/dsh-plugin-workflows/workers/client/state
     */
+    /** 「技能」页签自动检查的初始状态。 */
+    const EMPTY_SKILL_CHECKS = {
+    	workerId: null,
+    	status: "idle",
+    	results: {},
+    	error: null
+    };
     /** 「文件」页签的初始状态。 */
     const EMPTY_FILES = {
     	workerId: null,
@@ -7649,13 +7761,12 @@ window.__ModuleLoader__.load({
     	const [descriptionSaving, setDescriptionSaving] = react.default.useState(false);
     	const [descriptionError, setDescriptionError] = react.default.useState(null);
     	/**
-    	* 「重命名执行者」对话框：`renameDraft` 是新展示名草稿，默认带出当前名称；
-    	* 失败提示留在对话框里，提交中不响应关闭。
+    	* 「设置」页签里的展示名草稿；进入详情时从执行者当前名称初始化。与职责、
+    	* 模型一样没有保存按钮，停止输入后自动写回登记表。
     	*/
-    	const [renameOpen, setRenameOpen] = react.default.useState(false);
-    	const [renameDraft, setRenameDraft] = react.default.useState("");
-    	const [renameSaving, setRenameSaving] = react.default.useState(false);
-    	const [renameError, setRenameError] = react.default.useState(null);
+    	const [nameDraft, setNameDraft] = react.default.useState("");
+    	const [nameSaving, setNameSaving] = react.default.useState(false);
+    	const [nameError, setNameError] = react.default.useState(null);
     	/**
     	* 「模型」页签：目录按需加载；`modelDraft` 为 null 表示跟随宿主默认模型，
     	* 保存失败留在页签里，不用会被滚走的 Toast。
@@ -7681,8 +7792,9 @@ window.__ModuleLoader__.load({
     	* - `candidates.status`：`idle` 还没读 / `loading` 读取中 / `ready` 有清单 /
     	*   `error` 读取失败（带命令输出）；
     	* - `installSelected`：勾选的 skill 名；每次读出清单时默认全选未安装的；
-    	* - `favourites.status`：`unavailable` 表示 Skills 插件没安装（整块隐藏，
-    	*   不是错误），`ready` 时 `repos` 是收藏仓库。
+    	* - `installRepos.status`：`unavailable` 表示 Skills 插件没安装（对话框给出
+    	*   安装提示），`ready` 时 `repos` 是「技能仓库」里收藏的来源；`corrupt`
+    	*   表示收藏文件无法解析。
     	*/
     	const [installOpen, setInstallOpen] = react.default.useState(false);
     	const [installSource, setInstallSource] = react.default.useState("");
@@ -7696,14 +7808,49 @@ window.__ModuleLoader__.load({
     	const [installSelected, setInstallSelected] = react.default.useState([]);
     	const [installError, setInstallError] = react.default.useState(null);
     	const [installing, setInstalling] = react.default.useState(false);
-    	const [favourites, setFavourites] = react.default.useState({
+    	const [installRepos, setInstallRepos] = react.default.useState({
     		status: "idle",
-    		repos: []
+    		repos: [],
+    		corrupt: false,
+    		error: null
     	});
     	/** Toast 文案；同一时刻只保留最后一条。 */
     	const [notice, setNotice] = react.default.useState(null);
-    	const [updatingSkills, setUpdatingSkills] = react.default.useState(false);
+    	const [skillChecks, setSkillChecks] = react.default.useState(EMPTY_SKILL_CHECKS);
+    	const [updatingSkill, setUpdatingSkill] = react.default.useState(null);
     	const [updatingAllSkills, setUpdatingAllSkills] = react.default.useState(false);
+    	const [openInApp, setOpenInApp] = react.default.useState({
+    		status: "loading",
+    		apps: []
+    	});
+    	const [openInAppChoice, setOpenInAppChoice] = react.default.useState("");
+    	react.default.useEffect(() => {
+    		let cancelled = false;
+    		try {
+    			const raw = window.localStorage.getItem(OPEN_IN_APP_CHOICE_KEY);
+    			if (raw !== null) {
+    				const parsed = JSON.parse(raw);
+    				if (typeof parsed === "string") setOpenInAppChoice(parsed);
+    			}
+    		} catch {}
+    		fetch(OPEN_IN_APP_APPS_ROUTE, { headers: { accept: "application/json" } }).then((response) => response.ok ? response.json() : null).then((body) => {
+    			if (cancelled) return;
+    			const record = body !== null && typeof body === "object" ? body : {};
+    			const apps = Array.isArray(record.apps) ? record.apps.filter((id) => typeof id === "string") : [];
+    			setOpenInApp({
+    				status: apps.length > 0 ? "ready" : "unavailable",
+    				apps
+    			});
+    		}).catch(() => {
+    			if (!cancelled) setOpenInApp({
+    				status: "unavailable",
+    				apps: []
+    			});
+    		});
+    		return () => {
+    			cancelled = true;
+    		};
+    	}, []);
     	react.default.useEffect(() => {
     		let cancelled = false;
     		setList((prev) => ({
@@ -7734,7 +7881,7 @@ window.__ModuleLoader__.load({
     	const corrupt = data?.corrupt === true;
     	const selectedWorker = selectedId === null ? null : workers.find((worker) => worker.id === selectedId) ?? null;
     	/** 任意写操作进行中：按钮据此统一禁用，避免并发请求互相覆盖。 */
-    	const mutating = creating || busy !== null || installing || updatingSkills || updatingAllSkills || removing !== null || avatarSaving || descriptionSaving || renameSaving || modelSaving || deleteDialog.saving;
+    	const mutating = creating || busy !== null || installing || updatingSkill !== null || updatingAllSkills || removing !== null || avatarSaving || descriptionSaving || nameSaving || modelSaving || deleteDialog.saving;
     	/**
     	* 新建执行者时的默认头像：按预设顺序挑第一个还没被占用的，避免刚建的一批
     	* 执行者全是一个样子（Host 也会在没传头像时做同样的分配）。
@@ -7892,12 +8039,13 @@ window.__ModuleLoader__.load({
     		loadFiles(worker);
     		setDescriptionDraft(typeof worker.description === "string" ? worker.description : "");
     		setDescriptionError(null);
+    		setNameDraft(typeof worker.name === "string" ? worker.name : "");
+    		setNameError(null);
     		setSkillError(null);
+    		setSkillChecks(EMPTY_SKILL_CHECKS);
     		setConfirmingSkill(null);
     		setInstallOpen(false);
     		setInstallError(null);
-    		setRenameOpen(false);
-    		setRenameError(null);
     		setModelDraft(worker.model ?? null);
     		setModelError(null);
     		setNotice(null);
@@ -7907,12 +8055,12 @@ window.__ModuleLoader__.load({
     		setSelectedId(null);
     		setFiles(EMPTY_FILES);
     		setDescriptionError(null);
+    		setNameError(null);
     		setSkillError(null);
+    		setSkillChecks(EMPTY_SKILL_CHECKS);
     		setConfirmingSkill(null);
     		setInstallOpen(false);
     		setInstallError(null);
-    		setRenameOpen(false);
-    		setRenameError(null);
     		setModelError(null);
     		setNotice(null);
     	}
@@ -7964,14 +8112,12 @@ window.__ModuleLoader__.load({
     		setDescriptionSaving,
     		descriptionError,
     		setDescriptionError,
-    		renameOpen,
-    		setRenameOpen,
-    		renameDraft,
-    		setRenameDraft,
-    		renameSaving,
-    		setRenameSaving,
-    		renameError,
-    		setRenameError,
+    		nameDraft,
+    		setNameDraft,
+    		nameSaving,
+    		setNameSaving,
+    		nameError,
+    		setNameError,
     		modelCatalog,
     		setModelCatalog,
     		modelDraft,
@@ -8006,12 +8152,18 @@ window.__ModuleLoader__.load({
     		setInstallError,
     		installing,
     		setInstalling,
-    		updatingSkills,
-    		setUpdatingSkills,
+    		skillChecks,
+    		setSkillChecks,
+    		updatingSkill,
+    		setUpdatingSkill,
     		updatingAllSkills,
     		setUpdatingAllSkills,
-    		favourites,
-    		setFavourites,
+    		openInApp,
+    		setOpenInApp,
+    		openInAppChoice,
+    		setOpenInAppChoice,
+    		installRepos,
+    		setInstallRepos,
     		notice,
     		setNotice,
     		data,
@@ -8032,65 +8184,85 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/workers/components/install-dialog.js
     /**
-    * 「安装 skills」对话框：来源输入 + 收藏仓库入口 + 候选勾选列表。
+    * 「安装 skills」对话框：从 Skills 插件的「技能仓库」里选一个收藏来源，再勾选
+    * 其中可安装的 skills。页面不再提供手填来源的输入框，第三方来源必须先收藏。
     *
     * 默认勾选全部未安装的 skill；已安装的置灰不可选（设计契约）。
     *
     * @module @buka/dsh-plugin-workflows/workers/client/components/install-dialog
     */
     /**
-    * 对话框内容：来源输入 + 收藏仓库入口 + 候选勾选列表。
+    * 一条收藏来源：来源地址 + 备注 + 类型 / 数量。
+    *
+    * @param repo Host 从 Skills 服务读到的收藏仓库
+    * @param selected 是否是当前选中的仓库
+    * @param disabled 安装期间不允许切换
+    * @param t 词典
+    * @param onSelect 选中这个仓库
+    */
+    function renderRepository(repo, selected, disabled, t, onSelect) {
+    	const unavailable = repo.kind === "unavailable";
+    	return h("li", { key: repo.id }, h("button", {
+    		type: "button",
+    		className: `buka-workers-repo${selected ? " is-selected" : ""}`,
+    		"aria-pressed": selected,
+    		title: repo.note !== "" ? `${repo.source} — ${repo.note}` : repo.source,
+    		disabled,
+    		onClick: () => onSelect(repo.source)
+    	}, h("span", { className: "buka-workers-repoText" }, h("span", { className: "buka-workers-repoSource" }, repo.source), repo.note === "" ? null : h("span", { className: "buka-workers-repoNote" }, repo.note)), unavailable ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("repoUnavailable")) : null, repo.skills === null ? null : h("span", { className: "buka-workers-repoCount" }, String(t("skillsBadge")).replace("{n}", String(repo.skills)))));
+    }
+    /**
+    * 未安装 skill 的候选标签：名称 + 描述。
+    *
+    * @param skill 候选 skill
+    * @param installed 已安装的 skill 名集合
+    * @param selected 勾选的 skill 名
+    * @param installing 是否正在安装
+    * @param t 词典
+    * @param onToggle 勾选 / 取消
+    */
+    function renderCandidate(skill, installed, selected, installing, t, onToggle) {
+    	const isInstalled = installed.has(skill.name);
+    	const checked = !isInstalled && selected.includes(skill.name);
+    	return h("li", { key: skill.name }, h("label", {
+    		className: `buka-workers-candidate${isInstalled ? " isDisabled" : ""}`,
+    		title: typeof skill.description === "string" && skill.description !== "" ? skill.description : String(skill.name)
+    	}, h("input", {
+    		type: "checkbox",
+    		className: "buka-workers-candidateInput",
+    		checked,
+    		disabled: isInstalled || installing,
+    		onChange: () => onToggle(skill.name)
+    	}), h("span", { className: "buka-workers-candidateText" }, h("span", { className: "buka-workers-candidateName" }, String(skill.name)), typeof skill.description === "string" && skill.description !== "" ? h("span", { className: "buka-workers-candidateDesc" }, skill.description) : null), isInstalled ? h("span", { className: "buka-workers-candidateTag" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("alreadyInstalled"))) : null));
+    }
+    /**
+    * 对话框内容：技能仓库选择 + 候选勾选列表。
     * 默认勾选全部未安装的 skill；已安装的置灰不可选（设计契约）。
     *
     */
     function InstallDialog({ t, state, skillActions }) {
-    	const { installCandidates, installSelected, favourites, installSource, setInstallSource, installing, installError } = state;
-    	const { loadCandidates, toggleCandidate, selectAllCandidates } = skillActions;
+    	const { installCandidates, installSelected, installRepos, installSource, installing, installError } = state;
+    	const { selectInstallRepo, toggleCandidate, selectAllCandidates } = skillActions;
     	const candidates = installCandidates;
     	const installed = new Set(candidates.installed);
     	const selectable = candidates.skills.filter((skill) => !installed.has(skill.name));
     	const allSelected = selectable.length > 0 && selectable.every((skill) => installSelected.includes(skill.name));
-    	const favouritesBlock = favourites.status === "ready" ? favourites.repos.length === 0 ? h("p", { className: "buka-workers-fieldHint" }, t("favouritesEmpty")) : h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("favouritesLabel")), h("div", { className: "buka-workers-favorites" }, ...favourites.repos.map((repo) => h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		key: repo.id,
-    		variant: installSource === repo.source ? "primary" : "outline",
-    		size: "sm",
-    		className: "buka-workers-toolbarButton",
-    		title: repo.note !== "" ? repo.note : repo.source,
-    		disabled: installing || candidates.status === "loading",
-    		onClick: () => loadCandidates(repo.source)
-    	}, repo.source)))) : null;
-    	return h("div", { className: "buka-workers-dialogForm" }, h("form", {
-    		id: INSTALL_FORM_ID,
-    		className: "buka-workers-field",
-    		onSubmit: (event) => {
-    			event.preventDefault();
-    			loadCandidates();
-    		}
-    	}, h("label", {
-    		className: "buka-workers-fieldLabel",
-    		htmlFor: "buka-workers-install-source"
-    	}, t("installSourceLabel")), h("div", { className: "buka-workers-sourceRow" }, h(_deepseek_ai_dsh_client_ui_primitives.Input, {
-    		id: "buka-workers-install-source",
-    		className: "buka-workers-input",
-    		type: "text",
-    		value: installSource,
-    		placeholder: t("sourcePlaceholder"),
-    		autoComplete: "off",
-    		spellCheck: false,
-    		disabled: installing,
-    		"data-modal-autofocus": "",
-    		onChange: (event) => setInstallSource(event.target.value)
-    	}), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		type: "submit",
-    		className: "buka-workers-submit",
-    		icon: candidates.status === "loading" ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
-    			state: "ongoing",
-    			size: 13
-    		}) : void 0,
-    		disabled: installing || candidates.status === "loading" || installSource.trim() === ""
-    	}, candidates.status === "loading" ? t("loadingSkills") : t("loadSkills")))), favouritesBlock, candidates.status === "idle" ? h("p", { className: "buka-workers-fieldHint" }, t("installIdle")) : null, candidates.status === "loading" ? h("p", {
+    	const repos = installRepos.repos;
+    	const repoButtonsDisabled = installing;
+    	const reposBlock = h("div", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("installReposLabel")), installRepos.status === "idle" || installRepos.status === "loading" ? h("p", {
+    		className: "buka-workers-statusWithDot",
+    		role: "status"
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("installReposLoading")) : installRepos.status === "unavailable" ? h("p", { className: "buka-workers-fieldHint" }, t("installReposUnavailable")) : installRepos.status === "error" ? h("div", {
+    		className: "buka-workers-alert",
+    		role: "alert"
+    	}, h("div", { className: "buka-workers-alertHead" }, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("installReposFailed")} ${installRepos.error}`))) : installRepos.status === "ready" && installRepos.corrupt ? h("div", {
+    		className: "buka-workers-alert",
+    		role: "alert"
+    	}, h("div", { className: "buka-workers-alertHead" }, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }), h("span", null, t("installReposCorrupt")))) : installRepos.status === "ready" && repos.length === 0 ? h("p", { className: "buka-workers-fieldHint" }, t("installReposEmpty")) : installRepos.status === "ready" ? h("ul", {
+    		className: "buka-workers-repos",
+    		"aria-label": t("installReposLabel")
+    	}, ...repos.map((repo) => renderRepository(repo, installSource === repo.source, repoButtonsDisabled, t, selectInstallRepo))) : null);
+    	return h("div", { className: "buka-workers-dialogForm" }, reposBlock, candidates.status === "idle" ? h("p", { className: "buka-workers-fieldHint" }, t("installPickRepo")) : null, candidates.status === "loading" ? h("p", {
     		className: "buka-workers-statusWithDot",
     		role: "status"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("loadingSkills")) : null, candidates.status === "error" ? h("div", {
@@ -8102,20 +8274,7 @@ window.__ModuleLoader__.load({
     		checked: allSelected,
     		disabled: installing,
     		onChange: (event) => selectAllCandidates(event.target.checked)
-    	}), h("span", null, t("selectAllSkills")))), h("ul", { className: "buka-workers-candidates" }, ...candidates.skills.map((skill) => {
-    		const isInstalled = installed.has(skill.name);
-    		const checked = !isInstalled && installSelected.includes(skill.name);
-    		return h("li", { key: skill.name }, h("label", {
-    			className: `buka-workers-candidate${isInstalled ? " isDisabled" : ""}`,
-    			title: typeof skill.description === "string" && skill.description !== "" ? skill.description : String(skill.name)
-    		}, h("input", {
-    			type: "checkbox",
-    			className: "buka-workers-candidateInput",
-    			checked,
-    			disabled: isInstalled || installing,
-    			onChange: () => toggleCandidate(skill.name)
-    		}), h("span", { className: "buka-workers-candidateText" }, h("span", { className: "buka-workers-candidateName" }, String(skill.name)), typeof skill.description === "string" && skill.description !== "" ? h("span", { className: "buka-workers-candidateDesc" }, skill.description) : null), isInstalled ? h("span", { className: "buka-workers-candidateTag" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("alreadyInstalled"))) : null));
-    	})), installed.size === 0 ? null : h("p", { className: "buka-workers-fieldHint" }, t("installedHint"))) : null, installError === null ? null : h("div", {
+    	}), h("span", null, t("selectAllSkills")))), h("ul", { className: "buka-workers-candidates" }, ...candidates.skills.map((skill) => renderCandidate(skill, installed, installSelected, installing, t, toggleCandidate))), installed.size === 0 ? null : h("p", { className: "buka-workers-fieldHint" }, t("installedHint"))) : null, installError === null ? null : h("div", {
     		className: "buka-workers-alert",
     		role: "alert"
     	}, h("div", { className: "buka-workers-alertHead" }, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("skillErrorTitle")} ${installError.message}`)), typeof installError.output === "string" && installError.output !== "" ? h(react.default.Fragment, null, h("span", { className: "buka-workers-outputLabel" }, t("outputLabel")), h("pre", { className: "buka-workers-output" }, installError.output)) : null));
@@ -8125,7 +8284,7 @@ window.__ModuleLoader__.load({
     *
     */
     function InstallSkillsModal({ t, state, skillActions }) {
-    	const { installOpen, selectedWorker, installSelected, installing } = state;
+    	const { installOpen, selectedWorker, installSelected, installCandidates, installing } = state;
     	const { closeInstallDialog, installSelectedSkills } = skillActions;
     	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
     		open: installOpen,
@@ -8139,7 +8298,7 @@ window.__ModuleLoader__.load({
     		}, t("cancel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			variant: "primary",
     			type: "button",
-    			disabled: installing || installSelected.length === 0,
+    			disabled: installing || installCandidates.status === "loading" || installSelected.length === 0,
     			onClick: installSelectedSkills
     		}, installing ? String(t("installingSkills")).replace("{n}", String(installSelected.length)) : installSelected.length > 0 ? String(t("installSelectedCount")).replace("{n}", String(installSelected.length)) : t("installSelected")))
     	}, installOpen && selectedWorker !== null ? h(InstallDialog, {
@@ -8147,6 +8306,67 @@ window.__ModuleLoader__.load({
     		state,
     		skillActions
     	}) : null);
+    }
+    // .build/workflows/client/workers/open-in-app.js
+    /**
+    * 「用应用打开」的展示辅助。
+    *
+    * 应用清单来自 DSH 内置 `@deepseek-ai/dsh-client-ui-open-in-app` 的
+    * `GET /open-in-app/apps`，每项只是 catalog id（`finder` / `vscode` / …）。
+    * 这里给常见目录 / 终端类的系统名称做本地化；编辑器、IDE 与 Git GUI 用产品名，
+    * 不随界面语言变化。未知 id 原样显示，新版本 DSH 新增的应用也不会消失。
+    *
+    * @module @buka/dsh-plugin-workflows/workers/client/open-in-app
+    */
+    /** 需要随界面语言本地化的系统应用（其余用产品名）。 */
+    const LOCALIZED = {
+    	finder: "appFinder",
+    	explorer: "appExplorer",
+    	filemanager: "appFileManager",
+    	terminal: "appTerminal",
+    	windowsterminal: "appWindowsTerminal",
+    	gnometerminal: "appGnomeTerminal",
+    	konsole: "appKonsole"
+    };
+    /** 编辑器、IDE、Git GUI 与终端的产品名；与内置 open-in-app 的 catalog 对齐。 */
+    const PRODUCT_NAMES = {
+    	cursor: "Cursor",
+    	vscode: "VS Code",
+    	vscodeinsiders: "VS Code Insiders",
+    	windsurf: "Windsurf",
+    	zed: "Zed",
+    	sublimetext: "Sublime Text",
+    	xcode: "Xcode",
+    	androidstudio: "Android Studio",
+    	intellij: "IntelliJ IDEA",
+    	pycharm: "PyCharm",
+    	webstorm: "WebStorm",
+    	phpstorm: "PhpStorm",
+    	goland: "GoLand",
+    	rider: "Rider",
+    	rustrover: "RustRover",
+    	fork: "Fork",
+    	sourcetree: "Sourcetree",
+    	github: "GitHub Desktop",
+    	tower: "Tower",
+    	gitkraken: "GitKraken",
+    	smartgit: "SmartGit",
+    	sublimemerge: "Sublime Merge",
+    	ghostty: "Ghostty",
+    	warp: "Warp",
+    	iterm: "iTerm2",
+    	kitty: "kitty",
+    	gitbash: "Git Bash"
+    };
+    /**
+    * 一个应用 id 的展示名。
+    *
+    * @param id `GET /open-in-app/apps` 返回的应用 id
+    * @param t 翻译函数
+    */
+    function openInAppLabel(id, t) {
+    	const key = LOCALIZED[id];
+    	return key === void 0 ? PRODUCT_NAMES[id] ?? id : t(key);
     }
     // .build/workflows/client/workers/components/common.js
     /**
@@ -8183,6 +8403,68 @@ window.__ModuleLoader__.load({
     function MountedTag({ t, worker }) {
     	return h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: worker.mounted === true ? "success" : "neutral" }, worker.mounted === true ? t("mountedBadge") : t("unmountedBadge"));
     }
+    // .build/workflows/client/workers/components/detail-tabs.js
+    /**
+    * 执行者详情页的下划线页签。
+    *
+    * 详情页里的三个页签是「同一个对象的三种视图」，用轻量的下划线式页签比等宽
+    * 胶囊更像导航：选中态只靠文字颜色、字重与 2px 下划线区分，底部一条 0.5px
+    * 分隔线接住内容区，也方便在标签后挂一个表示「技能有更新」的小圆点。
+    *
+    * 键盘：← / → 循环切换，Home / End 跳到首尾；只有选中项是 Tab 停靠点
+    * （与 WAI-ARIA tabs 模式一致）。页面仍自己渲染 `role="tabpanel"` 的面板。
+    *
+    * @module @buka/dsh-plugin-workflows/workers/client/components/detail-tabs
+    */
+    /**
+    * 下划线式页签条。
+    *
+    * @param props.items 非空且值唯一的页签
+    * @param props.value 当前选中值（必须属于 `items`）
+    * @param props.onChange 点击、← / →、Home / End 触发的切换
+    * @param props.label 页签列表的无障碍名称
+    */
+    function DetailTabs({ items, value, onChange, label }) {
+    	/** 方向键 / Home / End：切换页签并把焦点移到新页签上。 */
+    	function onKeyDown(event) {
+    		const index = items.findIndex((item) => item.value === value);
+    		const last = items.length - 1;
+    		let next = -1;
+    		if (event.key === "ArrowRight") next = index >= last ? 0 : index + 1;
+    		else if (event.key === "ArrowLeft") next = index <= 0 ? last : index - 1;
+    		else if (event.key === "Home") next = 0;
+    		else if (event.key === "End") next = last;
+    		else return;
+    		const target = items[next];
+    		if (target === void 0) return;
+    		event.preventDefault();
+    		onChange(target.value);
+    		event.currentTarget.querySelectorAll("[role=\"tab\"]")[next]?.focus();
+    	}
+    	return h("div", {
+    		className: "buka-workers-detailTabs",
+    		role: "tablist",
+    		"aria-label": label,
+    		onKeyDown
+    	}, ...items.map((item) => {
+    		const selected = item.value === value;
+    		return h("button", {
+    			key: item.value,
+    			type: "button",
+    			role: "tab",
+    			id: item.id,
+    			className: "buka-workers-detailTab",
+    			"aria-selected": selected,
+    			"aria-controls": item.panelId,
+    			tabIndex: selected ? 0 : -1,
+    			...item.dot === true && item.labelWithDot !== void 0 ? { "aria-label": item.labelWithDot } : {},
+    			onClick: () => onChange(item.value)
+    		}, item.label, item.dot === true ? h("span", {
+    			className: "buka-workers-tabDot",
+    			"aria-hidden": true
+    		}) : null);
+    	}));
+    }
     // .build/workflows/client/workers/components/page-header.js
     /**
     * 「执行者」页面标题行：返回 / 头像 / 标题 / 重命名、工具栏与详情页签。
@@ -8190,14 +8472,81 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-workflows/workers/client/components/page-header
     */
     /**
+    * 菜单里的一个应用图标；图标路由不可用时退回文件夹图标。
+    */
+    function AppIcon({ id, size = 14 }) {
+    	const [failed, setFailed] = react.default.useState(false);
+    	if (failed) return h(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenOutlineRegular, { size });
+    	return h("img", {
+    		className: "buka-workers-appIcon",
+    		src: `${OPEN_IN_APP_ICON_ROUTE}/${encodeURIComponent(id)}`,
+    		width: size,
+    		height: size,
+    		alt: "",
+    		draggable: false,
+    		onError: () => setFailed(true)
+    	});
+    }
+    /**
+    * 「用应用打开」分体按钮：主按钮用上次选中的应用打开目录，右侧箭头选择
+    * 其它应用。应用清单来自 DSH 内核的 open-in-app，清单不可用时页面显示原来的
+    * Finder 按钮。
+    */
+    function OpenWithButton({ t, apps, preferred, busy, disabled, onSelect }) {
+    	const [menuOpen, setMenuOpen] = react.default.useState(false);
+    	const appName = openInAppLabel(preferred, t);
+    	const label = t("openInApp").replace("{app}", appName);
+    	return h(_deepseek_ai_dsh_client_ui_primitives.Menu, {
+    		open: menuOpen,
+    		className: "buka-workers-openAnchor",
+    		align: "end",
+    		portal: true,
+    		dense: true,
+    		selectedId: preferred,
+    		items: apps.map((id) => ({
+    			id,
+    			icon: h(AppIcon, { id }),
+    			label: openInAppLabel(id, t)
+    		})),
+    		onSelect: (id) => {
+    			setMenuOpen(false);
+    			onSelect(id);
+    		},
+    		onClose: () => setMenuOpen(false),
+    		anchor: h("div", { className: "buka-workers-openSplit" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			variant: "outline",
+    			size: "sm",
+    			className: "buka-workers-toolbarButton buka-workers-openMain",
+    			icon: busy ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    				state: "ongoing",
+    				size: 13
+    			}) : h(AppIcon, {
+    				id: preferred,
+    				size: 14
+    			}),
+    			disabled,
+    			"aria-label": label,
+    			onClick: () => onSelect(preferred)
+    		}, appName), h("button", {
+    			type: "button",
+    			className: "buka-workers-openMore",
+    			"aria-label": t("openWithChoose"),
+    			"aria-haspopup": "menu",
+    			"aria-expanded": menuOpen,
+    			disabled,
+    			onClick: () => setMenuOpen((open) => !open)
+    		}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronDownOutlineRegular, { size: 12 })))
+    	});
+    }
+    /**
     * 渲染标题行、工具栏与详情页签。
     *
     */
     function PageHeader({ t, state, actions, detail, skillActions, topTabs }) {
-    	const { selectedWorker, mutating, corrupt, list, busy, tab, reload, switchTab, backToList, updatingAllSkills } = state;
-    	const { openCreateDialog, openWorker, revealWorker } = actions;
-    	const { updateAllWorkers } = skillActions;
-    	const { openAvatarDialog, openRenameDialog } = detail;
+    	const { selectedWorker, mutating, corrupt, list, busy, tab, skillChecks, openInApp, openInAppChoice, reload, switchTab, backToList, updatingAllSkills } = state;
+    	const { openCreateDialog, openWorker, openWorkerWith, revealWorker } = actions;
+    	const { updateAllWorkers, openInstallDialog } = skillActions;
+    	const { openAvatarDialog } = detail;
     	const robot = selectedWorker?.driver === "robot";
     	const refreshButton = h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("refresh"),
@@ -8237,7 +8586,7 @@ window.__ModuleLoader__.load({
     		disabled: mutating || corrupt,
     		onClick: openCreateDialog
     	}, t("create")) : null;
-    	const detailActions = selectedWorker === null || robot ? null : [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	const detailActions = selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "open",
     		variant: "outline",
     		size: "sm",
@@ -8246,20 +8595,38 @@ window.__ModuleLoader__.load({
     		disabled: mutating,
     		"aria-label": `${t("newSession")} ${workerDisplayName(selectedWorker)}`,
     		onClick: () => openWorker(selectedWorker)
-    	}, t("newSession")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		key: "reveal",
+    	}, t("newSession"));
+    	const opening = selectedWorker !== null && busy === `reveal:${selectedWorker.id}`;
+    	const openInReady = openInApp.status === "ready" && openInApp.apps.length > 0;
+    	const preferredApp = openInReady ? openInApp.apps.includes(openInAppChoice) ? openInAppChoice : openInApp.apps[0] : "";
+    	const openButton = selectedWorker === null || robot ? null : openInReady && preferredApp !== void 0 && preferredApp !== "" ? h(OpenWithButton, {
+    		t,
+    		apps: openInApp.apps,
+    		preferred: preferredApp,
+    		busy: opening,
+    		disabled: mutating || selectedWorker.exists === false,
+    		onSelect: (appId) => void openWorkerWith(selectedWorker, appId)
+    	}) : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "outline",
     		size: "sm",
     		className: "buka-workers-toolbarButton",
-    		icon: busy === `reveal:${selectedWorker.id}` ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    		icon: opening ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     			state: "ongoing",
     			size: 13
     		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpenOutlineRegular, { size: 13 }),
     		disabled: mutating || selectedWorker.exists === false,
     		"aria-label": `${t("reveal")} ${workerDisplayName(selectedWorker)}`,
     		onClick: () => revealWorker(selectedWorker)
-    	}, t("reveal"))];
-    	const toolbarNode = h("div", { className: "buka-workers-toolbar" }, detailActions, updateAllButton, refreshButton, createButton);
+    	}, t("reveal"));
+    	const installButton = selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		variant: "primary",
+    		size: "sm",
+    		className: "buka-workers-toolbarButton",
+    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 13 }),
+    		disabled: mutating || corrupt || selectedWorker.exists === false,
+    		onClick: openInstallDialog
+    	}, t("installSkills"));
+    	const toolbarNode = h("div", { className: "buka-workers-toolbar" }, detailActions, openButton, updateAllButton, refreshButton, createButton, installButton);
     	const heading = selectedWorker === null ? null : h("div", { className: "buka-workers-heading" }, h("div", { className: "buka-workers-headingRow" }, h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("back"),
     		side: "top",
@@ -8280,67 +8647,99 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("changeAvatar")} ${workerDisplayName(selectedWorker)}`,
     		disabled: mutating,
     		onClick: () => openAvatarDialog(selectedWorker)
-    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, workerIdentityLabel(selectedWorker)), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
-    		label: `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
-    		side: "top",
-    		delayMs: 400
-    	}, h("button", {
-    		type: "button",
-    		className: "buka-workers-iconButton",
-    		"aria-label": `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
-    		disabled: mutating || corrupt,
-    		onClick: openRenameDialog
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
+    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, workerIdentityLabel(selectedWorker)), h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
     		t,
     		worker: selectedWorker
     	}))));
-    	const tabsNode = h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
-    		size: "sm",
-    		className: "buka-workers-tabList",
+    	const skillUpdates = selectedWorker !== null && skillChecks.workerId === selectedWorker.id && Object.values(skillChecks.results).some((entry) => entry.status === "update");
+    	const tabsNode = h(DetailTabs, {
     		label: t("tabsLabel"),
     		value: tab,
     		onChange: switchTab,
     		items: [
     			{
     				value: TABS[0].value,
-    				label: h(TabLabel, { text: t("tabSettings") }),
+    				label: t("tabSettings"),
     				id: TABS[0].id,
     				panelId: TABS[0].panelId
     			},
     			{
     				value: TABS[1].value,
-    				label: h(TabLabel, { text: t("tabFiles") }),
+    				label: t("tabFiles"),
     				id: TABS[1].id,
     				panelId: TABS[1].panelId
     			},
     			{
     				value: TABS[2].value,
-    				label: h(TabLabel, { text: t("tabSkills") }),
+    				label: t("tabSkills"),
     				id: TABS[2].id,
-    				panelId: TABS[2].panelId
+    				panelId: TABS[2].panelId,
+    				dot: skillUpdates,
+    				...skillUpdates ? { labelWithDot: t("tabSkillsHasUpdate") } : {}
     			}
     		]
-    	}));
+    	});
     	return h("div", { className: "buka-workers-head" }, h("div", { className: "buka-workers-headInner" }, selectedWorker === null ? h("div", { className: "buka-workers-bar" }, h("div", { className: "buka-workers-barTabs" }, topTabs), toolbarNode) : h("div", { className: "buka-workers-titleRow" }, heading, toolbarNode), selectedWorker === null ? null : tabsNode));
     }
     // .build/workflows/client/workers/components/worker-detail.js
     /**
-    * 「执行者」详情页：职责、模型、文件与 skills 四个页签。
+    * 「执行者」详情页：设置、文件与技能三个页签。
     *
     * @module @buka/dsh-plugin-workflows/workers/client/components/worker-detail
     */
     /**
-    * 技能区块：来源输入 + 安装按钮、失败输出、已安装列表与移除确认。
+    * 技能检查状态 → 行内标签；没有结果或未知状态时不显示。
+    *
+    * 状态模型由 Skills 插件定义（与它的「已安装」面板一致）：`update` 有更新、
+    * `modified` 本地已修改、`up-to-date` 已最新、`unsupported-source` 无法检查、
+    * `failed` 检查失败。
+    */
+    function skillStatusTag(status, t) {
+    	switch (status) {
+    		case "update": return {
+    			text: t("skillStatusUpdate"),
+    			tone: "info"
+    		};
+    		case "up-to-date": return {
+    			text: t("skillStatusUpToDate"),
+    			tone: "success"
+    		};
+    		case "modified": return {
+    			text: t("skillStatusModified"),
+    			tone: "warning"
+    		};
+    		case "unsupported-source": return {
+    			text: t("skillStatusUnsupported"),
+    			tone: "warning"
+    		};
+    		case "failed": return {
+    			text: t("skillStatusFailed"),
+    			tone: "warning"
+    		};
+    		default: return null;
+    	}
+    }
+    /**
+    * 技能区块：进入详情时自动检查更新，每行显示检查状态，有更新时提供行内
+    * 「更新」；安装入口在执行者页头右上角，区块里不再放全局更新 / 安装按钮。
     *
     */
     function SkillsSection({ t, worker, state, skillActions }) {
-    	const { mutating, confirmingSkill, removing, skillError, setConfirmingSkill, corrupt, updatingSkills } = state;
-    	const { removeSkill, openInstallDialog, updateWorkerSkills } = skillActions;
+    	const { mutating, confirmingSkill, removing, skillError, setConfirmingSkill, updatingSkill, skillChecks } = state;
+    	const { removeSkill, updateSkill } = skillActions;
     	const skills = skillsOf(worker);
     	const anyBusy = mutating;
+    	const checks = skillChecks.workerId === worker.id ? skillChecks.results : {};
+    	const checking = skillChecks.workerId === worker.id && skillChecks.status === "loading";
+    	const checkError = skillChecks.workerId === worker.id ? skillChecks.error : null;
     	const rows = skills.map((skill, index) => {
+    		const name = String(skill.name);
+    		const status = checks[name]?.status;
+    		const tag = skillStatusTag(status, t);
     		const confirmingThis = confirmingSkill === skill.name;
-    		const actions = removing === skill.name ? h("span", { className: "buka-workers-statusWithDot" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    		const removingThis = removing === skill.name;
+    		const updatingThis = updatingSkill === skill.name;
+    		const actions = removingThis ? h("span", { className: "buka-workers-statusWithDot" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     			state: "ongoing",
     			size: 13
     		}), t("removing")) : confirmingThis ? [h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -8357,19 +8756,35 @@ window.__ModuleLoader__.load({
     			size: "sm",
     			disabled: anyBusy,
     			onClick: () => setConfirmingSkill(null)
-    		}, t("cancel"))] : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    		}, t("cancel"))] : [updatingThis ? h("span", {
+    			key: "updating",
+    			className: "buka-workers-statusWithDot"
+    		}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    			state: "ongoing",
+    			size: 13
+    		}), t("updatingSkill")) : status === "update" ? h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			key: "update",
+    			variant: "outline",
+    			size: "sm",
+    			className: "buka-workers-toolbarButton",
+    			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
+    			"aria-label": `${t("updateSkill")} ${name}`,
+    			disabled: anyBusy,
+    			onClick: () => void updateSkill(worker, skill)
+    		}, t("updateSkill")) : null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    			key: "remove",
     			variant: "outline",
     			size: "sm",
     			className: "buka-workers-danger",
     			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutlineRegular, { size: 13 }),
     			disabled: anyBusy,
-    			"aria-label": `${t("removeSkill")} ${skill.name}`,
+    			"aria-label": `${t("removeSkill")} ${name}`,
     			onClick: () => setConfirmingSkill(skill.name)
-    		}, t("removeSkill"));
+    		}, t("removeSkill"))];
     		return h("li", {
     			className: "buka-workers-skillRow",
-    			key: `${String(skill.name)}:${index}`
-    		}, h("div", { className: "buka-workers-skillHead" }, h("span", { className: "buka-workers-skillName" }, String(skill.name)), typeof skill.source === "string" && skill.source !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
+    			key: `${name}:${index}`
+    		}, h("div", { className: "buka-workers-skillHead" }, h("span", { className: "buka-workers-skillName" }, name), tag === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: tag.tone }, tag.text), typeof skill.source === "string" && skill.source !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
     			tone: "info",
     			className: "buka-workers-skillSource"
     		}, skill.source) : null, h("span", { className: "buka-workers-skillActions" }, ...Array.isArray(actions) ? actions : [actions])), typeof skill.description === "string" && skill.description !== "" ? h("div", {
@@ -8380,24 +8795,13 @@ window.__ModuleLoader__.load({
     	return h("section", {
     		className: "buka-workers-section",
     		"aria-busy": anyBusy ? true : void 0
-    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("skillsTitle")), h("div", { className: "buka-workers-sectionActions" }, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "outline",
-    		size: "sm",
-    		className: "buka-workers-toolbarButton",
-    		icon: updatingSkills ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
-    			state: "ongoing",
-    			size: 13
-    		}) : h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 13 }),
-    		disabled: mutating || corrupt || worker.exists === false || skills.length === 0,
-    		onClick: () => updateWorkerSkills(worker)
-    	}, updatingSkills ? t("updatingSkills") : t("updateSkills")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "primary",
-    		size: "sm",
-    		className: "buka-workers-toolbarButton",
-    		icon: h(_deepseek_ai_dsh_client_ui_primitives.IconPlusOutlineRegular, { size: 13 }),
-    		disabled: mutating || corrupt || worker.exists === false,
-    		onClick: openInstallDialog
-    	}, t("installSkills")))), h("p", { className: "buka-workers-intro" }, t("skillsIntroBefore"), h("code", { className: "buka-workers-inlineCode" }, "npx skills add <source>"), t("skillsIntroMiddle"), h("code", { className: "buka-workers-inlineCode" }, ".agents/skills"), t("skillsIntroAfter")), skillError === null ? null : h("div", {
+    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("skillsTitle"))), checking ? h("p", {
+    		className: "buka-workers-statusWithDot",
+    		role: "status"
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }), t("skillCheckLoading")) : null, checkError === null ? null : h("p", {
+    		className: "buka-workers-failure",
+    		role: "alert"
+    	}, `${t("skillCheckFailed")} ${checkError}`), skillError === null ? null : h("div", {
     		className: "buka-workers-alert",
     		role: "alert"
     	}, h("div", { className: "buka-workers-alertHead" }, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("skillErrorTitle")} ${skillError.message}`)), typeof skillError.output === "string" && skillError.output !== "" ? h(react.default.Fragment, null, h("span", { className: "buka-workers-outputLabel" }, t("outputLabel")), h("pre", { className: "buka-workers-output" }, skillError.output)) : null), skills.length === 0 ? h("p", { className: "buka-workers-empty" }, t("skillsEmpty")) : h("ul", { className: "buka-workers-skillList" }, ...rows));
@@ -8553,14 +8957,19 @@ window.__ModuleLoader__.load({
     	})));
     }
     /**
-    * 「设置」页签：把职责与模型收在同一个页面里。
+    * 「设置」页签：把名称、职责与模型收在同一个页面里。
     *
-    * 两块各自保留自己的保存按钮：职责写登记表的 `description`，模型写新会话的
-    * 模型选择，失败的提示也各自留在自己的区块里；进入页签时会预读模型目录。
+    * 三块都没有保存按钮：名称与职责写登记表，模型写新会话的模型选择；都按改动
+    * 自动保存，失败的提示留在各自的区块里；进入页签时会预读模型目录。
     *
     */
     function SettingsSection({ t, worker, state, detailActions }) {
-    	return h("div", { className: "buka-workers-settings" }, h(DescriptionSection, {
+    	return h("div", { className: "buka-workers-settings" }, h(NameSection, {
+    		t,
+    		worker,
+    		state,
+    		detailActions
+    	}), h(DescriptionSection, {
     		t,
     		worker,
     		state,
@@ -8573,48 +8982,138 @@ window.__ModuleLoader__.load({
     	}));
     }
     /**
-    * 「描述」页签：一句话摘要 + 保存按钮。工作流通过 `buka_workers` 读这一行，
-    * 决定是否把节点交给这个执行者；没有改动时保存按钮不可用。
+    * 「名称」区块：执行者的展示名（可选）。目录与工作区都按标识符定位，改名只改
+    * 展示名；留空表示清空、展示时回退到标识符。
+    *
+    * 与职责、模型一样没有保存按钮：停止输入 500 ms 后自动保存，失焦立即保存。
+    *
+    */
+    function NameSection({ t, worker, state, detailActions }) {
+    	const { nameDraft, setNameDraft, nameSaving, nameError, setNameError } = state;
+    	const { normalizedWorkerName, saveWorkerName } = detailActions;
+    	const current = typeof worker.name === "string" ? worker.name : "";
+    	const dirty = normalizedWorkerName(nameDraft) !== normalizedWorkerName(current);
+    	const pendingSave = react.default.useRef({
+    		dirty: false,
+    		save: saveWorkerName
+    	});
+    	react.default.useEffect(() => {
+    		const pending = dirty && nameError === null;
+    		pendingSave.current = {
+    			dirty: pending,
+    			save: saveWorkerName
+    		};
+    		if (!pending || nameSaving) return void 0;
+    		const timer = setTimeout(() => void saveWorkerName(), 500);
+    		return () => clearTimeout(timer);
+    	}, [
+    		nameDraft,
+    		nameError,
+    		dirty,
+    		nameSaving
+    	]);
+    	react.default.useEffect(() => () => {
+    		if (pendingSave.current.dirty) pendingSave.current.save();
+    	}, []);
+    	return h("section", {
+    		className: "buka-workers-section",
+    		"aria-busy": nameSaving ? true : void 0
+    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("nameLabel")), h("span", {
+    		className: "buka-workers-autosave",
+    		role: "status",
+    		"aria-live": "polite"
+    	}, nameSaving ? t("saving") : dirty ? t("autosavePending") : null)), h("p", { className: "buka-workers-fieldHint" }, t("nameHint")), h(_deepseek_ai_dsh_client_ui_primitives.Input, {
+    		className: "buka-workers-fieldInput",
+    		type: "text",
+    		value: nameDraft,
+    		placeholder: String(worker.id ?? ""),
+    		autoComplete: "off",
+    		spellCheck: false,
+    		maxLength: 64,
+    		"aria-label": t("nameLabel"),
+    		onChange: (event) => {
+    			setNameError(null);
+    			setNameDraft(event.target.value);
+    		},
+    		onBlur: () => {
+    			if (dirty && !nameSaving && nameError === null) saveWorkerName();
+    		}
+    	}), nameError === null ? null : h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, nameError));
+    }
+    /**
+    * 「描述」区块：一句话摘要。工作流通过 `buka_workers` 读这一行，决定是否把
+    * 节点交给这个执行者。
+    *
+    * 没有保存按钮：停止输入后自动保存，失焦时立即保存；区块右上角只显示
+    * 「保存中… / 待保存…」这类状态。
     *
     */
     function DescriptionSection({ t, worker, state, detailActions }) {
-    	const { descriptionDraft, setDescriptionDraft, descriptionSaving, descriptionError, mutating } = state;
+    	const { descriptionDraft, setDescriptionDraft, descriptionSaving, descriptionError, setDescriptionError } = state;
     	const { normalizedDescription, saveDescription } = detailActions;
     	const current = typeof worker.description === "string" ? worker.description : "";
     	const dirty = normalizedDescription(descriptionDraft) !== current;
+    	const pendingSave = react.default.useRef({
+    		dirty: false,
+    		save: saveDescription
+    	});
+    	react.default.useEffect(() => {
+    		const pending = dirty && descriptionError === null;
+    		pendingSave.current = {
+    			dirty: pending,
+    			save: saveDescription
+    		};
+    		if (!pending || descriptionSaving) return void 0;
+    		const timer = setTimeout(() => void saveDescription(), 700);
+    		return () => clearTimeout(timer);
+    	}, [
+    		descriptionDraft,
+    		descriptionError,
+    		dirty,
+    		descriptionSaving
+    	]);
+    	react.default.useEffect(() => () => {
+    		if (pendingSave.current.dirty) pendingSave.current.save();
+    	}, []);
     	return h("section", {
     		className: "buka-workers-section",
     		"aria-busy": descriptionSaving ? true : void 0
-    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("descriptionLabel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		variant: "primary",
-    		size: "sm",
-    		type: "button",
-    		className: "buka-workers-submit",
-    		disabled: !dirty || mutating,
-    		onClick: saveDescription
-    	}, descriptionSaving ? t("saving") : t("save"))), h("p", { className: "buka-workers-fieldHint" }, t("descriptionHint")), h("textarea", {
+    	}, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("descriptionLabel")), h("span", {
+    		className: "buka-workers-autosave",
+    		role: "status",
+    		"aria-live": "polite"
+    	}, descriptionSaving ? t("saving") : dirty ? t("autosavePending") : null)), h("p", { className: "buka-workers-fieldHint" }, t("descriptionHint")), h("textarea", {
     		className: "buka-workers-descriptionInput is-tall",
     		value: descriptionDraft,
     		placeholder: t("descriptionPlaceholder"),
     		maxLength: 500,
     		rows: 4,
-    		disabled: descriptionSaving,
     		"aria-label": t("descriptionLabel"),
-    		onChange: (event) => setDescriptionDraft(event.target.value)
+    		onChange: (event) => {
+    			setDescriptionError(null);
+    			setDescriptionDraft(event.target.value);
+    		},
+    		onBlur: () => {
+    			if (dirty && !descriptionSaving && descriptionError === null) saveDescription();
+    		}
     	}), descriptionError === null ? null : h("p", {
     		className: "buka-workers-formError",
     		role: "alert"
     	}, descriptionError));
     }
     /**
-    * 「模型」页签：给智能体选新会话使用的模型。
+    * 「模型」区块：给智能体选新会话使用的模型。
     *
-    * 目录按需从 Host 读取；`modelDraft === null` 表示跟随宿主默认模型。保存后只影响
-    * 之后新开的会话，已有会话保留自己的模型（可在会话里用 `/model` 切换）。
+    * 目录按需从 Host 读取；`modelDraft === null` 表示跟随宿主默认模型。没有保存
+    * 按钮：选完就自动保存，只影响之后新开的会话，已有会话保留自己的模型（可在
+    * 会话里用 `/model` 切换）。
     *
     */
     function ModelSection({ t, worker, state, detailActions }) {
-    	const { modelCatalog, modelDraft, setModelDraft, modelSaving, modelError, loadModelCatalog } = state;
+    	const { modelCatalog, modelDraft, setModelDraft, modelSaving, modelError, setModelError, loadModelCatalog } = state;
     	const { saveWorkerModel } = detailActions;
     	const catalog = modelCatalog.data;
     	const available = catalog?.available === true;
@@ -8627,6 +9126,28 @@ window.__ModuleLoader__.load({
     	const showEffort = efforts.length > 0 || savedEffort !== void 0;
     	const savedSelection = worker.model ?? null;
     	const dirty = modelDraft === null || savedSelection === null ? modelDraft !== savedSelection : modelDraft.provider !== savedSelection.provider || modelDraft.model !== savedSelection.model || (modelDraft.reasoningEffort ?? "") !== (savedSelection.reasoningEffort ?? "");
+    	const pendingSave = react.default.useRef({
+    		dirty: false,
+    		save: saveWorkerModel
+    	});
+    	react.default.useEffect(() => {
+    		const pending = dirty && modelError === null;
+    		pendingSave.current = {
+    			dirty: pending,
+    			save: saveWorkerModel
+    		};
+    		if (!pending || modelSaving) return void 0;
+    		const timer = setTimeout(() => void saveWorkerModel(), 250);
+    		return () => clearTimeout(timer);
+    	}, [
+    		modelDraft,
+    		dirty,
+    		modelError,
+    		modelSaving
+    	]);
+    	react.default.useEffect(() => () => {
+    		if (pendingSave.current.dirty) pendingSave.current.save();
+    	}, []);
     	/** 模型选择的展示名：目录里有就用名称，否则退回 provider / model id。 */
     	function labelFor(selection) {
     		const group = groups.find((entry) => entry.id === selection.provider);
@@ -8634,6 +9155,7 @@ window.__ModuleLoader__.load({
     		return model === void 0 || group === void 0 ? `${selection.provider} / ${selection.model}` : `${group.name} · ${model.name}`;
     	}
     	function pickProvider(providerId) {
+    		setModelError(null);
     		if (providerId === "") {
     			setModelDraft(null);
     			return;
@@ -8645,6 +9167,7 @@ window.__ModuleLoader__.load({
     		});
     	}
     	function pickModel(modelId) {
+    		setModelError(null);
     		if (modelDraft === null) return;
     		setModelDraft({
     			provider: modelDraft.provider,
@@ -8652,6 +9175,7 @@ window.__ModuleLoader__.load({
     		});
     	}
     	function pickEffort(effortId) {
+    		setModelError(null);
     		if (modelDraft === null) return;
     		setModelDraft({
     			provider: modelDraft.provider,
@@ -8689,7 +9213,11 @@ window.__ModuleLoader__.load({
     		key: `saved:${savedEffort}`,
     		value: savedEffort
     	}, savedEffort));
-    	return h("section", { className: "buka-workers-modelSection" }, h("h2", { className: "buka-workers-sectionTitle" }, t("modelTitle")), h("p", { className: "buka-workers-fieldHint" }, t("modelHint")), modelCatalog.status === "loading" && catalog === null ? h("p", {
+    	return h("section", { className: "buka-workers-modelSection" }, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("modelTitle")), h("span", {
+    		className: "buka-workers-autosave",
+    		role: "status",
+    		"aria-live": "polite"
+    	}, modelSaving ? t("saving") : dirty ? t("autosavePending") : null)), h("p", { className: "buka-workers-fieldHint" }, t("modelHint")), modelCatalog.status === "loading" && catalog === null ? h("p", {
     		className: "buka-workers-fieldHint",
     		role: "status"
     	}, t("loading")) : null, modelCatalog.status === "error" ? h("p", {
@@ -8709,7 +9237,6 @@ window.__ModuleLoader__.load({
     			className: "buka-workers-select",
     			value: modelDraft?.provider ?? "",
     			"aria-label": t("modelProvider"),
-    			disabled: modelSaving,
     			onChange: (event) => pickProvider(event.target.value)
     		}, ...providerOptions)),
     		modelDraft === null ? null : h("label", {
@@ -8719,7 +9246,6 @@ window.__ModuleLoader__.load({
     			className: "buka-workers-select",
     			value: modelDraft.model,
     			"aria-label": t("modelModelLabel"),
-    			disabled: modelSaving,
     			onChange: (event) => pickModel(event.target.value)
     		}, ...modelOptions)),
     		modelDraft === null || !showEffort ? null : h("label", {
@@ -8729,7 +9255,6 @@ window.__ModuleLoader__.load({
     			className: "buka-workers-select",
     			value: savedEffort ?? "",
     			"aria-label": t("modelEffort"),
-    			disabled: modelSaving,
     			onChange: (event) => pickEffort(event.target.value)
     		}, ...effortOptions)),
     		h("p", {
@@ -8742,14 +9267,9 @@ window.__ModuleLoader__.load({
     			role: "alert"
     		}, modelError),
     		h("div", {
-    			key: "save",
+    			key: "actions",
     			className: "buka-workers-formActions"
     		}, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			variant: "primary",
-    			size: "sm",
-    			disabled: !dirty || modelSaving,
-    			onClick: () => void saveWorkerModel()
-    		}, modelSaving ? t("saving") : t("save")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			variant: "ghost",
     			size: "sm",
     			disabled: modelSaving,
@@ -8764,6 +9284,9 @@ window.__ModuleLoader__.load({
     function WorkerDetail({ t, worker, state, detailActions, skillActions }) {
     	const { tab } = state;
     	const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0];
+    	react.default.useEffect(() => {
+    		skillActions.checkWorkerSkills(worker);
+    	}, [worker.id]);
     	return h("div", { className: "buka-workers-pageBody buka-workers-detail" }, worker.exists === false ? h("p", {
     		className: "buka-workers-notice",
     		role: "status"
@@ -8790,10 +9313,10 @@ window.__ModuleLoader__.load({
     }
     // .build/workflows/client/workers/components/worker-dialogs.js
     /**
-    * 「执行者」页面里的创建 / 更换头像 / 重命名对话框。
+    * 「执行者」页面里的创建 / 更换头像对话框。
     *
-    * 三个对话框都由页面状态控制 `open`，提交中不响应关闭；失败提示留在框里，
-    * 避免被 Toast 遮住。
+    * 两个对话框都由页面状态控制 `open`，提交中不响应关闭；失败提示留在框里，
+    * 避免被 Toast 遮住。展示名不再走对话框，改在详情页的「设置」页签里自动保存。
     *
     * @module @buka/dsh-plugin-workflows/workers/client/components/worker-dialogs
     */
@@ -8903,48 +9426,6 @@ window.__ModuleLoader__.load({
     		className: "buka-workers-formError",
     		role: "alert"
     	}, avatarError)));
-    }
-    /**
-    * 重命名执行者对话框。
-    *
-    */
-    function RenameDialog({ t, state, detail }) {
-    	const { renameOpen, renameSaving, selectedWorker, renameDraft, setRenameDraft, renameError } = state;
-    	const { closeRenameDialog, renameWorker } = detail;
-    	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
-    		open: renameOpen,
-    		onClose: closeRenameDialog,
-    		title: selectedWorker === null ? t("rename") : `${t("rename")} · ${workerIdentityLabel(selectedWorker)}`,
-    		closeLabel: t("close"),
-    		footer: h(react.default.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			variant: "outline",
-    			onClick: closeRenameDialog,
-    			disabled: renameSaving
-    		}, t("cancel")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    			variant: "primary",
-    			type: "submit",
-    			form: RENAME_FORM_ID,
-    			disabled: renameSaving || selectedWorker === null || renameDraft.trim() === selectedWorker.name
-    		}, renameSaving ? t("saving") : t("save")))
-    	}, renameOpen && selectedWorker !== null ? h("form", {
-    		id: RENAME_FORM_ID,
-    		className: "buka-workers-dialogForm",
-    		onSubmit: renameWorker
-    	}, h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("renameFieldLabel")), h(_deepseek_ai_dsh_client_ui_primitives.Input, {
-    		className: "buka-workers-fieldInput",
-    		type: "text",
-    		value: renameDraft,
-    		placeholder: String(selectedWorker.name ?? selectedWorker.id ?? ""),
-    		autoComplete: "off",
-    		spellCheck: false,
-    		maxLength: 64,
-    		disabled: renameSaving,
-    		"data-modal-autofocus": "",
-    		onChange: (event) => setRenameDraft(event.target.value)
-    	})), h("p", { className: "buka-workers-fieldHint" }, t("renameHint")), renameError === null ? null : h("p", {
-    		className: "buka-workers-formError",
-    		role: "alert"
-    	}, renameError)) : null);
     }
     /**
     * 删除执行者确认弹窗。
@@ -9152,10 +9633,6 @@ window.__ModuleLoader__.load({
     		state,
     		actions
     	}), h(AvatarDialog, {
-    		t,
-    		state,
-    		detail
-    	}), h(RenameDialog, {
     		t,
     		state,
     		detail
@@ -9694,13 +10171,13 @@ window.__ModuleLoader__.load({
     	avatarSaveFailed: "Could not update the avatar:",
     	descriptionLabel: "Responsibilities",
     	descriptionPlaceholder: "e.g. Turns meeting notes into a three-point summary",
-    	descriptionHint: "Workflows read this line to decide whether to hand a node to this worker. State in one sentence what the worker is responsible for.",
+    	descriptionHint: "Workflows read this line to decide whether to hand a node to this worker. State in one sentence what the worker is responsible for; changes are saved automatically.",
     	noDescription: "No responsibilities yet.",
     	tabSettings: "Settings",
-    	descriptionSaved: "Responsibilities saved.",
+    	autosavePending: "Unsaved…",
     	descriptionSaveFailed: "Could not save the responsibilities:",
     	modelTitle: "Model",
-    	modelHint: "Pick the model this agent uses for new sessions. Existing sessions keep their own model and can switch with /model.",
+    	modelHint: "Pick the model this agent uses for new sessions. Existing sessions keep their own model and can switch with /model; changes are saved automatically.",
     	modelFollowDefault: "Follow the default model",
     	modelFollowDefaultHint: "New sessions use the host default model.",
     	modelProvider: "Provider",
@@ -9708,7 +10185,6 @@ window.__ModuleLoader__.load({
     	modelEffort: "Reasoning effort",
     	modelEffortDefault: "Adapter default",
     	modelCurrent: "Current model:",
-    	modelSaved: "Model saved.",
     	modelSaveFailed: "Could not save the model:",
     	modelLoadFailed: "Could not read the model catalog:",
     	modelEmpty: "No models are available. Configure a provider in the DSH model settings first.",
@@ -9719,16 +10195,22 @@ window.__ModuleLoader__.load({
     	createFailed: "Could not create the worker:",
     	createMountFailed: "The worker was created, but mounting it to a workspace failed. Use “Mount” to retry:",
     	createEmptyId: "Enter a worker identifier first.",
-    	rename: "Rename worker",
-    	renameLabel: "Rename",
-    	renameFieldLabel: "Name",
-    	renameHint: "Only the display name changes: the directory and the workspace stay where they are. Leave it empty to show the identifier.",
-    	renameSame: "The new name is the same as the current name.",
-    	renameSaveFailed: "Could not rename the worker:",
-    	renamed: "Renamed worker:",
+    	nameLabel: "Name",
+    	nameHint: "Only the display name changes: the directory and the workspace stay where they are. Leave it empty to show the identifier; changes are saved automatically.",
+    	nameSaveFailed: "Could not save the name:",
     	newSession: "New session",
     	reveal: "Open in Finder",
     	revealFailed: "Could not open the folder:",
+    	openInApp: "Open in {app}",
+    	openWithChoose: "Choose an app",
+    	openInAppFailed: "Could not open the worker directory:",
+    	appFinder: "Finder",
+    	appExplorer: "File Explorer",
+    	appFileManager: "Files",
+    	appTerminal: "Terminal",
+    	appWindowsTerminal: "Windows Terminal",
+    	appGnomeTerminal: "GNOME Terminal",
+    	appKonsole: "Konsole",
     	openFailed: "Could not open the worker:",
     	openUnmounted: "This worker is not mounted to a workspace yet. Click “Mount” first.",
     	openDetail: "Open details",
@@ -9769,17 +10251,19 @@ window.__ModuleLoader__.load({
     	tabsLabel: "Worker detail sections",
     	tabFiles: "Files",
     	tabSkills: "Skills",
+    	tabSkillsHasUpdate: "Skills (updates available)",
     	skillsTitle: "Installed skills",
-    	skillsIntroBefore: "Project-level skills are installed with ",
-    	skillsIntroMiddle: " into ",
-    	skillsIntroAfter: " (plus a Claude Code link in .claude/skills).",
-    	sourcePlaceholder: "Source, e.g. vercel-labs/agent-skills",
     	installSkills: "Install skills",
     	installDialogTitle: "Install skills",
-    	installSourceLabel: "Source",
-    	loadSkills: "List skills",
+    	installReposLabel: "Skill repositories",
+    	installReposLoading: "Reading skill repositories…",
+    	installReposUnavailable: "The Skills plugin (@buka/dsh-plugin-skills) is not installed, so saved repositories cannot be read.",
+    	installReposEmpty: "No repositories are saved yet. Save one in the Skills plugin under “Skill repositories”, then come back to install.",
+    	installReposCorrupt: "The saved repositories file cannot be parsed. Fix or delete it in the Skills plugin first.",
+    	installReposFailed: "Could not read skill repositories:",
+    	installPickRepo: "Pick a saved repository to read its skills.",
+    	repoUnavailable: "Unavailable",
     	loadingSkills: "Reading skills…",
-    	installIdle: "Enter a source, or pick a repository from the Skills favourites, then list its skills.",
     	skillsFound: "{n} skills available",
     	selectAllSkills: "Select all",
     	selectedSkills: "Selected {n} of {m}",
@@ -9789,19 +10273,23 @@ window.__ModuleLoader__.load({
     	installSelectedCount: "Install {n}",
     	installingSkills: "Installing {n}…",
     	installEmptySelection: "Select at least one skill.",
-    	favouritesLabel: "Skills favourites",
-    	favouritesEmpty: "No favourite repositories in the Skills plugin yet.",
     	errAvailableFailed: "Could not read the skill list:",
-    	errListUnparsed: "Could not read a skill list from this source. See the command output below.",
     	errInvalidSkills: "Select valid skills.",
     	skillInstalled: "Installed skill from:",
     	removeSkill: "Remove",
     	confirmRemoveSkill: "Confirm remove",
     	removing: "Removing…",
     	skillRemoved: "Removed skill:",
-    	updateSkills: "Update",
-    	updatingSkills: "Updating…",
-    	skillsUpToDate: "All skills are up to date.",
+    	updateSkill: "Update",
+    	updatingSkill: "Updating…",
+    	skillUpdated: "Updated skill:",
+    	skillCheckLoading: "Checking for skill updates…",
+    	skillCheckFailed: "Could not check for skill updates:",
+    	skillStatusUpdate: "Update available",
+    	skillStatusUpToDate: "Up to date",
+    	skillStatusModified: "Modified locally",
+    	skillStatusUnsupported: "Cannot check",
+    	skillStatusFailed: "Check failed",
     	updateAllWorkers: "Update all workers",
     	updatingAllWorkers: "Updating all…",
     	updateAllSummary: "Updated {n} skill(s); {f} skill failure(s), {s} worker(s) skipped.",
@@ -9871,6 +10359,9 @@ window.__ModuleLoader__.load({
     	errTooLarge: "AGENTS.md is larger than 512 KiB and cannot be saved.",
     	errInvalidContent: "The AGENTS.md content must be text.",
     	errInvalidSource: "Invalid source. Use an npx skills source such as owner/repo.",
+    	errSourceNotSaved: "This source is not saved. Add it in the Skills plugin under “Skill repositories” first.",
+    	errReposUnreadable: "The saved repositories cannot be read. Fix or delete the file in the Skills plugin first.",
+    	errSkillNotFound: "The repository no longer lists this skill. Read it again and retry.",
     	errInvalidSkill: "Invalid skill name.",
     	errNpxFailed: "npx skills failed. See the command output below.",
     	errSkillsUnavailable: "The Skills plugin (@buka/dsh-plugin-skills) is not installed, so worker skills cannot be updated.",
@@ -9900,13 +10391,13 @@ window.__ModuleLoader__.load({
     	avatarSaveFailed: "更换头像失败：",
     	descriptionLabel: "职责",
     	descriptionPlaceholder: "例如：负责把会议记录整理成三点结论",
-    	descriptionHint: "工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。",
+    	descriptionHint: "工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。修改后自动保存。",
     	noDescription: "还没有填写职责。",
     	tabSettings: "设置",
-    	descriptionSaved: "职责已保存。",
+    	autosavePending: "待保存…",
     	descriptionSaveFailed: "保存职责失败：",
     	modelTitle: "模型",
-    	modelHint: "选择这个智能体新开会话时使用的模型；已有会话保留自己的模型，可以在会话里用 /model 切换。",
+    	modelHint: "选择这个智能体新开会话时使用的模型；已有会话保留自己的模型，可以在会话里用 /model 切换。改动后自动保存。",
     	modelFollowDefault: "跟随默认模型",
     	modelFollowDefaultHint: "新会话使用宿主当前默认模型。",
     	modelProvider: "提供方",
@@ -9914,7 +10405,6 @@ window.__ModuleLoader__.load({
     	modelEffort: "推理强度",
     	modelEffortDefault: "适配器默认",
     	modelCurrent: "当前模型：",
-    	modelSaved: "已保存模型。",
     	modelSaveFailed: "保存模型失败：",
     	modelLoadFailed: "读取模型目录失败：",
     	modelEmpty: "当前没有可用模型，请先在 DSH 的模型设置里配置提供方。",
@@ -9925,16 +10415,22 @@ window.__ModuleLoader__.load({
     	createFailed: "创建失败：",
     	createMountFailed: "执行者已创建，但挂载到工作区失败，可点「挂载」重试：",
     	createEmptyId: "先填一个执行者标识符。",
-    	rename: "重命名执行者",
-    	renameLabel: "重命名",
-    	renameFieldLabel: "名称",
-    	renameHint: "只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。",
-    	renameSame: "新名称与当前名称相同。",
-    	renameSaveFailed: "重命名失败：",
-    	renamed: "已重命名为：",
+    	nameLabel: "名称",
+    	nameHint: "只改展示名：目录与工作区都保持原位；留空表示清空名称、显示标识符。修改后自动保存。",
+    	nameSaveFailed: "保存名称失败：",
     	newSession: "新会话",
     	reveal: "打开 Finder",
     	revealFailed: "打开文件夹失败：",
+    	openInApp: "用 {app} 打开",
+    	openWithChoose: "选择打开方式",
+    	openInAppFailed: "打开执行者目录失败：",
+    	appFinder: "访达",
+    	appExplorer: "文件资源管理器",
+    	appFileManager: "文件管理器",
+    	appTerminal: "终端",
+    	appWindowsTerminal: "Windows 终端",
+    	appGnomeTerminal: "GNOME 终端",
+    	appKonsole: "Konsole",
     	openFailed: "打开失败：",
     	openUnmounted: "这个执行者还没有挂载到工作区，先点「挂载」。",
     	openDetail: "打开详情",
@@ -9975,17 +10471,19 @@ window.__ModuleLoader__.load({
     	tabsLabel: "执行者详情页签",
     	tabFiles: "文件",
     	tabSkills: "技能",
+    	tabSkillsHasUpdate: "技能（有更新）",
     	skillsTitle: "已安装 skills",
-    	skillsIntroBefore: "项目级 skills 通过 ",
-    	skillsIntroMiddle: " 安装到 ",
-    	skillsIntroAfter: "（并给 Claude Code 建 .claude/skills 链接）。",
-    	sourcePlaceholder: "来源，如 vercel-labs/agent-skills",
     	installSkills: "安装 skills",
     	installDialogTitle: "安装 skills",
-    	installSourceLabel: "来源",
-    	loadSkills: "读取 skills",
+    	installReposLabel: "技能仓库",
+    	installReposLoading: "正在读取技能仓库…",
+    	installReposUnavailable: "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法读取收藏的技能仓库。",
+    	installReposEmpty: "技能仓库里还没有收藏来源。请先到 Skills 页面的「技能仓库」收藏，再回来安装。",
+    	installReposCorrupt: "技能仓库文件无法解析。请先在 Skills 页面修复或删除收藏文件。",
+    	installReposFailed: "读取技能仓库失败：",
+    	installPickRepo: "选择一个已收藏的技能仓库，读取其中的 skills。",
+    	repoUnavailable: "不可用",
     	loadingSkills: "正在读取 skills…",
-    	installIdle: "填一个来源，或从 Skills 收藏夹里选一个仓库，然后读取其中的 skills。",
     	skillsFound: "共 {n} 个 skills",
     	selectAllSkills: "全选",
     	selectedSkills: "已选 {n} / {m}",
@@ -9995,19 +10493,23 @@ window.__ModuleLoader__.load({
     	installSelectedCount: "安装 {n} 个",
     	installingSkills: "正在安装 {n} 个…",
     	installEmptySelection: "至少选一个 skill。",
-    	favouritesLabel: "Skills 收藏夹",
-    	favouritesEmpty: "Skills 插件里还没有收藏仓库。",
     	errAvailableFailed: "读取 skill 清单失败：",
-    	errListUnparsed: "无法从这个来源读出 skill 清单，命令输出见下方。",
     	errInvalidSkills: "skills 不合法。",
     	skillInstalled: "已安装 skill：",
     	removeSkill: "移除",
     	confirmRemoveSkill: "确认移除",
     	removing: "移除中…",
     	skillRemoved: "已移除 skill：",
-    	updateSkills: "更新",
-    	updatingSkills: "更新中…",
-    	skillsUpToDate: "所有 skill 都已是最新。",
+    	updateSkill: "更新",
+    	updatingSkill: "更新中…",
+    	skillUpdated: "已更新 skill：",
+    	skillCheckLoading: "正在检查 skill 更新…",
+    	skillCheckFailed: "检查 skill 更新失败：",
+    	skillStatusUpdate: "有更新",
+    	skillStatusUpToDate: "已最新",
+    	skillStatusModified: "本地已修改",
+    	skillStatusUnsupported: "无法检查",
+    	skillStatusFailed: "检查失败",
     	updateAllWorkers: "更新全部执行者",
     	updatingAllWorkers: "正在全部更新…",
     	updateAllSummary: "已更新 {n} 个 skill；{f} 个 skill 失败，跳过 {s} 个执行者。",
@@ -10077,6 +10579,9 @@ window.__ModuleLoader__.load({
     	errTooLarge: "AGENTS.md 超过 512 KiB，无法保存。",
     	errInvalidContent: "AGENTS.md 内容必须是文本。",
     	errInvalidSource: "来源不合法：请填 owner/repo 这类 npx skills 来源。",
+    	errSourceNotSaved: "这个来源还没有收藏。请先在 Skills 页面的「技能仓库」里收藏它。",
+    	errReposUnreadable: "技能仓库无法读取。请先在 Skills 页面修复或删除收藏文件。",
+    	errSkillNotFound: "技能仓库里已经没有这个 skill，请重新读取后再试。",
     	errInvalidSkill: "skill 名称不合法。",
     	errNpxFailed: "npx skills 执行失败，输出见下方。",
     	errSkillsUnavailable: "没有找到 Skills 插件（@buka/dsh-plugin-skills），无法更新执行者 skills。",
@@ -10110,6 +10615,14 @@ window.__ModuleLoader__.load({
     .buka-workers-heading{flex:1 1 auto;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:var(--buka-space-2, 8px)}
     .buka-workers-title{margin:0;font-size:var(--buka-text-page, 20px);font-weight:500;line-height:var(--buka-line-28, 28px);overflow-wrap:anywhere}
     .buka-workers-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:var(--buka-space-2, 8px);flex:none;flex-wrap:wrap;min-width:0}
+    .buka-workers-openAnchor{display:inline-flex;min-width:0}
+    .buka-workers-openSplit{display:inline-flex;align-items:stretch;min-width:0}
+    .buka-workers-openSplit .buka-workers-openMain{border-top-right-radius:0;border-bottom-right-radius:0}
+    .buka-workers-openMore{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;height:32px;margin:0;padding:0 var(--buka-space-1, 4px);border:0.5px solid var(--dsw-alias-border-l4);border-left:0;border-radius:0 var(--dsw-radius-md) var(--dsw-radius-md) 0;background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
+    @media (hover:hover){.buka-workers-openMore:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}}
+    .buka-workers-openMore:disabled{cursor:default;opacity:.6}
+    .buka-workers-openMore:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
+    .buka-workers-appIcon{flex:none;border-radius:3px;object-fit:contain}
     .buka-workers-body{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:var(--buka-space-5, 24px) 0 var(--buka-space-7, 48px)}
     .buka-workers-pageBody{display:flex;flex-direction:column;gap:var(--buka-space-5, 24px)}
     .buka-workers-detail{display:flex;flex-direction:column;gap:var(--buka-space-6, 32px);flex:1 1 auto;min-height:0}
@@ -10124,7 +10637,6 @@ window.__ModuleLoader__.load({
     .buka-workers-output{margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto;width:100%;box-sizing:border-box}
     .buka-workers-outputLabel{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);margin-top:2px}
     .buka-workers-meta{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
-    .buka-workers-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
     .buka-workers-inlineCode{font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-markdown-code-block);color:var(--dsw-alias-label-secondary);padding:1px var(--buka-space-1, 4px);margin:0 2px;overflow-wrap:anywhere;word-break:break-all}
     .buka-workers-back svg{transform:rotate(180deg)}
     .buka-workers-cards{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
@@ -10180,9 +10692,7 @@ window.__ModuleLoader__.load({
     @media (hover:hover){.buka-workers-iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
     .buka-workers-iconButton:active{background:var(--dsw-alias-interactive-bg-active)}
     .buka-workers-iconButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-    .buka-workers-sourceRow{display:flex;flex-wrap:wrap;align-items:center;gap:var(--buka-space-2, 8px)}
-    .buka-workers-input{flex:1 1 260px;display:flex;min-width:0}
-    .buka-workers-submit,.buka-workers-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 var(--buka-space-3, 12px);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px)}
+    .buka-workers-toolbarButton{border-radius:var(--dsw-radius-md);height:32px;padding:0 var(--buka-space-3, 12px);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px)}
     .buka-workers-dialogForm{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px)}
     .buka-workers-field{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px)}
     .buka-workers-fieldLabel{color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px);font-weight:500;line-height:var(--buka-line-20, 20px)}
@@ -10196,6 +10706,7 @@ window.__ModuleLoader__.load({
     .buka-workers-section{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px)}
     .buka-workers-agentsSection{flex:1 1 auto;min-height:0}
     .buka-workers-sectionHead{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-3, 12px);flex-wrap:wrap}
+    .buka-workers-autosave{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);min-height:18px;text-align:right}
     .buka-workers-sectionActions{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap}
     .buka-workers-sectionTitle{margin:0;font-size:var(--buka-text-section, 15px);font-weight:600;line-height:var(--buka-line-22, 22px)}
     .buka-workers-skillList{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
@@ -10211,11 +10722,16 @@ window.__ModuleLoader__.load({
     .buka-workers-descriptionInput{box-sizing:border-box;width:100%;min-height:60px;resize:vertical;border:0.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);tab-size:2}
     .buka-workers-descriptionInput.is-tall{min-height:140px}
     .buka-workers-descriptionInput::placeholder{color:var(--dsw-alias-label-caption)}
-    .buka-workers-descriptionInput:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+    .buka-workers-descriptionInput:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
     .buka-workers-descriptionInput:disabled{opacity:.65}
     .buka-workers-backButton{flex:none;margin-left:calc(-1 * var(--buka-space-1, 4px))}
-    .buka-workers-tabs{display:flex;align-items:center;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain}
-    .buka-workers-tabList{width:fit-content;max-width:100%}
+    .buka-workers-detailTabs{display:flex;align-items:center;gap:0;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:0.5px solid var(--dsw-alias-border-l1)}
+    .buka-workers-detailTab{position:relative;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);height:40px;margin:0;padding:0 var(--buka-space-3, 12px);border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-20, 20px);white-space:nowrap;cursor:pointer}
+    @media (hover:hover){.buka-workers-detailTab:hover{color:var(--dsw-alias-label-primary)}}
+    .buka-workers-detailTab[aria-selected="true"]{color:var(--dsw-alias-label-primary);font-weight:500}
+    .buka-workers-detailTab[aria-selected="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary)}
+    .buka-workers-detailTab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
+    .buka-workers-tabDot{width:7px;height:7px;flex:none;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
     .buka-workers-panel{display:flex;flex-direction:column;gap:var(--buka-space-5, 24px);flex:1 1 auto;min-height:0}
     .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
     .buka-workers-jobBlocker{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-2, 8px)}
@@ -10253,7 +10769,17 @@ window.__ModuleLoader__.load({
     .buka-workers-filePreviewMeta{flex:none;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px)}
     .buka-workers-fileCode{width:100%}
     @media (width<=720px){.buka-workers-filesLayout{grid-template-columns:1fr}.buka-workers-fileTree{max-height:240px}.buka-workers-filePreview{max-height:none}}
-    .buka-workers-favorites{display:flex;flex-wrap:wrap;gap:var(--buka-space-2, 8px)}
+    .buka-workers-repos{display:flex;flex-direction:column;gap:2px;max-height:220px;overflow:auto;overscroll-behavior:contain;margin:0;padding:var(--buka-space-1, 4px);list-style:none;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}
+    .buka-workers-repo{box-sizing:border-box;width:100%;display:flex;align-items:center;gap:var(--buka-space-3, 12px);margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+    @media (hover:hover){.buka-workers-repo:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}}
+    .buka-workers-repo.is-selected{background:var(--dsw-alias-interactive-bg-hover);box-shadow:inset 2px 0 0 var(--dsw-alias-brand-primary)}
+    .buka-workers-repo:disabled{cursor:default;opacity:.62}
+    .buka-workers-repo:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+    .buka-workers-repoText{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+    .buka-workers-repoSource{font-family:var(--ds-font-family-code);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
+    .buka-workers-repoNote{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
+    .buka-workers-repoCount{flex:none;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px)}
+
     .buka-workers-selectAll{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px)}
     `;
     // .build/workflows/client/index.js

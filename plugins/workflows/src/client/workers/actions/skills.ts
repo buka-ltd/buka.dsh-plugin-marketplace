@@ -6,7 +6,9 @@
 
 import {
   claudeOf,
+  errorCode,
   failureText,
+  messageOf,
   outputOf,
   requestJson,
   requestUpdateJson,
@@ -15,16 +17,19 @@ import {
 import {
   AVAILABLE_ROUTE,
   INSTALL_ROUTE,
+  SKILL_CHECK_ROUTE,
   SKILL_REMOVE_ROUTE,
+  SKILL_REPOS_ROUTE,
   SKILL_UPDATE_ALL_ROUTE,
   SKILL_UPDATE_ROUTE,
-  SKILLS_REPOS_ROUTE,
 } from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
 import type {
+  SkillCheckItem,
   Translate,
   Worker,
   WorkerClaude,
+  WorkerSkillCheckSnapshot,
   WorkerSkillUpdateAllSnapshot,
   WorkerSkillUpdateSnapshot,
 } from '../types.ts'
@@ -35,8 +40,8 @@ import type {
  */
 export function createSkillActions(state: WorkersPageState, t: Translate) {
   const {
-    favourites,
-    setFavourites,
+    installRepos,
+    setInstallRepos,
     setInstallOpen,
     installCandidates,
     setInstallCandidates,
@@ -56,42 +61,68 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     setRemoving,
     setConfirmingSkill,
     setSkillError,
-    updatingSkills,
-    setUpdatingSkills,
+    setSkillChecks,
+    updatingSkill,
+    setUpdatingSkill,
     updatingAllSkills,
     setUpdatingAllSkills,
   } = state
 
+  /** 候选清单请求序号：切换仓库时旧响应不能覆盖新仓库的清单。 */
+  let candidatesSequence = 0
+
   /**
-   * 读 Skills 插件的收藏仓库。只读它已经存在的 `GET /buka-skills/repos`：
-   * 两个插件之间不 import，这个路由回 404（插件没装）或任何失败都按
-   * 「没有收藏夹」处理，页面不显示这一块也不报错。
+   * 读 Skills 插件的「技能仓库」。Host 通过 `ctx.bukaSkills` 读收藏，插件没装
+   * 或版本太旧时回 503；页面据此显示安装提示，而不是让用户手填第三方来源。
    */
-  function loadFavourites() {
-    if (favourites.status === 'loading' || favourites.status === 'ready') return
-    setFavourites((prev) => ({ ...prev, status: 'loading' }))
-    requestJson(SKILLS_REPOS_ROUTE).then(
-      (body) => {
-        const repos = (Array.isArray(body?.repos) ? body.repos : [])
-          .filter(
-            (repo) =>
-              repo !== null &&
-              typeof repo === 'object' &&
-              typeof repo.source === 'string' &&
-              repo.source !== '',
-          )
-          .map((repo) => ({
-            id: typeof repo.id === 'string' && repo.id !== '' ? repo.id : (repo.source ?? ''),
-            source: repo.source ?? '',
-            note: typeof repo.note === 'string' ? repo.note : '',
-          }))
-        setFavourites({ status: 'ready', repos })
-      },
-      () => setFavourites({ status: 'unavailable', repos: [] }),
-    )
+  async function loadInstallRepos() {
+    if (installRepos.status === 'loading') return
+    setInstallRepos({ status: 'loading', repos: [], corrupt: false, error: null })
+    try {
+      const body = await requestJson<{
+        corrupt?: unknown
+        repositories?: unknown
+      }>(SKILL_REPOS_ROUTE)
+      const repos = (Array.isArray(body?.repositories) ? body.repositories : [])
+        .filter(
+          (repo): repo is Record<string, unknown> =>
+            repo !== null &&
+            typeof repo === 'object' &&
+            typeof repo.source === 'string' &&
+            repo.source !== '',
+        )
+        .map((repo) => ({
+          id: typeof repo.id === 'string' && repo.id !== '' ? repo.id : (repo.source as string),
+          source: repo.source as string,
+          note: typeof repo.note === 'string' ? repo.note : '',
+          kind: typeof repo.kind === 'string' && repo.kind !== '' ? repo.kind : 'unknown',
+          skills:
+            typeof repo.skills === 'number' && Number.isFinite(repo.skills) ? repo.skills : null,
+        }))
+      setInstallRepos({
+        status: 'ready',
+        repos,
+        corrupt: body?.corrupt === true,
+        error: null,
+      })
+      // 打开对话框时直接读第一个可用的收藏仓库，少一次点击；用户可以换仓库。
+      const first = repos.find((repo) => repo.kind !== 'unavailable') ?? repos[0]
+      if (body?.corrupt !== true && first !== undefined) void loadCandidates(first.source)
+    } catch (failure) {
+      if (errorCode(failure) === 'skills-unavailable') {
+        setInstallRepos({ status: 'unavailable', repos: [], corrupt: false, error: null })
+        return
+      }
+      setInstallRepos({
+        status: 'error',
+        repos: [],
+        corrupt: false,
+        error: failureText(t, failure),
+      })
+    }
   }
 
-  /** 打开「安装 skills」对话框：清掉上一次的来源、候选与勾选，并按需加载收藏夹。 */
+  /** 打开「安装 skills」对话框：清掉上一次的来源、候选与勾选，再读技能仓库。 */
   function openInstallDialog() {
     if (installing || corrupt) return
     setInstallSource('')
@@ -99,12 +130,21 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     setInstallSelected([])
     setInstallError(null)
     setInstallOpen(true)
-    loadFavourites()
+    void loadInstallRepos()
+  }
+
+  /** 换一个收藏仓库：重新读它的 skill 清单。 */
+  function selectInstallRepo(source: string) {
+    if (installing) return
+    if (source === installSource && installCandidates.status === 'ready') return
+    void loadCandidates(source)
   }
 
   /** 关闭「安装 skills」对话框；安装中不响应关闭，避免请求回来时状态错位。 */
   function closeInstallDialog() {
     if (installing) return
+    // 关掉时让在途的候选请求作废，别把结果写进下一次打开的弹窗。
+    candidatesSequence += 1
     setInstallOpen(false)
     setInstallError(null)
   }
@@ -115,6 +155,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
    */
   async function loadCandidates(sourceOverride?: string) {
     if (installing || selectedWorker === null) return
+    const sequence = ++candidatesSequence
     const value = (sourceOverride ?? installSource).trim()
     if (value === '') {
       setInstallCandidates({
@@ -128,12 +169,15 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
     }
     setInstallSource(value)
     setInstallCandidates({ status: 'loading', skills: [], installed: [], error: null, output: '' })
+    // 换仓库时先清空勾选：旧仓库的 skill 名不能套用到新仓库上。
+    setInstallSelected([])
     setInstallError(null)
     try {
       const body = await requestJson(AVAILABLE_ROUTE, {
         method: 'POST',
         body: JSON.stringify({ id: selectedWorker.id, source: value }),
       })
+      if (sequence !== candidatesSequence) return
       const skills = (Array.isArray(body?.skills) ? body.skills : []).filter(
         (skill) =>
           skill !== null &&
@@ -157,6 +201,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
         skills.filter((skill) => !installed.has(skill.name)).map((skill) => skill.name),
       )
     } catch (failure) {
+      if (sequence !== candidatesSequence) return
       setInstallCandidates({
         status: 'error',
         skills: [],
@@ -220,6 +265,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
       })
       setInstallOpen(false)
       flash('success', `${t('skillInstalled')} ${installSource.trim()}`)
+      void checkWorkerSkills(selectedWorker)
     } catch (failure) {
       setInstallError({
         message: failureText(t, failure),
@@ -231,18 +277,58 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
-   * 更新一个执行者的项目级 skills：Host 通过 Skills 插件的 `ctx.bukaSkills`
-   * 检查并更新目录，`modified` 会跳过。逐项失败时路由回 200 但 `ok:false`，
-   * 页面展示第一个失败 skill 的原因与输出；整体失败走请求异常分支。
+   * 自动检查一个执行者的项目级 skills：进入「技能」页签、安装 / 移除 / 更新
+   * 之后调用。只读，不写 lockfile；结果按 skill 名交给行内状态标记。
+   *
+   * 响应回来时只接受当前执行者的结果：切走再切回时旧请求不能覆盖新状态。
    */
-  async function updateWorkerSkills(worker: Worker) {
-    if (updatingSkills || updatingAllSkills) return
-    setUpdatingSkills(true)
+  async function checkWorkerSkills(worker: Worker) {
+    setSkillChecks((prev) => ({ ...prev, workerId: worker.id, status: 'loading', error: null }))
+    try {
+      const body = await requestJson<WorkerSkillCheckSnapshot>(SKILL_CHECK_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ id: worker.id }),
+      })
+      const results: Record<string, SkillCheckItem> = {}
+      for (const entry of Array.isArray(body?.check?.results) ? body.check.results : []) {
+        const name = typeof entry?.name === 'string' ? entry.name : ''
+        const status = typeof entry?.status === 'string' ? entry.status : ''
+        if (name === '' || status === '') continue
+        results[name] = {
+          name,
+          status,
+          ...(typeof entry?.message === 'string' && entry.message !== ''
+            ? { message: entry.message }
+            : {}),
+        }
+      }
+      setSkillChecks((prev) =>
+        prev.workerId === worker.id
+          ? { workerId: worker.id, status: 'ready', results, error: null }
+          : prev,
+      )
+    } catch (failure) {
+      setSkillChecks((prev) =>
+        prev.workerId === worker.id
+          ? { ...prev, status: 'error', error: messageOf(failure) }
+          : prev,
+      )
+    }
+  }
+
+  /**
+   * 行内更新一个 skill：Host 把 `skills` 收窄到这一项，`modified` 会被跳过。
+   * 逐项失败时路由回 200 但 `ok:false`，页面展示原因与输出；不论成功失败都
+   * 重新检查一次，让行内状态回到磁盘上的真实版本。
+   */
+  async function updateSkill(worker: Worker, skill: { name: string }) {
+    if (updatingSkill !== null || updatingAllSkills) return
+    setUpdatingSkill(skill.name)
     setSkillError(null)
     try {
       const body = await requestUpdateJson<WorkerSkillUpdateSnapshot>(SKILL_UPDATE_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ id: worker.id }),
+        body: JSON.stringify({ id: worker.id, skills: [skill.name] }),
       })
       if (Array.isArray(body.skills)) patchWorker(worker.id, { skills: body.skills })
       const summary = body.update
@@ -260,17 +346,18 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
           output: typeof first?.output === 'string' ? first.output : '',
         })
         flash('error', message)
-        return
+      } else {
+        // 没有实际更新（例如这一项只剩 `modified` 被跳过）时不谎报成功，
+        // 用 Host 的说明代替。
+        const updated = Array.isArray(summary?.updated) ? summary.updated.length : 0
+        const note = typeof summary?.message === 'string' ? summary.message : ''
+        flash('success', updated === 0 && note !== '' ? note : `${t('skillUpdated')} ${skill.name}`)
       }
-      const message = summary?.message
-      flash(
-        'success',
-        typeof message === 'string' && message !== '' ? message : t('skillsUpToDate'),
-      )
+      await checkWorkerSkills(worker)
     } catch (failure) {
       setSkillError({ message: failureText(t, failure), output: outputOf(failure) })
     } finally {
-      setUpdatingSkills(false)
+      setUpdatingSkill(null)
     }
   }
 
@@ -279,7 +366,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
    * 顺序执行，单个失败不中断；页面用汇总提示结果并刷新列表。
    */
   async function updateAllWorkers() {
-    if (updatingSkills || updatingAllSkills) return
+    if (updatingSkill !== null || updatingAllSkills) return
     setUpdatingAllSkills(true)
     try {
       const body = await requestJson<WorkerSkillUpdateAllSnapshot>(SKILL_UPDATE_ALL_ROUTE, {
@@ -319,6 +406,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
       patchWorker(worker.id, { skills: Array.isArray(body.skills) ? body.skills : [] })
       setConfirmingSkill(null)
       flash('success', `${t('skillRemoved')} ${skill.name}`)
+      void checkWorkerSkills(worker)
     } catch (failure) {
       setSkillError({ message: failureText(t, failure), output: outputOf(failure) })
     } finally {
@@ -327,15 +415,16 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
   }
 
   return {
-    loadFavourites,
     openInstallDialog,
+    selectInstallRepo,
     closeInstallDialog,
     loadCandidates,
     toggleCandidate,
     selectAllCandidates,
     installSelectedSkills,
     removeSkill,
-    updateWorkerSkills,
+    checkWorkerSkills,
+    updateSkill,
     updateAllWorkers,
   }
 }

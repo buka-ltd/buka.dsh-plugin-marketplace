@@ -10,15 +10,23 @@
 import React from 'react'
 import { messageOf, requestJson } from './api.ts'
 import { AVATARS, avatarPreset, DEFAULT_AVATAR_ID } from './avatar.ts'
-import { FILE_ROUTE, FILES_ROUTE, LIST_ROUTE, MODELS_ROUTE } from './constants.ts'
+import {
+  FILE_ROUTE,
+  FILES_ROUTE,
+  LIST_ROUTE,
+  MODELS_ROUTE,
+  OPEN_IN_APP_APPS_ROUTE,
+  OPEN_IN_APP_CHOICE_KEY,
+} from './constants.ts'
 import type {
   DeleteDialogState,
   DialogFailure,
-  FavouritesState,
   InstallCandidates,
+  InstallReposState,
   ListData,
   ListState,
   Notice,
+  SkillChecksState,
   Worker,
   WorkerFileContentData,
   WorkerFileNode,
@@ -47,6 +55,20 @@ interface WorkerFilesState {
   contentStatus: 'idle' | 'loading' | 'ready' | 'error'
   content: WorkerFileContentData | null
   contentError: string | null
+}
+
+/** DSH 内置「用应用打开」的应用清单状态。 */
+interface OpenInAppState {
+  status: 'loading' | 'ready' | 'unavailable'
+  apps: string[]
+}
+
+/** 「技能」页签自动检查的初始状态。 */
+const EMPTY_SKILL_CHECKS: SkillChecksState = {
+  workerId: null,
+  status: 'idle',
+  results: {},
+  error: null,
 }
 
 /** 「文件」页签的初始状态。 */
@@ -141,13 +163,12 @@ export function useWorkersState(props: { getService: GetService }) {
   const [descriptionError, setDescriptionError] = React.useState<string | null>(null)
 
   /**
-   * 「重命名执行者」对话框：`renameDraft` 是新展示名草稿，默认带出当前名称；
-   * 失败提示留在对话框里，提交中不响应关闭。
+   * 「设置」页签里的展示名草稿；进入详情时从执行者当前名称初始化。与职责、
+   * 模型一样没有保存按钮，停止输入后自动写回登记表。
    */
-  const [renameOpen, setRenameOpen] = React.useState(false)
-  const [renameDraft, setRenameDraft] = React.useState('')
-  const [renameSaving, setRenameSaving] = React.useState(false)
-  const [renameError, setRenameError] = React.useState<string | null>(null)
+  const [nameDraft, setNameDraft] = React.useState('')
+  const [nameSaving, setNameSaving] = React.useState(false)
+  const [nameError, setNameError] = React.useState<string | null>(null)
 
   /**
    * 「模型」页签：目录按需加载；`modelDraft` 为 null 表示跟随宿主默认模型，
@@ -176,8 +197,9 @@ export function useWorkersState(props: { getService: GetService }) {
    * - `candidates.status`：`idle` 还没读 / `loading` 读取中 / `ready` 有清单 /
    *   `error` 读取失败（带命令输出）；
    * - `installSelected`：勾选的 skill 名；每次读出清单时默认全选未安装的；
-   * - `favourites.status`：`unavailable` 表示 Skills 插件没安装（整块隐藏，
-   *   不是错误），`ready` 时 `repos` 是收藏仓库。
+   * - `installRepos.status`：`unavailable` 表示 Skills 插件没安装（对话框给出
+   *   安装提示），`ready` 时 `repos` 是「技能仓库」里收藏的来源；`corrupt`
+   *   表示收藏文件无法解析。
    */
   const [installOpen, setInstallOpen] = React.useState(false)
   const [installSource, setInstallSource] = React.useState('')
@@ -191,15 +213,59 @@ export function useWorkersState(props: { getService: GetService }) {
   const [installSelected, setInstallSelected] = React.useState<string[]>([])
   const [installError, setInstallError] = React.useState<DialogFailure | null>(null)
   const [installing, setInstalling] = React.useState(false)
-  const [favourites, setFavourites] = React.useState<FavouritesState>({ status: 'idle', repos: [] })
+  const [installRepos, setInstallRepos] = React.useState<InstallReposState>({
+    status: 'idle',
+    repos: [],
+    corrupt: false,
+    error: null,
+  })
 
   /** Toast 文案；同一时刻只保留最后一条。 */
   const [notice, setNotice] = React.useState<Notice | null>(null)
 
-  // skill 更新：单 worker 与列表页批量更新共用一个进行中标记，避免重复点击。
+  // 技能页签：进入页签时自动检查更新，结果按 skill 名保存；`updatingSkill`
+  // 是正在行内更新的那一项，与列表页的批量更新标记一起避免重复点击。
   // 放在状态 Hook 列表末尾，避免改变已有状态的位置。
-  const [updatingSkills, setUpdatingSkills] = React.useState(false)
+  const [skillChecks, setSkillChecks] = React.useState<SkillChecksState>(EMPTY_SKILL_CHECKS)
+  const [updatingSkill, setUpdatingSkill] = React.useState<string | null>(null)
   const [updatingAllSkills, setUpdatingAllSkills] = React.useState(false)
+  // 「用应用打开」：应用清单来自 DSH 内置 open-in-app 的 HTTP 契约；失败或
+  // 非桌面组合（清单为空）时页面退回原来的 Finder 按钮。
+  const [openInApp, setOpenInApp] = React.useState<OpenInAppState>({
+    status: 'loading',
+    apps: [],
+  })
+  const [openInAppChoice, setOpenInAppChoice] = React.useState('')
+
+  React.useEffect(() => {
+    let cancelled = false
+    try {
+      const raw = window.localStorage.getItem(OPEN_IN_APP_CHOICE_KEY)
+      if (raw !== null) {
+        const parsed: unknown = JSON.parse(raw)
+        if (typeof parsed === 'string') setOpenInAppChoice(parsed)
+      }
+    } catch {
+      // 隐私模式 / 存储被禁用：没有记住的选择，用清单里的第一个应用。
+    }
+    fetch(OPEN_IN_APP_APPS_ROUTE, { headers: { accept: 'application/json' } })
+      .then((response) => (response.ok ? (response.json() as Promise<unknown>) : null))
+      .then((body) => {
+        if (cancelled) return
+        const record = body !== null && typeof body === 'object' ? (body as { apps?: unknown }) : {}
+        const apps = Array.isArray(record.apps)
+          ? record.apps.filter((id): id is string => typeof id === 'string')
+          : []
+        setOpenInApp({ status: apps.length > 0 ? 'ready' : 'unavailable', apps })
+      })
+      .catch(() => {
+        if (!cancelled) setOpenInApp({ status: 'unavailable', apps: [] })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // 首次挂载与每次刷新（reloadKey 变化）都重新读 Host 的执行者登记表。
   React.useEffect(() => {
     let cancelled = false
@@ -229,12 +295,12 @@ export function useWorkersState(props: { getService: GetService }) {
     creating ||
     busy !== null ||
     installing ||
-    updatingSkills ||
+    updatingSkill !== null ||
     updatingAllSkills ||
     removing !== null ||
     avatarSaving ||
     descriptionSaving ||
-    renameSaving ||
+    nameSaving ||
     modelSaving ||
     deleteDialog.saving
 
@@ -405,12 +471,13 @@ export function useWorkersState(props: { getService: GetService }) {
     loadFiles(worker)
     setDescriptionDraft(typeof worker.description === 'string' ? worker.description : '')
     setDescriptionError(null)
+    setNameDraft(typeof worker.name === 'string' ? worker.name : '')
+    setNameError(null)
     setSkillError(null)
+    setSkillChecks(EMPTY_SKILL_CHECKS)
     setConfirmingSkill(null)
     setInstallOpen(false)
     setInstallError(null)
-    setRenameOpen(false)
-    setRenameError(null)
     setModelDraft(worker.model ?? null)
     setModelError(null)
     setNotice(null)
@@ -421,12 +488,12 @@ export function useWorkersState(props: { getService: GetService }) {
     setSelectedId(null)
     setFiles(EMPTY_FILES)
     setDescriptionError(null)
+    setNameError(null)
     setSkillError(null)
+    setSkillChecks(EMPTY_SKILL_CHECKS)
     setConfirmingSkill(null)
     setInstallOpen(false)
     setInstallError(null)
-    setRenameOpen(false)
-    setRenameError(null)
     setModelError(null)
     setNotice(null)
   }
@@ -480,14 +547,12 @@ export function useWorkersState(props: { getService: GetService }) {
     setDescriptionSaving,
     descriptionError,
     setDescriptionError,
-    renameOpen,
-    setRenameOpen,
-    renameDraft,
-    setRenameDraft,
-    renameSaving,
-    setRenameSaving,
-    renameError,
-    setRenameError,
+    nameDraft,
+    setNameDraft,
+    nameSaving,
+    setNameSaving,
+    nameError,
+    setNameError,
     modelCatalog,
     setModelCatalog,
     modelDraft,
@@ -522,12 +587,18 @@ export function useWorkersState(props: { getService: GetService }) {
     setInstallError,
     installing,
     setInstalling,
-    updatingSkills,
-    setUpdatingSkills,
+    skillChecks,
+    setSkillChecks,
+    updatingSkill,
+    setUpdatingSkill,
     updatingAllSkills,
     setUpdatingAllSkills,
-    favourites,
-    setFavourites,
+    openInApp,
+    setOpenInApp,
+    openInAppChoice,
+    setOpenInAppChoice,
+    installRepos,
+    setInstallRepos,
     notice,
     setNotice,
     data,

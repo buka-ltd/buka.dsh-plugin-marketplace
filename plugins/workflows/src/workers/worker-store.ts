@@ -10,6 +10,7 @@
  * - `store/registry.ts`：登记表读写与条目增删（version 4、旧表迁移、原子写、
  *   权限 0600、损坏拒绝写、内建执行者补写）；
  * - `store/agents.ts`：AGENTS.md 读写、模板与 CLAUDE.md 链接；
+ * - `store/git.ts`：执行者目录的默认 git 仓库初始化（「分享」的基础）；
  * - `store/rename.ts`：改名（只改展示名，不移动目录）；
  * - `store/delete.ts`：删除事务（目录改名回收 → 删工作区注册 → 删登记 → 清理；失败回滚）；
  * - `store/list.ts`：列表汇总（目录 / 挂载状态 / skills / AGENTS.md）；
@@ -41,6 +42,8 @@ export {
   findWorkerWorkspace,
   workspaceUnavailableError,
 } from './store/delete.ts'
+export type { WorkerGitInitResult } from './store/git.ts'
+export { ensureWorkerGitRepo } from './store/git.ts'
 export { listWorkers } from './store/list.ts'
 export { migrateWorkerStore } from './store/migrate.ts'
 export {

@@ -1,8 +1,8 @@
 /**
- * 「执行者」页面里的创建 / 更换头像 / 重命名对话框。
+ * 「执行者」页面里的创建 / 更换头像对话框。
  *
- * 三个对话框都由页面状态控制 `open`，提交中不响应关闭；失败提示留在框里，
- * 避免被 Toast 遮住。
+ * 两个对话框都由页面状态控制 `open`，提交中不响应关闭；失败提示留在框里，
+ * 避免被 Toast 遮住。展示名不再走对话框，改在详情页的「设置」页签里自动保存。
  *
  * @module @buka/dsh-plugin-workflows/workers/client/components/worker-dialogs
  */
@@ -17,7 +17,6 @@ import {
   AVATAR_FORM_ID,
   CREATE_FORM_ID,
   isValidWorkerId,
-  RENAME_FORM_ID,
   WORKER_DESCRIPTION_MAX_LENGTH,
   WORKER_NAME_MAX_LENGTH,
 } from '../constants.ts'
@@ -247,90 +246,6 @@ export function AvatarDialog({
           ? null
           : h('p', { className: 'buka-workers-formError', role: 'alert' }, avatarError),
       ),
-    )
-  )
-}
-
-/**
- * 重命名执行者对话框。
- *
- */
-export function RenameDialog({
-  t,
-  state,
-  detail,
-}: {
-  t: Translate
-  state: WorkersPageState
-  detail: DetailActions
-}): ReactElement {
-  const { renameOpen, renameSaving, selectedWorker, renameDraft, setRenameDraft, renameError } =
-    state
-  const { closeRenameDialog, renameWorker } = detail
-  return (
-    // 「重命名执行者」对话框：只改展示名；输入为空表示清空（之后显示标识符）。
-    // 目录不移动、工作区不重建。失败提示留在框里；保存中不响应关闭。
-    h(
-      Modal,
-      {
-        open: renameOpen,
-        onClose: closeRenameDialog,
-        title:
-          selectedWorker === null
-            ? t('rename')
-            : `${t('rename')} · ${workerIdentityLabel(selectedWorker)}`,
-        closeLabel: t('close'),
-        footer: h(
-          React.Fragment,
-          null,
-          h(
-            Button,
-            { variant: 'outline', onClick: closeRenameDialog, disabled: renameSaving },
-            t('cancel'),
-          ),
-          h(
-            Button,
-            {
-              variant: 'primary',
-              type: 'submit',
-              form: RENAME_FORM_ID,
-              disabled:
-                renameSaving ||
-                selectedWorker === null ||
-                renameDraft.trim() === selectedWorker.name,
-            },
-            renameSaving ? t('saving') : t('save'),
-          ),
-        ),
-      },
-      renameOpen && selectedWorker !== null
-        ? h(
-            'form',
-            { id: RENAME_FORM_ID, className: 'buka-workers-dialogForm', onSubmit: renameWorker },
-            h(
-              'label',
-              { className: 'buka-workers-field' },
-              h('span', { className: 'buka-workers-fieldLabel' }, t('renameFieldLabel')),
-              h(Input, {
-                className: 'buka-workers-fieldInput',
-                type: 'text',
-                value: renameDraft,
-                placeholder: String(selectedWorker.name ?? selectedWorker.id ?? ''),
-                autoComplete: 'off',
-                spellCheck: false,
-                maxLength: WORKER_NAME_MAX_LENGTH,
-                disabled: renameSaving,
-                'data-modal-autofocus': '',
-                onChange: (event: { target: { value: string } }) =>
-                  setRenameDraft(event.target.value),
-              }),
-            ),
-            h('p', { className: 'buka-workers-fieldHint' }, t('renameHint')),
-            renameError === null
-              ? null
-              : h('p', { className: 'buka-workers-formError', role: 'alert' }, renameError),
-          )
-        : null,
     )
   )
 }

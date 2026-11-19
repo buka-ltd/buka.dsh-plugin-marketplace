@@ -17,7 +17,14 @@ import {
   workerDisplayName,
   workerIdentityLabel,
 } from '../api.ts'
-import { CREATE_ROUTE, REMOVE_IMPACT_ROUTE, REMOVE_ROUTE, REVEAL_ROUTE } from '../constants.ts'
+import {
+  CREATE_ROUTE,
+  OPEN_IN_APP_CHOICE_KEY,
+  OPEN_IN_APP_OPEN_ROUTE,
+  REMOVE_IMPACT_ROUTE,
+  REMOVE_ROUTE,
+  REVEAL_ROUTE,
+} from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
 import type {
   Translate,
@@ -57,6 +64,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     corrupt,
     setDraftDescription,
     setDraftAvatar,
+    setOpenInAppChoice,
   } = state
 
   /**
@@ -113,6 +121,42 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
     } catch (failure) {
       const extra = errorCode(failure) === 'reveal-failed' ? '' : ` ${failureText(t, failure)}`
       flash('error', `${t('revealFailed')}${extra}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * 用 DSH 内置 open-in-app 的能力打开执行者目录。
+   *
+   * 应用清单由页面从 `GET /open-in-app/apps` 读出；这里 `POST
+   * /open-in-app/open` 按应用启动。成功不弹提示（应用窗口本身就是反馈），
+   * 选中的应用写回内置客户端同一个 localStorage 键，和 DSH 其他「用应用打开」
+   * 入口保持同一选择；失败用 Toast 说明。路由不可用时页面本来就会退回
+   * `revealWorker`，不会走到这里。
+   */
+  async function openWorkerWith(worker: Worker, appId: string) {
+    if (mutating || appId === '') return
+    if (isRobotWorker(worker)) {
+      flash('error', t('robotReadOnly'))
+      return
+    }
+    setBusy(`reveal:${worker.id}`)
+    try {
+      const response = await fetch(OPEN_IN_APP_OPEN_ROUTE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ app: appId, path: worker.path }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      setOpenInAppChoice(appId)
+      try {
+        window.localStorage.setItem(OPEN_IN_APP_CHOICE_KEY, JSON.stringify(appId))
+      } catch {
+        // 记不住选择不影响这次打开。
+      }
+    } catch (failure) {
+      flash('error', `${t('openInAppFailed')} ${messageOf(failure)}`)
     } finally {
       setBusy(null)
     }
@@ -326,6 +370,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   return {
     openWorker,
     revealWorker,
+    openWorkerWith,
     mountWorker,
     openCreateDialog,
     closeCreateDialog,

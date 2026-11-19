@@ -20,10 +20,14 @@
  * | `POST /buka-workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
  * | `GET /buka-workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
  * | `GET /buka-workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
- * | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
- * | `POST /buka-workers/skills/install` | 只安装选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
+ * | `GET /buka-workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
+ * | `POST /buka-workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
+ * | `POST /buka-workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
  * | `POST /buka-workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
- * | `POST /buka-workers/reveal` | 用系统文件管理器（macOS 的 Finder）打开执行者目录 |
+ * | `POST /buka-workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
+ * | `POST /buka-workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
+ * | `POST /buka-workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
+ * | `POST /buka-workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
  *
  * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
  * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`

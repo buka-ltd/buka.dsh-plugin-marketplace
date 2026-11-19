@@ -218,10 +218,26 @@ export interface InstallCandidates {
   output: string
 }
 
-/** Skills 插件的收藏仓库；`unavailable` 表示该插件没安装。 */
-export interface FavouritesState {
-  status: 'idle' | 'loading' | 'ready' | 'unavailable'
-  repos: Array<{ id: string; source: string; note: string }>
+/** Skills 插件「技能仓库」里的一条收藏来源。 */
+export interface SkillRepository {
+  id: string
+  source: string
+  note: string
+  /** Host 探测出的类型：`npx-skills` / `unavailable` / `unknown`。 */
+  kind: string
+  /** 探测出的可安装 skill 数；判不出时为 null。 */
+  skills: number | null
+}
+
+/**
+ * 「技能仓库」列表状态：`unavailable` 表示 Skills 插件没安装（或版本太旧），
+ * `corrupt` 表示收藏文件无法解析。
+ */
+export interface InstallReposState {
+  status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
+  repos: SkillRepository[]
+  corrupt: boolean
+  error: string | null
 }
 
 /** 更新结果里失败的一项。 */
@@ -239,6 +255,43 @@ export interface SkillUpdateSummary {
   updated?: unknown[]
   skipped?: unknown[]
   failed?: SkillUpdateFailureItem[]
+}
+
+/** 检查里的一行：技能名与状态（状态模型由 Skills 插件定义，页面只认字符串）。 */
+export interface SkillCheckItem {
+  readonly name: string
+  readonly status: string
+  readonly message?: string
+}
+
+/** 「技能」页签自动检查的页面状态；`results` 按 skill 名索引。 */
+export interface SkillChecksState {
+  /** 结果属于哪个执行者；切执行者后旧响应据此丢弃。 */
+  readonly workerId: string | null
+  readonly status: 'idle' | 'loading' | 'ready' | 'error'
+  readonly results: Record<string, SkillCheckItem>
+  readonly error: string | null
+}
+
+/** 单个执行者检查响应里的一行（Host 原样透传的 Skills 插件结果）。 */
+export interface WorkerSkillCheckItemSnapshot {
+  name?: unknown
+  status?: unknown
+  message?: unknown
+}
+
+/** 单个执行者检查响应。 */
+export interface WorkerSkillCheckSnapshot {
+  ok?: boolean
+  code?: string
+  message?: string
+  output?: string
+  check?: {
+    ok?: boolean
+    scope?: unknown
+    message?: unknown
+    results?: WorkerSkillCheckItemSnapshot[]
+  }
 }
 
 /** 单个执行者更新响应。 */

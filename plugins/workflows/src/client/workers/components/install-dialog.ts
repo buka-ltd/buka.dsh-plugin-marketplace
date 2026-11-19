@@ -1,5 +1,6 @@
 /**
- * 「安装 skills」对话框：来源输入 + 收藏仓库入口 + 候选勾选列表。
+ * 「安装 skills」对话框：从 Skills 插件的「技能仓库」里选一个收藏来源，再勾选
+ * 其中可安装的 skills。页面不再提供手填来源的输入框，第三方来源必须先收藏。
  *
  * 默认勾选全部未安装的 skill；已安装的置灰不可选（设计契约）。
  *
@@ -9,23 +10,127 @@
 import {
   Button,
   IconWarningOutlineRegular,
-  Input,
   Modal,
   StateDot,
   Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { FormEvent, ReactElement } from 'react'
+import type { ReactElement } from 'react'
 import React from 'react'
 import type { createSkillActions } from '../actions/skills.ts'
-import { INSTALL_FORM_ID } from '../constants.ts'
 import { h } from '../h.ts'
 import type { WorkersPageState } from '../state.ts'
-import type { Translate } from '../types.ts'
+import type { SkillCandidate, SkillRepository, Translate } from '../types.ts'
 
 type SkillActions = ReturnType<typeof createSkillActions>
 
 /**
- * 对话框内容：来源输入 + 收藏仓库入口 + 候选勾选列表。
+ * 一条收藏来源：来源地址 + 备注 + 类型 / 数量。
+ *
+ * @param repo Host 从 Skills 服务读到的收藏仓库
+ * @param selected 是否是当前选中的仓库
+ * @param disabled 安装期间不允许切换
+ * @param t 词典
+ * @param onSelect 选中这个仓库
+ */
+function renderRepository(
+  repo: SkillRepository,
+  selected: boolean,
+  disabled: boolean,
+  t: Translate,
+  onSelect: (source: string) => void,
+): ReactElement {
+  const unavailable = repo.kind === 'unavailable'
+  return h(
+    'li',
+    { key: repo.id },
+    h(
+      'button',
+      {
+        type: 'button',
+        className: `buka-workers-repo${selected ? ' is-selected' : ''}`,
+        'aria-pressed': selected,
+        title: repo.note !== '' ? `${repo.source} — ${repo.note}` : repo.source,
+        disabled,
+        onClick: () => onSelect(repo.source),
+      },
+      h(
+        'span',
+        { className: 'buka-workers-repoText' },
+        h('span', { className: 'buka-workers-repoSource' }, repo.source),
+        repo.note === '' ? null : h('span', { className: 'buka-workers-repoNote' }, repo.note),
+      ),
+      unavailable ? h(Tag, { tone: 'neutral' }, t('repoUnavailable')) : null,
+      repo.skills === null
+        ? null
+        : h(
+            'span',
+            { className: 'buka-workers-repoCount' },
+            String(t('skillsBadge')).replace('{n}', String(repo.skills)),
+          ),
+    ),
+  )
+}
+
+/**
+ * 未安装 skill 的候选标签：名称 + 描述。
+ *
+ * @param skill 候选 skill
+ * @param installed 已安装的 skill 名集合
+ * @param selected 勾选的 skill 名
+ * @param installing 是否正在安装
+ * @param t 词典
+ * @param onToggle 勾选 / 取消
+ */
+function renderCandidate(
+  skill: SkillCandidate,
+  installed: Set<string>,
+  selected: string[],
+  installing: boolean,
+  t: Translate,
+  onToggle: (name: string) => void,
+): ReactElement {
+  const isInstalled = installed.has(skill.name)
+  const checked = !isInstalled && selected.includes(skill.name)
+  return h(
+    'li',
+    { key: skill.name },
+    h(
+      'label',
+      {
+        className: `buka-workers-candidate${isInstalled ? ' isDisabled' : ''}`,
+        title:
+          typeof skill.description === 'string' && skill.description !== ''
+            ? skill.description
+            : String(skill.name),
+      },
+      h('input', {
+        type: 'checkbox',
+        className: 'buka-workers-candidateInput',
+        checked,
+        disabled: isInstalled || installing,
+        onChange: () => onToggle(skill.name),
+      }),
+      h(
+        'span',
+        { className: 'buka-workers-candidateText' },
+        h('span', { className: 'buka-workers-candidateName' }, String(skill.name)),
+        typeof skill.description === 'string' && skill.description !== ''
+          ? h('span', { className: 'buka-workers-candidateDesc' }, skill.description)
+          : null,
+      ),
+      isInstalled
+        ? h(
+            'span',
+            { className: 'buka-workers-candidateTag' },
+            h(Tag, { tone: 'neutral' }, t('alreadyInstalled')),
+          )
+        : null,
+    ),
+  )
+}
+
+/**
+ * 对话框内容：技能仓库选择 + 候选勾选列表。
  * 默认勾选全部未安装的 skill；已安装的置灰不可选（设计契约）。
  *
  */
@@ -41,102 +146,80 @@ export function InstallDialog({
   const {
     installCandidates,
     installSelected,
-    favourites,
+    installRepos,
     installSource,
-    setInstallSource,
     installing,
     installError,
   } = state
-  const { loadCandidates, toggleCandidate, selectAllCandidates } = skillActions
+  const { selectInstallRepo, toggleCandidate, selectAllCandidates } = skillActions
   const candidates = installCandidates
   const installed = new Set(candidates.installed)
   const selectable = candidates.skills.filter((skill) => !installed.has(skill.name))
   const allSelected =
     selectable.length > 0 && selectable.every((skill) => installSelected.includes(skill.name))
+  const repos = installRepos.repos
+  const repoButtonsDisabled = installing
 
-  const favouritesBlock =
-    favourites.status === 'ready'
-      ? favourites.repos.length === 0
-        ? h('p', { className: 'buka-workers-fieldHint' }, t('favouritesEmpty'))
-        : h(
-            'div',
-            { className: 'buka-workers-field' },
-            h('span', { className: 'buka-workers-fieldLabel' }, t('favouritesLabel')),
-            h(
+  const reposBlock = h(
+    'div',
+    { className: 'buka-workers-field' },
+    h('span', { className: 'buka-workers-fieldLabel' }, t('installReposLabel')),
+    installRepos.status === 'idle' || installRepos.status === 'loading'
+      ? h(
+          'p',
+          { className: 'buka-workers-statusWithDot', role: 'status' },
+          h(StateDot, { state: 'ongoing' }),
+          t('installReposLoading'),
+        )
+      : installRepos.status === 'unavailable'
+        ? h('p', { className: 'buka-workers-fieldHint' }, t('installReposUnavailable'))
+        : installRepos.status === 'error'
+          ? h(
               'div',
-              { className: 'buka-workers-favorites' },
-              ...favourites.repos.map((repo) =>
-                h(
-                  Button,
-                  {
-                    key: repo.id,
-                    variant: installSource === repo.source ? 'primary' : 'outline',
-                    size: 'sm',
-                    className: 'buka-workers-toolbarButton',
-                    title: repo.note !== '' ? repo.note : repo.source,
-                    disabled: installing || candidates.status === 'loading',
-                    onClick: () => loadCandidates(repo.source),
-                  },
-                  repo.source,
-                ),
+              { className: 'buka-workers-alert', role: 'alert' },
+              h(
+                'div',
+                { className: 'buka-workers-alertHead' },
+                h(IconWarningOutlineRegular, { size: 16 }),
+                h('span', null, `${t('installReposFailed')} ${installRepos.error}`),
               ),
-            ),
-          )
-      : null
+            )
+          : installRepos.status === 'ready' && installRepos.corrupt
+            ? h(
+                'div',
+                { className: 'buka-workers-alert', role: 'alert' },
+                h(
+                  'div',
+                  { className: 'buka-workers-alertHead' },
+                  h(IconWarningOutlineRegular, { size: 16 }),
+                  h('span', null, t('installReposCorrupt')),
+                ),
+              )
+            : installRepos.status === 'ready' && repos.length === 0
+              ? h('p', { className: 'buka-workers-fieldHint' }, t('installReposEmpty'))
+              : installRepos.status === 'ready'
+                ? h(
+                    'ul',
+                    { className: 'buka-workers-repos', 'aria-label': t('installReposLabel') },
+                    ...repos.map((repo) =>
+                      renderRepository(
+                        repo,
+                        installSource === repo.source,
+                        repoButtonsDisabled,
+                        t,
+                        selectInstallRepo,
+                      ),
+                    ),
+                  )
+                : null,
+  )
 
   return h(
     'div',
     { className: 'buka-workers-dialogForm' },
-    h(
-      'form',
-      {
-        id: INSTALL_FORM_ID,
-        className: 'buka-workers-field',
-        onSubmit: (event: FormEvent) => {
-          event.preventDefault()
-          loadCandidates()
-        },
-      },
-      h(
-        'label',
-        { className: 'buka-workers-fieldLabel', htmlFor: 'buka-workers-install-source' },
-        t('installSourceLabel'),
-      ),
-      h(
-        'div',
-        { className: 'buka-workers-sourceRow' },
-        h(Input, {
-          id: 'buka-workers-install-source',
-          className: 'buka-workers-input',
-          type: 'text',
-          value: installSource,
-          placeholder: t('sourcePlaceholder'),
-          autoComplete: 'off',
-          spellCheck: false,
-          disabled: installing,
-          'data-modal-autofocus': '',
-          onChange: (event: { target: { value: string } }) => setInstallSource(event.target.value),
-        }),
-        h(
-          Button,
-          {
-            variant: 'outline',
-            size: 'sm',
-            type: 'submit',
-            className: 'buka-workers-submit',
-            icon:
-              candidates.status === 'loading'
-                ? h(StateDot, { state: 'ongoing', size: 13 })
-                : undefined,
-            disabled: installing || candidates.status === 'loading' || installSource.trim() === '',
-          },
-          candidates.status === 'loading' ? t('loadingSkills') : t('loadSkills'),
-        ),
-      ),
-    ),
-    favouritesBlock,
+    reposBlock,
     candidates.status === 'idle'
-      ? h('p', { className: 'buka-workers-fieldHint' }, t('installIdle'))
+      ? h('p', { className: 'buka-workers-fieldHint' }, t('installPickRepo'))
       : null,
     candidates.status === 'loading'
       ? h(
@@ -201,46 +284,9 @@ export function InstallDialog({
           h(
             'ul',
             { className: 'buka-workers-candidates' },
-            ...candidates.skills.map((skill) => {
-              const isInstalled = installed.has(skill.name)
-              const checked = !isInstalled && installSelected.includes(skill.name)
-              return h(
-                'li',
-                { key: skill.name },
-                h(
-                  'label',
-                  {
-                    className: `buka-workers-candidate${isInstalled ? ' isDisabled' : ''}`,
-                    title:
-                      typeof skill.description === 'string' && skill.description !== ''
-                        ? skill.description
-                        : String(skill.name),
-                  },
-                  h('input', {
-                    type: 'checkbox',
-                    className: 'buka-workers-candidateInput',
-                    checked,
-                    disabled: isInstalled || installing,
-                    onChange: () => toggleCandidate(skill.name),
-                  }),
-                  h(
-                    'span',
-                    { className: 'buka-workers-candidateText' },
-                    h('span', { className: 'buka-workers-candidateName' }, String(skill.name)),
-                    typeof skill.description === 'string' && skill.description !== ''
-                      ? h('span', { className: 'buka-workers-candidateDesc' }, skill.description)
-                      : null,
-                  ),
-                  isInstalled
-                    ? h(
-                        'span',
-                        { className: 'buka-workers-candidateTag' },
-                        h(Tag, { tone: 'neutral' }, t('alreadyInstalled')),
-                      )
-                    : null,
-                ),
-              )
-            }),
+            ...candidates.skills.map((skill) =>
+              renderCandidate(skill, installed, installSelected, installing, t, toggleCandidate),
+            ),
           ),
           installed.size === 0
             ? null
@@ -283,10 +329,10 @@ export function InstallSkillsModal({
   state: WorkersPageState
   skillActions: SkillActions
 }): ReactElement {
-  const { installOpen, selectedWorker, installSelected, installing } = state
+  const { installOpen, selectedWorker, installSelected, installCandidates, installing } = state
   const { closeInstallDialog, installSelectedSkills } = skillActions
   return (
-    // 「安装 skills」对话框：选来源（或收藏仓库）→ 读出候选 → 勾选 → 只安装选中的。
+    // 「安装 skills」对话框：选「技能仓库」里收藏的来源 → 读出候选 → 勾选 → 只安装选中的。
     // 默认全选未安装的；已安装的置灰不可选；安装中不响应关闭。
     h(
       Modal,
@@ -308,7 +354,10 @@ export function InstallSkillsModal({
             {
               variant: 'primary',
               type: 'button',
-              disabled: installing || installSelected.length === 0,
+              disabled:
+                installing ||
+                installCandidates.status === 'loading' ||
+                installSelected.length === 0,
               onClick: installSelectedSkills,
             },
             installing

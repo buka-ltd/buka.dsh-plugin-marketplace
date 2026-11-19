@@ -9,6 +9,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { ensureWorkerGitRepo } from './git.ts'
 import { AGENTS_FILE, AGENTS_MAX_READ_BYTES, CLAUDE_FILE, pathExists, realpathOr } from './paths.ts'
 
 /**
@@ -33,6 +34,9 @@ export async function ensureWorkerDirectory(directory: string, label: string): P
   // Claude Code 读 CLAUDE.md：执行者目录里让它指向同一份 AGENTS.md。已存在的
   // 用户文件 / 别的链接不覆盖（首次创建以外的调用都是幂等的）。
   await ensureClaudeLink(canonical)
+  // 执行者目录默认是一个独立 git 仓库，作为「分享」的基础。初始化失败
+  // （没装 git、没有写权限）只降级成结果对象，目录与模板照常可用。
+  await ensureWorkerGitRepo(canonical)
   return canonical
 }
 

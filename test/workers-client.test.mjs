@@ -27,6 +27,7 @@ const PRIMITIVE_NAMES = [
   'CodeBlock',
   'FileTypeIcon',
   'IconChevronRightOutlineRegular',
+  'IconChevronDownOutlineRegular',
   'IconCloseOutlineRegular',
   'IconDownloadOutlineRegular',
   'IconEditOutlineRegular',
@@ -40,6 +41,7 @@ const PRIMITIVE_NAMES = [
   'IconWarningOutlineRegular',
   'Input',
   'MarkdownText',
+  'Menu',
   'ReadBlock',
   'Modal',
   'SegmentedTabs',
@@ -226,6 +228,7 @@ async function loadClient() {
       placeholder: props.placeholder ?? '',
       type: props.type,
       maxLength: props.maxLength,
+      'aria-label': props['aria-label'],
       'data-modal-autofocus': props['data-modal-autofocus'],
     })
   }
@@ -262,8 +265,21 @@ async function loadClient() {
       'div',
       { className: 'x-tabs' },
       ...(props.items ?? []).map((item) =>
-        h('button', { key: item.value, className: 'x-tab' }, item.label),
+        h('button', { key: item.value, className: 'x-tab', role: 'tab' }, item.label),
       ),
+    )
+  }
+
+  function MenuStub(props) {
+    return h(
+      'span',
+      { className: 'x-menu' },
+      props.anchor,
+      ...(props.open === true
+        ? (props.items ?? []).map((item) =>
+            h('button', { key: item.id, className: 'x-menuItem' }, item.label),
+          )
+        : []),
     )
   }
 
@@ -287,6 +303,7 @@ async function loadClient() {
     if (name === 'Tag') return TagStub(props)
     if (name === 'Tooltip') return TooltipStub(props)
     if (name === 'SegmentedTabs') return SegmentedTabsStub(props)
+    if (name === 'Menu') return MenuStub(props)
     if (name === 'ReadBlock') {
       return h(
         'div',
@@ -405,7 +422,8 @@ const zh = {
   robotReadOnly: '机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
-  descriptionHint: '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。',
+  descriptionHint:
+    '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。修改后自动保存。',
   tabSettings: '设置',
   modelTitle: '模型',
   modelHint:
@@ -441,18 +459,34 @@ const zh = {
   errInvalidId:
     '标识符不合法：需匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -），且创建后不可修改。',
   errIdTaken: '这个标识符已被占用，请换一个。',
-  rename: '重命名执行者',
-  renameLabel: '重命名',
-  renameFieldLabel: '名称',
-  renameHint: '只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。',
-  renameSame: '新名称与当前名称相同。',
-  renameSaveFailed: '重命名失败：',
-  renamed: '已重命名为：',
+  nameLabel: '名称',
+  nameHint: '只改展示名：目录与工作区都保持原位；留空表示清空名称、显示标识符。修改后自动保存。',
+  nameSaveFailed: '保存名称失败：',
+  autosavePending: '待保存…',
   mount: '挂载',
   delete: '删除',
   tabsLabel: '执行者详情页签',
   tabFiles: '文件',
   tabSkills: '技能',
+  tabSkillsHasUpdate: '技能（有更新）',
+  installSkills: '安装 skills',
+  installDialogTitle: '安装 skills',
+  installReposLabel: '技能仓库',
+  repoUnavailable: '不可用',
+  loadingSkills: '正在读取 skills…',
+  skillsFound: '共 {n} 个 skills',
+  selectAllSkills: '全选',
+  selectedSkills: '已选 {n} / {m}',
+  alreadyInstalled: '已安装',
+  installedHint: '已安装的 skill 不能重复勾选。',
+  installSelected: '安装选中的',
+  close: '关闭',
+  reveal: '打开 Finder',
+  openInApp: '用 {app} 打开',
+  openWithChoose: '选择打开方式',
+  openInAppFailed: '打开执行者目录失败：',
+  appFinder: '访达',
+  appTerminal: '终端',
   filesTitle: '文件',
   filesHint: '以只读方式浏览执行者目录；内容显示在右侧，编辑与保存交给 builder 工具。',
   filesTreeAria: '执行者目录树',
@@ -578,12 +612,17 @@ function emptyFiles() {
  *   dialogOpen?: boolean,
  *   draftDescription?: string,
  *   descriptionDraft?: string,
- *   renameOpen?: boolean,
- *   renameDraft?: string,
- *   renameSaving?: boolean,
- *   renameError?: string | null,
+ *   nameDraft?: string,
+ *   nameSaving?: boolean,
+ *   nameError?: string | null,
  *   tab?: string,
  *   files?: Record<string, any>,
+ *   installOpen?: boolean,
+ *   installSource?: string,
+ *   installCandidates?: Record<string, any>,
+ *   installSelected?: string[],
+ *   installing?: boolean,
+ *   installRepos?: Record<string, any>,
  * }} [options]
  * @returns {Array<any>}
  */
@@ -593,10 +632,9 @@ function states({
   dialogOpen = false,
   draftDescription = '',
   descriptionDraft = '',
-  renameOpen = false,
-  renameDraft = '',
-  renameSaving = false,
-  renameError = null,
+  nameDraft = '',
+  nameSaving = false,
+  nameError = null,
   modelCatalog = { status: 'idle', data: null, error: null },
   modelDraft = null,
   modelSaving = false,
@@ -604,6 +642,15 @@ function states({
   tab = 'settings',
   files = emptyFiles(),
   deleteDialog = { target: null, impact: null, loading: false, error: null, saving: false },
+  skillChecks = { workerId: null, status: 'idle', results: {}, error: null },
+  installOpen = false,
+  installSource = '',
+  installCandidates = { status: 'idle', skills: [], installed: [], error: null, output: '' },
+  installSelected = [],
+  installing = false,
+  installRepos = { status: 'unavailable', repos: [], corrupt: false, error: null },
+  openInApps = { status: 'loading', apps: [] },
+  openInAppChoice = '',
 } = {}) {
   return [
     { data, error: null, loading: false }, // list
@@ -624,10 +671,9 @@ function states({
     descriptionDraft, // descriptionDraft
     false, // descriptionSaving
     null, // descriptionError
-    renameOpen, // renameOpen
-    renameDraft, // renameDraft
-    renameSaving, // renameSaving
-    renameError, // renameError
+    nameDraft, // nameDraft
+    nameSaving, // nameSaving
+    nameError, // nameError
     modelCatalog, // modelCatalog
     modelDraft, // modelDraft
     modelSaving, // modelSaving
@@ -638,14 +684,19 @@ function states({
     null, // removing
     deleteDialog, // deleteDialogSkill
     null, // skillError
-    false, // installOpen
-    '', // installSource
-    { status: 'idle', skills: [], installed: [], error: null, output: '' }, // installCandidates
-    [], // installSelected
+    installOpen, // installOpen
+    installSource, // installSource
+    installCandidates, // installCandidates
+    installSelected, // installSelected
     null, // installError
-    false, // installing
-    { status: 'unavailable', repos: [] }, // favourites
+    installing, // installing
+    installRepos, // installRepos
     null, // notice
+    skillChecks, // skillChecks
+    null, // updatingSkill
+    false, // updatingAllSkills
+    openInApps, // openInApp
+    openInAppChoice, // openInAppChoice
   ]
 }
 
@@ -653,7 +704,7 @@ test('执行者详情：独立页头，不显示首页的工作流 / 执行者�
   const client = await loadClient()
   const tabLabels = (tree) =>
     collect(tree)
-      .nodes.filter((node) => node.props?.className === 'x-tab')
+      .nodes.filter((node) => node.props?.role === 'tab')
       .map((node) => collect(node).texts.join(''))
 
   // 详情页只保留自己的「设置 / 文件 / 技能」页签。
@@ -664,6 +715,190 @@ test('执行者详情：独立页头，不显示首页的工作流 / 执行者�
   // 列表页仍以首页两个页签作为标题。
   const list = client.render(states({ data: listData() }))
   assert.deepEqual(tabLabels(list), ['工作流', '执行者'])
+})
+
+test('执行者详情：下划线页签的 ARIA 与「技能」更新圆点', async () => {
+  const client = await loadClient()
+
+  const withUpdate = client.render(
+    states({
+      data: listData(),
+      selectedId: 'writer',
+      skillChecks: {
+        workerId: 'writer',
+        status: 'ready',
+        results: { alpha: { name: 'alpha', status: 'update' } },
+        error: null,
+      },
+    }),
+  )
+  const tabs = collect(withUpdate).nodes.filter((node) => node.props?.role === 'tab')
+  assert.equal(tabs.length, 3, '三个页签都带 role=tab')
+  assert.deepEqual(
+    tabs.map((node) => node.props?.['aria-selected']),
+    [true, false, false],
+  )
+  assert.deepEqual(
+    tabs.map((node) => node.props?.tabIndex),
+    [0, -1, -1],
+    '只有选中页签是 Tab 停靠点',
+  )
+  assert.equal(tabs[0].props?.['aria-controls'], 'buka-workers-panel-settings')
+  assert.equal(tabs[2].props?.['aria-controls'], 'buka-workers-panel-skills')
+
+  const skillsTab = tabs[2]
+  assert.ok(
+    collect(skillsTab).nodes.some((node) =>
+      String(node.props?.className ?? '').includes('buka-workers-tabDot'),
+    ),
+    '有更新时「技能」页签带圆点',
+  )
+  assert.equal(skillsTab.props?.['aria-label'], '技能（有更新）')
+
+  const noUpdate = client.render(states({ data: listData(), selectedId: 'writer' }))
+  const plainTabs = collect(noUpdate).nodes.filter((node) => node.props?.role === 'tab')
+  assert.equal(
+    collect(plainTabs[2]).nodes.some((node) =>
+      String(node.props?.className ?? '').includes('buka-workers-tabDot'),
+    ),
+    false,
+    '没有更新时不显示圆点',
+  )
+})
+
+test('执行者详情：「安装 skills」在页头工具栏最右侧，技能区块不再有该按钮', async () => {
+  const client = await loadClient()
+
+  for (const tab of ['settings', 'skills']) {
+    const tree = client.render(states({ data: listData(), selectedId: 'writer', tab }))
+    const installButtons = collect(tree).nodes.filter(
+      (node) => node.type === 'button' && (node.children ?? []).includes('安装 skills'),
+    )
+    assert.equal(installButtons.length, 1, `「${tab}」页签只有页头一个安装入口`)
+  }
+
+  // 页头工具栏的最后一个按钮就是安装入口（新会话 / 打开目录 / 刷新之后）。
+  const tree = client.render(states({ data: listData(), selectedId: 'writer' }))
+  const toolbar = findNode(
+    tree,
+    (node) => String(node.props?.className ?? '') === 'buka-workers-toolbar',
+  )
+  assert.ok(toolbar, '详情页有工具栏')
+  const toolbarButtons = collect(toolbar).nodes.filter((node) => node.type === 'button')
+  assert.ok(
+    (toolbarButtons.at(-1)?.children ?? []).includes('安装 skills'),
+    '安装入口在工具栏最右侧',
+  )
+})
+
+test('安装 skills 弹窗：来源只读技能仓库，不提供手填来源', async () => {
+  const client = await loadClient()
+  const tree = client.render(
+    states({
+      data: listData(),
+      selectedId: 'writer',
+      tab: 'skills',
+      installOpen: true,
+      installSource: 'owner/repo',
+      installCandidates: {
+        status: 'ready',
+        skills: [
+          { name: 'alpha', description: 'first' },
+          { name: 'beta', description: 'second' },
+        ],
+        installed: ['beta'],
+        error: null,
+        output: '',
+      },
+      installSelected: ['alpha'],
+      installRepos: {
+        status: 'ready',
+        corrupt: false,
+        error: null,
+        repos: [
+          { id: 'r1', source: 'owner/repo', note: '团队技能', kind: 'npx-skills', skills: 2 },
+          { id: 'r2', source: 'other/repo', note: '', kind: 'unavailable', skills: 0 },
+        ],
+      },
+    }),
+  )
+  const { texts, nodes } = collect(tree)
+
+  assert.ok(texts.includes('技能仓库'), '对话框只展示技能仓库区块')
+  assert.ok(texts.includes('owner/repo'), '收藏来源出现在弹窗里')
+  assert.ok(texts.includes('团队技能'), '收藏备注出现在弹窗里')
+  assert.ok(texts.includes('2 skills'), '展示收藏仓库的 skill 数')
+  assert.ok(texts.includes('不可用'), '不可用仓库带标签')
+  assert.ok(
+    findNode(
+      tree,
+      (node) =>
+        String(node.props?.className ?? '')
+          .split(' ')
+          .includes('buka-workers-repo') && node.props?.['aria-pressed'] === true,
+    ),
+    '当前来源的仓库高亮',
+  )
+  assert.equal(
+    nodes.filter((node) => node.type === 'input' && node.props?.type === 'text').length,
+    0,
+    '不再提供手填来源的输入框',
+  )
+  assert.ok(texts.includes('alpha'), '候选 skill 列出')
+  assert.ok(texts.includes('已安装'), '已安装项带标签')
+})
+
+test('执行者详情：「打开」优先用内置 open-in-app，不可用时退回 Finder', async () => {
+  const client = await loadClient()
+
+  // 应用清单加载中 / 不可用：保留原来的 Finder 按钮。
+  const fallback = client.render(states({ data: listData(), selectedId: 'writer' }))
+  assert.ok(
+    findNode(
+      fallback,
+      (node) => node.type === 'button' && node.props?.['aria-label'] === '打开 Finder writer',
+    ),
+    '清单不可用时显示「打开 Finder」',
+  )
+
+  // 清单可用：分体按钮用上次选中的应用，箭头打开选择菜单。
+  const ready = client.render(
+    states({
+      data: listData(),
+      selectedId: 'writer',
+      openInApps: { status: 'ready', apps: ['finder', 'vscode', 'terminal'] },
+      openInAppChoice: 'vscode',
+    }),
+  )
+  const main = findNode(
+    ready,
+    (node) => node.type === 'button' && node.props?.['aria-label'] === '用 VS Code 打开',
+  )
+  assert.ok(main, '主按钮显示上次选中的应用')
+  assert.ok((main.children ?? []).includes('VS Code'), '主按钮用应用名代替「用…打开」文案')
+  const chevron = findNode(
+    ready,
+    (node) => node.type === 'button' && node.props?.['aria-label'] === '选择打开方式',
+  )
+  assert.ok(chevron, '有下拉箭头')
+  assert.equal(chevron.props?.['aria-haspopup'], 'menu')
+
+  // 记住的应用不在清单里时退回清单第一项。
+  const missing = client.render(
+    states({
+      data: listData(),
+      selectedId: 'writer',
+      openInApps: { status: 'ready', apps: ['finder', 'terminal'] },
+      openInAppChoice: 'cursor',
+    }),
+  )
+  assert.ok(
+    findNode(
+      missing,
+      (node) => node.type === 'button' && node.props?.['aria-label'] === '用 访达 打开',
+    ),
+    '选择失效时用清单第一项',
+  )
 })
 
 test('执行者页：main 插槽注入的 workersT 是已绑定的翻译函数', async () => {
@@ -684,7 +919,7 @@ test('执行者页：卡片与职责页签展示职责，创建对话框带职�
   const list = collect(client.render(states({ data: listData() })))
   assert.ok(list.texts.includes(description))
 
-  // 职责在「设置」页签：说明 + textarea + 保存按钮。
+  // 职责在「设置」页签：说明 + textarea，没有保存按钮（修改即自动保存）。
   const tabStates = {
     data: listData(),
     selectedId: 'writer',
@@ -700,10 +935,14 @@ test('执行者页：卡片与职责页签展示职责，创建对话框带职�
   )
   assert.ok(
     detail.texts.includes(
-      '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。',
+      '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。修改后自动保存。',
     ),
   )
-  assert.ok(detail.texts.includes('保存'), '有改动时显示保存按钮')
+  assert.equal(
+    findNode(detail, (node) => node.type === 'button' && (node.children ?? []).includes('保存')),
+    null,
+    '设置页签没有保存按钮',
+  )
   const draftField = findNode(
     client.render(states(tabStates)),
     (node) => node.type === 'textarea' && node.props?.value === description,
@@ -827,97 +1066,66 @@ test('执行者页：创建对话框有必填标识符与可选名称，列表 /
   assert.equal(createButton(validStates)?.props?.disabled, false, '合法新标识符可以创建')
 })
 
-test('执行者页：详情页有重命名入口，renameOpen 时渲染重命名对话框', async () => {
+test('执行者页：展示名在「设置」页签里配置，标题行不再有重命名入口', async () => {
   const client = await loadClient()
+  const data = listData()
+  data.workers[0].name = 'writer'
 
-  // 配置视图标题行：执行者标题旁有铅笔按钮（tooltip / aria-label 带展示名）。
-  const detail = client.render(states({ data: listData(), selectedId: 'writer' }))
-  const renameButton = findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer')
-  assert.ok(renameButton, '配置视图标题行应有重命名按钮')
-  assert.equal(renameButton.props?.disabled, false)
-
-  // 目录缺失不影响改展示名（目录本来就按标识符固定，改名不碰磁盘）。
-  const missingData = listData()
-  missingData.workers[0].exists = false
-  const missingButton = findNode(
-    client.render(states({ data: missingData, selectedId: 'writer' })),
-    (node) => node.props?.['aria-label'] === '重命名 writer',
+  // 标题行不再有铅笔按钮，展示名只能在设置页签里改。
+  const detail = client.render(states({ data, selectedId: 'writer' }))
+  assert.equal(
+    findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer'),
+    null,
+    '标题行没有重命名按钮',
   )
-  assert.equal(missingButton?.props?.disabled, false, '目录缺失时仍可改展示名')
 
-  // renameOpen 时对话框要有标题、名称字段、语义提示与保存 / 取消。
-  const renameData = listData()
-  renameData.workers[0].name = 'writer'
-  const dialogStates = {
-    data: renameData,
-    selectedId: 'writer',
-    renameOpen: true,
-    renameDraft: 'writer',
-  }
-  const dialog = collect(client.render(states(dialogStates)))
-  assert.ok(dialog.texts.some((text) => text.includes('重命名执行者')))
-  assert.ok(dialog.texts.includes('名称'))
+  // 设置页签第一块是「名称」：输入框带出当前名称、上限与自动保存提示。
+  const settings = collect(
+    client.render(states({ data, selectedId: 'writer', nameDraft: 'writer' })),
+  )
+  assert.ok(settings.texts.includes('名称'))
   assert.ok(
-    dialog.texts.includes('只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。'),
+    settings.texts.includes(
+      '只改展示名：目录与工作区都保持原位；留空表示清空名称、显示标识符。修改后自动保存。',
+    ),
   )
-  assert.ok(dialog.texts.includes('保存'))
-  assert.ok(dialog.texts.includes('取消'))
   const field = findNode(
-    client.render(states(dialogStates)),
-    (node) => node.type === 'input' && node.props?.value === 'writer',
+    client.render(states({ data, selectedId: 'writer', nameDraft: 'writer' })),
+    (node) => node.type === 'input' && node.props?.['aria-label'] === '名称',
   )
-  assert.ok(field, '对话框应有名称输入框，并带出当前名称')
+  assert.ok(field, '设置页签有名称输入框')
+  assert.equal(field.props?.value, 'writer')
   assert.equal(field.props?.maxLength, 64)
 
-  // 保存按钮：草稿与当前名相同 / 为空 / 保存中都禁用；改成新名字才可用。
-  const saveButtons = (options) => {
-    // 只看重命名对话框里的保存按钮：设置页签也有「保存」，不能一起算。
-    const modal = findNode(
-      client.render(states(options)),
-      (node) => node.props?.className === 'x-modal',
-    )
-    return modal === null
-      ? []
-      : collect(modal).nodes.filter(
-          (node) => node.type === 'button' && (node.children ?? []).includes('保存'),
-        )
-  }
-  const sameButtons = saveButtons(dialogStates)
-  assert.ok(sameButtons.length > 0)
+  // 目录缺失不影响改展示名（名称只写登记表，不碰磁盘）。
+  const missingData = listData()
+  missingData.workers[0].exists = false
   assert.ok(
-    sameButtons.every((node) => node.props?.disabled === true),
-    '新名称与当前名相同时保存禁用',
-  )
-  const changedButtons = saveButtons({ ...dialogStates, renameDraft: 'author' })
-  assert.ok(
-    changedButtons.some((node) => node.props?.disabled === false),
-    '改了新名称后保存可用',
-  )
-  const emptyButtons = saveButtons({ ...dialogStates, renameDraft: '   ' })
-  assert.ok(
-    emptyButtons.some((node) => node.props?.disabled === false),
-    '名称留空表示清空，保存可用',
-  )
-  const savingButtons = saveButtons({ ...dialogStates, renameDraft: 'author', renameSaving: true })
-  assert.ok(
-    savingButtons.every((node) => node.props?.disabled === true),
-    '保存中禁用',
+    findNode(
+      client.render(states({ data: missingData, selectedId: 'writer', nameDraft: 'writer' })),
+      (node) => node.type === 'input' && node.props?.['aria-label'] === '名称',
+    ),
+    '目录缺失时仍可配置展示名',
   )
 
-  // 失败提示留在对话框里。
+  // 保存中 / 有改动 / 失败都留在区块里，不弹对话框。
+  const saving = collect(
+    client.render(states({ data, selectedId: 'writer', nameDraft: 'author', nameSaving: true })),
+  )
+  assert.ok(saving.texts.includes('保存中…'))
+  const dirty = collect(client.render(states({ data, selectedId: 'writer', nameDraft: 'author' })))
+  assert.ok(dirty.texts.includes('待保存…'))
   const failed = collect(
-    client.render(states({ ...dialogStates, renameError: '重命名失败：执行者名称已被占用' })),
+    client.render(
+      states({
+        data,
+        selectedId: 'writer',
+        nameDraft: 'author',
+        nameError: '保存名称失败：执行者名称已被占用',
+      }),
+    ),
   )
-  assert.ok(failed.texts.includes('重命名失败：执行者名称已被占用'))
-
-  // 登记文件损坏时重命名入口禁用。
-  const corruptData = listData()
-  corruptData.corrupt = true
-  const corruptButton = findNode(
-    client.render(states({ data: corruptData, selectedId: 'writer' })),
-    (node) => node.props?.['aria-label'] === '重命名 writer',
-  )
-  assert.equal(corruptButton?.props?.disabled, true, '登记文件损坏时重命名按钮禁用')
+  assert.ok(failed.texts.includes('保存名称失败：执行者名称已被占用'))
 })
 
 test('执行者页：列表整行点击进详情，行内动作统一为 outline 按钮', async () => {

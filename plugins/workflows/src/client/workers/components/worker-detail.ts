@@ -1,5 +1,5 @@
 /**
- * 「执行者」详情页：职责、模型、文件与 skills 四个页签。
+ * 「执行者」详情页：设置、文件与技能三个页签。
  *
  * @module @buka/dsh-plugin-workflows/workers/client/components/worker-detail
  */
@@ -7,10 +7,10 @@
 import {
   Button,
   FileTypeIcon,
-  IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
+  Input,
   languageForPath,
   ReadBlock,
   StateDot,
@@ -21,7 +21,7 @@ import React from 'react'
 import type { createDetailActions } from '../actions/detail.ts'
 import type { createSkillActions } from '../actions/skills.ts'
 import { skillsOf } from '../api.ts'
-import { TABS, WORKER_DESCRIPTION_MAX_LENGTH } from '../constants.ts'
+import { TABS, WORKER_DESCRIPTION_MAX_LENGTH, WORKER_NAME_MAX_LENGTH } from '../constants.ts'
 import { h } from '../h.ts'
 import type { WorkersPageState } from '../state.ts'
 import type { Translate, Worker, WorkerFileNode, WorkerModelSelection } from '../types.ts'
@@ -30,7 +30,35 @@ type DetailActions = ReturnType<typeof createDetailActions>
 type SkillActions = ReturnType<typeof createSkillActions>
 
 /**
- * 技能区块：来源输入 + 安装按钮、失败输出、已安装列表与移除确认。
+ * 技能检查状态 → 行内标签；没有结果或未知状态时不显示。
+ *
+ * 状态模型由 Skills 插件定义（与它的「已安装」面板一致）：`update` 有更新、
+ * `modified` 本地已修改、`up-to-date` 已最新、`unsupported-source` 无法检查、
+ * `failed` 检查失败。
+ */
+function skillStatusTag(
+  status: string | undefined,
+  t: Translate,
+): { text: string; tone: 'info' | 'success' | 'warning' } | null {
+  switch (status) {
+    case 'update':
+      return { text: t('skillStatusUpdate'), tone: 'info' }
+    case 'up-to-date':
+      return { text: t('skillStatusUpToDate'), tone: 'success' }
+    case 'modified':
+      return { text: t('skillStatusModified'), tone: 'warning' }
+    case 'unsupported-source':
+      return { text: t('skillStatusUnsupported'), tone: 'warning' }
+    case 'failed':
+      return { text: t('skillStatusFailed'), tone: 'warning' }
+    default:
+      return null
+  }
+}
+
+/**
+ * 技能区块：进入详情时自动检查更新，每行显示检查状态，有更新时提供行内
+ * 「更新」；安装入口在执行者页头右上角，区块里不再放全局更新 / 安装按钮。
  *
  */
 export function SkillsSection({
@@ -50,16 +78,23 @@ export function SkillsSection({
     removing,
     skillError,
     setConfirmingSkill,
-    corrupt,
-    updatingSkills,
+    updatingSkill,
+    skillChecks,
   } = state
-  const { removeSkill, openInstallDialog, updateWorkerSkills } = skillActions
+  const { removeSkill, updateSkill } = skillActions
   const skills = skillsOf(worker)
   const anyBusy = mutating
+  const checks = skillChecks.workerId === worker.id ? skillChecks.results : {}
+  const checking = skillChecks.workerId === worker.id && skillChecks.status === 'loading'
+  const checkError = skillChecks.workerId === worker.id ? skillChecks.error : null
 
   const rows = skills.map((skill, index) => {
+    const name = String(skill.name)
+    const status = checks[name]?.status
+    const tag = skillStatusTag(status, t)
     const confirmingThis = confirmingSkill === skill.name
     const removingThis = removing === skill.name
+    const updatingThis = updatingSkill === skill.name
     const actions = removingThis
       ? h(
           'span',
@@ -94,27 +129,54 @@ export function SkillsSection({
               t('cancel'),
             ),
           ]
-        : h(
-            Button,
-            {
-              variant: 'outline',
-              size: 'sm',
-              className: 'buka-workers-danger',
-              icon: h(IconTrashOutlineRegular, { size: 13 }),
-              disabled: anyBusy,
-              'aria-label': `${t('removeSkill')} ${skill.name}`,
-              onClick: () => setConfirmingSkill(skill.name),
-            },
-            t('removeSkill'),
-          )
+        : [
+            updatingThis
+              ? h(
+                  'span',
+                  { key: 'updating', className: 'buka-workers-statusWithDot' },
+                  h(StateDot, { state: 'ongoing', size: 13 }),
+                  t('updatingSkill'),
+                )
+              : status === 'update'
+                ? h(
+                    Button,
+                    {
+                      key: 'update',
+                      variant: 'outline',
+                      size: 'sm',
+                      className: 'buka-workers-toolbarButton',
+                      icon: h(IconRefreshOutlineRegular, { size: 13 }),
+                      'aria-label': `${t('updateSkill')} ${name}`,
+                      disabled: anyBusy,
+                      onClick: () => void updateSkill(worker, skill),
+                    },
+                    t('updateSkill'),
+                  )
+                : null,
+            h(
+              Button,
+              {
+                key: 'remove',
+                variant: 'outline',
+                size: 'sm',
+                className: 'buka-workers-danger',
+                icon: h(IconTrashOutlineRegular, { size: 13 }),
+                disabled: anyBusy,
+                'aria-label': `${t('removeSkill')} ${name}`,
+                onClick: () => setConfirmingSkill(skill.name),
+              },
+              t('removeSkill'),
+            ),
+          ]
 
     return h(
       'li',
-      { className: 'buka-workers-skillRow', key: `${String(skill.name)}:${index}` },
+      { className: 'buka-workers-skillRow', key: `${name}:${index}` },
       h(
         'div',
         { className: 'buka-workers-skillHead' },
-        h('span', { className: 'buka-workers-skillName' }, String(skill.name)),
+        h('span', { className: 'buka-workers-skillName' }, name),
+        tag === null ? null : h(Tag, { tone: tag.tone }, tag.text),
         typeof skill.source === 'string' && skill.source !== ''
           ? h(Tag, { tone: 'info', className: 'buka-workers-skillSource' }, skill.source)
           : null,
@@ -141,46 +203,22 @@ export function SkillsSection({
       'div',
       { className: 'buka-workers-sectionHead' },
       h('h2', { className: 'buka-workers-sectionTitle' }, t('skillsTitle')),
-      h(
-        'div',
-        { className: 'buka-workers-sectionActions' },
-        h(
-          Button,
-          {
-            variant: 'outline',
-            size: 'sm',
-            className: 'buka-workers-toolbarButton',
-            icon: updatingSkills
-              ? h(StateDot, { state: 'ongoing', size: 13 })
-              : h(IconRefreshOutlineRegular, { size: 13 }),
-            disabled: mutating || corrupt || worker.exists === false || skills.length === 0,
-            onClick: () => updateWorkerSkills(worker),
-          },
-          updatingSkills ? t('updatingSkills') : t('updateSkills'),
-        ),
-        h(
-          Button,
-          {
-            variant: 'primary',
-            size: 'sm',
-            className: 'buka-workers-toolbarButton',
-            icon: h(IconPlusOutlineRegular, { size: 13 }),
-            disabled: mutating || corrupt || worker.exists === false,
-            onClick: openInstallDialog,
-          },
-          t('installSkills'),
-        ),
-      ),
     ),
-    h(
-      'p',
-      { className: 'buka-workers-intro' },
-      t('skillsIntroBefore'),
-      h('code', { className: 'buka-workers-inlineCode' }, 'npx skills add <source>'),
-      t('skillsIntroMiddle'),
-      h('code', { className: 'buka-workers-inlineCode' }, '.agents/skills'),
-      t('skillsIntroAfter'),
-    ),
+    checking
+      ? h(
+          'p',
+          { className: 'buka-workers-statusWithDot', role: 'status' },
+          h(StateDot, { state: 'ongoing' }),
+          t('skillCheckLoading'),
+        )
+      : null,
+    checkError === null
+      ? null
+      : h(
+          'p',
+          { className: 'buka-workers-failure', role: 'alert' },
+          `${t('skillCheckFailed')} ${checkError}`,
+        ),
     skillError === null
       ? null
       : h(
@@ -526,10 +564,10 @@ export function FilesSection({
 }
 
 /**
- * 「设置」页签：把职责与模型收在同一个页面里。
+ * 「设置」页签：把名称、职责与模型收在同一个页面里。
  *
- * 两块各自保留自己的保存按钮：职责写登记表的 `description`，模型写新会话的
- * 模型选择，失败的提示也各自留在自己的区块里；进入页签时会预读模型目录。
+ * 三块都没有保存按钮：名称与职责写登记表，模型写新会话的模型选择；都按改动
+ * 自动保存，失败的提示留在各自的区块里；进入页签时会预读模型目录。
  *
  */
 export function SettingsSection({
@@ -546,14 +584,94 @@ export function SettingsSection({
   return h(
     'div',
     { className: 'buka-workers-settings' },
+    h(NameSection, { t, worker, state, detailActions }),
     h(DescriptionSection, { t, worker, state, detailActions }),
     h(ModelSection, { t, worker, state, detailActions }),
   )
 }
 
 /**
- * 「描述」页签：一句话摘要 + 保存按钮。工作流通过 `buka_workers` 读这一行，
- * 决定是否把节点交给这个执行者；没有改动时保存按钮不可用。
+ * 「名称」区块：执行者的展示名（可选）。目录与工作区都按标识符定位，改名只改
+ * 展示名；留空表示清空、展示时回退到标识符。
+ *
+ * 与职责、模型一样没有保存按钮：停止输入 500 ms 后自动保存，失焦立即保存。
+ *
+ */
+export function NameSection({
+  t,
+  worker,
+  state,
+  detailActions,
+}: {
+  t: Translate
+  worker: Worker
+  state: WorkersPageState
+  detailActions: DetailActions
+}): ReactElement {
+  const { nameDraft, setNameDraft, nameSaving, nameError, setNameError } = state
+  const { normalizedWorkerName, saveWorkerName } = detailActions
+  const current = typeof worker.name === 'string' ? worker.name : ''
+  const dirty = normalizedWorkerName(nameDraft) !== normalizedWorkerName(current)
+
+  const pendingSave = React.useRef({ dirty: false, save: saveWorkerName })
+  React.useEffect(() => {
+    // 失败后不再自动重试：错误留在区块里，用户继续编辑（清掉错误）才重新保存。
+    const pending = dirty && nameError === null
+    pendingSave.current = { dirty: pending, save: saveWorkerName }
+    if (!pending || nameSaving) return undefined
+    const timer = setTimeout(() => void saveWorkerName(), 500)
+    return () => clearTimeout(timer)
+  }, [nameDraft, nameError, dirty, nameSaving])
+  React.useEffect(
+    () => () => {
+      if (pendingSave.current.dirty) void pendingSave.current.save()
+    },
+    [],
+  )
+
+  return h(
+    'section',
+    { className: 'buka-workers-section', 'aria-busy': nameSaving ? true : undefined },
+    h(
+      'div',
+      { className: 'buka-workers-sectionHead' },
+      h('h2', { className: 'buka-workers-sectionTitle' }, t('nameLabel')),
+      h(
+        'span',
+        { className: 'buka-workers-autosave', role: 'status', 'aria-live': 'polite' },
+        nameSaving ? t('saving') : dirty ? t('autosavePending') : null,
+      ),
+    ),
+    h('p', { className: 'buka-workers-fieldHint' }, t('nameHint')),
+    h(Input, {
+      className: 'buka-workers-fieldInput',
+      type: 'text',
+      value: nameDraft,
+      placeholder: String(worker.id ?? ''),
+      autoComplete: 'off',
+      spellCheck: false,
+      maxLength: WORKER_NAME_MAX_LENGTH,
+      'aria-label': t('nameLabel'),
+      onChange: (event: { target: { value: string } }) => {
+        setNameError(null)
+        setNameDraft(event.target.value)
+      },
+      onBlur: () => {
+        if (dirty && !nameSaving && nameError === null) void saveWorkerName()
+      },
+    }),
+    nameError === null
+      ? null
+      : h('p', { className: 'buka-workers-formError', role: 'alert' }, nameError),
+  )
+}
+
+/**
+ * 「描述」区块：一句话摘要。工作流通过 `buka_workers` 读这一行，决定是否把
+ * 节点交给这个执行者。
+ *
+ * 没有保存按钮：停止输入后自动保存，失焦时立即保存；区块右上角只显示
+ * 「保存中… / 待保存…」这类状态。
  *
  */
 export function DescriptionSection({
@@ -567,11 +685,37 @@ export function DescriptionSection({
   state: WorkersPageState
   detailActions: DetailActions
 }): ReactElement {
-  const { descriptionDraft, setDescriptionDraft, descriptionSaving, descriptionError, mutating } =
-    state
+  const {
+    descriptionDraft,
+    setDescriptionDraft,
+    descriptionSaving,
+    descriptionError,
+    setDescriptionError,
+  } = state
   const { normalizedDescription, saveDescription } = detailActions
   const current = typeof worker.description === 'string' ? worker.description : ''
   const dirty = normalizedDescription(descriptionDraft) !== current
+
+  // 修改即保存：停止输入 700 ms 后写回登记表。保存结束后 `descriptionSaving`
+  // 变化会再跑一次本 effect，把保存期间继续输入的内容补上。
+  // 离开页签 / 切走执行者时把还挂着的改动落盘：卸载时定时器会被清掉，
+  // 不能再等那 700 ms。ref 在每次渲染后的 effect 里更新，清理时读到最新值。
+  const pendingSave = React.useRef({ dirty: false, save: saveDescription })
+  React.useEffect(() => {
+    // 失败后不再自动重试：错误留在区块里，用户继续编辑（清掉错误）才重新保存。
+    const pending = dirty && descriptionError === null
+    pendingSave.current = { dirty: pending, save: saveDescription }
+    if (!pending || descriptionSaving) return undefined
+    const timer = setTimeout(() => void saveDescription(), 700)
+    return () => clearTimeout(timer)
+  }, [descriptionDraft, descriptionError, dirty, descriptionSaving])
+  React.useEffect(
+    () => () => {
+      if (pendingSave.current.dirty) void pendingSave.current.save()
+    },
+    [],
+  )
+
   return h(
     'section',
     { className: 'buka-workers-section', 'aria-busy': descriptionSaving ? true : undefined },
@@ -580,16 +724,9 @@ export function DescriptionSection({
       { className: 'buka-workers-sectionHead' },
       h('h2', { className: 'buka-workers-sectionTitle' }, t('descriptionLabel')),
       h(
-        Button,
-        {
-          variant: 'primary',
-          size: 'sm',
-          type: 'button',
-          className: 'buka-workers-submit',
-          disabled: !dirty || mutating,
-          onClick: saveDescription,
-        },
-        descriptionSaving ? t('saving') : t('save'),
+        'span',
+        { className: 'buka-workers-autosave', role: 'status', 'aria-live': 'polite' },
+        descriptionSaving ? t('saving') : dirty ? t('autosavePending') : null,
       ),
     ),
     h('p', { className: 'buka-workers-fieldHint' }, t('descriptionHint')),
@@ -599,9 +736,14 @@ export function DescriptionSection({
       placeholder: t('descriptionPlaceholder'),
       maxLength: WORKER_DESCRIPTION_MAX_LENGTH,
       rows: 4,
-      disabled: descriptionSaving,
       'aria-label': t('descriptionLabel'),
-      onChange: (event: { target: { value: string } }) => setDescriptionDraft(event.target.value),
+      onChange: (event: { target: { value: string } }) => {
+        setDescriptionError(null)
+        setDescriptionDraft(event.target.value)
+      },
+      onBlur: () => {
+        if (dirty && !descriptionSaving && descriptionError === null) void saveDescription()
+      },
     }),
     descriptionError === null
       ? null
@@ -610,10 +752,11 @@ export function DescriptionSection({
 }
 
 /**
- * 「模型」页签：给智能体选新会话使用的模型。
+ * 「模型」区块：给智能体选新会话使用的模型。
  *
- * 目录按需从 Host 读取；`modelDraft === null` 表示跟随宿主默认模型。保存后只影响
- * 之后新开的会话，已有会话保留自己的模型（可在会话里用 `/model` 切换）。
+ * 目录按需从 Host 读取；`modelDraft === null` 表示跟随宿主默认模型。没有保存
+ * 按钮：选完就自动保存，只影响之后新开的会话，已有会话保留自己的模型（可在
+ * 会话里用 `/model` 切换）。
  *
  */
 export function ModelSection({
@@ -627,8 +770,15 @@ export function ModelSection({
   state: WorkersPageState
   detailActions: DetailActions
 }): ReactElement {
-  const { modelCatalog, modelDraft, setModelDraft, modelSaving, modelError, loadModelCatalog } =
-    state
+  const {
+    modelCatalog,
+    modelDraft,
+    setModelDraft,
+    modelSaving,
+    modelError,
+    setModelError,
+    loadModelCatalog,
+  } = state
   const { saveWorkerModel } = detailActions
   const catalog = modelCatalog.data
   const available = catalog?.available === true
@@ -653,6 +803,25 @@ export function ModelSection({
         modelDraft.model !== savedSelection.model ||
         (modelDraft.reasoningEffort ?? '') !== (savedSelection.reasoningEffort ?? '')
 
+  // 修改即保存：选择落定 250 ms 后写回登记表；连续切换（改提供方会连带换
+  // 模型）只发最后这一次。保存期间再改，effect 会在保存结束后再跑一遍。
+  // 与职责一样：切页签 / 切执行者时立即落盘，不在卸载时丢掉刚选中的模型。
+  const pendingSave = React.useRef({ dirty: false, save: saveWorkerModel })
+  React.useEffect(() => {
+    // 失败后不再自动重试：错误留在区块里，用户重新选择（清掉错误）才再保存。
+    const pending = dirty && modelError === null
+    pendingSave.current = { dirty: pending, save: saveWorkerModel }
+    if (!pending || modelSaving) return undefined
+    const timer = setTimeout(() => void saveWorkerModel(), 250)
+    return () => clearTimeout(timer)
+  }, [modelDraft, dirty, modelError, modelSaving])
+  React.useEffect(
+    () => () => {
+      if (pendingSave.current.dirty) void pendingSave.current.save()
+    },
+    [],
+  )
+
   /** 模型选择的展示名：目录里有就用名称，否则退回 provider / model id。 */
   function labelFor(selection: WorkerModelSelection): string {
     const group = groups.find((entry) => entry.id === selection.provider)
@@ -663,6 +832,7 @@ export function ModelSection({
   }
 
   function pickProvider(providerId: string) {
+    setModelError(null)
     if (providerId === '') {
       setModelDraft(null)
       return
@@ -673,11 +843,13 @@ export function ModelSection({
   }
 
   function pickModel(modelId: string) {
+    setModelError(null)
     if (modelDraft === null) return
     setModelDraft({ provider: modelDraft.provider, model: modelId })
   }
 
   function pickEffort(effortId: string) {
+    setModelError(null)
     if (modelDraft === null) return
     setModelDraft({
       provider: modelDraft.provider,
@@ -727,7 +899,16 @@ export function ModelSection({
   return h(
     'section',
     { className: 'buka-workers-modelSection' },
-    h('h2', { className: 'buka-workers-sectionTitle' }, t('modelTitle')),
+    h(
+      'div',
+      { className: 'buka-workers-sectionHead' },
+      h('h2', { className: 'buka-workers-sectionTitle' }, t('modelTitle')),
+      h(
+        'span',
+        { className: 'buka-workers-autosave', role: 'status', 'aria-live': 'polite' },
+        modelSaving ? t('saving') : dirty ? t('autosavePending') : null,
+      ),
+    ),
     h('p', { className: 'buka-workers-fieldHint' }, t('modelHint')),
     modelCatalog.status === 'loading' && catalog === null
       ? h('p', { className: 'buka-workers-fieldHint', role: 'status' }, t('loading'))
@@ -764,7 +945,6 @@ export function ModelSection({
                 className: 'buka-workers-select',
                 value: modelDraft?.provider ?? '',
                 'aria-label': t('modelProvider'),
-                disabled: modelSaving,
                 onChange: (event: { target: { value: string } }) =>
                   pickProvider(event.target.value),
               },
@@ -783,7 +963,6 @@ export function ModelSection({
                     className: 'buka-workers-select',
                     value: modelDraft.model,
                     'aria-label': t('modelModelLabel'),
-                    disabled: modelSaving,
                     onChange: (event: { target: { value: string } }) =>
                       pickModel(event.target.value),
                   },
@@ -802,7 +981,6 @@ export function ModelSection({
                     className: 'buka-workers-select',
                     value: savedEffort ?? '',
                     'aria-label': t('modelEffort'),
-                    disabled: modelSaving,
                     onChange: (event: { target: { value: string } }) =>
                       pickEffort(event.target.value),
                   },
@@ -825,17 +1003,7 @@ export function ModelSection({
               ),
           h(
             'div',
-            { key: 'save', className: 'buka-workers-formActions' },
-            h(
-              Button,
-              {
-                variant: 'primary',
-                size: 'sm',
-                disabled: !dirty || modelSaving,
-                onClick: () => void saveWorkerModel(),
-              },
-              modelSaving ? t('saving') : t('save'),
-            ),
+            { key: 'actions', className: 'buka-workers-formActions' },
             h(
               Button,
               {
@@ -871,6 +1039,14 @@ export function WorkerDetail({
 }): ReactElement {
   const { tab } = state
   const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0]
+
+  // 进入详情页就自动探测「技能」更新（只读，不写 lockfile）：页签上的小圆点
+  // 与页签内的行内状态共用同一份结果，用户不点进「技能」也能看到有更新。
+  // 只在执行者变化时触发；安装 / 删除 / 更新后由动作再检查一次。
+  React.useEffect(() => {
+    void skillActions.checkWorkerSkills(worker)
+  }, [worker.id])
+
   return h(
     'div',
     { className: 'buka-workers-pageBody buka-workers-detail' },

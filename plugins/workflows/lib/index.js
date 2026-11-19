@@ -6,7 +6,7 @@ import { constants, createReadStream, promises } from "node:fs";
 import os from "node:os";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 // .build/workflows/access.js
 /**
 * 工作流工具的可见性判定。
@@ -13128,6 +13128,203 @@ async function buildWorkerModelCatalog(ctx, signal) {
 		failures: settled.filter((entry) => entry.kind === "failure").map((entry) => entry.failure)
 	};
 }
+// .build/workflows/workers/store/git.js
+/**
+* 执行者目录的 git 仓库初始化。
+*
+* 每个智能执行者的目录默认是一个独立 git 仓库：这是「分享」的基础——本地有
+* 仓库，用户才能给它接上 GitHub / GitLab 等远端，再推送或让别人克隆。初始化
+* 只在目录还不是仓库时发生：
+*
+* - 目录里已有 `.git`（普通仓库的目录，或 worktree / submodule 的 `.git` 文件）：
+*   原样保留，不重跑、不覆盖；
+* - 目录位于另一个仓库的工作树里（某个祖先目录有 `.git`）：**不建嵌套仓库**，
+*   让目录里的文件继续由外层仓库管理；
+* - 其余情况执行 `git init --quiet`；分支名交给用户自己的 `init.defaultBranch`；
+* - 没装 git、没有写权限等失败一律降级成结果对象，不打断执行者的创建与列表。
+*
+* 初始化**不提交**：没有配置 `user.name` / `user.email` 的机器也能完成，首个
+* 提交由用户自己决定。同一目录的并发调用在进程内合并成一次。
+*
+* @module @buka/dsh-plugin-workflows/workers/store/git
+*/
+/** 仓库元数据目录名；worktree / submodule 里它是指向真实 git 目录的文件。 */
+const GIT_ENTRY = ".git";
+/** `git init` 的超时；本地建目录通常几毫秒，慢盘留足余量就够了。 */
+const INIT_TIMEOUT_MS = 1e4;
+/** git 输出的上限；init 正常没有输出，这里只是防御。 */
+const MAX_BUFFER = 1048576;
+/** 同一目录正在进行的初始化；并发调用共享同一个结果。 */
+const pendingInits = /* @__PURE__ */ new Map();
+/**
+* 确保一个执行者目录已经是一个 git 仓库。
+*
+* 幂等、永不 reject：已在仓库里、目录不存在、没装 git、`git init` 失败都返回
+* 结果对象，由调用方决定是否提示；没装 git 时下次加载会重新尝试。目录不存在
+* 或路径为空时不做任何写操作。
+*
+* @param directory 执行者目录的绝对路径
+* @param options.runGit 注入的 git runner（单测用）
+*/
+function ensureWorkerGitRepo(directory, { runGit = runGitDefault } = {}) {
+	const resolved = typeof directory === "string" ? directory.trim() : "";
+	if (resolved === "") return Promise.resolve({
+		ok: false,
+		status: "missing",
+		path: "",
+		error: "缺少执行者目录"
+	});
+	const target = path.resolve(resolved);
+	const running = pendingInits.get(target);
+	if (running !== void 0) return running;
+	const task = initRepository(target, runGit).finally(() => {
+		pendingInits.delete(target);
+	});
+	pendingInits.set(target, task);
+	return task;
+}
+/**
+* `ensureWorkerGitRepo` 的实际工作，永不 reject。
+*
+*/
+async function initRepository(directory, runGit) {
+	if (!await isDirectory$1(directory)) return {
+		ok: false,
+		status: "missing",
+		path: directory,
+		error: `执行者目录不存在：${directory}`
+	};
+	if (await hasGitEntry(directory)) return {
+		ok: true,
+		status: "exists",
+		path: directory
+	};
+	if (await hasGitAncestor(directory)) return {
+		ok: true,
+		status: "nested",
+		path: directory
+	};
+	try {
+		await runGit(["init", "--quiet"], { cwd: directory });
+		return {
+			ok: true,
+			status: "created",
+			path: directory
+		};
+	} catch (error) {
+		if (isMissingGit(error)) return {
+			ok: false,
+			status: "unavailable",
+			path: directory,
+			error: "未找到 git 可执行文件；安装 git 或把它加入 PATH 后，下次加载会再试。"
+		};
+		return {
+			ok: false,
+			status: "failed",
+			path: directory,
+			error: gitFailureText(error)
+		};
+	}
+}
+/**
+* 目录里是否有 `.git`；`lstat` 让 worktree / submodule 的 `.git` 文件也算数。
+*
+*/
+async function hasGitEntry(directory) {
+	try {
+		await promises.lstat(path.join(directory, GIT_ENTRY));
+		return true;
+	} catch {
+		return false;
+	}
+}
+/**
+* 某个祖先目录是否是仓库的根（工作树里已有 `.git`）。
+*
+* 从父目录开始逐级向上，遇到文件系统根为止；只看 `.git` 是否存在，不调用 git，
+* 所以列表加载时不会有额外进程。
+*/
+async function hasGitAncestor(directory) {
+	let current = path.dirname(directory);
+	for (;;) {
+		if (await hasGitEntry(current)) return true;
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+/** 路径存在且是目录。 */
+async function isDirectory$1(target) {
+	try {
+		return (await promises.stat(target)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+/**
+* spawn 失败时 `execFile` 的 `error.code` 是字符串（`ENOENT` 表示 PATH 里没有
+* git）；非零退出的 `code` 是数字退出码。
+*
+*/
+function isMissingGit(error) {
+	return error !== null && typeof error === "object" && error.code === "ENOENT";
+}
+/**
+* 把 git 失败转成可展示的一行原因：优先用 stderr 的最后几行。
+*
+*/
+function gitFailureText(error) {
+	const tail = lastLines(trimmedString(error?.stderr), 3);
+	if (tail !== "") return `git init 失败：${tail}`;
+	const message = trimmedString(error?.message);
+	if (message !== "") return `git init 失败：${message}`;
+	return `git init 失败：${String(error)}`;
+}
+/** 非字符串按空串处理并去掉首尾空白。 */
+function trimmedString(value) {
+	return typeof value === "string" ? value.trim() : "";
+}
+/**
+* 取文本最后几行并限制长度，避免把整份 git 输出塞进错误消息。
+*
+*/
+function lastLines(text, count) {
+	if (text === "") return "";
+	return text.split(/\r?\n/u).filter((line) => line.trim() !== "").slice(-count).join("\n").slice(0, 500);
+}
+/**
+* 默认 git runner：`execFile` + 超时 + 受限输出 + 禁用交互式认证。
+*
+* 初始化前清掉 `GIT_DIR` / `GIT_WORK_TREE`：宿主如果从 git 钩子等环境里启动，
+* 这两个变量会把 `git init` 指向别处，执行者目录反而建不出仓库。
+*/
+function runGitDefault(args, { cwd } = {}) {
+	const env = {
+		...process.env,
+		GIT_TERMINAL_PROMPT: "0"
+	};
+	delete env.GIT_DIR;
+	delete env.GIT_WORK_TREE;
+	return new Promise((resolve, reject) => {
+		execFile("git", args, {
+			...cwd === void 0 ? {} : { cwd },
+			timeout: INIT_TIMEOUT_MS,
+			maxBuffer: MAX_BUFFER,
+			env,
+			windowsHide: true
+		}, (error, stdout, stderr) => {
+			if (error !== null) {
+				error.stderr = String(stderr ?? "");
+				reject(error);
+				return;
+			}
+			resolve({
+				stdout: String(stdout ?? ""),
+				stderr: String(stderr ?? "")
+			});
+		});
+	});
+}
 // .build/workflows/workers/store/paths.js
 /**
 * 执行者存储层的路径、标识符与文件系统小工具。
@@ -13368,6 +13565,7 @@ async function ensureWorkerDirectory(directory, label) {
 	const agentsFile = path.join(canonical, AGENTS_FILE);
 	if (!await pathExists(agentsFile)) await promises.writeFile(agentsFile, workerAgentsTemplate(label, canonical), "utf8");
 	await ensureClaudeLink(canonical);
+	await ensureWorkerGitRepo(canonical);
 	return canonical;
 }
 /**
@@ -13782,54 +13980,6 @@ function createNpxRunner(options) {
 function cleanOutput(text, maxBytes = MAX_OUTPUT_BYTES) {
 	const limit = normalizeMaxOutputBytes(maxBytes);
 	return (typeof text === "string" ? text : "").replace(ANSI_ESCAPE, "").replace(CARRIAGE_RETURN, "").trim().slice(-limit);
-}
-/**
-* 解析 `npx skills add <source> --list` 的输出。
-*
-* CLI 只提供给人看的 Clack 文本（`--json` 不能与 `--list` 同用），非 TTY 下
-* 形如：
-*
-* ```text
-* │  Available Skills
-* │
-* │    web-design-guidelines
-* │
-* │      Review UI code for Web Interface Guidelines compliance.
-* ```
-*
-* 所以按缩进区分：`│` 列之后 4 空格是 skill 名，6 空格是描述（描述可能续行）。
-* 只解析 `Available Skills` 之后、`Use --skill` 之前的段落；解析不到时返回
-* 空数组，由调用方决定是「来源里没有 skill」还是「输出格式变了」。
-*
-* @param text 命令输出
-* @returns skill 名与描述；解析不到时是空数组
-*/
-function parseSkillList(text) {
-	const lines = cleanOutput(text, Number.MAX_SAFE_INTEGER).split("\n");
-	const start = lines.findIndex((line) => /Available Skills/u.test(line));
-	if (start < 0) return [];
-	const byName = /* @__PURE__ */ new Map();
-	let current = null;
-	for (const raw of lines.slice(start + 1)) {
-		if (/Use --skill/u.test(raw)) break;
-		const line = raw.replace(/^[\u2502\u2503|]/u, "");
-		if (line.trim() === "") continue;
-		if (current !== null && /^\s{6,}\S/u.test(line)) {
-			const piece = line.trim();
-			current.description = current.description === "" ? piece : `${current.description} ${piece}`;
-			continue;
-		}
-		if (/^\s{2,5}\S/u.test(line)) {
-			const name = line.trim();
-			if (name === "") continue;
-			current = {
-				name,
-				description: ""
-			};
-			if (!byName.has(name)) byName.set(name, current);
-		}
-	}
-	return [...byName.values()];
 }
 /**
 * 找到可执行的 npx；找不到时返回 null。
@@ -15025,6 +15175,7 @@ async function agentEntry(entry, workspaceByPath) {
 	const canonical = await realpathOr(entry.path, path.resolve(entry.path));
 	const workspace = workspaceByPath.get(canonical) ?? workspaceByPath.get(path.resolve(entry.path));
 	const exists = await isDirectory(canonical);
+	if (exists) await ensureWorkerGitRepo(canonical);
 	let skills = [];
 	try {
 		skills = (await scanProjectSkills(canonical)).skills;
@@ -16086,24 +16237,27 @@ function reportSkillUpdate(result) {
 /**
 * 「执行者」页面的项目级 skills 路由。
 *
-* 页面在这里列出某个来源里可安装的 skills、安装勾选项、移除已安装项；命令都
-* 在执行者目录里用 `npx skills` 执行，安装时同时落 `.agents/skills` 与
-* `.claude/skills`。命令输出只用于给人看，所以失败时把输出原样带回页面。
+* 页面只从 Skills 插件的「技能仓库」里选来源：先读收藏列表，再把某个收藏仓库
+* 的 skill 清单列出来。安装与移除仍在执行者目录里用 `npx skills` 执行，安装时
+* 同时落 `.agents/skills` 与 `.claude/skills`；命令输出只用于给人看，失败时把
+* 输出原样带回页面。浏览器不能再提交任意第三方来源：来源必须已收藏。
 *
 * @module @buka/dsh-plugin-workflows/workers/routes/skills
 */
-/** 页面列出来源里可安装的 skills 用的路由。 */
+/** 页面列出「技能仓库」收藏来源用的路由。 */
+const SKILL_REPOS_ROUTE = "/buka-workers/skills/repos";
+/** 页面列出一个收藏仓库里可安装的 skills 用的路由。 */
 const AVAILABLE_ROUTE = "/buka-workers/skills/available";
 /** 页面安装项目级 skill 用的路由。 */
 const INSTALL_ROUTE = "/buka-workers/skills/install";
 /** 页面移除项目级 skill 用的路由。 */
 const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
-/** 单个执行者的 skill 更新入口。 */
+/** 单个执行者的 skill 更新入口（可选 `skills` 只更新其中几项）。 */
 const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
+/** 单个执行者的 skill 检查入口：页面进入「技能」页签时自动调用。 */
+const SKILL_CHECK_ROUTE = "/buka-workers/skills/check";
 /** 列表页「更新全部执行者」。 */
 const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
-/** `add --list` 的输出需要整段解析，给列清单的 runner 单独放宽上限。 */
-const LIST_OUTPUT_BYTES = 262144;
 /** 项目级安装 / 移除的最长等待时间；比全局版 npx runner 默认的 120 s 更宽。 */
 const NPX_TIMEOUT_MS = 18e4;
 /**
@@ -16167,15 +16321,83 @@ function skillsService(ctx) {
 	}
 }
 /**
+* 读收藏的「技能仓库」；服务插件比这个版本旧、没有 `listRepositories()` 时
+* 按「没有收藏」处理，而不是把整个列表报成失败。
+*
+* @param service Skills 插件的 Host Service
+* @returns 规范化后的收藏仓库与收藏文件状态
+*/
+async function readSavedRepositories(service) {
+	const listed = typeof service.listRepositories === "function" ? await service.listRepositories() : null;
+	const repositories = [];
+	for (const repo of Array.isArray(listed?.repositories) ? listed.repositories : []) {
+		if (repo === null || typeof repo !== "object") continue;
+		if (typeof repo.source !== "string" || repo.source === "") continue;
+		repositories.push({
+			id: typeof repo.id === "string" && repo.id !== "" ? repo.id : repo.source,
+			source: repo.source,
+			note: typeof repo.note === "string" ? repo.note : "",
+			kind: typeof repo.kind === "string" && repo.kind !== "" ? repo.kind : "unknown",
+			skills: typeof repo.skills === "number" && Number.isFinite(repo.skills) ? repo.skills : null
+		});
+	}
+	return {
+		corrupt: listed?.corrupt === true,
+		repositories
+	};
+}
+/**
+* 在收藏列表里按来源找一条；页面总是回传收藏条目的 `source`，所以精确匹配即可。
+*
+* @param saved 收藏仓库列表
+* @param source 页面回传的来源
+*/
+function findSavedRepository(saved, source) {
+	return saved.repositories.find((repo) => repo.source === source) ?? null;
+}
+/**
+* 把一个仓库的 skill 清单规范化成页面的候选条目。
+*
+* @param service Skills 插件的 Host Service
+* @param source 已确认收藏的来源
+*/
+async function listRepositorySkills(service, source) {
+	if (typeof service.listSkills !== "function") return {
+		ok: false,
+		code: "skills-unavailable",
+		message: "这个 Skills 插件版本不支持读取技能仓库。"
+	};
+	const listed = await service.listSkills({ source });
+	if (listed?.ok !== true) return {
+		ok: false,
+		code: typeof listed?.code === "string" ? listed.code : "fetch-failed",
+		message: typeof listed?.message === "string" && listed.message !== "" ? listed.message : "无法读取这个技能仓库的 skill 列表。"
+	};
+	const skills = [];
+	for (const skill of Array.isArray(listed.skills) ? listed.skills : []) {
+		if (skill === null || typeof skill !== "object") continue;
+		if (typeof skill.name !== "string" || skill.name === "") continue;
+		skills.push({
+			name: skill.name,
+			description: typeof skill.description === "string" ? skill.description : ""
+		});
+	}
+	return {
+		ok: true,
+		skills
+	};
+}
+/**
 * 取检查 / 更新所需的服务；插件没装或版本太旧时写好 503 并返回 null。
 *
 * @param ctx web 上下文
 * @param res 响应
 * @param action 失败文案里的动作描述
+* @param capability 需要的服务方法
 */
-function requireSkillsService(ctx, res, action) {
+function requireSkillsService(ctx, res, action, capability) {
 	const service = skillsService(ctx);
-	if (service !== null && typeof service.updateSkills === "function") return service;
+	if (service !== null && typeof service[capability] === "function") return service;
 	sendError(res, 503, "skills-unavailable", `没有找到 Skills 插件（@buka/dsh-plugin-skills），无法${action} skills。`);
 	return null;
 }
@@ -16187,13 +16409,6 @@ function registerSkillRoutes(webCtx, deps) {
 	const { registryFile } = deps;
 	const runNpx = createNpxRunner({
 		timeoutMs: NPX_TIMEOUT_MS,
-		label: npxLabel,
-		missingMessage: NPX_MISSING_MESSAGE,
-		emptyOutputOnSetupFailure: true
-	});
-	const runNpxList = createNpxRunner({
-		timeoutMs: NPX_TIMEOUT_MS,
-		maxOutputBytes: LIST_OUTPUT_BYTES,
 		label: npxLabel,
 		missingMessage: NPX_MISSING_MESSAGE,
 		emptyOutputOnSetupFailure: true
@@ -16212,6 +16427,28 @@ function registerSkillRoutes(webCtx, deps) {
 	function sendWorkerError(res, error) {
 		sendError(res, error.status, error.code, error.message);
 	}
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
+		path: SKILL_REPOS_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "GET") {
+				sendMethodNotAllowed(res, "GET");
+				return;
+			}
+			const service = requireSkillsService(webCtx, res, "读取技能仓库里的", "listRepositories");
+			if (service === null) return;
+			try {
+				sendJson(res, 200, {
+					ok: true,
+					...await readSavedRepositories(service)
+				});
+			} catch (error) {
+				webCtx.logger?.warn?.("buka-workers: 读取技能仓库失败：%s", describeError$1(error));
+				sendError(res, 502, "repos-failed", `读取技能仓库失败：${describeError$1(error)}`);
+			}
+		}
+	}), `buka-workers: GET ${SKILL_REPOS_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: AVAILABLE_ROUTE,
@@ -16233,37 +16470,42 @@ function registerSkillRoutes(webCtx, deps) {
 				sendError(res, 400, "invalid-source", `skill 来源不合法：需要 1–${MAX_SOURCE_LENGTH} 个字符且不含控制字符。`);
 				return;
 			}
+			const service = requireSkillsService(webCtx, res, "读取技能仓库里的", "listSkills");
+			if (service === null) return;
 			try {
-				const result = await serialRunner()(() => runNpxList([
-					"add",
-					source,
-					"--list"
-				], resolved.worker.path));
-				if (!result.ok) {
+				const saved = await readSavedRepositories(service);
+				if (saved.corrupt) {
+					sendError(res, 409, "repos-unreadable", "技能仓库文件无法解析，无法确认这个来源是否已收藏。请先在 Skills 页面修复或删除收藏文件。");
+					return;
+				}
+				const repository = findSavedRepository(saved, source);
+				if (repository === null) {
+					sendError(res, 400, "not-saved", `只允许安装「技能仓库」里收藏过的来源，请先在 Skills 页面收藏：${source}`);
+					return;
+				}
+				const listed = await listRepositorySkills(service, repository.source);
+				if (!listed.ok) {
 					sendJson(res, 502, {
 						ok: false,
-						code: "npx-failed",
-						message: result.message ?? "npx skills add --list 失败",
-						output: result.output ?? ""
+						code: listed.code,
+						message: listed.message
 					});
 					return;
 				}
-				const candidates = parseSkillList(result.output);
-				if (candidates.length === 0) {
+				if (listed.skills.length === 0) {
 					sendJson(res, 502, {
 						ok: false,
-						code: "list-unparsed",
-						message: "无法从这个来源读出 skill 清单，请检查来源后重试。",
-						output: result.output ?? ""
+						code: "list-empty",
+						message: "这个技能仓库里没有可安装的 skill，请换一个收藏来源或刷新 Skills 页面。"
 					});
 					return;
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已读取 skill 清单（%s ← %s，%d 个）", resolved.worker.path, source, candidates.length);
+				webCtx.logger?.info?.("buka-workers: 已读取 skill 清单（%s ← %s，%d 个）", resolved.worker.path, repository.source, listed.skills.length);
 				sendJson(res, 200, {
 					ok: true,
-					source,
-					skills: candidates,
+					source: repository.source,
+					skills: listed.skills,
 					installed: scanned.skills.map((skill) => skill.name)
 				});
 			} catch (error) {
@@ -16298,8 +16540,35 @@ function registerSkillRoutes(webCtx, deps) {
 				sendError(res, 400, "invalid-skills", `skills 必须是 1–${MAX_SKILL_SELECTION} 个合法的 skill 名。`);
 				return;
 			}
+			const service = requireSkillsService(webCtx, res, "从技能仓库安装", "listSkills");
+			if (service === null) return;
 			try {
-				const args = ["add", source];
+				const saved = await readSavedRepositories(service);
+				if (saved.corrupt) {
+					sendError(res, 409, "repos-unreadable", "技能仓库文件无法解析，无法确认这个来源是否已收藏。请先在 Skills 页面修复或删除收藏文件。");
+					return;
+				}
+				const repository = findSavedRepository(saved, source);
+				if (repository === null) {
+					sendError(res, 400, "not-saved", `只允许安装「技能仓库」里收藏过的来源，请先在 Skills 页面收藏：${source}`);
+					return;
+				}
+				const listed = await listRepositorySkills(service, repository.source);
+				if (!listed.ok) {
+					sendJson(res, 502, {
+						ok: false,
+						code: listed.code,
+						message: listed.message
+					});
+					return;
+				}
+				const available = new Set(listed.skills.map((skill) => skill.name));
+				const missing = selected.filter((skill) => !available.has(skill));
+				if (missing.length > 0) {
+					sendError(res, 400, "skill-not-found", `技能仓库里没有这些 skill：${missing.join("、")}。仓库可能已更新，请重新读取后再试。`);
+					return;
+				}
+				const args = ["add", repository.source];
 				for (const skill of selected) args.push("--skill", skill);
 				args.push("-a", "universal", "-a", "claude-code", "-y");
 				const result = await serialRunner()(() => runNpx(args, resolved.worker.path));
@@ -16314,7 +16583,7 @@ function registerSkillRoutes(webCtx, deps) {
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
 				const claude = await ensureClaudeLink(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已安装 %d 个 skill（%s ← %s）", selected.length, resolved.worker.path, source);
+				webCtx.logger?.info?.("buka-workers: 已安装 %d 个 skill（%s ← %s）", selected.length, resolved.worker.path, repository.source);
 				sendJson(res, 200, {
 					ok: true,
 					output: result.output ?? "",
@@ -16378,6 +16647,46 @@ function registerSkillRoutes(webCtx, deps) {
 	}), `buka-workers: POST ${SKILL_REMOVE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
+		path: SKILL_CHECK_ROUTE,
+		handler: async (req, res) => {
+			if (rejected(webCtx, req, res)) return;
+			if (req.method !== "POST") {
+				sendMethodNotAllowed(res, "POST");
+				return;
+			}
+			const body = await readJsonBody(req, res);
+			if (body === void 0) return;
+			const resolved = await resolveWorker(registryFile, body?.id);
+			if (resolved.error !== void 0) {
+				sendWorkerError(res, resolved.error);
+				return;
+			}
+			const service = requireSkillsService(webCtx, res, "检查这个执行者的", "checkSkills");
+			if (service === null) return;
+			try {
+				const result = await service.checkSkills({ dir: resolved.worker.path });
+				const report = reportSkillUpdate(result);
+				if (report.failure !== null) {
+					sendJson(res, report.status, {
+						ok: false,
+						...report.failure.code === void 0 ? {} : { code: report.failure.code },
+						message: report.failure.message,
+						...report.failure.output === void 0 ? {} : { output: report.failure.output }
+					});
+					return;
+				}
+				sendJson(res, 200, {
+					ok: true,
+					check: result
+				});
+			} catch (error) {
+				webCtx.logger?.warn?.("buka-workers: 检查 skill 更新失败：%s", describeError$1(error));
+				sendError(res, 502, "check-failed", `检查 skill 更新失败：${describeError$1(error)}`);
+			}
+		}
+	}), `buka-workers: POST ${SKILL_CHECK_ROUTE}`);
+	webCtx.effect(() => webCtx.webServer.register({
+		kind: "exact",
 		path: SKILL_UPDATE_ROUTE,
 		handler: async (req, res) => {
 			if (rejected(webCtx, req, res)) return;
@@ -16392,10 +16701,18 @@ function registerSkillRoutes(webCtx, deps) {
 				sendWorkerError(res, resolved.error);
 				return;
 			}
-			const service = requireSkillsService(webCtx, res, "检查或更新这个执行者的");
+			const only = body?.skills === void 0 ? void 0 : normalizeSkillSelection(body.skills);
+			if (body?.skills !== void 0 && only === null) {
+				sendError(res, 400, "invalid-skills", `skills 必须是 1–${MAX_SKILL_SELECTION} 个合法的 skill 名。`);
+				return;
+			}
+			const service = requireSkillsService(webCtx, res, "更新这个执行者的", "updateSkills");
 			if (service === null) return;
 			try {
-				const result = await service.updateSkills({ dir: resolved.worker.path });
+				const result = await service.updateSkills({
+					dir: resolved.worker.path,
+					...only === void 0 || only === null ? {} : { skills: only }
+				});
 				const report = reportSkillUpdate(result);
 				if (report.failure !== null) {
 					webCtx.logger?.warn?.("buka-workers: 更新 skill 失败（%s）：%s", resolved.worker.path, report.failure.message);
@@ -16429,7 +16746,7 @@ function registerSkillRoutes(webCtx, deps) {
 				sendMethodNotAllowed(res, "POST");
 				return;
 			}
-			const service = requireSkillsService(webCtx, res, "更新执行者的");
+			const service = requireSkillsService(webCtx, res, "更新执行者的", "updateSkills");
 			if (service === null) return;
 			try {
 				const listed = await listWorkers({
@@ -18845,10 +19162,14 @@ function registerWorkerTools(ctx, deps) {
 * | `POST /buka-workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
 * | `GET /buka-workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
 * | `GET /buka-workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
-* | `POST /buka-workers/skills/available` | 执行 `npx skills add <source> --list` 列出可安装的 skills |
-* | `POST /buka-workers/skills/install` | 只安装选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
+* | `GET /buka-workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
+* | `POST /buka-workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
+* | `POST /buka-workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
 * | `POST /buka-workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
-* | `POST /buka-workers/reveal` | 用系统文件管理器（macOS 的 Finder）打开执行者目录 |
+* | `POST /buka-workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
+* | `POST /buka-workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
+* | `POST /buka-workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
+* | `POST /buka-workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
 *
 * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
 * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`

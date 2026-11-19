@@ -1,10 +1,10 @@
 /**
- * 「执行者」详情页的动作：更换头像、改展示名、保存职责描述。
+ * 「执行者」详情页的动作：更换头像，以及设置页签里展示名 / 职责 / 模型的
+ * 自动保存。
  *
  * @module @buka/dsh-plugin-workflows/workers/client/actions/detail
  */
 
-import type { FormEvent } from 'react'
 import { failureText, requestJson } from '../api.ts'
 import { avatarPreset } from '../avatar.ts'
 import { AVATAR_ROUTE, DESCRIPTION_ROUTE, MODEL_ROUTE, RENAME_ROUTE } from '../constants.ts'
@@ -26,28 +26,21 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     setAvatarSaving,
     setAvatarError,
     setAvatarOpen,
-    selectedWorker,
-    setRenameDraft,
-    setRenameError,
-    setRenameOpen,
-    renameSaving,
-    renameDraft,
-    setRenameSaving,
+    nameDraft,
+    nameSaving,
+    setNameSaving,
+    setNameError,
     selectedId,
     descriptionDraft,
-    setDescriptionDraft,
     descriptionSaving,
     setDescriptionSaving,
     setDescriptionError,
     modelDraft,
-    setModelDraft,
     modelSaving,
     setModelSaving,
     setModelError,
     patchWorker,
     flash,
-    reload,
-    corrupt,
   } = state
 
   /**
@@ -93,58 +86,35 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
-   * 打开「重命名执行者」对话框：草稿从当前展示名开始，用户直接改成新名称。
-   * 登记文件损坏或写操作进行中时不打开（入口按钮也会禁用）；目录缺失不影响
-   * 改展示名。
+   * 展示名的规范化（与 Host 一致：折叠空白并 trim），用来判断有没有改动。
+   * 空串表示清空名称，展示时回退到标识符。
    */
-  function openRenameDialog() {
-    if (selectedWorker === null || mutating || corrupt) return
-    setRenameDraft(selectedWorker.name)
-    setRenameError(null)
-    setRenameOpen(true)
-  }
-
-  /** 关闭「重命名执行者」对话框；保存中不响应关闭。 */
-  function closeRenameDialog() {
-    if (renameSaving) return
-    setRenameOpen(false)
-    setRenameError(null)
+  function normalizedWorkerName(value: unknown): string {
+    return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''
   }
 
   /**
-   * 改展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
-   * 工作区的标题同步成新名称。成功后只局部更新列表里的这一条，`selectedId`
-   * 不变，详情页留在同一个执行者上；失败留在对话框里提示。
-   *
+   * 保存展示名：Host 只更新登记表里的 `name`，目录与工作区注册保持不变，已挂载
+   * 工作区的标题由 Host 同步。设置页签没有保存按钮，成功后只局部更新列表里的
+   * 这一条；失败提示留在区块里。
    */
-  async function renameWorker(event: FormEvent) {
-    event.preventDefault()
-    if (selectedWorker === null || renameSaving) return
-    const previousName = selectedWorker.name
-    const nextName = renameDraft.trim()
-    if (nextName === previousName) {
-      setRenameError(t('renameSame'))
-      return
-    }
-    setRenameSaving(true)
-    setRenameError(null)
+  async function saveWorkerName() {
+    if (selectedId === null || nameSaving) return
+    setNameSaving(true)
+    setNameError(null)
     try {
       const body = await requestJson(RENAME_ROUTE, {
         method: 'POST',
-        body: JSON.stringify({ id: selectedWorker.id, name: nextName }),
+        body: JSON.stringify({ id: selectedId, name: nameDraft }),
       })
       const saved = body?.worker
-      const savedName = typeof saved?.name === 'string' ? saved.name : nextName
-      patchWorker(selectedWorker.id, { name: savedName })
-      setRenameOpen(false)
-      setRenameDraft('')
-      const display = savedName === '' ? selectedWorker.id : savedName
-      flash('success', `${t('renamed')} ${display}`)
-      reload()
+      const savedName =
+        typeof saved?.name === 'string' ? saved.name : normalizedWorkerName(nameDraft)
+      patchWorker(selectedId, { name: savedName })
     } catch (failure) {
-      setRenameError(`${t('renameSaveFailed')} ${failureText(t, failure)}`)
+      setNameError(`${t('nameSaveFailed')} ${failureText(t, failure)}`)
     } finally {
-      setRenameSaving(false)
+      setNameSaving(false)
     }
   }
 
@@ -158,7 +128,11 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
 
   /**
    * 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `buka_workers`
-   * 工具读它，决定是否把节点交给这个执行者；保存成功后只局部更新列表。
+   * 工具读它，决定是否把节点交给这个执行者。
+   *
+   * 设置页签没有保存按钮：页面在输入停下后自动调用这里，所以成功后只局部
+   * 更新列表，不改写正在编辑的草稿（改写会吞掉保存期间继续输入的内容）。
+   * 失败提示留在区块里。
    */
   async function saveDescription() {
     if (selectedId === null || descriptionSaving) return
@@ -172,8 +146,6 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
       const saved = body?.worker?.description
       const next = typeof saved === 'string' ? saved : normalizedDescription(descriptionDraft)
       patchWorker(selectedId, { description: next })
-      setDescriptionDraft(next)
-      flash('success', t('descriptionSaved'))
     } catch (failure) {
       setDescriptionError(`${t('descriptionSaveFailed')} ${failureText(t, failure)}`)
     } finally {
@@ -184,6 +156,8 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
   /**
    * 保存智能体的模型选择；`null` 表示跟随宿主默认模型。
    *
+   * 与职责一样由页面在改动后自动调用，成功后只局部更新列表；草稿保持用户
+   * 刚选的值，避免把保存期间继续改动的选择覆盖回旧值。
    */
   async function saveWorkerModel() {
     if (selectedId === null || modelSaving) return
@@ -196,8 +170,6 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
       })
       const saved = (body?.worker?.model ?? null) as WorkerModelSelection | null
       patchWorker(selectedId, { model: saved })
-      setModelDraft(saved)
-      flash('success', t('modelSaved'))
     } catch (failure) {
       setModelError(`${t('modelSaveFailed')} ${failureText(t, failure)}`)
     } finally {
@@ -209,9 +181,8 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     openAvatarDialog,
     closeAvatarDialog,
     saveAvatar,
-    openRenameDialog,
-    closeRenameDialog,
-    renameWorker,
+    normalizedWorkerName,
+    saveWorkerName,
     normalizedDescription,
     saveDescription,
     saveWorkerModel,

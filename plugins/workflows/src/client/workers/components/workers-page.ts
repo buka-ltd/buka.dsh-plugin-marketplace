@@ -22,12 +22,7 @@ import type { Translate } from '../types.ts'
 import { InstallSkillsModal } from './install-dialog.ts'
 import { PageHeader } from './page-header.ts'
 import { WorkerDetail } from './worker-detail.ts'
-import {
-  AvatarDialog,
-  CreateWorkerDialog,
-  DeleteWorkerDialog,
-  RenameDialog,
-} from './worker-dialogs.ts'
+import { AvatarDialog, CreateWorkerDialog, DeleteWorkerDialog } from './worker-dialogs.ts'
 import { WorkerList } from './worker-list.ts'
 
 /**
@@ -77,7 +72,6 @@ export function WorkersPage(props: {
         }),
     h(CreateWorkerDialog, { t, state, actions }),
     h(AvatarDialog, { t, state, detail }),
-    h(RenameDialog, { t, state, detail }),
     h(DeleteWorkerDialog, { t, state, actions }),
     h(InstallSkillsModal, { t, state, skillActions }),
   )

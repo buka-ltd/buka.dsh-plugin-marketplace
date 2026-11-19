@@ -104,8 +104,12 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errInvalidSkill')
     case 'invalid-skills':
       return t('errInvalidSkills')
-    case 'list-unparsed':
-      return t('errListUnparsed')
+    case 'not-saved':
+      return t('errSourceNotSaved')
+    case 'repos-unreadable':
+      return t('errReposUnreadable')
+    case 'skill-not-found':
+      return t('errSkillNotFound')
     case 'npx-failed':
       return t('errNpxFailed')
     case 'skills-unavailable':

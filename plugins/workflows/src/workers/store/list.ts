@@ -15,6 +15,7 @@ import path from 'node:path'
 import { resolveAvatar } from '../avatar.ts'
 import { emptyAgentsFile, ensureClaudeLink, readAgentsFile, readClaudeLink } from './agents.ts'
 import { withBuiltinWorkers } from './builtin.ts'
+import { ensureWorkerGitRepo } from './git.ts'
 import { isDirectory, realpathOr, realpathOrNull, requireRegistryFile } from './paths.ts'
 import { scanProjectSkills } from './project-skills.ts'
 import { readWorkerRegistry } from './registry.ts'
@@ -96,6 +97,9 @@ async function agentEntry(
   const workspace = workspaceByPath.get(canonical) ?? workspaceByPath.get(path.resolve(entry.path))
 
   const exists = await isDirectory(canonical)
+  // 旧执行者（创建时还没有自动建仓）在列表加载时补齐独立仓库；已经是仓库、
+  // 位于外层仓库里或没装 git 时都快速返回，不影响列表本身。
+  if (exists) await ensureWorkerGitRepo(canonical)
   let skills: WorkerListEntry['skills'] = []
   try {
     skills = (await scanProjectSkills(canonical)).skills
