@@ -101,7 +101,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   // 正在安装的树 skill（`installKeyOf()` 的组合键）；Host 侧安装与卸载串行，
   // 这里也同一时刻只放一个请求，避免用户连点排出看不到的队列。
   const [installing, setInstalling] = React.useState<string | null>(null)
-  // 「安装到打工人 / 工作区」对话框：打开时才去读目标列表，选中后复用同一条
+  // 「安装到执行者 / 工作区」对话框：打开时才去读目标列表，选中后复用同一条
   // 安装路由（带 `target`）。目标列表与选择都是纯页面状态，不进 localStorage。
   const [targetDialog, setTargetDialog] = React.useState<TargetDialog | null>(null)
   const [targets, setTargets] = React.useState<LoadedState<InstallTargetsSnapshot>>({
@@ -551,7 +551,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 打开「安装到打工人 / 工作区」对话框。
+   * 打开「安装到执行者 / 工作区」对话框。
    *
    * @param kind 目标类型
    * @param repo 一条收藏
@@ -589,7 +589,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 把当前选中的 skill / 目录安装到选中的打工人 / 工作区。Host 会把选择换回
+   * 把当前选中的 skill / 目录安装到选中的执行者 / 工作区。Host 会把选择换回
    * 登记表里的可信目录；目录会把其下每个 skill 的路径一起传上去。成功后关掉
    * 对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
    */

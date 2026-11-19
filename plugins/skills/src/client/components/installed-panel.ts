@@ -10,7 +10,6 @@
  */
 
 import type { ReactElement } from 'react'
-import { Fragment } from 'react'
 
 import type { Translate } from '../dictionary.ts'
 import { entryKey } from '../keys.ts'
@@ -18,6 +17,7 @@ import {
   Button,
   h,
   IconRefreshOutlineRegular,
+  IconSkillOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
   StateDot,
@@ -25,6 +25,7 @@ import {
 } from '../primitives.ts'
 import { repoLabel } from '../repo-source.ts'
 import type { InstalledSkill, SkillCheckEntry, SkillsPageState } from '../types.ts'
+import { RepoAvatar } from './repo-avatar.ts'
 
 /** 一行右侧操作区的入参。 */
 interface RowActionsState {
@@ -171,40 +172,61 @@ function renderInstalled(state: SkillsPageState): ReactElement {
       h(
         'div',
         { className: 'buka-skills-cardHead' },
+        // 图标列：来源仓库的头像（手工安装的回退到 skill 图标），在 40px 列内
+        // 水平、垂直居中；主区与它等高，标题与描述从主区左边缘开始。
+        h(
+          'span',
+          { className: 'buka-skills-cardLead', 'aria-hidden': true },
+          h(RepoAvatar, {
+            source: entry.npxSourceUrl ?? entry.npxSource,
+            size: 24,
+            fallback: h(IconSkillOutlineRegular, { size: 16 }),
+          }),
+        ),
         h(
           'div',
-          { className: 'buka-skills-titleRow' },
+          { className: 'buka-skills-cardMain' },
           h(
             'div',
-            { className: 'buka-skills-titleCluster' },
-            h('span', { className: 'buka-skills-cardTitle' }, entry.name),
-            h(Tag, { tone: 'neutral' }, entry.scope),
-            h(Tag, { tone: source.tone }, source.text),
-            status === null ? null : h(Tag, { tone: status.tone }, status.text),
+            { className: 'buka-skills-titleRow' },
+            h(
+              'div',
+              { className: 'buka-skills-titleCluster' },
+              h('span', { className: 'buka-skills-cardTitle', title: entry.name }, entry.name),
+              // 检查结果是这一行最需要被看见的信息，紧跟在名字后面；
+              // 来源仓库名可能很长，放到最后，换行时不会顶掉状态。
+              status === null ? null : h(Tag, { tone: status.tone }, status.text),
+              h(Tag, { tone: 'neutral' }, entry.scope),
+              h(Tag, { tone: source.tone }, source.text),
+            ),
+            h(
+              'div',
+              { className: 'buka-skills-titleActions' },
+              rowActions(entry, {
+                busy,
+                confirming,
+                t,
+                onAsk: () => setConfirming(entryKey(entry)),
+                onCancel: () => setConfirming(null),
+                onConfirm: () => uninstall(entry),
+              }),
+            ),
           ),
-          h(
-            'div',
-            { className: 'buka-skills-titleActions' },
-            rowActions(entry, {
-              busy,
-              confirming,
-              t,
-              onAsk: () => setConfirming(entryKey(entry)),
-              onCancel: () => setConfirming(null),
-              onConfirm: () => uninstall(entry),
-            }),
-          ),
+          typeof entry.description === 'string' && entry.description !== ''
+            ? h(
+                'div',
+                { className: 'buka-skills-cardDesc', title: entry.description },
+                entry.description,
+              )
+            : null,
+          confirming === entryKey(entry)
+            ? h(
+                'p',
+                { className: 'buka-skills-hint' },
+                entry.managedByNpx === true ? t('confirmNpx') : t('confirmLocal'),
+              )
+            : null,
         ),
-        typeof entry.description === 'string' && entry.description !== ''
-          ? h('div', { className: 'buka-skills-cardDesc' }, entry.description)
-          : null,
-        confirming === entryKey(entry)
-          ? h(
-              'p',
-              { className: 'buka-skills-hint' },
-              entry.managedByNpx === true ? t('confirmNpx') : t('confirmLocal'),
-            )
-          : null,
       ),
     )
   })
@@ -217,6 +239,19 @@ function renderInstalled(state: SkillsPageState): ReactElement {
           installedData.roots.map((root) => root.path).join(' · '),
         )
       : null
+
+  const emptyState = h(
+    'div',
+    { className: 'buka-skills-emptyState' },
+    h(
+      'span',
+      { className: 'buka-skills-emptyIcon', 'aria-hidden': true },
+      h(IconSkillOutlineRegular, { size: 28 }),
+    ),
+    h('p', { className: 'buka-skills-emptyTitle' }, t('empty')),
+    h('p', { className: 'buka-skills-emptyHint' }, t('emptyHint')),
+    rootsTip,
+  )
 
   return h(
     'div',
@@ -310,7 +345,7 @@ function renderInstalled(state: SkillsPageState): ReactElement {
     installedData === null
       ? null
       : rows.length === 0 && !installed.loading
-        ? h(Fragment, null, h('p', { className: 'buka-skills-empty' }, t('empty')), rootsTip)
+        ? emptyState
         : h('ul', { className: 'buka-skills-cards' }, ...rows),
   )
 }

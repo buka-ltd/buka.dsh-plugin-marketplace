@@ -14,6 +14,7 @@ import type { Translate } from '../dictionary.ts'
 import {
   Button,
   h,
+  IconBranchOutlineRegular,
   IconChevronRightOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
@@ -22,6 +23,7 @@ import {
 } from '../primitives.ts'
 import { isListableSource, repoUrl } from '../repo-source.ts'
 import type { SkillsPageState } from '../types.ts'
+import { RepoAvatar } from './repo-avatar.ts'
 import { createTreeRenderer } from './tree.ts'
 
 /**
@@ -84,83 +86,104 @@ function renderSaved(state: SkillsPageState): ReactElement {
       h(
         'div',
         { className: 'buka-skills-cardHead' },
+        // 折叠按钮在行首（展开控制），固定占 20px 并与图标列等高；不可列出的
+        // 来源没有按钮，但仍保留这一列，收藏卡片的标题缩进因此保持一致。
+        h(
+          'span',
+          { className: 'buka-skills-chevronSlot' },
+          // 只有可列出的来源（GitHub / git 远端 / 本地路径）显示折叠
+          // 箭头；包名与网页链接只当书签，没有可展开的树。
+          listable
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'buka-skills-chevron',
+                  'aria-expanded': expanded,
+                  'aria-label': `${expanded ? t('collapseRepo') : t('expandRepo')} ${repo.source}`,
+                  onClick: () => toggleRepo(repo),
+                },
+                h(IconChevronRightOutlineRegular, { size: 14 }),
+              )
+            : null,
+        ),
+        // 图标列：仓库头像在 40px 列内水平、垂直居中；非 GitHub 来源回退到
+        // 分支图标。
+        h(
+          'span',
+          { className: 'buka-skills-cardLead', 'aria-hidden': true },
+          h(RepoAvatar, {
+            source: repo.source,
+            size: 24,
+            fallback: h(IconBranchOutlineRegular, { size: 16 }),
+          }),
+        ),
         h(
           'div',
-          { className: 'buka-skills-titleRow' },
+          { className: 'buka-skills-cardMain' },
           h(
             'div',
-            { className: 'buka-skills-titleCluster' },
-            // 只有可列出的来源（GitHub / git 远端 / 本地路径）显示折叠
-            // 箭头；包名与网页链接只当书签，没有可展开的树。
-            listable
-              ? h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'buka-skills-chevron',
-                    'aria-expanded': expanded,
-                    'aria-label': `${expanded ? t('collapseRepo') : t('expandRepo')} ${repo.source}`,
-                    onClick: () => toggleRepo(repo),
-                  },
-                  h(IconChevronRightOutlineRegular, { size: 14 }),
-                )
-              : null,
-            // 标题本身就是仓库链接：点标题直接打开仓库页。
-            link === ''
-              ? h('span', { className: 'buka-skills-cardTitle' }, repo.source)
-              : h(
-                  'a',
-                  {
-                    className: 'buka-skills-cardTitle buka-skills-cardLink',
-                    href: link,
-                    target: '_blank',
-                    rel: 'noreferrer noopener',
-                  },
-                  repo.source,
-                ),
-            // 仓库类型徽标：标题之后、已安装标记之前。
-            kindTag === null ? null : h(Tag, { tone: kindTag.tone }, kindTag.text),
-            installedAlready ? h(Tag, { tone: 'success' }, t('installedBadge')) : null,
+            { className: 'buka-skills-titleRow' },
+            h(
+              'div',
+              { className: 'buka-skills-titleCluster' },
+              // 标题本身就是仓库链接：点标题直接打开仓库页。
+              link === ''
+                ? h('span', { className: 'buka-skills-cardTitle' }, repo.source)
+                : h(
+                    'a',
+                    {
+                      className: 'buka-skills-cardTitle buka-skills-cardLink',
+                      href: link,
+                      target: '_blank',
+                      rel: 'noreferrer noopener',
+                    },
+                    repo.source,
+                  ),
+              // 仓库类型徽标：标题之后、已安装标记之前。
+              kindTag === null ? null : h(Tag, { tone: kindTag.tone }, kindTag.text),
+              installedAlready ? h(Tag, { tone: 'success' }, t('installedBadge')) : null,
+            ),
+            h(
+              'div',
+              { className: 'buka-skills-titleActions' },
+              // 样式与已安装列表的卸载按钮一致（outline + 危险色 + 文案）；
+              // 删除中整块换成状态点，与卸载一致，也避免请求期间重复点击。
+              removing === repo.id
+                ? h(
+                    'span',
+                    { className: 'buka-skills-statusWithDot' },
+                    h(StateDot, { state: 'ongoing' }),
+                    t('removing'),
+                  )
+                : h(
+                    Button,
+                    {
+                      variant: 'outline',
+                      size: 'sm',
+                      className: 'buka-skills-danger',
+                      icon: h(IconTrashOutlineRegular, { size: 13 }),
+                      'aria-label': `${t('removeRepo')} ${repo.source}`,
+                      onClick: () => removeRepo(repo),
+                      disabled: removing !== null,
+                    },
+                    t('removeRepo'),
+                  ),
+            ),
           ),
-          h(
-            'div',
-            { className: 'buka-skills-titleActions' },
-            // 样式与已安装列表的卸载按钮一致（outline + 危险色 + 文案）；
-            // 删除中整块换成状态点，与卸载一致，也避免请求期间重复点击。
-            removing === repo.id
-              ? h(
-                  'span',
-                  { className: 'buka-skills-statusWithDot' },
-                  h(StateDot, { state: 'ongoing' }),
-                  t('removing'),
-                )
-              : h(
-                  Button,
-                  {
-                    variant: 'outline',
-                    size: 'sm',
-                    className: 'buka-skills-danger',
-                    icon: h(IconTrashOutlineRegular, { size: 13 }),
-                    'aria-label': `${t('removeRepo')} ${repo.source}`,
-                    onClick: () => removeRepo(repo),
-                    disabled: removing !== null,
-                  },
-                  t('removeRepo'),
-                ),
-          ),
+          typeof repo.note === 'string' && repo.note !== ''
+            ? h('div', { className: 'buka-skills-cardDesc', title: repo.note }, repo.note)
+            : null,
+          typeof warning === 'string' && warning !== ''
+            ? h(
+                'p',
+                { className: 'buka-skills-notice', role: 'status' },
+                h(IconWarningOutlineRegular, { size: 16 }),
+                h('span', null, `${t('treeRefreshWarning')} ${warning}`),
+              )
+            : null,
+          expanded && listable ? renderTree(repo) : null,
         ),
-        typeof repo.note === 'string' && repo.note !== ''
-          ? h('div', { className: 'buka-skills-cardDesc' }, repo.note)
-          : null,
-        typeof warning === 'string' && warning !== ''
-          ? h(
-              'p',
-              { className: 'buka-skills-notice', role: 'status' },
-              h(IconWarningOutlineRegular, { size: 16 }),
-              h('span', null, `${t('treeRefreshWarning')} ${warning}`),
-            )
-          : null,
-        expanded && listable ? renderTree(repo) : null,
       ),
     )
   })
@@ -201,7 +224,17 @@ function renderSaved(state: SkillsPageState): ReactElement {
     savedData === null
       ? null
       : rows.length === 0 && !saved.loading
-        ? h('p', { className: 'buka-skills-empty' }, t('repoEmpty'))
+        ? h(
+            'div',
+            { className: 'buka-skills-emptyState' },
+            h(
+              'span',
+              { className: 'buka-skills-emptyIcon', 'aria-hidden': true },
+              h(IconBranchOutlineRegular, { size: 28 }),
+            ),
+            h('p', { className: 'buka-skills-emptyTitle' }, t('repoEmpty')),
+            h('p', { className: 'buka-skills-emptyHint' }, t('repoEmptyHint')),
+          )
         : h('ul', { className: 'buka-skills-cards' }, ...rows),
   )
 }

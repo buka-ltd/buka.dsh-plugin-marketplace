@@ -1,10 +1,10 @@
 /**
- * 「安装到打工人 / 工作区」对话框：读取目标列表、单选，确认后安装。
+ * 「安装到执行者 / 工作区」对话框：读取目标列表、单选，确认后安装。
  *
  * 选中项可以是单个 skill，也可以是目录（装其下全部 skill）；标题下的说明行
  * 分别显示「目标 skill」或「目标目录 · 数量」。
  *
- * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
+ * 目标列表来自 Host 的 `GET /buka-skills/targets`：执行者只列智能体且目录
  * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用标识符 / 路径回去
  * 解析一次，所以这里展示的列表只用于选择。
  *
@@ -140,7 +140,7 @@ function renderBody(props: TargetDialogProps, kind: TargetDialogKind): ReactElem
 }
 
 /**
- * 「安装到打工人 / 工作区」对话框。
+ * 「安装到执行者 / 工作区」对话框。
  *
  * @param props 页面状态与动作
  */

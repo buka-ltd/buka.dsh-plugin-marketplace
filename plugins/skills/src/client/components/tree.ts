@@ -23,7 +23,11 @@ import {
   IconCheckOutlineRegular,
   IconChevronRightOutlineRegular,
   IconDownloadOutlineRegular,
+  IconFolderOpenOutlineRegular,
+  IconSkillOutlineRegular,
+  IconUserOutlineRegular,
   IconWarningOutlineRegular,
+  IconWorkspaceTreeOutlineRegular,
   StateDot,
 } from '../primitives.ts'
 import type {
@@ -89,7 +93,7 @@ export interface TreeRendererState {
   readonly installedSkillKeys: ReadonlySet<string>
   /** 正在安装的树 skill（`installKeyOf()` 的组合键）。 */
   readonly installing: string | null
-  /** 是否正在把 skill 安装到打工人 / 工作区。 */
+  /** 是否正在把 skill 安装到执行者 / 工作区。 */
   readonly targetInstalling: boolean
   /** 取一个仓库的 skills 树。 */
   readonly loadTree: (repo: RepoRef, options?: { refresh?: boolean }) => Promise<void>
@@ -99,7 +103,7 @@ export interface TreeRendererState {
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
   /** 安装一个目录里的全部 skill 到全局。 */
   readonly installDir: (repo: RepoRef, node: SkillTreeDir) => Promise<void>
-  /** 打开「安装到打工人 / 工作区」对话框。 */
+  /** 打开「安装到执行者 / 工作区」对话框。 */
   readonly openTargetDialog: (
     kind: TargetDialogKind,
     repo: RepoRef,
@@ -199,9 +203,9 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
    * 一个节点右侧的三个安装入口，目录与 skill 叶子共用。
    *
    * 目录行把「全局安装」换成「全部安装」（装目录下全部 skill），其余两个入口
-   * 在两种行上含义相同：选一个打工人 / 工作区作为目标。三个按钮在任一安装
+   * 在两种行上含义相同：选一个执行者 / 工作区作为目标。三个按钮在任一安装
    * 进行中统一禁用；只有全局入口会在已安装时变成禁用的「全局已安装」，
-   * 打工人 / 工作区是每次临时选的目标，不做已安装判断。
+   * 执行者 / 工作区是每次临时选的目标，不做已安装判断。
    *
    * @param repo 一条收藏
    * @param node 目录或 skill 节点
@@ -254,8 +258,9 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
       h(
         Button,
         {
-          variant: 'outline',
+          variant: 'ghost',
           size: 'sm',
+          icon: h(IconUserOutlineRegular, { size: 13 }),
           'aria-label': `${t('installWorker')} ${node.name}`,
           disabled: installing !== null || targetInstalling,
           onClick: () => openTargetDialog('worker', repo, node),
@@ -265,8 +270,9 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
       h(
         Button,
         {
-          variant: 'outline',
+          variant: 'ghost',
           size: 'sm',
+          icon: h(IconWorkspaceTreeOutlineRegular, { size: 13 }),
           'aria-label': `${t('installWorkspace')} ${node.name}`,
           disabled: installing !== null || targetInstalling,
           onClick: () => openTargetDialog('workspace', repo, node),
@@ -302,6 +308,11 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
               onClick: () => toggleDir(repo, node.path),
             },
             h(IconChevronRightOutlineRegular, { size: 12 }),
+            h(
+              'span',
+              { className: 'buka-skills-treeDirIcon', 'aria-hidden': true },
+              h(IconFolderOpenOutlineRegular, { size: 14 }),
+            ),
             h('span', { className: 'buka-skills-treeName' }, node.name),
             h('span', { className: 'buka-skills-treeCount' }, `· ${countSkills(node)}`),
           ),
@@ -331,6 +342,11 @@ function createTreeRenderer(props: TreeRendererState): TreeRenderer {
       h(
         'div',
         { className: 'buka-skills-treeSkill', title: description === '' ? node.path : description },
+        h(
+          'span',
+          { className: 'buka-skills-treeSkillIcon', 'aria-hidden': true },
+          h(IconSkillOutlineRegular, { size: 14 }),
+        ),
         h(
           'div',
           { className: 'buka-skills-treeSkillMain' },

@@ -85,7 +85,7 @@ export interface SkillTreeLeaf {
 export type TargetDialogKind = 'worker' | 'workspace'
 
 /**
- * Host `GET /buka-skills/targets` 返回的一个打工人。
+ * Host `GET /buka-skills/targets` 返回的一个执行者。
  *
  * `id` 是不可变标识符（引用键）；`name` 是可选展示名，可能为空串；旧版
  * workers 没有 `id` 时 Host 已把 `name` 填进 `id`。
@@ -117,7 +117,7 @@ export interface InstallTargetsSnapshot {
   readonly workspaces?: InstallTargetList<WorkspaceInstallTarget>
 }
 
-/** 打开着的「安装到打工人 / 工作区」对话框。 */
+/** 打开着的「安装到执行者 / 工作区」对话框。 */
 export interface TargetDialog {
   readonly kind: TargetDialogKind
   readonly repo: RepoRef
@@ -268,11 +268,11 @@ export interface SkillsPageState {
   readonly installedSkillKeys: ReadonlySet<string>
   /** 正在安装的树 skill 键。 */
   readonly installing: string | null
-  /** 打开着的「安装到打工人 / 工作区」对话框；`null` 表示没有。 */
+  /** 打开着的「安装到执行者 / 工作区」对话框；`null` 表示没有。 */
   readonly targetDialog: TargetDialog | null
-  /** 对话框里可选的打工人 / 工作区列表。 */
+  /** 对话框里可选的执行者 / 工作区列表。 */
   readonly targets: LoadedState<InstallTargetsSnapshot>
-  /** 对话框里选中的目标：打工人名或工作区路径。 */
+  /** 对话框里选中的目标：执行者名或工作区路径。 */
   readonly targetChoice: string
   /** 是否正在把 skill 安装到选中的目标。 */
   readonly targetInstalling: boolean
@@ -296,7 +296,7 @@ export interface SkillsPageState {
   readonly installSkill: (repo: RepoRef, node: SkillTreeLeaf) => Promise<void>
   /** 安装一个目录里的全部 skill（目录行的「全部安装」）。 */
   readonly installDir: (repo: RepoRef, node: SkillTreeDir) => Promise<void>
-  /** 打开「安装到打工人 / 工作区」对话框。 */
+  /** 打开「安装到执行者 / 工作区」对话框。 */
   readonly openTargetDialog: (
     kind: TargetDialogKind,
     repo: RepoRef,

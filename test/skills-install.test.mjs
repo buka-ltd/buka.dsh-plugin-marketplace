@@ -4,7 +4,7 @@
  * 安装走 `skills` 包的库 API；这里注入假 `install`，验证本插件负责的部分：
  *
  * - 安装目录名与 `skills` 的 sanitizeName() 一致；
- * - 全局 / 打工人 / 工作区三种目标的 scope、cwd、agents 与关闭遥测；
+ * - 全局 / 执行者 / 工作区三种目标的 scope、cwd、agents 与关闭遥测；
  * - 全局安装拒绝已安装、`DSH_AGENTS_HOME` 指到别处与非法名字；
  * - 页面入口只接受收藏过的来源，skill 是否存在以 Host 读到的仓库列表为准；
  * - 目录安装逐个执行、已装过的跳过、单个失败不中断且汇总。
@@ -201,7 +201,7 @@ test('全局安装：库失败与目标缺少 SKILL.md 都按失败上报', asyn
   assert.equal(incomplete.code, 'install-incomplete')
 })
 
-test('项目级安装：打工人写 universal + claude-code，工作区只写 universal', async (t) => {
+test('项目级安装：执行者写 universal + claude-code，工作区只写 universal', async (t) => {
   const { root } = await makeHomes(t)
   const workerDir = path.join(root, 'worker')
   const workspaceDir = path.join(root, 'workspace')
@@ -307,7 +307,7 @@ test('页面入口：只安装收藏过的来源，skill 必须在 Host 读到�
   assert.equal(fake.calls[0].source, repoDir)
 })
 
-test('安装到打工人：Host 解析目录后才交给安装库', async (t) => {
+test('安装到执行者：Host 解析目录后才交给安装库', async (t) => {
   const { homes, root } = await makeHomes(t)
   const workerDir = path.join(root, 'worker')
   await fs.mkdir(workerDir, { recursive: true })
@@ -359,7 +359,7 @@ test('安装到打工人：Host 解析目录后才交给安装库', async (t) =>
     skillPath: 'skills/demo/SKILL.md',
     target: 'worker',
     worker: 'ghost',
-    resolveTarget: async () => ({ ok: false, code: 'unknown-worker', message: '没有这个打工人' }),
+    resolveTarget: async () => ({ ok: false, code: 'unknown-worker', message: '没有这个执行者' }),
     install,
   })
   assert.equal(missing.ok, false)

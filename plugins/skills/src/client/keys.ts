@@ -91,7 +91,7 @@ function targetItemsOf(kind: TargetDialogKind, snapshot: InstallTargetsSnapshot 
 }
 
 /**
- * 目标条目的选择键：打工人用不可变标识符（旧版退回 `name`），工作区用路径。
+ * 目标条目的选择键：执行者用不可变标识符（旧版退回 `name`），工作区用路径。
  *
  * @param kind 目标类型
  * @param item 一条目标
@@ -108,7 +108,7 @@ function targetKeyOf(kind: TargetDialogKind, item: unknown): string {
 }
 
 /**
- * 目标条目的展示标签：打工人按「名称 · 标识符」消歧，工作区用标题（缺省回退
+ * 目标条目的展示标签：执行者按「名称 · 标识符」消歧，工作区用标题（缺省回退
  * 路径）。
  *
  * @param kind 目标类型
@@ -122,7 +122,7 @@ function targetLabelOf(kind: TargetDialogKind, item: unknown): string {
 }
 
 /**
- * 目标条目的路径副标题；打工人 / 工作区都有，缺失时返回空串。
+ * 目标条目的路径副标题；执行者 / 工作区都有，缺失时返回空串。
  *
  * @param item 一条目标
  */

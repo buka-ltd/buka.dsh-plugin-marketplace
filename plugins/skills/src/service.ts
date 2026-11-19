@@ -124,7 +124,7 @@ export interface SkillListResult {
 
 /** 检查 / 更新的入参：省略 `dir` 表示全局。 */
 export interface SkillScopeOptions {
-  /** 目标目录（打工人目录或工作区目录）；省略表示全局。 */
+  /** 目标目录（执行者目录或工作区目录）；省略表示全局。 */
   dir?: string
   /** 绕过仓库缓存重新拉取来源。 */
   refresh?: boolean

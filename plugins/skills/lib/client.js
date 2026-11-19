@@ -31,9 +31,9 @@ window.__ModuleLoader__.load({
     /**
     * 预设头像：id → emoji / 底色 / 词典 key。
     *
-    * 打工人页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
+    * 执行者页与工作流节点图原本各维护一份同样的显示表；插件之间不互相 import，
     * 所以统一收在这里，两个浏览器一半都从这里派生。id 与 Host 的
-    * `plugins/workers/src/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
+    * `plugins/workflows/src/workers/avatar.ts` 一一对应（那边只存 id，不存 emoji / 底色），
     * **id 是跨插件的稳定契约**：增删预设时两边一起改，顺序也不要动。
     *
     * @module plugin-ui/avatars
@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
     * 创建 React 元素的小包装。
     *
     * 页面直接手写 `createElement`（不用 JSX）。短名保持 `React.createElement` 的
-    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：打工人 / 技能
+    * 全部重载（这样内联回调仍能拿到事件类型），另外补一个宽松签名：执行者 / 技能
     * 页有些 props 是自带的宽对象或带 `data-*` 的元素属性，类型系统不必逐个展开。
     *
     * @module plugin-ui/h
@@ -199,7 +199,7 @@ window.__ModuleLoader__.load({
     }
     // packages/plugin-ui/lib/worker-label.js
     /**
-    * 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+    * 执行者展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
     *
     * 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
     * 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
@@ -212,7 +212,7 @@ window.__ModuleLoader__.load({
     	return typeof value === "string" ? value.trim() : "";
     }
     /**
-    * 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+    * 执行者展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
     *
     */
     function workerDisplayName(worker) {
@@ -254,7 +254,7 @@ window.__ModuleLoader__.load({
     function loadPrimitives(id) {
     	return require(id);
     }
-    const { Button, Input, SegmentedTabs, Tag, Tooltip, Toast, StateDot, IconBranchOutlineRegular, IconCheckOutlineRegular, IconChevronRightOutlineRegular, IconDownloadOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconSkillOutlineRegular, IconTrashOutlineRegular, IconWarningOutlineRegular, Modal } = loadPrimitives("@deepseek-ai/dsh-client-ui-primitives");
+    const { Button, Input, SegmentedTabs, Tag, Tooltip, Toast, StateDot, IconBranchOutlineRegular, IconCheckOutlineRegular, IconChevronRightOutlineRegular, IconDownloadOutlineRegular, IconFolderOpenOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconSkillOutlineRegular, IconTrashOutlineRegular, IconUserOutlineRegular, IconWarningOutlineRegular, IconWorkspaceTreeOutlineRegular, Modal } = loadPrimitives("@deepseek-ai/dsh-client-ui-primitives");
     // .build/skills/client/components/panel-icon.js
     /**
     * 侧边栏的图标。
@@ -395,7 +395,7 @@ window.__ModuleLoader__.load({
     	return Array.isArray(list?.items) ? [...list.items] : [];
     }
     /**
-    * 目标条目的选择键：打工人用不可变标识符（旧版退回 `name`），工作区用路径。
+    * 目标条目的选择键：执行者用不可变标识符（旧版退回 `name`），工作区用路径。
     *
     * @param kind 目标类型
     * @param item 一条目标
@@ -411,7 +411,7 @@ window.__ModuleLoader__.load({
     	return typeof value === "string" ? value : "";
     }
     /**
-    * 目标条目的展示标签：打工人按「名称 · 标识符」消歧，工作区用标题（缺省回退
+    * 目标条目的展示标签：执行者按「名称 · 标识符」消歧，工作区用标题（缺省回退
     * 路径）。
     *
     * @param kind 目标类型
@@ -424,7 +424,7 @@ window.__ModuleLoader__.load({
     	return title !== "" ? title : typeof record?.path === "string" ? record.path : "";
     }
     /**
-    * 目标条目的路径副标题；打工人 / 工作区都有，缺失时返回空串。
+    * 目标条目的路径副标题；执行者 / 工作区都有，缺失时返回空串。
     *
     * @param item 一条目标
     */
@@ -441,6 +441,12 @@ window.__ModuleLoader__.load({
     *
     * @module @buka/dsh-plugin-skills/client/repo-source
     */
+    /** GitHub owner 的写法：网页链接、SCP 地址与已经规范化的 `owner/repo`。 */
+    const GITHUB_OWNER_PATTERNS = [
+    	/^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9._-]*)\//iu,
+    	/^(?:[A-Za-z0-9._-]+@)?github\.com:([A-Za-z0-9][A-Za-z0-9._-]*)\//iu,
+    	/^([A-Za-z0-9][A-Za-z0-9._-]*)\/[A-Za-z0-9._-]+$/u
+    ];
     /**
     * 把各种 npx 来源写法收敛成可比较的键：`https://github.com/a/b.git`、
     * `github.com/a/b` 与 `a/b` 都是 `a/b`。Host 写进收藏文件的 `id` 也是
@@ -483,6 +489,34 @@ window.__ModuleLoader__.load({
     	if (/^https?:\/\//iu.test(source)) return source;
     	if (/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/u.test(source)) return `https://github.com/${source}`;
     	return "";
+    }
+    /**
+    * GitHub 仓库的 owner 段：GitHub 的仓库头像就是 owner 的头像，所以只从
+    * GitHub 来源里取第一段。本地路径、其它 git 远端、包名与网页书签都没有
+    * 可靠的头像地址，返回空串。
+    *
+    * @param value 来源或来源链接
+    * @returns owner；没有时返回空串
+    */
+    function githubOwnerOf(value) {
+    	if (typeof value !== "string") return "";
+    	const text = value.trim();
+    	if (text === "") return "";
+    	for (const pattern of GITHUB_OWNER_PATTERNS) {
+    		const match = pattern.exec(text);
+    		if (match?.[1] !== void 0 && match[1] !== "") return match[1];
+    	}
+    	return "";
+    }
+    /**
+    * 仓库图标地址：GitHub 的 owner 头像；没有可靠图标时返回空串，调用方回退到
+    * 内置图标。只拼 GitHub 官方域名，来源里的 owner 已由正则限定字符集。
+    *
+    * @param value 来源或来源链接
+    */
+    function repoIconUrl(value) {
+    	const owner = githubOwnerOf(value);
+    	return owner === "" ? "" : `https://github.com/${owner}.png?size=80`;
     }
     /**
     * 这个来源能不能让 Host 去列 skills，与 Host `repo-store.js` 的
@@ -1144,7 +1178,7 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 打开「安装到打工人 / 工作区」对话框。
+    	* 打开「安装到执行者 / 工作区」对话框。
     	*
     	* @param kind 目标类型
     	* @param repo 一条收藏
@@ -1190,7 +1224,7 @@ window.__ModuleLoader__.load({
     		loadTargets(targetDialog.kind);
     	}
     	/**
-    	* 把当前选中的 skill / 目录安装到选中的打工人 / 工作区。Host 会把选择换回
+    	* 把当前选中的 skill / 目录安装到选中的执行者 / 工作区。Host 会把选择换回
     	* 登记表里的可信目录；目录会把其下每个 skill 的路径一起传上去。成功后关掉
     	* 对话框并提示，失败留在框里显示（与「收藏」对话框一致）。
     	*/
@@ -1378,6 +1412,38 @@ window.__ModuleLoader__.load({
     		switchTab
     	};
     }
+    // .build/skills/client/components/repo-avatar.js
+    /**
+    * 仓库头像：GitHub owner 的头像图片，拿不到头像时回退到调用方给的内置图标。
+    *
+    * 头像只用于识别来源，不承载文案，所以 `alt` 留空并按装饰图处理；加载失败
+    * （离线、被 CSP 拦下、来源不是 GitHub）时不再重试，直接显示内置图标。失败
+    * 记在具体的 URL 上，来源换了会重新尝试。
+    *
+    * @module @buka/dsh-plugin-skills/client/components/repo-avatar
+    */
+    /**
+    * GitHub 仓库头像；没有头像时显示回退图标。
+    *
+    * @param props 来源、尺寸与回退图标
+    */
+    function RepoAvatar(props) {
+    	const url = repoIconUrl(props.source);
+    	const [failedUrl, setFailedUrl] = (0, react.useState)(null);
+    	if (url === "" || failedUrl === url) return props.fallback;
+    	return h("img", {
+    		className: "buka-skills-avatar",
+    		src: url,
+    		alt: "",
+    		"aria-hidden": true,
+    		width: props.size,
+    		height: props.size,
+    		loading: "lazy",
+    		decoding: "async",
+    		referrerPolicy: "no-referrer",
+    		onError: () => setFailedUrl(url)
+    	});
+    }
     // .build/skills/client/components/installed-panel.js
     /**
     * 「已安装」面板：两个全局根下的 skill 卡片、检查 / 更新入口、lockfile 提示
@@ -1487,16 +1553,33 @@ window.__ModuleLoader__.load({
     		return h("li", {
     			className: "buka-skills-card",
     			key: `${entry.scope}:${entry.id}`
-    		}, h("div", { className: "buka-skills-cardHead" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, h("span", { className: "buka-skills-cardTitle" }, entry.name), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text), status === null ? null : h(Tag, { tone: status.tone }, status.text)), h("div", { className: "buka-skills-titleActions" }, rowActions(entry, {
+    		}, h("div", { className: "buka-skills-cardHead" }, h("span", {
+    			className: "buka-skills-cardLead",
+    			"aria-hidden": true
+    		}, h(RepoAvatar, {
+    			source: entry.npxSourceUrl ?? entry.npxSource,
+    			size: 24,
+    			fallback: h(IconSkillOutlineRegular, { size: 16 })
+    		})), h("div", { className: "buka-skills-cardMain" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, h("span", {
+    			className: "buka-skills-cardTitle",
+    			title: entry.name
+    		}, entry.name), status === null ? null : h(Tag, { tone: status.tone }, status.text), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text)), h("div", { className: "buka-skills-titleActions" }, rowActions(entry, {
     			busy,
     			confirming,
     			t,
     			onAsk: () => setConfirming(entryKey(entry)),
     			onCancel: () => setConfirming(null),
     			onConfirm: () => uninstall(entry)
-    		}))), typeof entry.description === "string" && entry.description !== "" ? h("div", { className: "buka-skills-cardDesc" }, entry.description) : null, confirming === entryKey(entry) ? h("p", { className: "buka-skills-hint" }, entry.managedByNpx === true ? t("confirmNpx") : t("confirmLocal")) : null));
+    		}))), typeof entry.description === "string" && entry.description !== "" ? h("div", {
+    			className: "buka-skills-cardDesc",
+    			title: entry.description
+    		}, entry.description) : null, confirming === entryKey(entry) ? h("p", { className: "buka-skills-hint" }, entry.managedByNpx === true ? t("confirmNpx") : t("confirmLocal")) : null)));
     	});
     	const rootsTip = installedData !== null && Array.isArray(installedData.roots) && installedData.roots.length > 0 ? h("p", { className: "buka-skills-meta" }, installedData.roots.map((root) => root.path).join(" · ")) : null;
+    	const emptyState = h("div", { className: "buka-skills-emptyState" }, h("span", {
+    		className: "buka-skills-emptyIcon",
+    		"aria-hidden": true
+    	}, h(IconSkillOutlineRegular, { size: 28 })), h("p", { className: "buka-skills-emptyTitle" }, t("empty")), h("p", { className: "buka-skills-emptyHint" }, t("emptyHint")), rootsTip);
     	return h("div", { className: "buka-skills-panel" }, h("div", { className: "buka-skills-panelActions" }, checkMessage === null ? null : h("p", {
     		className: "buka-skills-meta",
     		role: "status"
@@ -1530,7 +1613,7 @@ window.__ModuleLoader__.load({
     	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, t("corruptLock"), " ", h("span", { className: "buka-skills-path" }, String(installedData.lock?.path ?? "")))) : null, installedData !== null && installedData.lock?.exists === false ? h("p", { className: "buka-skills-status" }, `${t("noLock")} `, h("span", { className: "buka-skills-path" }, String(installedData.lock?.path ?? ""))) : null, installedData !== null && Array.isArray(installedData.warnings) && installedData.warnings.length > 0 ? h("p", {
     		className: "buka-skills-notice",
     		role: "status"
-    	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("warningsLabel")} `, h("span", { className: "buka-skills-path" }, installedData.warnings.join(" · ")))) : null, installedData === null ? null : rows.length === 0 && !installed.loading ? h(react.Fragment, null, h("p", { className: "buka-skills-empty" }, t("empty")), rootsTip) : h("ul", { className: "buka-skills-cards" }, ...rows));
+    	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("warningsLabel")} `, h("span", { className: "buka-skills-path" }, installedData.warnings.join(" · ")))) : null, installedData === null ? null : rows.length === 0 && !installed.loading ? emptyState : h("ul", { className: "buka-skills-cards" }, ...rows));
     }
     // .build/skills/client/components/save-dialog.js
     /**
@@ -1690,9 +1773,9 @@ window.__ModuleLoader__.load({
     	* 一个节点右侧的三个安装入口，目录与 skill 叶子共用。
     	*
     	* 目录行把「全局安装」换成「全部安装」（装目录下全部 skill），其余两个入口
-    	* 在两种行上含义相同：选一个打工人 / 工作区作为目标。三个按钮在任一安装
+    	* 在两种行上含义相同：选一个执行者 / 工作区作为目标。三个按钮在任一安装
     	* 进行中统一禁用；只有全局入口会在已安装时变成禁用的「全局已安装」，
-    	* 打工人 / 工作区是每次临时选的目标，不做已安装判断。
+    	* 执行者 / 工作区是每次临时选的目标，不做已安装判断。
     	*
     	* @param repo 一条收藏
     	* @param node 目录或 skill 节点
@@ -1719,14 +1802,16 @@ window.__ModuleLoader__.load({
     			disabled: installing !== null || targetInstalling,
     			onClick: onInstall
     		}, installLabel), h(Button, {
-    			variant: "outline",
+    			variant: "ghost",
     			size: "sm",
+    			icon: h(IconUserOutlineRegular, { size: 13 }),
     			"aria-label": `${t("installWorker")} ${node.name}`,
     			disabled: installing !== null || targetInstalling,
     			onClick: () => openTargetDialog("worker", repo, node)
     		}, t("installWorker")), h(Button, {
-    			variant: "outline",
+    			variant: "ghost",
     			size: "sm",
+    			icon: h(IconWorkspaceTreeOutlineRegular, { size: 13 }),
     			"aria-label": `${t("installWorkspace")} ${node.name}`,
     			disabled: installing !== null || targetInstalling,
     			onClick: () => openTargetDialog("workspace", repo, node)
@@ -1751,7 +1836,10 @@ window.__ModuleLoader__.load({
     				className: "buka-skills-treeToggle",
     				"aria-expanded": !collapsed,
     				onClick: () => toggleDir(repo, node.path)
-    			}, h(IconChevronRightOutlineRegular, { size: 12 }), h("span", { className: "buka-skills-treeName" }, node.name), h("span", { className: "buka-skills-treeCount" }, `· ${countSkills(node)}`)), renderActions(repo, node, allSkillsInstalled(node, installedSkillKeys), installing === installKeyOf(repo, node), () => installDir(repo, node))), collapsed ? null : h("ul", { className: "buka-skills-treeGroup" }, ...children.map((child) => renderTreeNode(repo, child))));
+    			}, h(IconChevronRightOutlineRegular, { size: 12 }), h("span", {
+    				className: "buka-skills-treeDirIcon",
+    				"aria-hidden": true
+    			}, h(IconFolderOpenOutlineRegular, { size: 14 })), h("span", { className: "buka-skills-treeName" }, node.name), h("span", { className: "buka-skills-treeCount" }, `· ${countSkills(node)}`)), renderActions(repo, node, allSkillsInstalled(node, installedSkillKeys), installing === installKeyOf(repo, node), () => installDir(repo, node))), collapsed ? null : h("ul", { className: "buka-skills-treeGroup" }, ...children.map((child) => renderTreeNode(repo, child))));
     		}
     		const description = typeof node.description === "string" ? node.description : "";
     		const installed = installedSkillKeys.has(skillKeyOf(node.name));
@@ -1762,7 +1850,10 @@ window.__ModuleLoader__.load({
     		}, h("div", {
     			className: "buka-skills-treeSkill",
     			title: description === "" ? node.path : description
-    		}, h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), renderActions(repo, node, installed, busy, () => installSkill(repo, node))));
+    		}, h("span", {
+    			className: "buka-skills-treeSkillIcon",
+    			"aria-hidden": true
+    		}, h(IconSkillOutlineRegular, { size: 14 })), h("div", { className: "buka-skills-treeSkillMain" }, h("span", { className: "buka-skills-treeSkillName" }, node.name), description === "" ? null : h("span", { className: "buka-skills-treeSkillDesc" }, description)), renderActions(repo, node, installed, busy, () => installSkill(repo, node))));
     	}
     	return {
     		renderTree,
@@ -1819,13 +1910,20 @@ window.__ModuleLoader__.load({
     		return h("li", {
     			className: "buka-skills-card",
     			key: repo.id
-    		}, h("div", { className: "buka-skills-cardHead" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, listable ? h("button", {
+    		}, h("div", { className: "buka-skills-cardHead" }, h("span", { className: "buka-skills-chevronSlot" }, listable ? h("button", {
     			type: "button",
     			className: "buka-skills-chevron",
     			"aria-expanded": expanded,
     			"aria-label": `${expanded ? t("collapseRepo") : t("expandRepo")} ${repo.source}`,
     			onClick: () => toggleRepo(repo)
-    		}, h(IconChevronRightOutlineRegular, { size: 14 })) : null, link === "" ? h("span", { className: "buka-skills-cardTitle" }, repo.source) : h("a", {
+    		}, h(IconChevronRightOutlineRegular, { size: 14 })) : null), h("span", {
+    			className: "buka-skills-cardLead",
+    			"aria-hidden": true
+    		}, h(RepoAvatar, {
+    			source: repo.source,
+    			size: 24,
+    			fallback: h(IconBranchOutlineRegular, { size: 16 })
+    		})), h("div", { className: "buka-skills-cardMain" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, link === "" ? h("span", { className: "buka-skills-cardTitle" }, repo.source) : h("a", {
     			className: "buka-skills-cardTitle buka-skills-cardLink",
     			href: link,
     			target: "_blank",
@@ -1838,10 +1936,13 @@ window.__ModuleLoader__.load({
     			"aria-label": `${t("removeRepo")} ${repo.source}`,
     			onClick: () => removeRepo(repo),
     			disabled: removing !== null
-    		}, t("removeRepo")))), typeof repo.note === "string" && repo.note !== "" ? h("div", { className: "buka-skills-cardDesc" }, repo.note) : null, typeof warning === "string" && warning !== "" ? h("p", {
+    		}, t("removeRepo")))), typeof repo.note === "string" && repo.note !== "" ? h("div", {
+    			className: "buka-skills-cardDesc",
+    			title: repo.note
+    		}, repo.note) : null, typeof warning === "string" && warning !== "" ? h("p", {
     			className: "buka-skills-notice",
     			role: "status"
-    		}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("treeRefreshWarning")} ${warning}`)) : null, expanded && listable ? renderTree(repo) : null));
+    		}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, `${t("treeRefreshWarning")} ${warning}`)) : null, expanded && listable ? renderTree(repo) : null)));
     	});
     	return h("div", { className: "buka-skills-panel" }, saved.error === null ? null : h("p", {
     		className: "buka-skills-failure",
@@ -1852,16 +1953,19 @@ window.__ModuleLoader__.load({
     	}, h(StateDot, { state: "ongoing" }), t("loading")) : null, storeCorrupt ? h("p", {
     		className: "buka-skills-notice",
     		role: "status"
-    	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, t("storeUnreadable"), " ", h("span", { className: "buka-skills-path" }, String(savedData?.file ?? "")))) : null, savedData === null ? null : rows.length === 0 && !saved.loading ? h("p", { className: "buka-skills-empty" }, t("repoEmpty")) : h("ul", { className: "buka-skills-cards" }, ...rows));
+    	}, h(IconWarningOutlineRegular, { size: 16 }), h("span", null, t("storeUnreadable"), " ", h("span", { className: "buka-skills-path" }, String(savedData?.file ?? "")))) : null, savedData === null ? null : rows.length === 0 && !saved.loading ? h("div", { className: "buka-skills-emptyState" }, h("span", {
+    		className: "buka-skills-emptyIcon",
+    		"aria-hidden": true
+    	}, h(IconBranchOutlineRegular, { size: 28 })), h("p", { className: "buka-skills-emptyTitle" }, t("repoEmpty")), h("p", { className: "buka-skills-emptyHint" }, t("repoEmptyHint"))) : h("ul", { className: "buka-skills-cards" }, ...rows));
     }
     // .build/skills/client/components/target-dialog.js
     /**
-    * 「安装到打工人 / 工作区」对话框：读取目标列表、单选，确认后安装。
+    * 「安装到执行者 / 工作区」对话框：读取目标列表、单选，确认后安装。
     *
     * 选中项可以是单个 skill，也可以是目录（装其下全部 skill）；标题下的说明行
     * 分别显示「目标 skill」或「目标目录 · 数量」。
     *
-    * 目标列表来自 Host 的 `GET /buka-skills/targets`：打工人只列智能体且目录
+    * 目标列表来自 Host 的 `GET /buka-skills/targets`：执行者只列智能体且目录
     * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用标识符 / 路径回去
     * 解析一次，所以这里展示的列表只用于选择。
     *
@@ -1920,7 +2024,7 @@ window.__ModuleLoader__.load({
     	}));
     }
     /**
-    * 「安装到打工人 / 工作区」对话框。
+    * 「安装到执行者 / 工作区」对话框。
     *
     * @param props 页面状态与动作
     */
@@ -1976,7 +2080,7 @@ window.__ModuleLoader__.load({
     	const state = useSkillsPageState(t);
     	const { tab, storeCorrupt, loading, notice, setNotice, dialogOpen, adding, source, setSource, note, setNote, addError, targetDialog, targets, targetChoice, targetInstalling, targetError, reload, openSaveDialog, closeSaveDialog, addRepo, switchTab, closeTargetDialog, setTargetChoice, reloadTargets, installToTarget } = state;
     	const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0];
-    	return h("div", { className: "buka-skills-page" }, h("div", { className: "buka-skills-head" }, h("div", { className: "buka-skills-headInner" }, h("div", { className: "buka-skills-heading" }, h("h1", { className: "buka-skills-title" }, t("title"))), h("div", { className: "buka-skills-toolbar" }, h(Tooltip, {
+    	return h("div", { className: "buka-skills-page" }, h("div", { className: "buka-skills-head" }, h("div", { className: "buka-skills-headInner" }, h("div", { className: "buka-skills-heading" }, h("h1", { className: "buka-skills-title" }, t("title")), h("p", { className: "buka-skills-subtitle" }, t("subtitle"))), h("div", { className: "buka-skills-toolbar" }, h(Tooltip, {
     		label: t("refresh"),
     		side: "bottom",
     		delayMs: 500,
@@ -2069,6 +2173,7 @@ window.__ModuleLoader__.load({
     const en = {
     	panel: "Skills",
     	title: "Skills",
+    	subtitle: "Manage the global skills shared by every session, and save the sources you install from.",
     	tabsLabel: "Skill sections",
     	tabInstalled: "Installed",
     	tabRepos: "Saved",
@@ -2076,6 +2181,7 @@ window.__ModuleLoader__.load({
     	loading: "Loading…",
     	loadFailed: "Request failed:",
     	empty: "No global skills are installed.",
+    	emptyHint: "Pick a source in the Saved tab to install one, or run npx skills add in a terminal.",
     	badgeNpx: "npx skills",
     	badgeManual: "manual",
     	uninstall: "Uninstall",
@@ -2092,6 +2198,7 @@ window.__ModuleLoader__.load({
     	corruptLock: "The npx skills lockfile exists but cannot be used, so skills under ~/.agents are shown as manual and cannot be uninstalled here until it is fixed:",
     	warningsLabel: "Some skill directories could not be read:",
     	repoEmpty: "No saved skill repositories yet.",
+    	repoEmptyHint: "Save a repository from the button in the top-right corner to browse and install its skills.",
     	dialogTitle: "Save repository",
     	fieldSource: "Repository",
     	fieldNote: "Note",
@@ -2168,6 +2275,7 @@ window.__ModuleLoader__.load({
     const zh = {
     	panel: "Skills",
     	title: "Skills",
+    	subtitle: "管理对所有会话生效的全局 skills，并收藏常用的来源。",
     	tabsLabel: "Skills 页面分区",
     	tabInstalled: "已安装",
     	tabRepos: "收藏",
@@ -2175,6 +2283,7 @@ window.__ModuleLoader__.load({
     	loading: "正在读取…",
     	loadFailed: "请求失败：",
     	empty: "还没有安装任何全局 skill。",
+    	emptyHint: "在「收藏」里挑一个来源安装，或在终端运行 npx skills add。",
     	badgeNpx: "npx skills",
     	badgeManual: "manual",
     	uninstall: "卸载",
@@ -2191,6 +2300,7 @@ window.__ModuleLoader__.load({
     	corruptLock: "npx skills 的 lockfile 存在却无法使用：~/.agents 下的 skill 暂按手工安装展示，修好它之前不能在这里卸载：",
     	warningsLabel: "部分 skills 目录无法读取：",
     	repoEmpty: "还没有收藏任何仓库。",
+    	repoEmptyHint: "点右上角的「收藏」添加来源，之后就能在这里浏览并安装它的 skills。",
     	dialogTitle: "收藏",
     	fieldSource: "仓库",
     	fieldNote: "备注",
@@ -2212,7 +2322,7 @@ window.__ModuleLoader__.load({
     	installedBadgeGlobal: "全局已安装",
     	installGlobal: "全局安装",
     	installAll: "全部安装",
-    	installWorker: "安装到打工人",
+    	installWorker: "安装到执行者",
     	installWorkspace: "安装到工作区",
     	installing: "安装中…",
     	installedToast: "已安装：",
@@ -2221,21 +2331,21 @@ window.__ModuleLoader__.load({
     	dirAllInstalled: "这个目录下的 skill 都已安装。",
     	installFailed: "安装失败：",
     	installMissing: "仓库列表里已经找不到这个 skill，刷新仓库后再试。",
-    	targetWorkerTitle: "安装到打工人",
+    	targetWorkerTitle: "安装到执行者",
     	targetWorkspaceTitle: "安装到工作区",
     	targetFor: "目标 skill：",
     	targetForDir: "目标目录：",
     	targetLoading: "正在读取目标…",
     	targetLoadFailed: "读取目标失败：",
-    	targetEmptyWorkers: "没有可用的智能体；装好打工人插件并创建打工人后再试。",
+    	targetEmptyWorkers: "没有可用的智能体；装好执行者插件并创建执行者后再试。",
     	targetEmptyWorkspaces: "还没有注册任何工作区。",
-    	targetWorkersUnavailable: "没有找到打工人插件（@buka/dsh-plugin-workers），无法安装到打工人。",
+    	targetWorkersUnavailable: "没有找到执行者插件（@buka/dsh-plugin-workers），无法安装到执行者。",
     	targetWorkspacesUnavailable: "当前运行环境没有工作区注册表，无法安装到工作区。",
     	targetInstall: "安装",
     	targetInstalling: "安装中…",
-    	installedToWorker: "已安装到打工人：",
+    	installedToWorker: "已安装到执行者：",
     	installedToWorkspace: "已安装到工作区：",
-    	installedDirToWorker: "已将该目录下的 skill 安装到打工人：",
+    	installedDirToWorker: "已将该目录下的 skill 安装到执行者：",
     	installedDirToWorkspace: "已将该目录下的 skill 安装到工作区：",
     	expandRepo: "展开 skills",
     	collapseRepo: "收起 skills",
@@ -2267,8 +2377,9 @@ window.__ModuleLoader__.load({
     /**
     * 页面的 CSS 常量。
     *
-    * 结构与 Plugins 页面一致（标题行、Tab 行、960px 内容区、卡片列表），颜色与
-    * 尺寸只用主题 token 和 DSH 的圆角/焦点 token。
+    * 视觉基准是 Plugins 页面（`dsh-client-ui-plugin-manager`）：标题行 + 工具栏
+    * + Tab 行、960px 内容区、卡片列表、40px 图标块、行内标签。颜色与尺寸只用
+    * 主题 token 和 DSH 的圆角/焦点 token，不写死色值。
     *
     * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
     * 「已安装」比视口高、出现滚动条，「收藏」没有；滚动条一出现/一消失，
@@ -2276,46 +2387,59 @@ window.__ModuleLoader__.load({
     * 半个滚动条宽度——切 Tab 时看起来就是整页左右抖一下。`scrollbar-gutter:
     * stable` 常驻预留滚动条槽位，两个 Tab 内容盒等宽，版面不再跟着滚动条跳。
     *
+    * 卡片把「图标块 + 主区（标题行 / 描述 / 展开的树）+ 行内操作」拆开：
+    * 标题行固定 40px 高，与图标块等高，所以展开树时图标不会跟着内容上下跳。
+    *
     * @module @buka/dsh-plugin-skills/client/styles
     */
     /** 页面样式。 */
     const CSS = `
     .buka-skills-page{--buka-skills-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-skills-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden auto;scrollbar-gutter:stable;overscroll-behavior:contain}
     @media (width<=767px){.buka-skills-page{--buka-skills-inset:20px}}
-    .buka-skills-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-skills-inset));max-width:none;margin-inline:calc(-1 * var(--buka-skills-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-skills-inset) 0;background:var(--dsw-alias-bg-base);z-index:1;position:sticky;top:0}
+    .buka-skills-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-skills-inset));max-width:none;margin-inline:calc(-1 * var(--buka-skills-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-skills-inset) 8px;background:var(--dsw-alias-bg-base);border-bottom:0.5px solid var(--dsw-alias-border-l1);z-index:1;position:sticky;top:0}
     .buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:16px}
     .buka-skills-heading{order:1;min-width:0;max-width:100%}
     .buka-skills-title{margin:0;font-size:20px;font-weight:500;line-height:28px}
+    .buka-skills-subtitle{margin:2px 0 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;text-wrap:pretty}
     .buka-skills-toolbar{order:2;display:flex;align-items:center;gap:8px}
     .buka-skills-tabs{flex:100%;order:3;display:flex}
     .buka-skills-tabList{width:fit-content;min-width:240px}
     @media (width<=372px){.buka-skills-tabList{min-width:0}}
-    .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:32px 0 48px}
-    .buka-skills-panel{display:flex;flex-direction:column;gap:24px}
+    .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:24px 0 48px}
+    .buka-skills-panel{display:flex;flex-direction:column;gap:16px}
     .buka-skills-panelActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
     .buka-skills-panelActions>.buka-skills-meta{flex:1 1 auto}
-    .buka-skills-status,.buka-skills-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
+    .buka-skills-status{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
     .buka-skills-statusWithDot{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
     .buka-skills-failure{color:var(--dsw-alias-state-error-primary);align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px;display:flex;flex-wrap:wrap}
     .buka-skills-notice{border-radius:var(--dsw-radius-md);background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-label-secondary);align-items:flex-start;gap:8px;margin:0;padding:10px 12px;font-size:12px;line-height:18px;display:flex}
     .buka-skills-notice>svg{color:var(--dsw-alias-state-warn-primary);flex:none;margin-top:2px}
     .buka-skills-path{font-family:var(--ds-font-family-code);font-size:11px;overflow-wrap:anywhere}
+    .buka-skills-emptyState{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:48px 24px;text-align:center}
+    .buka-skills-emptyIcon{color:var(--dsw-alias-label-caption);display:inline-flex}
+    .buka-skills-emptyTitle{margin:0;color:var(--dsw-alias-label-secondary);font-size:14px;font-weight:500;line-height:20px}
+    .buka-skills-emptyHint{margin:0;max-width:44ch;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;text-wrap:balance}
     .buka-skills-cards{flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;display:flex}
     .buka-skills-card{border-radius:var(--dsw-radius-xl);min-width:0;margin:0 -8px}
-    .buka-skills-cardHead{flex-direction:column;gap:4px;padding:8px;display:flex}
-    .buka-skills-titleRow{justify-content:space-between;align-items:flex-start;gap:8px;min-width:0;display:flex}
+    .buka-skills-cardHead{gap:8px;padding:8px;display:flex;align-items:flex-start}
+    /* 图标列：固定 40px，头像/回退图标在列内水平、垂直居中；标题行与它等高。 */
+    .buka-skills-cardLead{flex:none;justify-content:center;align-items:center;width:40px;min-height:40px;display:inline-flex}
+    .buka-skills-cardMain{flex:1 1 auto;min-width:0;flex-direction:column;gap:4px;display:flex}
+    .buka-skills-titleRow{justify-content:space-between;align-items:center;gap:8px;min-width:0;min-height:40px;display:flex}
     .buka-skills-titleCluster{flex:1 1 auto;flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}
     .buka-skills-titleActions{flex:none;align-items:center;gap:8px;display:inline-flex}
-    .buka-skills-cardTitle{text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;overflow:hidden}
+    .buka-skills-avatar{flex:none;border-radius:50%;object-fit:cover;display:inline-block}
+    .buka-skills-cardTitle{min-width:0;max-width:min(100%,32em);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;overflow:hidden}
     .buka-skills-cardLink{color:inherit;text-decoration:none;cursor:pointer}
     @media (hover:hover){.buka-skills-cardLink:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}}
     .buka-skills-cardLink:focus-visible{border-radius:var(--dsw-radius-sm);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
-    .buka-skills-chevron{border-radius:var(--dsw-radius-sm);width:20px;height:20px;color:var(--dsw-alias-label-caption);cursor:pointer;background:0 0;border:0;flex:none;justify-content:center;align-items:center;margin-right:-2px;padding:0;display:inline-flex}
+    .buka-skills-chevronSlot{flex:none;justify-content:center;align-items:center;width:20px;min-height:40px;display:inline-flex}
+    .buka-skills-chevron{border-radius:var(--dsw-radius-sm);width:20px;height:20px;color:var(--dsw-alias-label-caption);cursor:pointer;background:0 0;border:0;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}
     .buka-skills-chevron>svg{transition:transform .12s ease}
     .buka-skills-chevron[aria-expanded=true]>svg{transform:rotate(90deg)}
     @media (hover:hover){.buka-skills-chevron:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
     .buka-skills-chevron:focus-visible{border-radius:var(--dsw-radius-sm);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-    .buka-skills-tree{margin:2px 0 0;padding:0 0 0 28px;list-style:none;display:flex;flex-direction:column;gap:1px}
+    .buka-skills-tree{margin:2px 0 0 2px;padding:0 0 0 18px;border-left:0.5px solid var(--dsw-alias-border-l1);list-style:none;display:flex;flex-direction:column;gap:1px}
     .buka-skills-treeItem{min-width:0;flex-direction:column;gap:1px;display:flex}
     .buka-skills-treeToggle{box-sizing:border-box;flex:1 1 auto;min-width:0;gap:6px;padding:2px 6px;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-secondary);text-align:left;cursor:pointer;font-size:13px;line-height:20px;display:flex;align-items:center}
     .buka-skills-treeToggle>svg{color:var(--dsw-alias-label-caption);flex:none;transition:transform .12s ease}
@@ -2324,19 +2448,20 @@ window.__ModuleLoader__.load({
     .buka-skills-treeToggle:focus-visible{border-radius:var(--dsw-radius-sm);outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-1px}
     .buka-skills-treeName{min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
     .buka-skills-treeCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px;line-height:18px}
-    .buka-skills-treeGroup{margin:0;padding:0 0 0 16px;list-style:none;flex-direction:column;gap:1px;display:flex}
+    .buka-skills-treeGroup{margin:0;padding:0 0 0 16px;border-left:0.5px solid var(--dsw-alias-border-l1);list-style:none;flex-direction:column;gap:1px;display:flex}
     .buka-skills-treeDir{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 6px;display:flex}
     @media (hover:hover){.buka-skills-treeDir:hover{background:var(--dsw-alias-interactive-bg-hover)}}
     .buka-skills-treeSkill{min-width:0;border-radius:var(--dsw-radius-sm);flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 6px;display:flex}
     @media (hover:hover){.buka-skills-treeSkill:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+    .buka-skills-treeSkillIcon,.buka-skills-treeDirIcon{flex:none;color:var(--dsw-alias-label-caption);display:inline-flex;align-items:center}
     .buka-skills-treeSkillMain{min-width:0;flex:1 1 160px;flex-direction:column;display:flex}
     .buka-skills-treeSkillName{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-size:13px;line-height:20px}
     .buka-skills-treeSkillDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:1;-webkit-box-orient:vertical;font-size:12px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere}
-    .buka-skills-treeSkillAction{flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;display:flex}
+    .buka-skills-treeSkillAction{flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:4px;display:flex}
     .buka-skills-treeArea{flex-direction:column;gap:2px;display:flex}
-    .buka-skills-treeStatus{padding:2px 6px 2px 34px}
-    .buka-skills-treeFailure{gap:8px;padding:2px 6px 2px 34px;display:flex;flex-wrap:wrap;align-items:center}
-    .buka-skills-cardDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:3;-webkit-box-orient:vertical;font-size:13px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere;word-break:break-word}
+    .buka-skills-treeStatus{padding:2px 6px 2px 28px}
+    .buka-skills-treeFailure{gap:8px;padding:2px 6px 2px 28px;display:flex;flex-wrap:wrap;align-items:center}
+    .buka-skills-cardDesc{color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:18px;display:-webkit-box;overflow:hidden;overflow-wrap:anywhere;word-break:break-word}
     .buka-skills-meta{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere}
     .buka-skills-hint{color:var(--dsw-alias-state-warn-primary);margin:2px 0 0;font-size:12px;line-height:18px}
     .buka-skills-danger{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent)}
@@ -2382,7 +2507,7 @@ window.__ModuleLoader__.load({
     *   来源只认仓库根 `skills/` 下（任意层级）的 SKILL.md：打开收藏页后会对
     *   每个可列出 skills 的收藏静默探测仓库类型（`probe=1`，只读仓库树，不阻塞
     *   列表），标题行标出「npx skills」或「不可用」。展开后的每个 skill 右侧有
-    *   三个入口：「全局安装」「安装到打工人」「安装到工作区」。后两个打开对话框，
+    *   三个入口：「全局安装」「安装到执行者」「安装到工作区」。后两个打开对话框，
     *   分别列出 `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
     *   工作区；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾
     *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个

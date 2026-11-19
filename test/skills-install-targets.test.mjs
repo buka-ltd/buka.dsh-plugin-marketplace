@@ -1,9 +1,9 @@
 /**
- * 「安装到打工人 / 工作区」目标解析的单测。
+ * 「安装到执行者 / 工作区」目标解析的单测。
  *
  * 守卫几件容易回归的事：
- * - 目标列表只来自 Host 服务：打工人的机器人、缺目录的条目会被过滤；
- * - 打工人按不可变标识符做键，展示名可以为空；旧版只有 `name` 时退回 `name`；
+ * - 目标列表只来自 Host 服务：执行者的机器人、缺目录的条目会被过滤；
+ * - 执行者按不可变标识符做键，展示名可以为空；旧版只有 `name` 时退回 `name`；
  * - 安装时按标识符 / 路径回登记表重新解析，浏览器传的路径不会直接当工作目录；
  * - 服务缺失、登记表读不了、目录消失都有稳定错误码，页面能给出说明。
  */
@@ -38,7 +38,7 @@ async function makeDir(name) {
   return { root, dir }
 }
 
-test('目标列表：过滤机器人与缺路径的打工人，工作区标题缺省回退目录名', async () => {
+test('目标列表：过滤机器人与缺路径的执行者，工作区标题缺省回退目录名', async () => {
   const { root, dir } = await makeDir('repo')
   try {
     const ctx = fakeContext({
@@ -88,7 +88,7 @@ test('目标列表：过滤机器人与缺路径的打工人，工作区标题�
   }
 })
 
-test('解析打工人：按名字回登记表，机器人与空名字都有错误码', async () => {
+test('解析执行者：按名字回登记表，机器人与空名字都有错误码', async () => {
   const { root, dir } = await makeDir('worker')
   try {
     const ctx = fakeContext({
@@ -230,14 +230,14 @@ test('目标列表：以标识符为键，展示名为空也保留，旧版只�
         { id: 'qa', name: '', path: dir, description: 'QA' },
         { id: 'writer', name: '写作助手', path: dir, description: '' },
       ],
-      '展示名为空不应丢弃打工人；机器人、缺路径、目录不存在与重复标识符仍被过滤，并按键排序',
+      '展示名为空不应丢弃执行者；机器人、缺路径、目录不存在与重复标识符仍被过滤，并按键排序',
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
 })
 
-test('解析打工人：按标识符匹配，名称只作展示，旧版退回 name', async () => {
+test('解析执行者：按标识符匹配，名称只作展示，旧版退回 name', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'buka-skills-targets-'))
   const qaDir = path.join(root, 'qa')
   const writerDir = path.join(root, 'writer')
@@ -291,7 +291,7 @@ test('解析打工人：按标识符匹配，名称只作展示，旧版退回 n
   }
 })
 
-test('弹窗标签：打工人用标识符作键，标签按「名称 · 标识符」消歧', () => {
+test('弹窗标签：执行者用标识符作键，标签按「名称 · 标识符」消歧', () => {
   assert.equal(targetKeyOf('worker', { id: 'qa', name: '' }), 'qa')
   assert.equal(targetKeyOf('worker', { id: 'qa', name: '质量保障' }), 'qa')
   assert.equal(targetKeyOf('worker', { name: '软件工程师' }), '软件工程师')

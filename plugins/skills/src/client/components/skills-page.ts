@@ -82,6 +82,7 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
           'div',
           { className: 'buka-skills-heading' },
           h('h1', { className: 'buka-skills-title' }, t('title')),
+          h('p', { className: 'buka-skills-subtitle' }, t('subtitle')),
         ),
         h(
           'div',
@@ -185,7 +186,7 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
       addError,
       addRepo,
     }),
-    // 「安装到打工人 / 工作区」对话框：打开时才读目标列表，确认后复用同一条
+    // 「安装到执行者 / 工作区」对话框：打开时才读目标列表，确认后复用同一条
     // 安装路由；失败留在框里，安装中不响应关闭。
     renderTargetDialog({
       t,

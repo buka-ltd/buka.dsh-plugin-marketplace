@@ -7,6 +7,13 @@
  * @module @buka/dsh-plugin-skills/client/repo-source
  */
 
+/** GitHub owner 的写法：网页链接、SCP 地址与已经规范化的 `owner/repo`。 */
+const GITHUB_OWNER_PATTERNS = [
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9._-]*)\//iu,
+  /^(?:[A-Za-z0-9._-]+@)?github\.com:([A-Za-z0-9][A-Za-z0-9._-]*)\//iu,
+  /^([A-Za-z0-9][A-Za-z0-9._-]*)\/[A-Za-z0-9._-]+$/u,
+]
+
 /**
  * 把各种 npx 来源写法收敛成可比较的键：`https://github.com/a/b.git`、
  * `github.com/a/b` 与 `a/b` 都是 `a/b`。Host 写进收藏文件的 `id` 也是
@@ -51,6 +58,36 @@ function repoUrl(source: string): string {
 }
 
 /**
+ * GitHub 仓库的 owner 段：GitHub 的仓库头像就是 owner 的头像，所以只从
+ * GitHub 来源里取第一段。本地路径、其它 git 远端、包名与网页书签都没有
+ * 可靠的头像地址，返回空串。
+ *
+ * @param value 来源或来源链接
+ * @returns owner；没有时返回空串
+ */
+function githubOwnerOf(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const text = value.trim()
+  if (text === '') return ''
+  for (const pattern of GITHUB_OWNER_PATTERNS) {
+    const match = pattern.exec(text)
+    if (match?.[1] !== undefined && match[1] !== '') return match[1]
+  }
+  return ''
+}
+
+/**
+ * 仓库图标地址：GitHub 的 owner 头像；没有可靠图标时返回空串，调用方回退到
+ * 内置图标。只拼 GitHub 官方域名，来源里的 owner 已由正则限定字符集。
+ *
+ * @param value 来源或来源链接
+ */
+function repoIconUrl(value: unknown): string {
+  const owner = githubOwnerOf(value)
+  return owner === '' ? '' : `https://github.com/${owner}.png?size=80`
+}
+
+/**
  * 这个来源能不能让 Host 去列 skills，与 Host `repo-store.js` 的
  * `classifyRepoSource()` 对应：`github`、`git`、`local` 三种可以列出，
  * `web`、`package` 只能当书签。
@@ -82,4 +119,4 @@ function isListableSource(source: unknown): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/u.test(text)
 }
 
-export { isListableSource, normalizeRepo, repoLabel, repoUrl }
+export { isListableSource, normalizeRepo, repoIconUrl, repoLabel, repoUrl }

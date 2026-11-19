@@ -1,11 +1,11 @@
 /**
- * 全局之外的安装目标：打工人目录与工作区目录。
+ * 全局之外的安装目标：执行者目录与工作区目录。
  *
- * 收藏页的「安装到打工人 / 安装到工作区」需要两份列表，两份都来自别的插件或
+ * 收藏页的「安装到执行者 / 安装到工作区」需要两份列表，两份都来自别的插件或
  * 宿主服务，不能由浏览器传路径：
  *
- * - 打工人：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
- *   目录存在的打工人；机器人没有目录，装不了项目级 skill。引用键是不可变的
+ * - 执行者：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
+ *   目录存在的执行者；机器人没有目录，装不了项目级 skill。引用键是不可变的
  *   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
  *   `name`。
  * - 工作区：`ctx.workspaceRegistry`（DSH 自带）的 `list()`，取已注册工作区的
@@ -27,7 +27,7 @@ import path from 'node:path'
 import { workerIdentityLabel } from '@buka/plugin-ui/worker-label'
 import type { Context } from '@deepseek-ai/cordis'
 
-/** workers 插件 Host 服务的最小形状；只用到列出打工人。 */
+/** workers 插件 Host 服务的最小形状；只用到列出执行者。 */
 interface WorkersServiceLike {
   list?(): Promise<unknown> | unknown
 }
@@ -37,7 +37,7 @@ interface WorkspaceRegistryLike {
   list?(): unknown
 }
 
-/** 一个可安装的打工人；`id` 是引用键，`name` 是原值为空的展示名。 */
+/** 一个可安装的执行者；`id` 是引用键，`name` 是原值为空的展示名。 */
 export interface WorkerInstallTarget {
   readonly id: string
   readonly name: string
@@ -98,7 +98,7 @@ function optionalService<T>(ctx: Context, name: string): T | undefined {
 }
 
 /**
- * 取一条打工人记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
+ * 取一条执行者记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
  *
  * `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
  * workers 才用它兜底。
@@ -112,7 +112,7 @@ function workerKeyOf(record: Record<string, unknown>): string {
 }
 
 /**
- * 规范化打工人列表：只要智能体、目录存在、标识符与路径都非空的条目。
+ * 规范化执行者列表：只要智能体、目录存在、标识符与路径都非空的条目。
  *
  * workers 插件的 `list()` 返回 `workers` 数组，字段随版本可能增减；这里按字段
  * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
@@ -173,7 +173,7 @@ function normalizeWorkspaces(result: unknown): WorkspaceInstallTarget[] {
 }
 
 /**
- * 读打工人列表；服务缺失时 `available: false`，读取失败时带上原因。
+ * 读执行者列表；服务缺失时 `available: false`，读取失败时带上原因。
  *
  * @param ctx 插件上下文
  */
@@ -224,7 +224,7 @@ export async function listInstallTargets(ctx: Context): Promise<InstallTargetsSn
  * 确认目标目录仍然存在，并把解析结果整理成安装流程使用的形状。
  *
  * @param directory 候选目录
- * @param label 展示标签（打工人按「名称 · 标识符」消歧，工作区用标题）
+ * @param label 展示标签（执行者按「名称 · 标识符」消歧，工作区用标题）
  */
 async function confirmDirectory(directory: string, label: string): Promise<ResolvedInstallTarget> {
   let stat: Awaited<ReturnType<typeof fs.stat>>
@@ -242,7 +242,7 @@ async function confirmDirectory(directory: string, label: string): Promise<Resol
 /**
  * 安装时把浏览器选中的目标解析成一个可信目录。
  *
- * - 打工人按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+ * - 执行者按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
  *   浏览器传的仍是 `name`）；
  * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
  *
@@ -258,14 +258,14 @@ export async function resolveInstallTarget(
   if (request?.target === 'worker') {
     const wanted = typeof request.worker === 'string' ? request.worker.trim() : ''
     if (wanted === '') {
-      return { ok: false, code: 'invalid-target', message: '缺少打工人标识符' }
+      return { ok: false, code: 'invalid-target', message: '缺少执行者标识符' }
     }
     const workers = await readWorkers(ctx)
     if (!workers.available) {
       return {
         ok: false,
         code: 'workers-unavailable',
-        message: '没有找到打工人插件（@buka/dsh-plugin-workers），无法安装到打工人',
+        message: '没有找到执行者插件（@buka/dsh-plugin-workers），无法安装到执行者',
       }
     }
     if (workers.error !== null) {
@@ -276,7 +276,7 @@ export async function resolveInstallTarget(
       return {
         ok: false,
         code: 'unknown-worker',
-        message: `没有找到这个打工人（可能只支持智能体）：${wanted}`,
+        message: `没有找到这个执行者（可能只支持智能体）：${wanted}`,
       }
     }
     return confirmDirectory(found.path, workerIdentityLabel(found))

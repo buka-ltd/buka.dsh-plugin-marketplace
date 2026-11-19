@@ -3,7 +3,7 @@
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **已安装**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；可以检查更新、应用更新，并按来源决定卸载方式；
-- **收藏**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个打工人或某个已注册工作区。
+- **收藏**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个执行者或某个已注册工作区。
 
 页面之外，插件把收藏、仓库内容与按目录检查 / 更新的能力开放成 Host Service `ctx.bukaSkills`，见下方[对外服务](#对外服务host-service)。
 
@@ -94,24 +94,24 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 | 入口         | 行为                                                                                          |
 | ------------ | --------------------------------------------------------------------------------------------- |
 | 全局安装     | 装到 `~/.agents/skills`；两个全局根里已有同名 skill 时变成禁用的「全局已安装」                |
-| 安装到打工人 | 选择框列出智能体（`ctx.bukaWorkers`），装进 `<打工人目录>/.agents/skills` 与 `.claude/skills` |
+| 安装到执行者 | 选择框列出智能体（`ctx.bukaWorkers`），装进 `<执行者目录>/.agents/skills` 与 `.claude/skills` |
 | 安装到工作区 | 选择框列出已注册工作区（`ctx.workspaceRegistry`），装进 `<工作区路径>/.agents/skills`         |
 
 Host 侧的约束：
 
 - 只允许安装**收藏过**的来源；浏览器只传来源与 skill 在仓库里的路径，名字与是否存在以 Host 读到的仓库列表为准；
 - 安装把**原始来源**交给 `installSkills`，lock 里保持上游身份（GitHub 简写 / git URL / 本地路径），不是本插件的克隆缓存路径；
-- 打工人只传标识符、工作区只传路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录；
-- 安装目标库为 `scope: 'global'` + `agents: ['universal']`，项目级为 `scope: 'project'` + `cwd` + `agents`（打工人额外 `claude-code`）；
+- 执行者只传标识符、工作区只传路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录；
+- 安装目标库为 `scope: 'global'` + `agents: ['universal']`，项目级为 `scope: 'project'` + `cwd` + `agents`（执行者额外 `claude-code`）；
 - 所有安装 / 卸载 / 检查 / 更新共用一条串行队列，避免并发写 `skills-lock.json`；
 - 库报告成功但目标目录没有 `SKILL.md` 时按失败上报。
 
-## 打工人页面
+## 执行者页面
 
 workers 插件通过 `ctx.bukaSkills` 提供更新入口（目录由调用方解析后传入）：
 
-- 单个打工人的 Skills 页签有「更新」按钮；
-- 列表页工具栏有「更新全部打工人」：只对智能体、目录存在且有 skill 的 worker 顺序执行，机器人 / 空 skill 的 worker 跳过；单个失败不中断，最后汇总每个 worker 的结果。
+- 单个执行者的 Skills 页签有「更新」按钮；
+- 列表页工具栏有「更新全部执行者」：只对智能体、目录存在且有 skill 的 worker 顺序执行，机器人 / 空 skill 的 worker 跳过；单个失败不中断，最后汇总每个 worker 的结果。
 
 ## 页面与路由
 
@@ -169,14 +169,14 @@ export function apply(ctx) {
 | `src/repo-skills.ts`、`src/repo/**`            | 仓库发现与缓存：只认根 `skills/`，远端浅克隆，本地扫描，请求合并与 TTL 缓存                            |
 | `src/git-source.ts`                            | git 克隆缓存与刷新；刷新失败保留旧克隆并返回 warning                                                   |
 | `src/local-source.ts`                          | 本地目录读取抽象：递归遍历与限定在根目录内的文件读取                                                   |
-| `src/install-targets.ts`                       | 打工人 / 工作区目标解析                                                                                |
+| `src/install-targets.ts`                       | 执行者 / 工作区目标解析                                                                                |
 | `src/routes.ts`、`src/tools.ts`、`src/http.ts` | 包内路由、只读工具与请求 / 响应辅助                                                                    |
 | `src/client/**`                                | 两个 Tab（已安装 / 收藏）、页面状态、请求、词典与样式                                                  |
 | `lib/index.js`、`lib/client.js`                | 构建产物：Host / 浏览器一半的运行文件；不手改                                                          |
 
 ## 已知限制
 
-- 「已安装」页只列出全局根目录；项目级 skills 不在这里列出，由打工人 / 工作区自己负责。
+- 「已安装」页只列出全局根目录；项目级 skills 不在这里列出，由执行者 / 工作区自己负责。
 - 检查 / 更新复用 `skills` CLI 的文本输出（`↑ … has an update` / `✎ … has local changes`），状态解析依赖固定版本 `1.9.0`；升级 `skills` 时要同步核对 `parseCheckOutput()`。
 - 全局检查 / 更新固定写 `~/.agents`；`DSH_AGENTS_HOME` 指到别处时拒绝执行。
 - 本地修改只在项目级（带 `skills-lock.json` 内容哈希）时能识别；全局 lock 不记内容哈希。

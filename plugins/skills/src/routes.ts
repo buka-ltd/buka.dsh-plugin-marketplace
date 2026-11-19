@@ -7,10 +7,10 @@
  * - `POST /buka-skills/uninstall` 卸载一个；
  * - `GET /buka-skills/check` 检查全局 skill 的更新；
  * - `POST /buka-skills/update` 应用可用的更新；
- * - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
+ * - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
  *   （`ctx.workspaceRegistry`）；
  * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
- *   skill）安装到全局、某个打工人目录或某个工作区目录；
+ *   skill）安装到全局、某个执行者目录或某个工作区目录；
  * - `GET /buka-skills/repos` 列出用户收藏的仓库，
  * - `POST /buka-skills/repos` 收藏一个，
  * - `POST /buka-skills/repos/remove` 移除一个，
@@ -42,10 +42,10 @@ const LIST_ROUTE = '/buka-skills/list'
 /** 页面卸载 skill 用的路由。 */
 const UNINSTALL_ROUTE = '/buka-skills/uninstall'
 
-/** 页面读取可安装目标（打工人 / 工作区）用的路由。 */
+/** 页面读取可安装目标（执行者 / 工作区）用的路由。 */
 const TARGETS_ROUTE = '/buka-skills/targets'
 
-/** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 打工人 / 工作区用的路由。 */
+/** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 执行者 / 工作区用的路由。 */
 const INSTALL_ROUTE = '/buka-skills/install'
 
 /** 收藏仓库的列表 / 添加路由。 */
@@ -73,7 +73,7 @@ interface RequestBody {
   /** 目录安装：目录里每个 skill 的仓库路径；与 `path` 二选一。 */
   paths?: unknown
   target?: unknown
-  /** 打工人目标的标识符；旧版 workers 没有 `id` 时是它的名字。 */
+  /** 执行者目标的标识符；旧版 workers 没有 `id` 时是它的名字。 */
   worker?: unknown
   workspace?: unknown
 }
@@ -176,7 +176,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       `buka-skills: POST ${UNINSTALL_ROUTE}`,
     )
 
-    // ---- 可安装目标：打工人 / 工作区 ---------------------------------------
+    // ---- 可安装目标：执行者 / 工作区 ---------------------------------------
     // 两份列表都来自 Host 的登记表（可选的 `bukaWorkers` 服务与 DSH 的
     // `workspaceRegistry`），浏览器只拿到标识符、名称 / 标题与路径，安装时再把
     // 选中的字符串换回可信目录。
@@ -205,7 +205,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
 
     // ---- 从收藏列表一键安装 ------------------------------------------------
     // 只接受收藏过的来源；skill 是否存在、叫什么以 Host 这次读到的仓库列表
-    // 为准（浏览器只传仓库路径）。安装目标默认全局；打工人 / 工作区由
+    // 为准（浏览器只传仓库路径）。安装目标默认全局；执行者 / 工作区由
     // `resolveInstallTarget()` 从登记表解析成目录。三类安装与卸载共用串行队列，
     // 避免同时改写共享的 skills lockfile。
 

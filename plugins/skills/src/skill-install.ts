@@ -1,5 +1,5 @@
 /**
- * 从收藏的仓库把单个 skill 安装到全局、打工人或工作区。
+ * 从收藏的仓库把单个 skill 安装到全局、执行者或工作区。
  *
  * 安装走 `skills` 包的库 API（`installSkills`），而不是运行时 spawn `npx`：
  * 来源解析、下载、lockfile 与各 agent 目录的链接都由库维护。我们只负责三件事：
@@ -14,14 +14,14 @@
  * - **全局**：`~/.agents/skills/<目录名>`，DSH 的 `user-agents` 根，对所有会话
  *   生效；设置了 `DSH_AGENTS_HOME` 指向别处时无法保证库装到 DSH 会扫描的
  *   位置，这种配置下宁可不装。
- * - **打工人**：打工人目录下的 `.agents/skills` 与 `.claude/skills`（workers 插件
+ * - **执行者**：执行者目录下的 `.agents/skills` 与 `.claude/skills`（workers 插件
  *   的项目级 skills 约定）。
  * - **工作区**：工作区目录下的 `.agents/skills`，只对那个项目生效。
  *
  * 安装时把**原始来源**（GitHub 简写 / git URL / 本地路径）交给 `installSkills`，
  * lock 里的来源因此仍是可再解析的上游身份，而不是本插件的克隆缓存路径。
  *
- * 打工人 / 工作区目录由调用方从 Host 的登记表解析后传入，本模块不接触 DSH
+ * 执行者 / 工作区目录由调用方从 Host 的登记表解析后传入，本模块不接触 DSH
  * 服务；除 `install-targets.ts` 的类型外只依赖 Node 内置模块与同目录的纯 Node
  * 模块，便于单独测试。
  *
@@ -52,7 +52,7 @@ export const MAX_GROUP_SKILLS = 200
 /** 安装时指定的 agent：`universal` 读写 `~/.agents/skills`（项目里是 `.agents/skills`）。 */
 export const INSTALL_AGENT = 'universal'
 
-/** 打工人额外落一份 `.claude/skills` 链接。 */
+/** 执行者额外落一份 `.claude/skills` 链接。 */
 export const WORKER_CLAUDE_AGENT = 'claude-code'
 
 /** 库 API 里用到的一小部分选项；显式声明便于测试注入假实现。 */
@@ -105,7 +105,7 @@ export interface SkillInstallResult {
 }
 
 /**
- * 把浏览器选中的打工人 / 工作区解析成一个可信目录。
+ * 把浏览器选中的执行者 / 工作区解析成一个可信目录。
  *
  * 由路由注入，实现见 `src/install-targets.ts`：本模块只依赖 Node 内置模块，
  * 不直接接触 DSH 服务，便于单独测试。
@@ -217,7 +217,7 @@ async function findInstalledElsewhere(
 }
 
 /**
- * 安装前共用的来源 / 名字校验：全局、打工人、工作区三处都必须过这一关。
+ * 安装前共用的来源 / 名字校验：全局、执行者、工作区三处都必须过这一关。
  */
 function checkSourceAndName(
   source: unknown,
@@ -369,13 +369,13 @@ export async function installGlobalSkill({
 }
 
 /**
- * 把单个 skill 从某个来源安装到打工人或工作区目录。
+ * 把单个 skill 从某个来源安装到执行者或工作区目录。
  *
  * 目标目录由调用方（`install-targets.ts`）从 Host 的登记表解析，浏览器不能
- * 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个打工人 /
+ * 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个执行者 /
  * 工作区是正常操作，重复执行交给安装库自己处理。
  *
- * 打工人目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
+ * 执行者目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
  * （`agents: ['universal', 'claude-code']`）；工作区只写 DSH 会扫描的
  * `.agents/skills`，不碰用户其它 agent 目录。
  */
@@ -576,10 +576,10 @@ async function resolveSavedInstall({
 
 /**
  * 页面「安装」按钮的完整流程：校验来源是收藏、skill 在仓库列表里，再按
- * `target` 交给全局安装或某个打工人 / 工作区的项目级安装。
+ * `target` 交给全局安装或某个执行者 / 工作区的项目级安装。
  *
  * 浏览器只传来源与 skill 的仓库路径：名字、是否真的存在都以 Host 这次读到的
- * 仓库列表为准；打工人只传标识符、工作区只传路径，真正的工作目录由
+ * 仓库列表为准；执行者只传标识符、工作区只传路径，真正的工作目录由
  * `resolveTarget()` 从 Host 的登记表解析，避免页面缓存过期或请求被伪造时装错
  * 位置。
  */
@@ -680,7 +680,7 @@ export interface SkillGroupInstallResult {
 }
 
 /**
- * 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的打工人 / 工作区。
+ * 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的执行者 / 工作区。
  *
  * 任何一个失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
  * 有失败时整体 `ok: false`，`message` 列出每个失败的名字与原因。

@@ -138,7 +138,7 @@ async function readBoundedBody(req) {
 }
 // packages/plugin-ui/lib/worker-label.js
 /**
-* 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+* 执行者展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
 *
 * 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
 * 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
@@ -151,7 +151,7 @@ function text(value) {
 	return typeof value === "string" ? value.trim() : "";
 }
 /**
-* 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+* 执行者展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
 *
 */
 function workerDisplayName(worker) {
@@ -174,13 +174,13 @@ function workerIdentityLabel(worker) {
 }
 // .build/skills/install-targets.js
 /**
-* 全局之外的安装目标：打工人目录与工作区目录。
+* 全局之外的安装目标：执行者目录与工作区目录。
 *
-* 收藏页的「安装到打工人 / 安装到工作区」需要两份列表，两份都来自别的插件或
+* 收藏页的「安装到执行者 / 安装到工作区」需要两份列表，两份都来自别的插件或
 * 宿主服务，不能由浏览器传路径：
 *
-* - 打工人：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
-*   目录存在的打工人；机器人没有目录，装不了项目级 skill。引用键是不可变的
+* - 执行者：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
+*   目录存在的执行者；机器人没有目录，装不了项目级 skill。引用键是不可变的
 *   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
 *   `name`。
 * - 工作区：`ctx.workspaceRegistry`（DSH 自带）的 `list()`，取已注册工作区的
@@ -218,7 +218,7 @@ function optionalService(ctx, name) {
 	}
 }
 /**
-* 取一条打工人记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
+* 取一条执行者记录的引用键：非空 `id`；旧版记录没有 `id` 时退回非空 `name`。
 *
 * `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
 * workers 才用它兜底。
@@ -231,7 +231,7 @@ function workerKeyOf(record) {
 	return typeof record.name === "string" ? record.name.trim() : "";
 }
 /**
-* 规范化打工人列表：只要智能体、目录存在、标识符与路径都非空的条目。
+* 规范化执行者列表：只要智能体、目录存在、标识符与路径都非空的条目。
 *
 * workers 插件的 `list()` 返回 `workers` 数组，字段随版本可能增减；这里按字段
 * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
@@ -282,7 +282,7 @@ function normalizeWorkspaces(result) {
 	return [...byPath.values()].sort((left, right) => left.title.localeCompare(right.title));
 }
 /**
-* 读打工人列表；服务缺失时 `available: false`，读取失败时带上原因。
+* 读执行者列表；服务缺失时 `available: false`，读取失败时带上原因。
 *
 * @param ctx 插件上下文
 */
@@ -350,7 +350,7 @@ async function listInstallTargets(ctx) {
 * 确认目标目录仍然存在，并把解析结果整理成安装流程使用的形状。
 *
 * @param directory 候选目录
-* @param label 展示标签（打工人按「名称 · 标识符」消歧，工作区用标题）
+* @param label 展示标签（执行者按「名称 · 标识符」消歧，工作区用标题）
 */
 async function confirmDirectory(directory, label) {
 	let stat;
@@ -377,7 +377,7 @@ async function confirmDirectory(directory, label) {
 /**
 * 安装时把浏览器选中的目标解析成一个可信目录。
 *
-* - 打工人按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+* - 执行者按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
 *   浏览器传的仍是 `name`）；
 * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
 *
@@ -392,13 +392,13 @@ async function resolveInstallTarget(ctx, request) {
 		if (wanted === "") return {
 			ok: false,
 			code: "invalid-target",
-			message: "缺少打工人标识符"
+			message: "缺少执行者标识符"
 		};
 		const workers = await readWorkers(ctx);
 		if (!workers.available) return {
 			ok: false,
 			code: "workers-unavailable",
-			message: "没有找到打工人插件（@buka/dsh-plugin-workers），无法安装到打工人"
+			message: "没有找到执行者插件（@buka/dsh-plugin-workers），无法安装到执行者"
 		};
 		if (workers.error !== null) return {
 			ok: false,
@@ -409,7 +409,7 @@ async function resolveInstallTarget(ctx, request) {
 		if (found === void 0) return {
 			ok: false,
 			code: "unknown-worker",
-			message: `没有找到这个打工人（可能只支持智能体）：${wanted}`
+			message: `没有找到这个执行者（可能只支持智能体）：${wanted}`
 		};
 		return confirmDirectory(found.path, workerIdentityLabel(found));
 	}
@@ -1513,7 +1513,7 @@ async function removeSavedRepo({ homes = resolveHomes(), id } = {}) {
 }
 /** 安装时指定的 agent：`universal` 读写 `~/.agents/skills`（项目里是 `.agents/skills`）。 */
 const INSTALL_AGENT = "universal";
-/** 打工人额外落一份 `.claude/skills` 链接。 */
+/** 执行者额外落一份 `.claude/skills` 链接。 */
 const WORKER_CLAUDE_AGENT = "claude-code";
 /**
 * 库的全局规范副本目录（`~/.agents/skills` 的上级），DSH 的 `user-agents`
@@ -1592,7 +1592,7 @@ async function findInstalledElsewhere(homes, id, name) {
 	return { status: "absent" };
 }
 /**
-* 安装前共用的来源 / 名字校验：全局、打工人、工作区三处都必须过这一关。
+* 安装前共用的来源 / 名字校验：全局、执行者、工作区三处都必须过这一关。
 */
 function checkSourceAndName(source, name) {
 	if (typeof source !== "string" || source.trim() === "") return {
@@ -1728,13 +1728,13 @@ async function installGlobalSkill({ homes = resolveHomes(), canonicalAgentsHome 
 	};
 }
 /**
-* 把单个 skill 从某个来源安装到打工人或工作区目录。
+* 把单个 skill 从某个来源安装到执行者或工作区目录。
 *
 * 目标目录由调用方（`install-targets.ts`）从 Host 的登记表解析，浏览器不能
-* 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个打工人 /
+* 直接指定路径。项目级安装不检查「已安装」：同一个 skill 装进另一个执行者 /
 * 工作区是正常操作，重复执行交给安装库自己处理。
 *
-* 打工人目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
+* 执行者目录按 workers 插件的约定同时落 `.agents/skills` 与 `.claude/skills`
 * （`agents: ['universal', 'claude-code']`）；工作区只写 DSH 会扫描的
 * `.agents/skills`，不碰用户其它 agent 目录。
 */
@@ -1915,10 +1915,10 @@ async function resolveSavedInstall({ homes, catalog, source, target, worker, wor
 }
 /**
 * 页面「安装」按钮的完整流程：校验来源是收藏、skill 在仓库列表里，再按
-* `target` 交给全局安装或某个打工人 / 工作区的项目级安装。
+* `target` 交给全局安装或某个执行者 / 工作区的项目级安装。
 *
 * 浏览器只传来源与 skill 的仓库路径：名字、是否真的存在都以 Host 这次读到的
-* 仓库列表为准；打工人只传标识符、工作区只传路径，真正的工作目录由
+* 仓库列表为准；执行者只传标识符、工作区只传路径，真正的工作目录由
 * `resolveTarget()` 从 Host 的登记表解析，避免页面缓存过期或请求被伪造时装错
 * 位置。
 */
@@ -1975,7 +1975,7 @@ async function installSavedSkill({ homes = resolveHomes(), canonicalAgentsHome =
 	};
 }
 /**
-* 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的打工人 / 工作区。
+* 目录行「安装全部」：把目录里每个 skill 依次装到全局或选中的执行者 / 工作区。
 *
 * 任何一个失败都不会中断后面的，结果按 installed / skipped / failed 分组返回；
 * 有失败时整体 `ok: false`，`message` 列出每个失败的名字与原因。
@@ -2109,10 +2109,10 @@ function requestedSkillPaths(value) {
 * - `POST /buka-skills/uninstall` 卸载一个；
 * - `GET /buka-skills/check` 检查全局 skill 的更新；
 * - `POST /buka-skills/update` 应用可用的更新；
-* - `GET /buka-skills/targets` 列出可安装的打工人（`ctx.bukaWorkers`）与工作区
+* - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
 *   （`ctx.workspaceRegistry`）；
 * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
-*   skill）安装到全局、某个打工人目录或某个工作区目录；
+*   skill）安装到全局、某个执行者目录或某个工作区目录；
 * - `GET /buka-skills/repos` 列出用户收藏的仓库，
 * - `POST /buka-skills/repos` 收藏一个，
 * - `POST /buka-skills/repos/remove` 移除一个，
@@ -2128,9 +2128,9 @@ function requestedSkillPaths(value) {
 const LIST_ROUTE = "/buka-skills/list";
 /** 页面卸载 skill 用的路由。 */
 const UNINSTALL_ROUTE = "/buka-skills/uninstall";
-/** 页面读取可安装目标（打工人 / 工作区）用的路由。 */
+/** 页面读取可安装目标（执行者 / 工作区）用的路由。 */
 const TARGETS_ROUTE = "/buka-skills/targets";
-/** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 打工人 / 工作区用的路由。 */
+/** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 执行者 / 工作区用的路由。 */
 const INSTALL_ROUTE = "/buka-skills/install";
 /** 收藏仓库的列表 / 添加路由。 */
 const REPOS_ROUTE = "/buka-skills/repos";
@@ -4837,9 +4837,9 @@ function registerTools(ctx, deps) {
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
 *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
 *   `GET /buka-skills/check` 检查更新，`POST /buka-skills/update` 应用更新，
-*   `GET /buka-skills/targets` 列出可安装的打工人（可选的 `ctx.bukaWorkers`）与
+*   `GET /buka-skills/targets` 列出可安装的执行者（可选的 `ctx.bukaWorkers`）与
 *   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
-*   里的一个 skill 安装到全局、某个打工人目录或某个工作区目录；
+*   里的一个 skill 安装到全局、某个执行者目录或某个工作区目录；
 *   `GET /buka-skills/repos` 列出用户收藏的仓库，
 *   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
 *   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；

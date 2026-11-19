@@ -7,11 +7,11 @@
  *
  * - 安装走 Host 路由 `POST /buka-skills/install`，请求体只传来源与仓库里的路径，
  *   名字与是否存在由 Host 的仓库列表决定；
- * - skill 叶子右侧固定三个入口：「全局安装」「安装到打工人」「安装到工作区」；
+ * - skill 叶子右侧固定三个入口：「全局安装」「安装到执行者」「安装到工作区」；
  * - 只有全局入口在已安装时变成禁用的「全局已安装」按钮，全局安装中显示状态点；
  * - 已安装按 `npx skills` 的目录名规则归一后与全局安装列表比较，不看来源；
  * - 安装成功只重读「已安装」列表，不重建仓库树；失败用 Toast 提示；
- * - 打工人 / 工作区先读目标列表，确认后带 `target` 请求同一条安装路由。
+ * - 执行者 / 工作区先读目标列表，确认后带 `target` 请求同一条安装路由。
  *
  * `skillKeyOf()` 是纯字符串函数，直接从源码里抽出来求值，用行为断言补住边界。
  */
@@ -135,11 +135,11 @@ test('skill 叶子与目录行共用三个安装入口，目录行的全局入�
     '有安装请求进行中时应禁用安装按钮',
   )
   assert.ok(actions.includes("t('installing')"), '安装中应显示「安装中…」')
-  assert.ok(actions.includes("t('installWorker')"), '缺少「安装到打工人」入口')
+  assert.ok(actions.includes("t('installWorker')"), '缺少「安装到执行者」入口')
   assert.ok(actions.includes("t('installWorkspace')"), '缺少「安装到工作区」入口')
   assert.ok(
     actions.includes("openTargetDialog('worker', repo, node)"),
-    '「安装到打工人」没有打开目标选择框',
+    '「安装到执行者」没有打开目标选择框',
   )
   assert.ok(
     actions.includes("openTargetDialog('workspace', repo, node)"),
@@ -356,7 +356,7 @@ test('中英文词典键完全一致，安装相关文案齐全', () => {
   assert.ok(source.includes("targetInstalling: '安装中…'"), '中文 targetInstalling 文案不对')
 })
 
-test('安装到打工人 / 工作区：先读目标列表，确认后带 target 请求 Host', () => {
+test('安装到执行者 / 工作区：先读目标列表，确认后带 target 请求 Host', () => {
   assert.ok(source.includes("const TARGETS_ROUTE = '/buka-skills/targets'"), '缺少目标列表路由常量')
   const load = section('async function loadTargets(kind)', 'function openTargetDialog(')
   assert.ok(load.includes('requestJson(TARGETS_ROUTE)'), '没有读取目标列表')
@@ -370,16 +370,16 @@ test('安装到打工人 / 工作区：先读目标列表，确认后带 target 
   const install = section('async function installToTarget()', 'function openSaveDialog()')
   assert.ok(install.includes('requestJson(INSTALL_ROUTE, {'), '没有请求 Host 的安装路由')
   assert.ok(install.includes('target: kind'), '请求体没有带安装目标')
-  assert.ok(install.includes('worker: choice'), '打工人目标没有带名字')
+  assert.ok(install.includes('worker: choice'), '执行者目标没有带名字')
   assert.ok(install.includes('workspace: choice'), '工作区目标没有带路径')
-  assert.ok(install.includes("'installedToWorker'"), '缺少安装到打工人的成功文案')
+  assert.ok(install.includes("'installedToWorker'"), '缺少安装到执行者的成功文案')
   assert.ok(install.includes("'installedToWorkspace'"), '缺少安装到工作区的成功文案')
   assert.ok(install.includes("node.type === 'dir'"), '目录目标没有走批量请求')
   assert.ok(
     install.includes('paths: skillLeavesOf(node).map((leaf) => leaf.path)'),
     '目录目标应把全部叶子路径交给 Host',
   )
-  assert.ok(install.includes("'installedDirToWorker'"), '缺少目录安装到打工人的成功文案')
+  assert.ok(install.includes("'installedDirToWorker'"), '缺少目录安装到执行者的成功文案')
   assert.ok(install.includes("'installedDirToWorkspace'"), '缺少目录安装到工作区的成功文案')
   assert.ok(install.includes('setTargetError(text)'), '失败应留在对话框里提示')
   assert.ok(!install.includes('refreshInstalled()'), '项目级安装不该刷新全局已安装列表')
@@ -387,7 +387,7 @@ test('安装到打工人 / 工作区：先读目标列表，确认后带 target 
 
 test('目标选择对话框复用基座 Modal，并列出可选目标', () => {
   assert.ok(source.includes('renderTargetDialog'), '页面没有渲染目标对话框')
-  assert.ok(source.includes("'targetWorkerTitle'"), '缺少打工人对话框标题')
+  assert.ok(source.includes("'targetWorkerTitle'"), '缺少执行者对话框标题')
   assert.ok(source.includes("'targetForDir'"), '目录目标没有单独的说明文案')
   assert.ok(source.includes("'targetWorkspaceTitle'"), '缺少工作区对话框标题')
   assert.ok(source.includes('targetItemsOf(kind, targets.data)'), '没有取目标条目')
