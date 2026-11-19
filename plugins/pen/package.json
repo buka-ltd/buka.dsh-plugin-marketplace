@@ -1,0 +1,41 @@
+{
+  "name": "@buka/dsh-plugin-pen",
+  "version": "0.1.0",
+  "description": "新建会话时勾选「Pen」（带 Pen 图标），这个会话就注入 Pen（pen.dev）的 MCP 工具。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "icon.svg",
+    "assets",
+    "locale/*.json",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.20",
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-mcp-client": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

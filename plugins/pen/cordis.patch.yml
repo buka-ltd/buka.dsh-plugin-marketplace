@@ -1,0 +1,7 @@
+# `@buka/dsh-plugin-pen` 的 bundle 层：把本插件自己插进组成。
+#
+# 只插入一行：Host 一半按会话管理 pen MCP 的连接与工具作用域，浏览器一半
+# 把「Pen」勾选框（带 Pen 图标）注册到新会话框右上角。
+- insert:
+    - id: mcp-buka-pen
+      name: '@buka/dsh-plugin-pen'
