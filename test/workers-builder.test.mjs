@@ -1,5 +1,5 @@
 /**
- * 「打工人」preset 相关纯逻辑的单测：可见性判定（access.js）、
+ * 「执行者」preset 相关纯逻辑的单测：可见性判定（access.js）、
  * 构建请求规范化与创建 / 修改 / 挂载（builder.js）、工具定义与结果映射
  * （build-tool.js）。
  *
@@ -17,22 +17,24 @@ import test from 'node:test'
 import {
   normalizePresets,
   resolveWorkerBuildAccess,
-  resolveWorkerSkillsVisibility,
-} from '../plugins/workers/src/access.ts'
-import { AVATAR_IDS, DEFAULT_AVATAR_ID } from '../plugins/workers/src/avatar.ts'
-import { createWorkerBuildTool, WORKER_BUILD_TOOL_NAME } from '../plugins/workers/src/build-tool.ts'
+} from '../plugins/workflows/src/workers/access.ts'
+import { AVATAR_IDS, DEFAULT_AVATAR_ID } from '../plugins/workflows/src/workers/avatar.ts'
+import {
+  createWorkerBuildTool,
+  WORKER_BUILD_TOOL_NAME,
+} from '../plugins/workflows/src/workers/build-tool.ts'
 import {
   BUILD_ERROR_CODES,
   buildWorker,
   currentMount,
   mountWorker,
   normalizeBuildRequest,
-} from '../plugins/workers/src/builder.ts'
+} from '../plugins/workflows/src/workers/builder.ts'
 import {
   readClaudeLink,
   readWorkerRegistry,
   writeWorkerRegistry,
-} from '../plugins/workers/src/worker-store.ts'
+} from '../plugins/workflows/src/workers/worker-store.ts'
 
 /**
  * 建一个临时根目录。
@@ -130,7 +132,7 @@ test('normalizeBuildRequest：标识符、展示名、头像、AGENTS.md 与 upd
   assert.deepEqual(
     normalizeBuildRequest({
       id: 'news-brief',
-      name: '  新闻 打工人 ',
+      name: '  新闻 执行者 ',
       avatar: 'owl',
       description: '  把新闻\n整理成简报  ',
       agents: '# 角色\n',
@@ -138,7 +140,7 @@ test('normalizeBuildRequest：标识符、展示名、头像、AGENTS.md 与 upd
     }),
     {
       id: 'news-brief',
-      name: '新闻 打工人',
+      name: '新闻 执行者',
       nameProvided: true,
       avatar: 'owl',
       description: '把新闻 整理成简报',
@@ -206,8 +208,8 @@ test('resolveWorkerBuildAccess：只放行点名 preset 的根会话，服务缺
     ['fresh', { id: 'fresh', header: {} }],
   ])
   const presets = new Map([
-    ['root', 'worker-builder'],
-    ['child', 'worker-builder'],
+    ['root', 'workflow-orchestrator'],
+    ['child', 'workflow-orchestrator'],
     ['other', 'standard'],
     ['fresh', null],
   ])
@@ -215,10 +217,14 @@ test('resolveWorkerBuildAccess：只放行点名 preset 的根会话，服务缺
     sessions: { get: (id) => sessions.get(id) },
     agentPresets: { presetForSession: (session) => presets.get(session.id) ?? null },
   }
-  const access = (agentId, allowed = ['worker-builder']) =>
+  const access = (agentId, allowed = ['workflow-orchestrator']) =>
     resolveWorkerBuildAccess({ allowed, agentId, ...services })
 
-  assert.deepEqual(access('root'), { visible: true, preset: 'worker-builder', reason: 'allowed' })
+  assert.deepEqual(access('root'), {
+    visible: true,
+    preset: 'workflow-orchestrator',
+    reason: 'allowed',
+  })
   assert.deepEqual(access('child'), { visible: false, preset: null, reason: 'child-session' })
   assert.deepEqual(access('other'), { visible: false, preset: 'standard', reason: 'denied' })
   assert.deepEqual(access('fresh'), { visible: false, preset: null, reason: 'no-preset' })
@@ -229,11 +235,14 @@ test('resolveWorkerBuildAccess：只放行点名 preset 的根会话，服务缺
   assert.deepEqual(access('other', []), { visible: true, preset: null, reason: 'open' })
 
   // 服务不可用：写操作收紧（与工作流插件的「保持可见」不同）。
-  assert.deepEqual(resolveWorkerBuildAccess({ allowed: ['worker-builder'], agentId: 'root' }), {
-    visible: false,
-    preset: null,
-    reason: 'unavailable',
-  })
+  assert.deepEqual(
+    resolveWorkerBuildAccess({ allowed: ['workflow-orchestrator'], agentId: 'root' }),
+    {
+      visible: false,
+      preset: null,
+      reason: 'unavailable',
+    },
+  )
   assert.deepEqual(resolveWorkerBuildAccess({ allowed: [] }), {
     visible: true,
     preset: null,
@@ -241,61 +250,19 @@ test('resolveWorkerBuildAccess：只放行点名 preset 的根会话，服务缺
   })
   assert.equal(resolveWorkerBuildAccess().reason, 'open')
 
-  assert.deepEqual(normalizePresets([' worker-builder ', '', 42, 'standard']), [
-    'worker-builder',
+  assert.deepEqual(normalizePresets([' workflow-orchestrator ', '', 42, 'standard']), [
+    'workflow-orchestrator',
     'standard',
   ])
-  assert.deepEqual(normalizePresets('worker-builder'), [])
+  assert.deepEqual(normalizePresets('workflow-orchestrator'), [])
 })
 
-test('resolveWorkerSkillsVisibility：工作流编排 preset 固定看不到技能清单，识别不出调用方时保持可见', () => {
-  const sessions = new Map([
-    ['orchestrator', { id: 'orchestrator', header: {} }],
-    ['builder', { id: 'builder', header: {} }],
-    ['fresh', { id: 'fresh', header: {} }],
-  ])
-  const presets = new Map([
-    ['orchestrator', 'workflow-orchestrator'],
-    ['builder', 'worker-builder'],
-    ['fresh', null],
-  ])
-  const services = {
-    sessions: { get: (id) => sessions.get(id) },
-    agentPresets: { presetForSession: (session) => presets.get(session.id) ?? null },
-  }
-  const visibility = (agentId) => resolveWorkerSkillsVisibility({ agentId, ...services })
-
-  // 固定规则：随包发布的工作流编排 preset 看不到技能清单，其他 preset 正常可见。
-  assert.deepEqual(visibility('orchestrator'), {
-    visible: false,
-    preset: 'workflow-orchestrator',
-    reason: 'hidden',
-  })
-  assert.deepEqual(visibility('builder'), {
-    visible: true,
-    preset: 'worker-builder',
-    reason: 'visible',
-  })
-  assert.deepEqual(visibility('fresh'), { visible: true, preset: null, reason: 'no-preset' })
-  assert.deepEqual(visibility('missing'), { visible: true, preset: null, reason: 'no-session' })
-  assert.equal(visibility('').reason, 'no-session')
-
-  // 只读信息的收窄：识别不出调用方时保持可见（与写操作的收紧策略不同）。
-  assert.deepEqual(resolveWorkerSkillsVisibility({ agentId: 'orchestrator' }), {
-    visible: true,
-    preset: null,
-    reason: 'unavailable',
-  })
-  assert.equal(resolveWorkerSkillsVisibility().reason, 'unavailable')
-  assert.equal(resolveWorkerSkillsVisibility().visible, true)
-})
-
-test('buildWorker：新建打工人写目录、登记、AGENTS.md、CLAUDE.md 链接并挂载', async () => {
+test('buildWorker：新建执行者写目录、登记、AGENTS.md、CLAUDE.md 链接并挂载', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
     const registry = fakeWorkspaceRegistry()
-    const agents = '# 新闻简报打工人\n\n## 角色\n\n每天把行业新闻整理成三条结论。\n'
+    const agents = '# 新闻简报执行者\n\n## 角色\n\n每天把行业新闻整理成三条结论。\n'
     const result = await buildWorker({
       ...store,
       id: 'brief',
@@ -352,13 +319,13 @@ test('buildWorker：不传头像时自动分配，不传 AGENTS.md 时用模板'
     assert.ok(AVATAR_IDS.includes(result.worker.avatar))
     const template = await fs.readFile(path.join(result.worker.path, 'AGENTS.md'), 'utf8')
     assert.ok(template.startsWith('# AGENTS.md'))
-    assert.ok(template.includes('writer'), '模板里带打工人名字')
+    assert.ok(template.includes('writer'), '模板里带执行者名字')
   } finally {
     await removeRoot(root)
   }
 })
 
-test('buildWorker：同名打工人没有 update 时拒绝且不覆盖现有文件', async () => {
+test('buildWorker：同名执行者没有 update 时拒绝且不覆盖现有文件', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
@@ -448,7 +415,7 @@ test('buildWorker：update 只改传入的字段，目录、创建时间与登�
     })
     assert.equal(fourth.updated, false)
     assert.equal(fourth.created, false)
-    assert.equal(registry.created.length, 1, '已挂载的打工人不会再 create 一次')
+    assert.equal(registry.created.length, 1, '已挂载的执行者不会再 create 一次')
 
     // update 用于不存在的名字时按新建处理。
     const created = await buildWorker({
@@ -525,7 +492,7 @@ test('mountWorker / currentMount：按规范路径判断是否已挂载，失败
     })
     assert.equal(reused.created.length, 0)
 
-    // 没有 create 能力：打工人仍然可用，但报告未挂载。
+    // 没有 create 能力：执行者仍然可用，但报告未挂载。
     const readOnly = { list: () => [] }
     assert.deepEqual(await mountWorker({ workspaceRegistry: readOnly, workerPath }), {
       mounted: false,
@@ -745,7 +712,7 @@ test('createWorkerBuildTool：assertAccess 抛错时不执行构建', async () =
     defineTool: (definition) => definition,
     avatarIds: AVATAR_IDS,
     assertAccess: () => {
-      throw new Error('only the worker-builder preset')
+      throw new Error('only the workflow-orchestrator preset')
     },
     runBuild: async () => {
       ran = true
@@ -754,7 +721,7 @@ test('createWorkerBuildTool：assertAccess 抛错时不执行构建', async () =
   })
   await assert.rejects(
     () => tool.execute({ id: 'writer' }, { agent: { id: 'other' } }),
-    /worker-builder/,
+    /workflow-orchestrator/,
   )
   assert.equal(ran, false)
 })
@@ -768,26 +735,31 @@ test('createWorkerBuildTool：缺少依赖时直接报错，避免注册出半�
   )
 })
 
-test('bundle 补丁随插件发布 worker-builder preset，且与 Config 默认名单一致', () => {
+test('bundle 补丁随插件发布唯一的 Workflow 预设，且与 Config 默认名单一致', () => {
   const patch = readFileSync(
-    new URL('../plugins/workers/cordis.patch.yml', import.meta.url),
+    new URL('../plugins/workflows/cordis.patch.yml', import.meta.url),
     'utf8',
   )
-  assert.match(patch, /- id: preset-worker-builder/)
+  assert.match(patch, /- id: preset-workflow-orchestrator/)
   assert.match(patch, /name: '@deepseek-ai\/dsh-agent-preset'/)
-  assert.match(patch, /config:\n\s+id: worker-builder/)
-  assert.match(patch, /name: 打工人/)
-  assert.match(patch, /order: 10/)
+  assert.match(patch, /config:\n\s+id: workflow-orchestrator/)
+  assert.match(patch, /name: Workflow/)
+  assert.match(patch, /order: 20/)
+  // 旧的「执行者」预设随合并删除，只剩一个预设行。
+  assert.equal(patch.includes('- id: preset-worker-builder'), false)
 
-  const index = readFileSync(new URL('../plugins/workers/src/index.ts', import.meta.url), 'utf8')
-  assert.match(index, /const DEFAULT_BUILDER_PRESETS = \['worker-builder'\]/)
+  const index = readFileSync(
+    new URL('../plugins/workflows/src/workers/index.ts', import.meta.url),
+    'utf8',
+  )
+  assert.match(index, /const DEFAULT_BUILDER_PRESETS = \['workflow-orchestrator'\]/)
 })
 
 test('package.json 的 files 用 lib 覆盖全部产物，避免发布时漏文件', () => {
   const pkg = JSON.parse(
-    readFileSync(new URL('../plugins/workers/package.json', import.meta.url), 'utf8'),
+    readFileSync(new URL('../plugins/workflows/package.json', import.meta.url), 'utf8'),
   )
-  const modules = readdirSync(new URL('../plugins/workers/lib', import.meta.url)).filter((name) =>
+  const modules = readdirSync(new URL('../plugins/workflows/lib', import.meta.url)).filter((name) =>
     name.endsWith('.js'),
   )
   assert.ok(modules.length > 0)
@@ -957,7 +929,7 @@ test('buildWorker：update 必须显式；展示名可重复；标识符冲突�
         }),
       (error) => error.code === BUILD_ERROR_CODES.workerExists,
     )
-    // 展示名不要求唯一：与另一个打工人同名是允许的，id 仍是定位键。
+    // 展示名不要求唯一：与另一个执行者同名是允许的，id 仍是定位键。
     const sameDisplay = await buildWorker({
       ...store,
       id: 'writer',
@@ -1013,7 +985,7 @@ test('buildWorker：update 必须显式；展示名可重复；标识符冲突�
     const created = await buildWorker({
       ...store,
       id: 'fresh',
-      name: '新打工人',
+      name: '新执行者',
       update: true,
       workspaceRegistry: registry,
     })
@@ -1024,7 +996,7 @@ test('buildWorker：update 必须显式；展示名可重复；标识符冲突�
   }
 })
 
-test('buildWorker：改展示名与头像 / 职责 / AGENTS.md 同一次调用；未挂载的打工人更新后挂载', async () => {
+test('buildWorker：改展示名与头像 / 职责 / AGENTS.md 同一次调用；未挂载的执行者更新后挂载', async () => {
   const root = await makeRoot()
   try {
     const store = storeOf(root)
@@ -1056,7 +1028,7 @@ test('buildWorker：改展示名与头像 / 职责 / AGENTS.md 同一次调用�
     )
     assert.equal(renamed.worker.createdAt, first.worker.createdAt)
 
-    // 未挂载的打工人在 update 后会按原目录重新挂载，标题用新的展示名。
+    // 未挂载的执行者在 update 后会按原目录重新挂载，标题用新的展示名。
     const loose = await buildWorker({ ...store, id: 'loose', name: '散工' })
     assert.equal(loose.mounted, false)
     const mountAfterRename = await buildWorker({

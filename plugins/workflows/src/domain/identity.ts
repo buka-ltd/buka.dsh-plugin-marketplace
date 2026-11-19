@@ -1,5 +1,5 @@
 /**
- * 打工人引用的读取：v8 写 `id`，v7 作业快照写 `name`。
+ * 执行者引用的读取：v8 写 `id`，v7 作业快照写 `name`。
  *
  * 阶段 1 只做身份模型：旧快照里的 `name` 字段保存的就是当时的引用键（老打工
  * 人的标识符 = 原名字），所以读取时按 `id ?? name` 兜底即可，不需要迁移作业
@@ -18,9 +18,9 @@ interface WorkerRefLike {
 }
 
 /**
- * 取一条打工人引用的标识符。
+ * 取一条执行者引用的标识符。
  *
- * @param value 执行者、任务执行者或交回方式
+ * @param value 主体、任务主体或交回方式
  * @returns 标识符；两边都为空时是 null
  */
 export function workerRef(value: WorkerRefLike | null | undefined): string | null {
@@ -32,10 +32,10 @@ export function workerRef(value: WorkerRefLike | null | undefined): string | nul
 }
 
 /**
- * 取岗位执行者的标识符。
+ * 取岗位主体的标识符。
  *
- * @param executor 岗位执行者
- * @returns 打工人标识符；人是 null
+ * @param executor 岗位主体
+ * @returns 执行者标识符；人是 null
  */
 export function executorRef(executor: ExecutorSpec | null | undefined): string | null {
   if (executor === null || executor === undefined) return null
@@ -45,15 +45,15 @@ export function executorRef(executor: ExecutorSpec | null | undefined): string |
 }
 
 /**
- * 取任务钉住的执行者的标识符。
+ * 取任务钉住的主体的标识符。
  *
- * @param executor 任务执行者
- * @returns 打工人标识符；人或会话是 null
+ * @param executor 任务主体
+ * @returns 执行者标识符；人或会话是 null
  */
 export function storedExecutorRef(executor: StoredExecutor | null | undefined): string | null {
   if (executor === null || executor === undefined) return null
   const kind = (executor as { kind?: string }).kind
-  // 人 / 会话没有打工人标识符；旧快照的 kind: "robot" 仍按打工人处理。
+  // 人 / 会话没有执行者标识符；旧快照的 kind: "robot" 仍按执行者处理。
   if (kind === 'human' || kind === 'session') return null
   return workerRef(executor)
 }

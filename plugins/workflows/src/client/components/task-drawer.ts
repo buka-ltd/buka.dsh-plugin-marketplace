@@ -83,7 +83,7 @@ export function renderTaskDrawer(page: AppContext): React.ReactElement | null {
   )
 }
 
-/** 头部第二行：岗位 · 入站通道 · 代办 / 执行者。 */
+/** 头部第二行：岗位 · 入站通道 · 代办 / 主体。 */
 function taskMeta(page: AppContext, task: TaskDetail): string {
   const { t } = page
   const position = task.positionLabel ?? task.position ?? ''
@@ -94,7 +94,7 @@ function taskMeta(page: AppContext, task: TaskDetail): string {
   return [position, channel, renderTaskActor(page, task)].filter((part) => part !== '').join(' · ')
 }
 
-/** 任务岗位对应的打工人头像。 */
+/** 任务岗位对应的执行者头像。 */
 function executorAvatar(page: AppContext, task: TaskDetail): string | undefined {
   if (task.position === undefined || task.position === '') return undefined
   const definition = mergedDefinition(

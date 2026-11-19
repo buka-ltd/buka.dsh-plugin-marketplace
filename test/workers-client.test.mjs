@@ -1,12 +1,14 @@
 /**
- * @buka/dsh-plugin-workers 浏览器一半的渲染冒烟测试。
+ * 合并包浏览器一半的执行者页渲染冒烟测试。
  *
- * 直接 import `src/client/index.ts`（Node 负责剥类型），用 `module.registerHooks`
- * 把 `react` / `@buka/plugin-ui` / `@deepseek-ai/dsh-client-ui-primitives` 换成
+ * 直接 import `src/client/index.ts`（合并后的入口，注册唯一的首页，顶部两个
+ * 页签：工作流 / 执行者；Node 负责剥类型），用 `module.registerHooks` 把
+ * `react` / `@buka/plugin-ui` / `@deepseek-ai/dsh-client-ui-primitives` 换成
  * 最小桩：页面组件只在渲染期用 `React.createElement`、`useState`、`useEffect`
  * 与基座按钮 / 标签，所以不需要构建 `lib/client.js` 也能抓到渲染函数里的运行时
- * 错误。随后按页面的 `useState` 顺序注入状态，直接调用注册到 `main` 的组件，
- * 检查列表卡片与各对话框是否按状态渲染。
+ * 错误。随后按页面的 `useState` 顺序注入状态（首页页签排第 0 位，执行者页状态
+ * 从第 1 位开始），直接调用注册到 `main` 的首页组件并停在执行者页签，检查列表
+ * 卡片与各对话框是否按状态渲染。
  */
 
 import assert from 'node:assert/strict'
@@ -17,20 +19,28 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-const CLIENT_PATH = path.resolve('plugins/workers/src/client/index.ts')
+const CLIENT_PATH = path.resolve('plugins/workflows/src/client/index.ts')
 
 /** 浏览器一半源码里用到的全部基座导出；桩模块必须静态导出这些名字。 */
 const PRIMITIVE_NAMES = [
   'Button',
+  'CodeBlock',
+  'FileTypeIcon',
   'IconChevronRightOutlineRegular',
+  'IconCloseOutlineRegular',
+  'IconDownloadOutlineRegular',
   'IconEditOutlineRegular',
   'IconFolderOpenOutlineRegular',
+  'IconInfoOutlineRegular',
   'IconNewChatOutlineRegular',
   'IconPlusOutlineRegular',
   'IconRefreshOutlineRegular',
+  'IconSettingsOutlineRegular',
   'IconTrashOutlineRegular',
   'IconWarningOutlineRegular',
   'Input',
+  'MarkdownText',
+  'ReadBlock',
   'Modal',
   'SegmentedTabs',
   'StateDot',
@@ -56,6 +66,7 @@ writeFileSync(
     "  Fragment: 'fragment',",
     '  useState: (initial) => globalThis.__dshUseState(initial),',
     '  useEffect: () => {},',
+    '  useRef: (value) => ({ current: value }),',
     '}',
     'export default React',
     '',
@@ -70,6 +81,7 @@ writeFileSync(
     'export const messageOf = (failure) =>',
     '  failure instanceof Error ? failure.message : String(failure ?? "")',
     `export { workerDisplayName, workerIdentityLabel } from '${realWorkerLabel}'`,
+    "export const TabLabel = (props) => globalThis.__dshH('span', { className: 'x-tabLabel' }, props.text)",
     'export const requestJson = async () => {',
     '  throw new Error("client test: network is disabled")',
     '}',
@@ -82,6 +94,8 @@ writeFileSync(
     '// 基座组件桩：每个导出把 props 交给测试里的分发器，由它返回可检查的元素。',
     'const primitive = (name) => (props) => globalThis.__dshPrimitive(name, props)',
     ...PRIMITIVE_NAMES.map((name) => `export const ${name} = primitive(${JSON.stringify(name)})`),
+    'export const languageForPath = (value) =>',
+    "  typeof value === 'string' && value.includes('.') ? value.split('.').pop() : ''",
     '',
   ].join('\n'),
 )
@@ -128,7 +142,12 @@ function walk(node, visit) {
   }
   if (typeof node !== 'object') return
   if (typeof node.type === 'function') {
-    walk(node.type({ ...node.props, children: node.children }), visit)
+    // 函数组件只展开一次并缓存：首页包裹了执行者页组件，同一棵树被反复
+    // 遍历时不能再消费页面内部的 useState（第二次展开会越界回落到初值）。
+    if (node.__walkExpanded === undefined) {
+      node.__walkExpanded = node.type({ ...node.props, children: node.children })
+    }
+    walk(node.__walkExpanded, visit)
     return
   }
   if (node.type === 'fragment') {
@@ -268,6 +287,14 @@ async function loadClient() {
     if (name === 'Tag') return TagStub(props)
     if (name === 'Tooltip') return TooltipStub(props)
     if (name === 'SegmentedTabs') return SegmentedTabsStub(props)
+    if (name === 'ReadBlock') {
+      return h(
+        'div',
+        { className: 'x-readBlock', 'data-label': props.label },
+        ...(props.lines ?? []).map((line) => h('div', { className: 'x-readBlockLine' }, line.text)),
+      )
+    }
+    if (name === 'FileTypeIcon') return IconStub()
     if (name === 'StateDot') return StateDotStub(props)
     if (name === 'Toast') return ToastStub(props)
     return IconStub()
@@ -285,6 +312,8 @@ async function loadClient() {
   const components = {}
   let clientModule = null
   let css = ''
+  /** 首页注册时 `inject` 工厂的返回值：页面收到的 props 就是这一份。 */
+  let injectedProps = {}
 
   globalThis.document = {
     createElement() {
@@ -316,24 +345,40 @@ async function loadClient() {
           fn()
         },
         register(options, component) {
-          components[options.name === 'main' ? 'page' : 'icon'] = component
+          // 合并后的 client 只注册一个首页（两个页签）；测试取它并停在执行者页签。
+          const key = options.key ?? options.id ?? (options.name === 'main' ? 'page' : 'icon')
+          components[key] = component
+          if (typeof options.inject === 'function') injectedProps = options.inject()
           return () => {}
         },
       },
     })
-    assert.equal(typeof components.page, 'function', 'client should register a main page component')
+    assert.equal(
+      typeof components['buka-workflows'],
+      'function',
+      'client should register the merged home page component',
+    )
     return {
       css: () => css,
+      /** 首页注册时注入的 props（`getService` / `workersT`）。 */
+      injected: () => injectedProps,
       /**
-       * 用预设的 state 顺序渲染一次页面。
+       * 用预设的 state 顺序渲染一次首页（停在执行者页签）。
        *
        * @param {Array<any>} states
        * @returns {any}
        */
       render(states) {
-        globalThis.__dshStateQueue = [...states]
+        // 首页（HomePage）的页签 useState 占第 0 位，执行者页状态从第 1 位开始。
+        globalThis.__dshStateQueue = ['worker', ...states]
         globalThis.__dshStateIndex = 0
-        return components.page({ t: (key) => zh[key] ?? key, getService: () => null })
+        return components['buka-workflows']({
+          t: (key) => zh[key] ?? key,
+          // 执行者页的 `t` 来自 main 插槽的 inject；这里刻意不再兜底成正确翻译，
+          // 让「inject 多包一层函数」这类问题在测试里直接暴露成空文案。
+          workersT: injectedProps.workersT,
+          getService: () => null,
+        })
       },
     }
   } finally {
@@ -343,10 +388,13 @@ async function loadClient() {
 
 /** 截图 / 断言用到的中文文案。 */
 const zh = {
-  title: '打工人',
+  topTabWorkflow: '工作流',
+  topTabWorker: '执行者',
+  topTabsAria: '主视图',
+  title: '执行者',
   refresh: '刷新',
-  create: '创建打工人',
-  empty: '还没有打工人。',
+  create: '创建执行者',
+  empty: '还没有执行者。',
   mountedBadge: '已挂载',
   unmountedBadge: '未挂载',
   skillsBadge: '{n} skills',
@@ -357,9 +405,8 @@ const zh = {
   robotReadOnly: '机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
-  descriptionHint: '工作流会读它来决定是否把节点交给这个打工人；用一句话写清这个打工人负责什么。',
-  tabDescription: '职责',
-  tabModel: '模型',
+  descriptionHint: '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。',
+  tabSettings: '设置',
   modelTitle: '模型',
   modelHint:
     '选择这个智能体新开会话时使用的模型；已有会话保留自己的模型，可以在会话里用 /model 切换。',
@@ -386,15 +433,15 @@ const zh = {
   createFieldId: '标识符',
   createIdPlaceholder: '标识符，如 writer',
   createIdHint:
-    '必填，创建后不可修改；它同时是打工人目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
+    '必填，创建后不可修改；它同时是执行者目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
   createFieldName: '名称（可选）',
   createNamePlaceholder: '展示名，如 写作助手',
   createNameHint: '只用于展示，可随时修改；留空时显示标识符。',
-  createEmptyId: '先填一个打工人标识符。',
+  createEmptyId: '先填一个执行者标识符。',
   errInvalidId:
     '标识符不合法：需匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -），且创建后不可修改。',
   errIdTaken: '这个标识符已被占用，请换一个。',
-  rename: '重命名打工人',
+  rename: '重命名执行者',
   renameLabel: '重命名',
   renameFieldLabel: '名称',
   renameHint: '只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。',
@@ -403,30 +450,52 @@ const zh = {
   renamed: '已重命名为：',
   mount: '挂载',
   delete: '删除',
-  tabsLabel: '打工人详情页签',
-  tabAgents: 'AGENTS.md',
+  tabsLabel: '执行者详情页签',
+  tabFiles: '文件',
   tabSkills: '技能',
-  deleteTitle: '删除打工人',
+  filesTitle: '文件',
+  filesHint: '以只读方式浏览执行者目录；内容显示在右侧，编辑与保存交给 builder 工具。',
+  filesTreeAria: '执行者目录树',
+  filesSelectFile: '选择一个文件查看内容。',
+  filesEmpty: '这个执行者目录里还没有文件。',
+  filesLoadFailed: '读取目录失败：',
+  filesReadFailed: '读取文件失败：',
+  filesTooLarge: '文件大小 {n}，超过 256 KiB 的预览上限；请用外部编辑器打开。',
+  filesBinary: '这是二进制文件，不提供预览。',
+  filesEmptyFile: '这个文件是空的。',
+  filesTruncated: '目录较大，只展示了一部分。',
+  filesLinesTruncated: '文件较长，只显示前 {n} 行。',
+  filesCode: '代码',
+  filesWrap: '自动换行',
+  filesUnwrap: '取消换行',
+  filesCopy: '复制',
+  filesCopied: '已复制',
+  filesWindow: '显示 {shown} / {total} 行',
+  filesCollapseAria: '折叠隐藏行',
+  filesExpandAria: '展开 {n} 个隐藏行',
+  filesCollapse: '折叠',
+  filesExpand: '展开',
+  deleteTitle: '删除执行者',
   deleteConfirm: '永久删除',
   deleting: '正在删除…',
   deleteHardDeleteNote:
-    '删除是硬删：登记条目、打工人目录与工作区注册会一起消失。目录里的 AGENTS.md 与项目 skills 也会一起消失，没有回收站。',
+    '删除是硬删：登记条目、执行者目录与工作区注册会一起消失。目录里的 AGENTS.md 与项目 skills 也会一起消失，没有回收站。',
   deleteImpactLoading: '正在读取删除影响面…',
   deleteImpactFailed: '读取删除影响面失败：',
   deleteDir: '将被删除的目录',
-  deleteMounted: '这个打工人已挂载，工作区注册会一起摘掉。',
-  deleteNotMounted: '这个打工人没有挂载，没有工作区注册需要摘掉。',
+  deleteMounted: '这个执行者已挂载，工作区注册会一起摘掉。',
+  deleteNotMounted: '这个执行者没有挂载，没有工作区注册需要摘掉。',
   deleteFinishedJobs: '引用它的已结束作业数：',
   deleteAffectedWorkflows: '会因此变成不可用的工作流：',
-  deleteNoWorkflows: '没有工作流引用这个打工人。',
+  deleteNoWorkflows: '没有工作流引用这个执行者。',
   deleteOpenJob: '打开作业',
   deleteBlockedTitle: '运行中的作业阻塞删除',
   deleteBlockedByJobs:
-    '有引用这个打工人的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。',
+    '有引用这个执行者的运行中作业。请先在这些作业的作业页主动终止它们，再回来删除；不提供强制删除。',
 }
 
 /**
- * 一条打工人记录。
+ * 一条执行者记录。
  *
  * @param {string} id
  * @param {string} avatar
@@ -460,7 +529,7 @@ function worker(id, avatar, description = '', overrides = {}) {
  * @returns {Record<string, any>}
  */
 function clockWorker() {
-  return worker('clock', 'ghost', '到点完成任务的定时打工人', {
+  return worker('clock', 'ghost', '到点完成任务的定时执行者', {
     driver: 'robot',
     program: 'clock',
     path: '',
@@ -485,6 +554,21 @@ function listData() {
   }
 }
 
+/** 「文件」页签的空状态，形状与 `state.ts` 的 `EMPTY_FILES` 一致。 */
+function emptyFiles() {
+  return {
+    workerId: null,
+    treeStatus: 'idle',
+    tree: null,
+    truncated: false,
+    treeError: null,
+    selectedPath: '',
+    contentStatus: 'idle',
+    content: null,
+    contentError: null,
+  }
+}
+
 /**
  * 页面状态数组：顺序必须与 `WorkersPage` 里的 `React.useState` 一致。
  *
@@ -499,6 +583,7 @@ function listData() {
  *   renameSaving?: boolean,
  *   renameError?: string | null,
  *   tab?: string,
+ *   files?: Record<string, any>,
  * }} [options]
  * @returns {Array<any>}
  */
@@ -516,7 +601,8 @@ function states({
   modelDraft = null,
   modelSaving = false,
   modelError = null,
-  tab = 'agents',
+  tab = 'settings',
+  files = emptyFiles(),
   deleteDialog = { target: null, impact: null, loading: false, error: null, saving: false },
 } = {}) {
   return [
@@ -548,8 +634,7 @@ function states({
     modelError, // modelError
     selectedId, // selectedId
     tab, // tab
-    '', // agentsDraft
-    false, // agentsSaving
+    files, // files
     null, // removing
     deleteDialog, // deleteDialogSkill
     null, // skillError
@@ -564,30 +649,41 @@ function states({
   ]
 }
 
-test('打工人页：卡片与职责页签展示职责，创建对话框带职责字段', async () => {
+test('执行者页：main 插槽注入的 workersT 是已绑定的翻译函数', async () => {
+  const client = await loadClient()
+  const { workersT } = client.injected()
+  // 插槽把 inject 返回值里的函数当普通 prop 传，不会再调用；多包一层时
+  // `workersT('title')` 会返回函数，于是页签 / 按钮文案全部为空。
+  assert.equal(typeof workersT, 'function')
+  assert.equal(workersT('title'), '执行者')
+  assert.equal(workersT('skillsBadge'), '{n} skills')
+})
+
+test('执行者页：卡片与职责页签展示职责，创建对话框带职责字段', async () => {
   const client = await loadClient()
   const description = '写发布说明与测试报告'
 
-  // 列表卡片直接展示职责，便于比较打工人。
+  // 列表卡片直接展示职责，便于比较执行者。
   const list = collect(client.render(states({ data: listData() })))
   assert.ok(list.texts.includes(description))
 
-  // 职责是详情页的独立页签：说明 + textarea + 保存按钮。
+  // 职责在「设置」页签：说明 + textarea + 保存按钮。
   const tabStates = {
     data: listData(),
     selectedId: 'writer',
     descriptionDraft: description,
-    tab: 'description',
+    tab: 'settings',
   }
   const detail = collect(client.render(states(tabStates)))
   assert.ok(detail.texts.includes('职责'))
   assert.ok(
-    detail.texts.indexOf('职责') < detail.texts.indexOf('AGENTS.md'),
-    '职责页签排在 AGENTS.md 之前',
+    detail.texts.indexOf('设置') < detail.texts.indexOf('文件') &&
+      detail.texts.indexOf('文件') < detail.texts.indexOf('技能'),
+    '页签顺序为设置、文件、技能',
   )
   assert.ok(
     detail.texts.includes(
-      '工作流会读它来决定是否把节点交给这个打工人；用一句话写清这个打工人负责什么。',
+      '工作流会读它来决定是否把节点交给这个执行者；用一句话写清这个执行者负责什么。',
     ),
   )
   assert.ok(detail.texts.includes('保存'), '有改动时显示保存按钮')
@@ -597,13 +693,10 @@ test('打工人页：卡片与职责页签展示职责，创建对话框带职�
   )
   assert.ok(draftField)
 
-  // 默认 AGENTS.md 页签不显示职责编辑器。
-  const agentsTab = client.render(states({ data: listData(), selectedId: 'writer' }))
+  // 文件页签不显示职责编辑器。
+  const filesTab = client.render(states({ data: listData(), selectedId: 'writer', tab: 'files' }))
   assert.equal(
-    findNode(
-      agentsTab,
-      (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责',
-    ),
+    findNode(filesTab, (node) => node.type === 'textarea' && node.props?.['aria-label'] === '职责'),
     null,
   )
 
@@ -616,12 +709,61 @@ test('打工人页：卡片与职责页签展示职责，创建对话框带职�
   assert.ok(createField)
 })
 
-test('打工人页：创建对话框有必填标识符与可选名称，列表 / 详情显示「名称 · id」', async () => {
+test('执行者页：文件页签只读展示目录树与代码内容，没有编辑器与保存按钮', async () => {
+  const client = await loadClient()
+  const files = {
+    workerId: 'writer',
+    treeStatus: 'ready',
+    tree: [
+      { name: 'AGENTS.md', path: 'AGENTS.md', kind: 'file', bytes: 32 },
+      {
+        name: '.agents',
+        path: '.agents',
+        kind: 'directory',
+        children: [{ name: 'skills', path: '.agents/skills', kind: 'directory', children: [] }],
+      },
+    ],
+    truncated: false,
+    treeError: null,
+    selectedPath: 'AGENTS.md',
+    contentStatus: 'ready',
+    content: {
+      ok: true,
+      path: 'AGENTS.md',
+      bytes: 32,
+      content: '# AGENTS.md\n\n负责写发布说明。',
+      tooLarge: false,
+      binary: false,
+      maxBytes: 262144,
+    },
+    contentError: null,
+  }
+  const detail = client.render(
+    states({ data: listData(), selectedId: 'writer', tab: 'files', files }),
+  )
+  const texts = collect(detail).texts
+  assert.ok(texts.includes('文件'), '页签名为「文件」')
+  assert.ok(texts.includes('AGENTS.md'), '目录树列出文件')
+  assert.ok(texts.includes('负责写发布说明。'), '右侧展示代码内容')
+  assert.ok(texts.includes('.agents'), '目录树列出子目录')
+  assert.equal(
+    findNode(detail, (node) => node.type === 'textarea'),
+    null,
+    '文件页签不渲染编辑器',
+  )
+  assert.equal(
+    findNode(detail, (node) => node.type === 'button' && (node.children ?? []).includes('保存')),
+    null,
+    '文件页签没有保存按钮',
+  )
+})
+
+test('执行者页：创建对话框有必填标识符与可选名称，列表 / 详情显示「名称 · id」', async () => {
   const client = await loadClient()
   const data = listData()
   data.workers = [worker('writer', 'panda', '写发布说明与测试报告', { name: '写作助手' })]
 
-  // 列表标题同时给出展示名与标识符，避免同名打工人无法区分。
+  // 列表标题同时给出展示名与标识符，避免同名执行者无法区分。
   const list = collect(client.render(states({ data })))
   assert.ok(list.texts.includes('写作助手 · writer'))
 
@@ -648,7 +790,7 @@ test('打工人页：创建对话框有必填标识符与可选名称，列表 /
   assert.ok(dialogTexts.includes('名称（可选）'))
   assert.ok(
     dialogTexts.includes(
-      '必填，创建后不可修改；它同时是打工人目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
+      '必填，创建后不可修改；它同时是执行者目录名与工作流引用键。只能用小写字母、数字、_ 与 -，且以小写字母开头。',
     ),
   )
 
@@ -668,10 +810,10 @@ test('打工人页：创建对话框有必填标识符与可选名称，列表 /
   assert.equal(createButton(validStates)?.props?.disabled, false, '合法新标识符可以创建')
 })
 
-test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名对话框', async () => {
+test('执行者页：详情页有重命名入口，renameOpen 时渲染重命名对话框', async () => {
   const client = await loadClient()
 
-  // 配置视图标题行：打工人标题旁有铅笔按钮（tooltip / aria-label 带展示名）。
+  // 配置视图标题行：执行者标题旁有铅笔按钮（tooltip / aria-label 带展示名）。
   const detail = client.render(states({ data: listData(), selectedId: 'writer' }))
   const renameButton = findNode(detail, (node) => node.props?.['aria-label'] === '重命名 writer')
   assert.ok(renameButton, '配置视图标题行应有重命名按钮')
@@ -696,7 +838,7 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
     renameDraft: 'writer',
   }
   const dialog = collect(client.render(states(dialogStates)))
-  assert.ok(dialog.texts.some((text) => text.includes('重命名打工人')))
+  assert.ok(dialog.texts.some((text) => text.includes('重命名执行者')))
   assert.ok(dialog.texts.includes('名称'))
   assert.ok(
     dialog.texts.includes('只改展示名：目录与工作区都保持原位。留空表示清空名称、改回显示标识符。'),
@@ -711,10 +853,18 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
   assert.equal(field.props?.maxLength, 64)
 
   // 保存按钮：草稿与当前名相同 / 为空 / 保存中都禁用；改成新名字才可用。
-  const saveButtons = (options) =>
-    collect(client.render(states(options))).nodes.filter(
-      (node) => node.type === 'button' && (node.children ?? []).includes('保存'),
+  const saveButtons = (options) => {
+    // 只看重命名对话框里的保存按钮：设置页签也有「保存」，不能一起算。
+    const modal = findNode(
+      client.render(states(options)),
+      (node) => node.props?.className === 'x-modal',
     )
+    return modal === null
+      ? []
+      : collect(modal).nodes.filter(
+          (node) => node.type === 'button' && (node.children ?? []).includes('保存'),
+        )
+  }
   const sameButtons = saveButtons(dialogStates)
   assert.ok(sameButtons.length > 0)
   assert.ok(
@@ -739,9 +889,9 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
 
   // 失败提示留在对话框里。
   const failed = collect(
-    client.render(states({ ...dialogStates, renameError: '重命名失败：打工人名称已被占用' })),
+    client.render(states({ ...dialogStates, renameError: '重命名失败：执行者名称已被占用' })),
   )
-  assert.ok(failed.texts.includes('重命名失败：打工人名称已被占用'))
+  assert.ok(failed.texts.includes('重命名失败：执行者名称已被占用'))
 
   // 登记文件损坏时重命名入口禁用。
   const corruptData = listData()
@@ -753,7 +903,7 @@ test('打工人页：详情页有重命名入口，renameOpen 时渲染重命名
   assert.equal(corruptButton?.props?.disabled, true, '登记文件损坏时重命名按钮禁用')
 })
 
-test('打工人页：列表整行点击进详情，行内动作统一为 outline 按钮', async () => {
+test('执行者页：列表整行点击进详情，行内动作统一为 outline 按钮', async () => {
   const client = await loadClient()
   const tree = client.render(states({ data: listData() }))
   const list = collect(tree)
@@ -766,7 +916,7 @@ test('打工人页：列表整行点击进详情，行内动作统一为 outline
     (node) =>
       node.type === 'li' && String(node.props?.className ?? '').includes('buka-workers-card'),
   )
-  assert.ok(card, '列表里有打工人卡片')
+  assert.ok(card, '列表里有执行者卡片')
   assert.equal(typeof card.props?.onClick, 'function', '整行可点击进入详情')
   assert.match(String(card.props?.className), /is-clickable/u)
 
@@ -775,7 +925,7 @@ test('打工人页：列表整行点击进详情，行内动作统一为 outline
     tree,
     (node) => node.type === 'button' && node.props?.['aria-label'] === '打开详情 writer',
   )
-  assert.ok(titleButton, '打工人名是进入详情的按钮')
+  assert.ok(titleButton, '执行者名是进入详情的按钮')
   let stopped = false
   titleButton.props.onClick({
     stopPropagation: () => {
@@ -823,7 +973,7 @@ test('打工人页：列表整行点击进详情，行内动作统一为 outline
   assert.equal(busyTitle.props?.disabled, true, '写操作中标题按钮禁用')
 })
 
-test('打工人页：机器人只读，没有新会话 / 挂载 / 删除 / 助理入口', async () => {
+test('执行者页：机器人只读，没有新会话 / 挂载 / 删除 / 助理入口', async () => {
   const client = await loadClient()
   const data = listData()
   data.workers = [clockWorker()]
@@ -832,7 +982,7 @@ test('打工人页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
 
   // 驱动与职责展示；明确说明只读。
   assert.ok(list.texts.includes('机器人'))
-  assert.ok(list.texts.includes('到点完成任务的定时打工人'))
+  assert.ok(list.texts.includes('到点完成任务的定时执行者'))
   assert.ok(list.texts.includes('机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。'))
   // 没有新会话 / 挂载 / 删除 / 助理入口，也不显示目录缺失警告。
   assert.equal(list.texts.includes('新会话'), false)
@@ -853,7 +1003,7 @@ test('打工人页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
   assert.equal(title?.props?.disabled, true, 'program 卡片的标题按钮禁用')
 })
 
-test('打工人页：列表与详情没有助理徽标、标记按钮或筛选', async () => {
+test('执行者页：列表与详情没有助理徽标、标记按钮或筛选', async () => {
   const client = await loadClient()
   const tree = client.render(states({ data: listData() }))
   const list = collect(tree)
@@ -869,7 +1019,7 @@ test('打工人页：列表与详情没有助理徽标、标记按钮或筛选',
   assert.equal(detail.texts.includes('取消助理'), false)
 })
 
-test('打工人页：模型页签展示可选模型与当前选择', async () => {
+test('执行者页：设置页签展示职责与模型，模型可选', async () => {
   const client = await loadClient()
   const data = listData()
   data.workers[0].model = { provider: 'p1', model: 'm1' }
@@ -877,7 +1027,7 @@ test('打工人页：模型页签展示可选模型与当前选择', async () =>
     states({
       data,
       selectedId: 'writer',
-      tab: 'model',
+      tab: 'settings',
       modelDraft: { provider: 'p1', model: 'm1' },
       modelCatalog: {
         status: 'ready',
@@ -902,7 +1052,7 @@ test('打工人页：模型页签展示可选模型与当前选择', async () =>
   )
   const view = collect(tree)
 
-  assert.ok(view.texts.includes('模型'), '详情页有模型页签')
+  assert.ok(view.texts.includes('模型'), '设置页签有模型区块')
   assert.ok(view.texts.includes('当前模型： Provider One · Model One'))
   const provider = findNode(tree, (node) => node.props?.['aria-label'] === '提供方')
   assert.equal(provider?.type, 'select')
@@ -912,14 +1062,14 @@ test('打工人页：模型页签展示可选模型与当前选择', async () =>
   assert.equal(model?.props?.value, 'm1')
 })
 
-test('打工人页：模型页签跟随默认模型时只渲染提供方选择', async () => {
+test('执行者页：设置页签跟随默认模型时只渲染提供方选择', async () => {
   const client = await loadClient()
   const view = collect(
     client.render(
       states({
         data: listData(),
         selectedId: 'writer',
-        tab: 'model',
+        tab: 'settings',
         modelCatalog: {
           status: 'ready',
           data: {
@@ -939,7 +1089,7 @@ test('打工人页：模型页签跟随默认模型时只渲染提供方选择',
       states({
         data: listData(),
         selectedId: 'writer',
-        tab: 'model',
+        tab: 'settings',
         modelCatalog: {
           status: 'ready',
           data: {
@@ -956,14 +1106,14 @@ test('打工人页：模型页签跟随默认模型时只渲染提供方选择',
   assert.equal(selects.length, 1, '跟随默认模型时只显示提供方选择')
 })
 
-test('打工人页：模型目录不可用时说明原因', async () => {
+test('执行者页：设置页签的模型目录不可用时说明原因', async () => {
   const client = await loadClient()
   const view = collect(
     client.render(
       states({
         data: listData(),
         selectedId: 'writer',
-        tab: 'model',
+        tab: 'settings',
         modelCatalog: {
           status: 'ready',
           data: { available: false, default: null, groups: [], failures: [] },

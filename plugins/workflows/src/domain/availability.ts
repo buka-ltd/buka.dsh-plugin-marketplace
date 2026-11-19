@@ -1,12 +1,12 @@
 /**
- * 派生的「不可用」状态：工作流 / 作业引用的打工人已不在登记表里。
+ * 派生的「不可用」状态：工作流 / 作业引用的执行者已不在登记表里。
  *
- * 不可用不落盘，由读取方按引用能否解析实时计算；重新绑定一个已存在的打工人
+ * 不可用不落盘，由读取方按引用能否解析实时计算；重新绑定一个已存在的执行者
  * 后自动恢复。它与「停用」不同：停用是人为收起，不可用是引用断了。
  *
  * 引用来源：
  *
- * - 工作流定义：岗位执行者、任务类型的助理；
+ * - 工作流定义：岗位主体、任务类型的助理；
  * - 作业快照：钉住的定义 + 交回方式里的助理（v7 快照用 `name` 兜底）。
  *
  * @module @buka/dsh-plugin-workflows/domain/availability
@@ -41,7 +41,7 @@ function collect(missing: MissingWorkerRef[], seen: Set<string>, entry: MissingW
  * 计算一份工作流定义里的缺失引用。
  *
  * @param definition 工作流定义（v8）或作业钉住的旧快照（v7）
- * @param workers 打工人登记表（按标识符）
+ * @param workers 执行者登记表（按标识符）
  * @returns 可用性：缺哪些标识符、分别在哪
  */
 export function definitionAvailability(
@@ -82,7 +82,7 @@ export function definitionAvailability(
  * 计算一个作业的派生可用性：钉住的定义 + 交回方式的助理。
  *
  * @param job 作业记录
- * @param workers 打工人登记表（按标识符）
+ * @param workers 执行者登记表（按标识符）
  * @returns 可用性
  */
 export function jobAvailability(
@@ -119,12 +119,12 @@ export function describeUnavailable(availability: WorkerAvailability): string {
 }
 
 /**
- * 判断一份工作流定义是否引用了某个打工人标识符。
+ * 判断一份工作流定义是否引用了某个执行者标识符。
  *
- * 引用 = 岗位执行者、任务类型助理（定义里是字符串）。
+ * 引用 = 岗位主体、任务类型助理（定义里是字符串）。
  *
  * @param definition 工作流定义 / 作业快照
- * @param id 打工人标识符
+ * @param id 执行者标识符
  * @returns 引用时为 true
  */
 export function definitionReferencesWorker(definition: WorkflowDefinition, id: string): boolean {
@@ -139,12 +139,12 @@ export function definitionReferencesWorker(definition: WorkflowDefinition, id: s
 }
 
 /**
- * 判断一个作业是否引用了某个打工人标识符：钉住的定义 + 交回方式。
+ * 判断一个作业是否引用了某个执行者标识符：钉住的定义 + 交回方式。
  *
  * v7 作业快照用 `name` 兜底，读取时统一按标识符比较。
  *
  * @param job 作业记录
- * @param id 打工人标识符
+ * @param id 执行者标识符
  * @returns 引用时为 true
  */
 export function jobReferencesWorker(job: JobRecord, id: string): boolean {

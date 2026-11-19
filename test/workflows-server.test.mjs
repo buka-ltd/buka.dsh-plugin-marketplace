@@ -95,10 +95,10 @@ class FakeDomain {
 }
 
 // ---------------------------------------------------------------------------
-// 测试夹具：打工人、会话句柄、发起人投递、工作流定义
+// 测试夹具：执行者、会话句柄、发起人投递、工作流定义
 // ---------------------------------------------------------------------------
 
-/** 测试里的打工人登记表。 */
+/** 测试里的执行者登记表。 */
 const WORKER_ENTRIES = [
   { id: '软件工程师', name: '', driver: 'agent', avatar: 'rocket' },
   { id: '质量保障工程师', name: '', driver: 'agent', avatar: 'owl' },
@@ -501,7 +501,7 @@ function humanOnlyDefinition() {
   return definition
 }
 
-/** 人任务点名助理 + 一条并行的打工人分支：用来验证代办失败会取消其余任务。 */
+/** 人任务点名助理 + 一条并行的执行者分支：用来验证代办失败会取消其余任务。 */
 function assistantWithParallelDefinition() {
   const definition = assistantDefinition()
   definition.positions.push({
@@ -675,7 +675,7 @@ async function setup(definition, overrides = {}) {
   const store = new WorkflowStore({ domain, dataDir })
   await store.init()
   const workers = makeWorkers()
-  const delivery = makeDelivery()
+  const delivery = overrides.delivery ?? makeDelivery()
   const engine = new WorkflowEngine({
     ctx: {},
     store,
@@ -843,7 +843,7 @@ test('engine: a v7 job snapshot stays readable and keeps advancing with name fal
     delivery,
   })
   try {
-    // v7 快照：定义里执行者与交回方式都只有 name（不迁移）。
+    // v7 快照：定义里主体与交回方式都只有 name（不迁移）。
     const definition = simpleDevDefinition()
     definition.version = 7
     definition.positions[0].executor = { kind: 'worker', name: '软件工程师' }
@@ -1112,6 +1112,111 @@ test('engine: the end report is delivered to the starter session and waits for c
     await waitFor(() => env.store.getJob(job.id).status === 'completed')
     assert.equal(taskAt(env.store, job.id, 'end').status, 'completed')
     assert.equal((await env.engine.jobDetail(job.id)).canRetryDelivery, false)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/**
+ * 在 dev 会话里建结束任务并完成 dev，触发一次结束投递。
+ *
+ * @param env 测试环境
+ * @param job 作业
+ * @param workerSession 执行该作业 dev 任务的会话
+ */
+async function handOffToEnd(env, job, workerSession) {
+  const dev = taskAt(env.store, job.id, 'dev')
+  await env.engine.createTaskFromSession({
+    sessionId: workerSession,
+    channel: 'dev.end',
+    type: 'end',
+    content: { summary: '最终交付物' },
+    deps: [dev.id],
+  })
+  await env.engine.completeTaskFromSession({ sessionId: workerSession, text: '', attachments: [] })
+}
+
+test('engine: the starter session already handles the end task when the delivery turn starts', async () => {
+  let engine = null
+  const seen = []
+  const delivery = {
+    async deliver(sessionId) {
+      // 宿主 followup() 之后回合立刻开始；该回合的工具清单按 when 谓词算，
+      // 所以 deliver 被调用的这一刻 taskForSession() 就必须能查到结束任务。
+      seen.push(engine.taskForSession(sessionId))
+      return 0
+    },
+  }
+  const env = await setup(simpleDevDefinition(), { delivery })
+  engine = env.engine
+  try {
+    const job = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: '发布需求' },
+      sessionId: 'starter-session',
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    await handOffToEnd(env, job, env.workers.dispatched[0].sessionId)
+    await waitFor(() => seen.length === 1)
+    const end = taskAt(env.store, job.id, 'end')
+    assert.deepEqual(seen[0], { jobId: job.id, taskId: end.id })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a failed delivery leaves the starter session without task tools', async () => {
+  const delivery = {
+    async deliver() {
+      throw new Error('starter session is unavailable')
+    },
+  }
+  const env = await setup(simpleDevDefinition(), { delivery })
+  try {
+    const job = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: '发布需求' },
+      sessionId: 'starter-session',
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    await handOffToEnd(env, job, env.workers.dispatched[0].sessionId)
+    await waitFor(() => taskAt(env.store, job.id, 'end').status === 'ready')
+    assert.equal(env.engine.taskForSession('starter-session'), null)
+    assert.equal((await env.engine.jobDetail(job.id)).canRetryDelivery, true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a failed delivery gives the session back the task it was already running', async () => {
+  const delivery = {
+    async deliver() {
+      throw new Error('starter session is unavailable')
+    },
+  }
+  const env = await setup(simpleDevDefinition(), { delivery })
+  try {
+    const jobA = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: '先发的作业' },
+      sessionId: 'external-session',
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    // 执行作业 A 的 dev 的那个会话，同时也是作业 B 的发起人。
+    const runningSession = env.workers.dispatched[0].sessionId
+    const devA = taskAt(env.store, jobA.id, 'dev')
+    assert.equal(env.engine.taskForSession(runningSession)?.taskId, devA.id)
+
+    const jobB = await env.engine.createJobFromSession({
+      workflowId: env.workflowId,
+      content: { requirement: '后发的作业' },
+      sessionId: runningSession,
+    })
+    await waitFor(() => env.workers.dispatched.length === 2)
+    await handOffToEnd(env, jobB, env.workers.dispatched[1].sessionId)
+    await waitFor(() => taskAt(env.store, jobB.id, 'end').status === 'ready')
+    // 投递失败只解绑结束任务，不能把它正在跑的 dev 绑定弄丢。
+    assert.equal(env.engine.taskForSession(runningSession)?.taskId, devA.id)
   } finally {
     await env.cleanup()
   }
@@ -2348,7 +2453,7 @@ test('engine: a failing robot creation fails the robot task and creates nothing'
 })
 
 // ---------------------------------------------------------------------------
-// 头像：workers 服务晚于 workflows 就绪时，定义图仍要拿到打工人头像
+// 头像：workers 服务晚于 workflows 就绪时，定义图仍要拿到执行者头像
 // ---------------------------------------------------------------------------
 
 test('engine: workflow detail resolves worker avatars even when the workers service starts late', async () => {
@@ -2420,7 +2525,7 @@ test('attachments: a task result attaches files and downstream tasks can read th
   try {
     await fs.mkdir(path.join(workspace, 'artifacts'), { recursive: true })
     await fs.writeFile(path.join(workspace, 'artifacts', 'report.txt'), 'hello attachment', 'utf8')
-    // 打工人工作区指向临时目录（附件相对路径的根）。
+    // 执行者工作区指向临时目录（附件相对路径的根）。
     const workers = makeWorkers([
       { id: '软件工程师', name: '', driver: 'agent', path: workspace },
       { id: '质量保障工程师', name: '', driver: 'agent', path: workspace },
@@ -2785,7 +2890,7 @@ test('routes: POST job/restart validates the mode and returns a stable error cod
 })
 
 // ---------------------------------------------------------------------------
-// 派生不可用：工作流 / 作业引用缺失打工人
+// 派生不可用：工作流 / 作业引用缺失执行者
 // ---------------------------------------------------------------------------
 
 /** 两条并行分支：dev(软件工程师) 与 qa(质量保障工程师)，各自都能到 end。 */
@@ -2908,7 +3013,7 @@ test('engine: a workflow referencing a deleted worker derives unavailable, block
     await engine.setWorkflowActive(workflow.id, true)
     engine.dispose()
 
-    // 删除打工人：重新读登记表，工作流派生「不可用」。
+    // 删除执行者：重新读登记表，工作流派生「不可用」。
     const workersMissing = makeWorkers(WORKER_ENTRIES.filter((entry) => entry.id !== '软件工程师'))
     engine = new WorkflowEngine({
       ctx: {},
@@ -2946,7 +3051,7 @@ test('engine: a workflow referencing a deleted worker derives unavailable, block
     )
     engine.dispose()
 
-    // 重新绑定一个已存在的打工人：自动恢复可用，可以启动作业。
+    // 重新绑定一个已存在的执行者：自动恢复可用，可以启动作业。
     const workersRebound = makeWorkers()
     engine = new WorkflowEngine({
       ctx: {},

@@ -1,13 +1,14 @@
 /**
  * `POST /buka-workers/rename` 的路由级单测。
  *
- * `src/index.ts` 顶层 import 了 DSH 运行时包（`@deepseek-ai/dsh-tools` 与
- * `@deepseek-ai/schemastery`），仓库里没有这些依赖。这里用 `module.registerHooks`
- * 把两个包替换成最小桩，再用假的 `webServer` / `connection` 注册路由，直接调用
- * 改名 handler 检查 HTTP 状态、响应字段与错误码映射——不启动 DSH、不联网。
+ * 执行者装配入口 `src/workers/index.ts` 顶层 import 了 DSH 运行时包
+ * （`@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`），仓库里没有这些
+ * 依赖。这里用 `module.registerHooks` 把两个包替换成最小桩，再用假的
+ * `webServer` / `connection` 注册路由，直接调用改名 handler 检查 HTTP 状态、
+ * 响应字段与错误码映射——不启动 DSH、不联网。
  *
  * 覆盖：成功改名的响应形状（`renamed` / `previousName` / `agents` / 工作区重建）、
- * 内置名保留（409）、非法名（400）、未知打工人（404）、方法不允许（405）。
+ * 内置名保留（409）、非法名（400）、未知执行者（404）、方法不允许（405）。
  */
 
 import assert from 'node:assert/strict'
@@ -49,7 +50,7 @@ registerHooks({
 })
 
 /**
- * 建临时打工人根目录，返回一个最小可用的插件上下文。
+ * 建临时执行者根目录，返回一个最小可用的插件上下文。
  *
  * @returns {Promise<{
  *   workersDir: string,
@@ -105,9 +106,9 @@ async function makeHarness() {
   const registeredTools = []
   const tools = { register: (tool, options) => registeredTools.push({ tool, options }) }
 
-  // 「打工人」preset 的根会话：让 buka_worker_build 通过可见性判定。
+  // Workflow 预设的根会话：让 buka_worker_build 通过可见性判定。
   const sessions = new Map([['builder', { id: 'builder', header: {} }]])
-  const presets = new Map([['builder', 'worker-builder']])
+  const presets = new Map([['builder', 'workflow-orchestrator']])
 
   const ctx = {
     provide() {},
@@ -131,10 +132,10 @@ async function makeHarness() {
     logger,
   }
 
-  const { apply } = await import(
-    `${pathToFileURL(path.resolve('plugins/workers/src/index.ts')).href}`
+  const { applyWorkers } = await import(
+    `${pathToFileURL(path.resolve('plugins/workflows/src/workers/index.ts')).href}`
   )
-  apply(ctx, { workersDir, builderPresets: ['worker-builder'], seedPresets: false })
+  applyWorkers(ctx, { workersDir, builderPresets: ['workflow-orchestrator'], seedPresets: false })
 
   const entry = registeredTools.find((item) => item.tool.name === 'buka_worker_build')
   assert.ok(entry, 'buka_worker_build 应已注册')
@@ -254,7 +255,7 @@ test('POST /buka-workers/rename：错误码映射（内置名 409、非法名 40
     await harness.tool.execute({ id: 'writer' }, agent)
     await harness.tool.execute({ id: 'painter' }, agent)
 
-    // 展示名不要求唯一：与另一个打工人同名是允许的。
+    // 展示名不要求唯一：与另一个执行者同名是允许的。
     const sameDisplayName = await callRoute(harness.routes, '/buka-workers/rename', {
       body: { id: 'writer', name: 'painter' },
     })
@@ -280,7 +281,7 @@ test('POST /buka-workers/rename：错误码映射（内置名 409、非法名 40
     assert.equal(cleared.status, 200)
     assert.equal(cleared.body.name, '')
 
-    // 未知打工人。
+    // 未知执行者。
     const unknown = await callRoute(harness.routes, '/buka-workers/rename', {
       body: { id: 'nobody', name: 'author' },
     })
@@ -334,7 +335,7 @@ test('POST /buka-workers/assistant 已删除；列表不再返回 assistant', as
   }
 })
 
-test('打工人路由：内建 clock 不可创建 / 删除 / 改名 / 改头像，列表按 driver 展示', async () => {
+test('执行者路由：内建 clock 不可创建 / 删除 / 改名 / 改头像，列表按 driver 展示', async () => {
   const harness = await makeHarness()
   try {
     const agent = { agent: { id: 'builder' } }

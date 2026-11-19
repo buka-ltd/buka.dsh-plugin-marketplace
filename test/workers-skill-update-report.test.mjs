@@ -1,5 +1,5 @@
 /**
- * 单个打工人「更新 skills」结果的 HTTP 呈现单测。
+ * 单个执行者「更新 skills」结果的 HTTP 呈现单测。
  *
  * 覆盖两条失败路径：整体失败（`ok:false`，要回错误状态）与逐项失败
  * （`ok:true` 但 `failed` 非空，仍回 200 但 `ok:false`）。
@@ -11,7 +11,7 @@ import test from 'node:test'
 import {
   reportSkillUpdate,
   skillUpdateErrorStatus,
-} from '../plugins/workers/src/skill-update-report.ts'
+} from '../plugins/workflows/src/workers/skill-update-report.ts'
 
 test('更新上报：整体失败映射错误状态并带回 message / output', () => {
   const report = reportSkillUpdate({

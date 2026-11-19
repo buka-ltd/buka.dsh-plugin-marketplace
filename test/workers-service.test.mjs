@@ -12,19 +12,19 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { defaultAvatarFor } from '../plugins/workers/src/avatar.ts'
+import { defaultAvatarFor } from '../plugins/workflows/src/workers/avatar.ts'
 import {
   mapTurnEnd,
   readSessionOutcome,
   summarizeWorker,
   WorkerSessionService,
-} from '../plugins/workers/src/service.ts'
+} from '../plugins/workflows/src/workers/service.ts'
 import {
   addWorker,
   ensureBuiltinWorkers,
   resolveWorkerRegistryFile,
   setWorkerModel,
-} from '../plugins/workers/src/worker-store.ts'
+} from '../plugins/workflows/src/workers/worker-store.ts'
 
 test('workers service: summarizeWorker keeps orchestration fields and driver/program', () => {
   const summary = summarizeWorker({
@@ -75,7 +75,7 @@ test('workers service: summarizeWorker keeps orchestration fields and driver/pro
     exists: false,
     mounted: false,
     workspaceId: null,
-    description: '到点完成任务的定时打工人',
+    description: '到点完成任务的定时执行者',
     skills: [],
     agents: { exists: false, bytes: 0, modifiedAt: null, content: '', tooLarge: false },
     claude: { exists: false, symlink: false, mode: 'missing', target: '' },
@@ -151,7 +151,7 @@ test('workers service: mapTurnEnd normalizes turn end reasons', () => {
 })
 
 /**
- * 建一个临时打工人目录与登记表，并补上内建 clock（模拟插件启动）。
+ * 建一个临时执行者目录与登记表，并补上内建 clock（模拟插件启动）。
  *
  * @returns {Promise<{ workersDir: string, registryFile: string, root: string }>}
  */
@@ -447,7 +447,7 @@ test('workers service: avatarMap is a lightweight id -> avatar lookup with built
       workersDir: home.workersDir,
       registryFile: home.registryFile,
     })
-    // 新建的打工人一定有头像；内建 clock 按名字兜底。
+    // 新建的执行者一定有头像；内建 clock 按名字兜底。
     const first = await service.avatarMap()
     assert.deepEqual(Object.keys(first), ['writer', 'clock'])
     assert.ok(typeof first.writer === 'string' && first.writer !== '')

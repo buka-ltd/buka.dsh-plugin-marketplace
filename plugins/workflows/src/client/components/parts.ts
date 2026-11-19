@@ -2,6 +2,7 @@
  * 页面通用小部件：状态标签、加载 / 失败 / 空态、键值行、只读 schema 与二次确认按钮。
  */
 
+import { TabLabel } from '@buka/plugin-ui'
 import { Button, SegmentedTabs, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import React from 'react'
 
@@ -273,7 +274,7 @@ export function DrawerTabs(props: {
             value: current?.id ?? '',
             items: props.tabs.map((tab) => ({
               value: tab.id,
-              label: tab.label,
+              label: h(TabLabel, { text: tab.label }),
               id: `buka-workflows-drawer-tab-${tab.id}`,
               panelId: `buka-workflows-drawer-panel-${tab.id}`,
             })),
@@ -366,7 +367,7 @@ export function renderSection(
   )
 }
 
-/** 执行者展示：打工人 / 人 + 「展示名 · 标识符」；已删打工人标「已删除」。 */
+/** 主体展示：工作人员 / 执行者 + 「展示名 · 标识符」；已删执行者标「已删除」。 */
 export function renderExecutor(page: AppContext, executor: Executor | null | undefined): string {
   const { t } = page
   if (!isRecord(executor)) return t('taskTypeUnset')
@@ -392,7 +393,7 @@ export function renderAssistant(page: AppContext, id: string): string {
 
 /**
  * 任务「谁在办」：人任务说「代办：某人」/「待你办理」/「你在办理」，
- * 打工人任务只给执行者。
+ * 执行者任务只给执行者。
  */
 export function renderTaskActor(
   page: AppContext,

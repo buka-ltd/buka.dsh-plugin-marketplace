@@ -105,7 +105,7 @@ function normalizeClaimant(claimant: Claimant | null): Claimant | null {
   return { ...claimant, kind: 'worker' }
 }
 
-/** 把定义快照里岗位执行者的 `kind: "robot"` 归一成 `worker`（不改版本与引用字段）。 */
+/** 把定义快照里岗位主体的 `kind: "robot"` 归一成 `worker`（不改版本与引用字段）。 */
 function normalizeDefinitionExecutors(definition: WorkflowDefinition): WorkflowDefinition {
   // 容错：单测和手工数据里可能有缺 definition / positions 的记录。
   if (
@@ -136,9 +136,9 @@ function normalizeDefinitionExecutors(definition: WorkflowDefinition): WorkflowD
 }
 
 /**
- * 把 v7 工作流定义升到 v8：岗位执行者的 `name` 改名为 `id`，值不变。
+ * 把 v7 工作流定义升到 v8：岗位主体的 `name` 改名为 `id`，值不变。
  *
- * 老打工人的标识符就是它当时登记的名字，所以这里只是字段改名；任务类型
+ * 老执行者的标识符就是它当时登记的名字，所以这里只是字段改名；任务类型
  * `assistant` 的值与交回方式本来就是引用键，不需要转换。迁移幂等：v8 定义
  * 原样返回，不产生写入。
  */
@@ -211,7 +211,7 @@ export class WorkflowStore {
   }
 
   /**
-   * 把术语改名前的旧记录（执行者 / 承办者 `kind: "robot"`、driver `"program"`）
+   * 把术语改名前的旧记录（主体 / 承办者 `kind: "robot"`、driver `"program"`）
    * 归一成当前取值。只改标记为旧值的记录，幂等；迁移后字段与新建记录一致。
    */
   private async normalizeLegacyWorkerKinds(): Promise<void> {
@@ -240,7 +240,7 @@ export class WorkflowStore {
   }
 
   /**
-   * 把 workflows 表里 v7 的定义快照升到 v8：执行者的 `name` 改名成 `id`。
+   * 把 workflows 表里 v7 的定义快照升到 v8：主体的 `name` 改名成 `id`。
    *
    * 作业快照（jobs.definition）保持 v7 形状，读取时按旧字段兜底；这里只动
    * 工作流定义。迁移幂等：v8 定义不产生写入，重复打开不再汇报条数。

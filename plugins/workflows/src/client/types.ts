@@ -65,6 +65,25 @@ export const REFRESH_MS = 5000
 /** 当前工作流定义格式；与宿主 `DEFINITION_VERSION` 保持一致。 */
 export const DEFINITION_VERSION = 8
 
+/** 一个会话在 DSH 客户端里的即时状态；只取本插件判定「是否在等人」要用的字段。 */
+export interface SessionStatusSummary {
+  /** 会话是否还有回合在跑；未知时缺省。 */
+  running?: boolean
+  /** 正在等用户处理的交互（审批 / plan 审阅 / 提问）；有值即表示会话在等人。 */
+  pendingInteraction?: unknown
+}
+
+/** 按会话 id 索引的会话状态快照，由 `main` 插槽的 `useSessionStatus` 提供。 */
+export type SessionStatusSnapshot = ReadonlyMap<string, SessionStatusSummary>
+
+/** DSH `main` 插槽注入的会话状态选择器钩子。 */
+export type UseSessionStatus = <Selected>(
+  selector: (snapshot: SessionStatusSnapshot) => Selected,
+) => Selected
+
+/** 没有注入会话状态钩子时复用的空快照。 */
+export const EMPTY_SESSION_STATUS: SessionStatusSnapshot = new Map()
+
 /** 工作流状态。 */
 export type WorkflowStatus = 'draft' | 'active' | 'retired'
 
@@ -81,22 +100,22 @@ export type TaskStatus =
   | 'blocked'
   | 'cancelled'
 
-/** 岗位执行者：打工人或人；v8 用 `id` 引用，`name` 是展示名或 v7 快照的旧引用。 */
+/** 岗位主体：执行者或工作人员；v8 用 `id` 引用，`name` 是展示名或 v7 快照的旧引用。 */
 export interface Executor {
   kind?: string
-  /** 打工人标识符。 */
+  /** 执行者标识符。 */
   id?: string
   /** 展示名；旧快照里也可能是当时的标识符。 */
   name?: string
-  /** 打工人头像 id（Host 若给出就画）。 */
+  /** 执行者头像 id（Host 若给出就画）。 */
   avatar?: string
-  /** 打工人驱动：agent / robot（只读展示用）。 */
+  /** 执行者驱动：agent / robot（只读展示用）。 */
   driver?: string
   /** 登记表里查不到这个标识符：显示占位头像与「已删除」。 */
   missing?: boolean
 }
 
-/** 一条缺失的打工人引用。 */
+/** 一条缺失的执行者引用。 */
 export interface MissingWorkerRef {
   id: string
   role?: 'executor' | 'assistant' | 'delivery'
@@ -151,7 +170,7 @@ export interface TaskTypeDefinition {
   actions?: ActionDefinition[]
   /** 仅机器人岗位：任务完成后创建的后续任务。 */
   creates?: CreationDefinition[]
-  /** 仅人岗位：点名的助理打工人标识符。 */
+  /** 仅人岗位：点名的助理执行者标识符。 */
   assistant?: string | null
   mode?: string | null
 }
@@ -226,7 +245,7 @@ export interface JobSummary {
   availability?: WorkerAvailability
 }
 
-/** 承办者（人 / 助理打工人 / 执行打工人）。 */
+/** 承办者（人 / 助理执行者 / 执行执行者）。 */
 export interface Claimant {
   kind?: string
   name?: string
@@ -370,7 +389,7 @@ export interface JobDetail {
   canRetryDelivery?: boolean
   /** 重启入口：可用性与不可用原因由服务端判定，客户端只按它渲染。 */
   restart?: JobRestartOptions
-  /** 派生可用性：缺执行者 / 助理时作业页标注「不可用」。 */
+  /** 派生可用性：缺主体 / 助理时作业页标注「不可用」。 */
   availability?: WorkerAvailability
 }
 
@@ -523,6 +542,10 @@ export interface PageState {
 export interface WorkflowsPageProps {
   t: Translate
   getService?: ((name: string) => unknown) | null
+  /** 首页装配好的顶部页签，透传给页签带。 */
+  topTabs?: React.ReactElement
+  /** `main` 插槽注入的会话状态钩子；旧组合没有时退化为空快照。 */
+  useSessionStatus?: UseSessionStatus | undefined
 }
 
 /** 判断普通对象。 */

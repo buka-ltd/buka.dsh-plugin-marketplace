@@ -9,7 +9,7 @@
  *
  * 渲染在创建任务时进行；定义校验阶段用 `inspectPayload` 只提取路径、不求值，
  * 再按对应的 schema 检查。路径不存在时抛错（而不是静默变空串），避免把空内容
- * 交给执行者。
+ * 交给主体。
  *
  * @module @buka/dsh-plugin-workflows/definition/payload
  */

@@ -26,9 +26,9 @@ import type {
 
 /**
  * 当前域版本。记录格式变化时递增并补迁移入口（见 `store/index.ts` 的
- * `init`）；version 2 把执行者 / 承办者的 `kind: "robot"` 改成 `worker`、
+ * `init`）；version 2 把主体 / 承办者的 `kind: "robot"` 改成 `worker`、
  * driver `program` 改成 `robot`，version 3 把定义升到 v5 / v6 并给任务补
- * `channel`；v7 工作流定义在 `init` 里升到 v8（执行者 `name` 改名为 `id`），
+ * `channel`；v7 工作流定义在 `init` 里升到 v8（主体 `name` 改名为 `id`），
  * 作业快照保持 v7 形状。旧版本记录仍可读取，打开后由 `init` 归一 / 升级。
  */
 export const WORKFLOW_DOMAIN_VERSION = 3
@@ -52,7 +52,7 @@ const taskStatusSchema = z.enum([
   'cancelled',
 ])
 
-/** 执行者：打工人或人；v8 写 `id`，v7 作业快照写 `name`。 */
+/** 主体：工作人员或执行者；v8 写 `id`，v7 作业快照写 `name`。 */
 const workerExecutorShape = {
   id: z.string().optional(),
   name: z.string().optional(),
@@ -63,7 +63,7 @@ const workerExecutorShape = {
 
 const storedExecutorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('worker'), ...workerExecutorShape }).passthrough(),
-  // 术语改名前的作业快照把打工人写成 kind: "robot"；打开后由 store.init() 归一。
+  // 术语改名前的作业快照把执行者写成 kind: "robot"；打开后由 store.init() 归一。
   z.object({ kind: z.literal('robot'), ...workerExecutorShape }).passthrough(),
   z.object({ kind: z.literal('human') }).passthrough(),
   z.object({ kind: z.literal('session'), sessionId: z.string() }).passthrough(),

@@ -1,7 +1,7 @@
 /**
  * `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.bukaWorkflows`。
  *
- * 目前只有一个能力：`workerUsage(id)`。Workers 插件在删除打工人前用它算出
+ * 目前只有一个能力：`workerUsage(id)`。Workers 插件在删除执行者前用它算出
  * 影响面与唯一阻塞条件（引用该标识符的运行中作业）；取不到服务时视为没有
  * 作业引用。
  *
@@ -29,9 +29,9 @@ export class WorkflowQueryService {
   }
 
   /**
-   * 一个打工人标识符被工作流 / 作业引用的情况。
+   * 一个执行者标识符被工作流 / 作业引用的情况。
    *
-   * @param id 打工人标识符
+   * @param id 执行者标识符
    * @returns 运行中作业、引用它的工作流与已结束作业数
    */
   async workerUsage(id: string): Promise<WorkerUsage> {

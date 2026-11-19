@@ -47,7 +47,7 @@ const BASELINE_RULES = [
 /** 人任务助理的基准规则：代人处理，动作由人确认。 */
 const ASSISTANT_RULES = [
   '## 工作流规则',
-  '- 你代表人与执行者沟通，拿到人的决定后用 `buka_task_complete` 提交。',
+  '- 你代表人与工作人员沟通，拿到人的决定后用 `buka_task_complete` 提交。',
   '- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件。',
   '- 写入资产：提交结果时用 `attachments` 归档产出文件（path 相对你的工作目录）。',
   '- 需要创建后续任务时，用 `buka_task_actions` 看这个任务可选的动作，用 `buka_task_complete` 带上 `action` 与 `input`。',

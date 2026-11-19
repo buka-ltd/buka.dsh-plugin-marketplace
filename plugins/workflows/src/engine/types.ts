@@ -14,7 +14,7 @@ import type { JsonValue } from '../domain/types.ts'
 import type { ResolvedOptions } from '../options.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 
-/** workers 列表里的一行（本插件只关心执行者契约）。 */
+/** workers 列表里的一行（本插件只关心主体契约）。 */
 export interface WorkerListEntryLike {
   readonly name?: unknown
   readonly driver?: unknown

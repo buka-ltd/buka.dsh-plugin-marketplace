@@ -1,0 +1,101 @@
+/**
+ * 执行者头像的 Host 侧契约：预设 id、默认分配与校验。
+ *
+ * 头像在登记表里只存一个 id（例如 `panda`），显示由两个浏览器一半各自维护一份
+ * 同一 id → emoji / 底色的映射：`src/client/workers/` 的执行者页与
+ * `src/client/` 的工作流节点图。因此 **id 是跨半边的稳定契约**，增删预设时要
+ * 同步两处客户端。
+ *
+ * 默认分配是确定性的：没有指定头像的执行者按不可变标识符哈希到一个预设，这样
+ * 旧登记表里的执行者也有稳定头像，改名不会让头像漂移；新建执行者优先挑一个还
+ * 没被占用的预设，避免刚创建的一批执行者全是一个样子。
+ *
+ * 本模块只依赖 Node 内置能力，可被 `node --test` 直接 import。
+ *
+ * @module @buka/dsh-plugin-workflows/workers/avatar
+ */
+
+/**
+ * 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是标识符
+ * 哈希的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
+ *
+ * 这里**没有** 🤖 执行者 emoji：那是历史遗留的「通用型执行者」专属头像，通用型
+ * 执行者已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按
+ * 标识符哈希落回其它预设。
+ *
+ */
+export const AVATAR_IDS = Object.freeze([
+  'sprout',
+  'sun',
+  'cat',
+  'fox',
+  'panda',
+  'owl',
+  'whale',
+  'octopus',
+  'bee',
+  'rocket',
+  'dino',
+  'ghost',
+  'penguin',
+  'unicorn',
+  'mushroom',
+] as const)
+
+/** 没有任何可用 id 时的兜底头像。 */
+export const DEFAULT_AVATAR_ID = AVATAR_IDS[0]
+
+/** id → 是否属于预设集合。 */
+const AVATAR_ID_SET = new Set<string>(AVATAR_IDS)
+
+/**
+ * 这个值是不是一个预设头像 id。
+ *
+ */
+export function isAvatarId(value: unknown): value is string {
+  return typeof value === 'string' && AVATAR_ID_SET.has(value)
+}
+
+/**
+ * 标识符 → 稳定哈希（FNV-1a，按 Unicode 码点遍历；迁移来的旧标识符可能含汉字）。
+ *
+ */
+function hashName(id: unknown): number {
+  let hash = 2166136261
+  for (const char of String(id ?? '')) {
+    hash ^= char.codePointAt(0) ?? 0
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/**
+ * 标识符对应的确定性头像：同一个标识符永远得到同一个头像。
+ *
+ */
+export function defaultAvatarFor(id: unknown): string {
+  return AVATAR_IDS[hashName(id) % AVATAR_IDS.length] ?? DEFAULT_AVATAR_ID
+}
+
+/**
+ * 新建执行者时的默认头像：先按标识符哈希，如果这个 id 已经被别的执行者用了，
+ * 就按预设顺序挑第一个没被占用的；全被占用时回到标识符哈希的结果。
+ *
+ */
+export function pickDefaultAvatar(id: unknown, used: Iterable<string> = []): string {
+  const taken = new Set(used)
+  const preferred = defaultAvatarFor(id)
+  if (!taken.has(preferred)) return preferred
+  for (const id of AVATAR_IDS) {
+    if (!taken.has(id)) return id
+  }
+  return preferred
+}
+
+/**
+ * 读取登记表里的头像值并规范化：合法的 id 原样返回，缺省 / 非法值按执行者标识符兜底。
+ *
+ */
+export function resolveAvatar(value: unknown, workerId: unknown): string {
+  return isAvatarId(value) ? value : defaultAvatarFor(workerId)
+}

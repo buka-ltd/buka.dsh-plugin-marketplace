@@ -115,12 +115,6 @@ importers:
         specifier: 1.9.0
         version: 1.9.0
 
-  plugins/workers:
-    dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: ~3.18.5
-        version: 3.18.5
-
   plugins/workflows:
     dependencies:
       '@deepseek-ai/schemastery':

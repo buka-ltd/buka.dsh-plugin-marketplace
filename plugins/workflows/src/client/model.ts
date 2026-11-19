@@ -29,7 +29,7 @@ import type {
 } from './types.ts'
 import { asArray, isRecord } from './types.ts'
 
-/** 一条打工人引用的展示身份：标识符 + 展示名。 */
+/** 一条执行者引用的展示身份：标识符 + 展示名。 */
 export interface WorkerIdentity {
   /** 不可变标识符；空串表示没有引用。 */
   id: string
@@ -38,9 +38,9 @@ export interface WorkerIdentity {
 }
 
 /**
- * 读取打工人引用的身份；同时容忍 v8 的 `id` 与 v7 快照的 `name`。
+ * 读取执行者引用的身份；同时容忍 v8 的 `id` 与 v7 快照的 `name`。
  *
- * @param ref 执行者、交回方式或助理
+ * @param ref 主体、交回方式或助理
  * @returns 标识符与展示名
  */
 export function workerIdentity(
@@ -67,7 +67,7 @@ export function workerIdentity(
 /**
  * 展示「展示名 · 标识符」；名称为空（等于标识符）时只显示标识符。
  *
- * @param ref 打工人引用
+ * @param ref 执行者引用
  * @returns 展示文本；没有引用时是空串
  */
 export function workerIdentityText(
@@ -91,7 +91,7 @@ export function currentAvailability(state: PageState): WorkerAvailability | null
 }
 
 /**
- * 缺失的打工人引用。
+ * 缺失的执行者引用。
  *
  * @param state 页面状态
  * @returns 缺失引用数组；可用时是空数组
@@ -102,10 +102,10 @@ export function missingWorkersOf(state: PageState): MissingWorkerRef[] {
 }
 
 /**
- * 判断一条打工人引用是否已不存在（历史展示据此显示「已删除」与占位头像）。
+ * 判断一条执行者引用是否已不存在（历史展示据此显示「已删除」与占位头像）。
  *
  * @param state 页面状态
- * @param ref 打工人标识符（v7 快照里是当时的名字）
+ * @param ref 执行者标识符（v7 快照里是当时的名字）
  * @returns 缺失时为 true
  */
 export function isWorkerMissing(state: PageState, ref: string): boolean {
@@ -182,7 +182,7 @@ export interface ChannelView {
 /**
  * 看板的一行：发起人（开始 / 结束任务合并）或岗位。
  *
- * 开始与结束任务的执行者是同一个发起人，合成一行才不会把同一个人画两次。
+ * 开始与结束任务的主体是同一个发起人，合成一行才不会把同一个人画两次。
  */
 export interface BoardRow {
   id: string
@@ -192,12 +192,12 @@ export interface BoardRow {
   tasks: TaskSummary[]
 }
 
-/** 取当前工作流详情里的定义快照；执行者补上打工人登记里的展示字段。 */
+/** 取当前工作流详情里的定义快照；主体补上执行者登记里的展示字段。 */
 export function currentDefinition(state: PageState): WorkflowDefinition | null {
   const detail = state.workflow.data
   const definition = detail?.workflow?.definition
   if (!isRecord(definition)) return null
-  // 定义快照只存打工人标识符；展示名 / avatar / driver 在 graph 投影里，展示前合并回来。
+  // 定义快照只存执行者标识符；展示名 / avatar / driver 在 graph 投影里，展示前合并回来。
   const executors = new Map<string, Executor>()
   for (const position of detail?.graph?.positions ?? []) {
     if (typeof position.id === 'string' && isRecord(position.executor)) {
@@ -396,7 +396,7 @@ export function jobRecord(state: PageState): JobDetail['job'] | null {
   return state.job.data?.job ?? null
 }
 
-/** 当前作业的发起人（开始 / 结束任务的执行者）；没有作业时为 null。 */
+/** 当前作业的发起人（开始 / 结束任务的主体）；没有作业时为 null。 */
 export function currentStarter(state: PageState): Starter | null {
   return state.job.data?.job?.starter ?? null
 }
@@ -444,7 +444,7 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 /**
  * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
  *
- * 内建开始 / 结束任务的执行者是同一个发起人，因此合并成一行；岗位行只放
+ * 内建开始 / 结束任务的主体是同一个发起人，因此合并成一行；岗位行只放
  * 定义里仍存在的岗位，契约外任务由调用方补行。
  *
  * @param definition
@@ -587,14 +587,14 @@ export function taskAssistantId(state: PageState, task: TaskActorInput): string 
   return typeof assistant === 'string' && assistant.trim() !== '' ? assistant.trim() : null
 }
 
-/** 岗位执行者（当前作业定义 + 工作流定义合并后）。 */
+/** 岗位主体（当前作业定义 + 工作流定义合并后）。 */
 function positionExecutorOf(state: PageState, positionId: string): Executor | null {
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
   return positionsOf(definition).find((position) => position.id === positionId)?.executor ?? null
 }
 
 /**
- * 任务「谁在办」：人任务说代办 / 待你办理 / 你在办理，打工人任务只说执行者。
+ * 任务「谁在办」：人任务说代办 / 待你办理 / 你在办理，执行者任务只说执行者。
  *
  * 承办者（谁接走任务）不再展示；人任务的助理来自任务类型定义的点名。
  *

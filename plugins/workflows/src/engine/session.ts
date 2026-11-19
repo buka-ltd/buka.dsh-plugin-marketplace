@@ -1,7 +1,7 @@
 /**
- * 发起人会话投递与打工人句柄读取。
+ * 发起人会话投递与执行者句柄读取。
  *
- * 开始 / 结束任务的执行者是发起人。发起人可能是普通会话：插件通过宿主
+ * 开始 / 结束任务的主体是发起人。发起人可能是普通会话：插件通过宿主
  * `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
  * agent，构造一条用户消息 `followup` 进去，再用 `sessions.flush` 等持久化确认。
  * 这与官方 `@deepseek-ai/dsh-schedule` 的提醒投递是同一机制。
@@ -129,7 +129,7 @@ export function createHostSessionDelivery(ctx: Context): SessionDelivery {
 }
 
 /**
- * 读一次打工人句柄的观测结果。
+ * 读一次执行者句柄的观测结果。
  *
  * @param handle workers 句柄
  * @param sinceSeq 起点 seq

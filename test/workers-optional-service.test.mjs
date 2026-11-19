@@ -11,7 +11,7 @@ import test from 'node:test'
 
 import { Context, Service } from '@deepseek-ai/cordis'
 
-import { optionalService } from '../plugins/workers/src/engine/session-runtime.ts'
+import { optionalService } from '../plugins/workflows/src/workers/engine/session-runtime.ts'
 
 /** 一个最小的 planMode 替身：只用于占据隔离作用域里的服务名。 */
 class PlanModeStub extends Service {

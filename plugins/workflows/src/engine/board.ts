@@ -30,7 +30,7 @@ import { positionLabel, taskTypeLabel } from './prompt.ts'
 const SUMMARY_BYTES = 240
 
 /**
- * 把打工人登记里的展示名 / driver / avatar 补到执行者上（只用于展示）。
+ * 把执行者登记里的展示名 / driver / avatar 补到主体上（只用于展示）。
  *
  * 旧作业快照只有 `name`（当时的标识符）；这里统一投影出 `id`，并优先用登记
  * 表里算好的展示名覆盖 `name`。登记表查不到时保留快照里的值并标记
@@ -64,7 +64,7 @@ function executorView(
  * 助理已不在登记表里时标 `missing: true`。
  *
  * @param delivery 钉住的交回方式
- * @param workers 打工人登记表
+ * @param workers 执行者登记表
  * @returns 契约形状的交回方式
  */
 export function deliveryView(

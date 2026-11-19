@@ -24,10 +24,10 @@ import {
   isAvatarId,
   pickDefaultAvatar,
   resolveAvatar,
-} from '../plugins/workers/src/avatar.ts'
-import { buildWorkerModelCatalog } from '../plugins/workers/src/model-catalog.ts'
-import { PRESET_WORKERS, seedPresetWorkers } from '../plugins/workers/src/presets.ts'
-import { revealCommand, revealDirectory } from '../plugins/workers/src/reveal.ts'
+} from '../plugins/workflows/src/workers/avatar.ts'
+import { buildWorkerModelCatalog } from '../plugins/workflows/src/workers/model-catalog.ts'
+import { PRESET_WORKERS, seedPresetWorkers } from '../plugins/workflows/src/workers/presets.ts'
+import { revealCommand, revealDirectory } from '../plugins/workflows/src/workers/reveal.ts'
 import {
   AGENTS_MAX_READ_BYTES,
   addWorker,
@@ -63,7 +63,7 @@ import {
   workerDirectory,
   writeAgentsFile,
   writeWorkerRegistry,
-} from '../plugins/workers/src/worker-store.ts'
+} from '../plugins/workflows/src/workers/worker-store.ts'
 
 /**
  * 建一个临时根目录。
@@ -121,7 +121,7 @@ async function removeRoot(root) {
   await fs.rm(root, { recursive: true, force: true })
 }
 
-test('打工人标识符校验与目录拼接：新格式严格、旧格式兼容', () => {
+test('执行者标识符校验与目录拼接：新格式严格、旧格式兼容', () => {
   // 新标识符：小写字母开头，后面可跟小写字母、数字、_ 与 -。
   for (const good of ['writer', 'a', 'a1', 'bot_1-2', 'x'.repeat(64)]) {
     assert.equal(isValidWorkerId(good), true, good)
@@ -172,7 +172,7 @@ test('打工人标识符校验与目录拼接：新格式严格、旧格式兼�
   const root = path.resolve(path.join(tmpdir(), 'workers-root'))
   assert.equal(workerDirectory(root, 'writer'), path.join(root, 'writer'))
   assert.equal(workerDirectory(root, '  writer  '), path.join(root, 'writer'))
-  // 更新 / 改名 / 删除已有打工人时仍接受旧标识符。
+  // 更新 / 改名 / 删除已有执行者时仍接受旧标识符。
   assert.equal(workerDirectory(root, '写作-bot'), path.join(root, '写作-bot'))
   assert.equal(workerDirectory(root, '.'), null)
   assert.equal(workerDirectory(root, '..'), null)
@@ -181,7 +181,7 @@ test('打工人标识符校验与目录拼接：新格式严格、旧格式兼�
   assert.equal(workerDirectory('', 'writer'), null)
 })
 
-test('插件全局目录、打工人根目录与登记文件路径', async () => {
+test('插件全局目录、执行者根目录与登记文件路径', async () => {
   const root = await makeRoot()
   try {
     const cache = path.join(root, 'cache')
@@ -335,7 +335,7 @@ test('AGENTS.md 读取、写入与 256 KiB 上限', async () => {
       tooLarge: false,
     })
 
-    const text = '# AGENTS.md\n\n你好，打工人。\n'
+    const text = '# AGENTS.md\n\n你好，执行者。\n'
     const saved = await writeAgentsFile(workspace, text)
     assert.equal(saved.bytes, Buffer.byteLength(text, 'utf8'))
     assert.ok(!Number.isNaN(Date.parse(saved.modifiedAt)))
@@ -372,7 +372,7 @@ test('AGENTS.md 读取、写入与 256 KiB 上限', async () => {
   }
 })
 
-test('打工人登记表：缺失按空表、原子写 0600', async () => {
+test('执行者登记表：缺失按空表、原子写 0600', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
@@ -511,10 +511,10 @@ test('addWorker / removeWorker：按标识符建目录、id 冲突拒绝、只�
 
     const template = await fs.readFile(path.join(writer.worker.path, 'AGENTS.md'), 'utf8')
     assert.ok(template.startsWith('# AGENTS.md\n'))
-    assert.ok(template.includes('这是「写作助手」打工人的协作说明'))
+    assert.ok(template.includes('这是「写作助手」执行者的协作说明'))
     assert.ok(template.includes(`- 路径：\`${writer.worker.path}\``))
 
-    // 创建打工人时自动把 CLAUDE.md 做成指向 AGENTS.md 的软链接。
+    // 创建执行者时自动把 CLAUDE.md 做成指向 AGENTS.md 的软链接。
     const claudeLink = path.join(writer.worker.path, CLAUDE_FILE)
     assert.equal((await fs.lstat(claudeLink)).isSymbolicLink(), true)
     assert.equal(
@@ -528,7 +528,7 @@ test('addWorker / removeWorker：按标识符建目录、id 冲突拒绝、只�
       target: 'AGENTS.md',
     })
 
-    // 新打工人插到数组最前（页面最新在上）。
+    // 新执行者插到数组最前（页面最新在上）。
     const painter = await addWorker({ workersDir, file, id: 'painter' })
     assert.equal(painter.worker.name, '', '展示名可留空')
     let registry = await readWorkerRegistry({ file })
@@ -675,7 +675,7 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
       target: '',
     })
 
-    // 旧打工人没有 CLAUDE.md 链接：列清单时自动补一份（目录与 AGENTS.md 都在）。
+    // 旧执行者没有 CLAUDE.md 链接：列清单时自动补一份（目录与 AGENTS.md 都在）。
     await fs.rm(path.join(writer.worker.path, CLAUDE_FILE))
     await listWorkers({ file, workersDir })
     assert.equal(
@@ -803,7 +803,7 @@ test('cleanOutput 去掉 ANSI 与回车并保留末尾 4000 字符', () => {
   assert.equal(cleanOutput(undefined), '')
 })
 
-test('预设头像：id 唯一、确定性默认分配与新打工人一定带头像', async () => {
+test('预设头像：id 唯一、确定性默认分配与新执行者一定带头像', async () => {
   assert.equal(new Set(AVATAR_IDS).size, AVATAR_IDS.length)
   assert.ok(AVATAR_IDS.includes(DEFAULT_AVATAR_ID))
   for (const id of AVATAR_IDS) assert.equal(isAvatarId(id), true, id)
@@ -953,7 +953,7 @@ test('历史遗留的 worker 头像 id 不在预设里，会按名字哈希落�
   assert.ok(AVATAR_IDS.includes(resolveAvatar('worker', 'writer')))
 })
 
-test('打工人描述：空白折叠、上限、登记表与列表读写', async () => {
+test('执行者描述：空白折叠、上限、登记表与列表读写', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
@@ -987,7 +987,7 @@ test('打工人描述：空白折叠、上限、登记表与列表读写', async
     await setWorkerDescription({ file, id: 'writer', description: '   ' })
     assert.equal((await readWorkerRegistry({ file })).workers[0].description, '')
 
-    // 上限与非字符串都拒绝，未知打工人 404 语义。
+    // 上限与非字符串都拒绝，未知执行者 404 语义。
     await assert.rejects(
       () =>
         setWorkerDescription({
@@ -1098,7 +1098,7 @@ test('renameWorker：只改展示名，保留标识符、目录、头像与条�
 
     // AGENTS.md 与 CLAUDE.md 不因改展示名而改动。
     const template = await fs.readFile(path.join(writer.worker.path, 'AGENTS.md'), 'utf8')
-    assert.ok(template.includes('这是「写作助手」打工人的协作说明'))
+    assert.ok(template.includes('这是「写作助手」执行者的协作说明'))
     assert.deepEqual(await readClaudeLink(writer.worker.path), {
       exists: true,
       symlink: true,
@@ -1247,7 +1247,7 @@ test('renameWorker：登记表写失败时展示名保持原值，目录不受�
   }
 })
 
-test('预设打工人：只在登记表为空时种子一次，非空 / 损坏都不动', async () => {
+test('预设执行者：只在登记表为空时种子一次，非空 / 损坏都不动', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
@@ -1484,14 +1484,14 @@ test('登记表：旧记录里的 assistant 字段读取时丢弃、写回时消
   }
 })
 
-test('预设打工人：已有内建 clock 时仍然补两个 agent 起点打工人', async () => {
+test('预设执行者：已有内建 clock 时仍然补两个 agent 起点执行者', async () => {
   const root = await makeRoot()
   try {
     const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    // 启动顺序：先补内建 clock，再做预设种子；clock 不算「已有打工人」。
+    // 启动顺序：先补内建 clock，再做预设种子；clock 不算「已有执行者」。
     await ensureBuiltinWorkers({ file })
     const seeded = await seedPresetWorkers({ workersDir, file })
     assert.equal(seeded.corrupt, false)
@@ -1788,7 +1788,7 @@ test('智能体模型：setWorkerModel 保存 / 清除、形状校验与机器�
       (error) => error.code === 'robot-worker',
     )
 
-    // 手工写坏的 model 被忽略，不会让整条打工人消失。
+    // 手工写坏的 model 被忽略，不会让整条执行者消失。
     await writeFile(
       file,
       JSON.stringify({

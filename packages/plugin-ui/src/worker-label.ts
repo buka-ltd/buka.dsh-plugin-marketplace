@@ -1,5 +1,5 @@
 /**
- * 打工人展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
+ * 执行者展示名的统一写法：两个插件都用「名称 · 标识符」消歧。
  *
  * 标识符是不可变引用键，名称是可选展示名；只读接口可能只给其中一个，也可能
  * 直接给算好的 `displayName`。这里按「名称 → displayName → 标识符」取展示名，
@@ -8,7 +8,7 @@
  * @module @buka/plugin-ui/worker-label
  */
 
-/** 打工人展示信息的最小形状；字段都按 unknown 收，缺失时各自回退。 */
+/** 执行者展示信息的最小形状；字段都按 unknown 收，缺失时各自回退。 */
 export interface WorkerLabelLike {
   id?: unknown
   name?: unknown
@@ -21,7 +21,7 @@ function text(value: unknown): string {
 }
 
 /**
- * 打工人展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
+ * 执行者展示名：名称非空时用它，否则用算好的 `displayName`，再否则用标识符。
  *
  */
 export function workerDisplayName(worker: WorkerLabelLike | null | undefined): string {

@@ -1,5 +1,5 @@
 /**
- * 打工人展示名的公共写法：名称 / displayName / 标识符的取值顺序与消歧格式。
+ * 执行者展示名的公共写法：名称 / displayName / 标识符的取值顺序与消歧格式。
  */
 
 import assert from 'node:assert/strict'

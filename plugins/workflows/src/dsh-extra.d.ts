@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/cordis'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** Buka Workers 服务（`@buka/dsh-plugin-workers` 提供）；未安装时为 undefined。 */
+    /** 执行者服务（合并包的执行者一半提供）；按可选服务处理，缺省时消费方降级。 */
     bukaWorkers: BukaWorkersService | undefined
     /**
      * Web 组合的会话控制器：按 sessionId 解析 / 恢复 ordinary session 的 live agent。
@@ -27,13 +27,13 @@ declare module '@deepseek-ai/cordis' {
  * 压缩、结果契约与追问都在 workflows 侧。
  */
 export interface BukaWorkersService {
-  /** 打工人登记表 + 目录状态。 */
+  /** 执行者登记表 + 目录状态。 */
   list?: () => Promise<unknown> | unknown
-  /** 打工人名 → 头像 id 表。 */
+  /** 执行者名 → 头像 id 表。 */
   avatarMap?: () => Promise<unknown> | unknown
-  /** 非阻塞地投递一轮打工人会话（总是新会话）。 */
+  /** 非阻塞地投递一轮执行者会话（总是新会话）。 */
   dispatchSession?: (request: Record<string, unknown>) => Promise<unknown> | unknown
-  /** 打开 / 续接一个已有打工人会话，不发 prompt。 */
+  /** 打开 / 续接一个已有执行者会话，不发 prompt。 */
   openSession?: (request: Record<string, unknown>) => Promise<unknown> | unknown
 }
 

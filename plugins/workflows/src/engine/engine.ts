@@ -96,13 +96,13 @@ import { describeError, WorkflowError } from './types.ts'
 /** 任务结果文本在记录里的预览上限。 */
 const RESULT_PREVIEW_BYTES = 4096
 
-/** 打工人登记表缓存时间。 */
+/** 执行者登记表缓存时间。 */
 const WORKER_CACHE_MS = 5000
 
 /**
  * 作业快照仍可读的版本范围。
  *
- * v7 快照不迁移：执行者 / 交回方式里的 `name` 按旧字段兜底；v8 是当前格式。
+ * v7 快照不迁移：主体 / 交回方式里的 `name` 按旧字段兜底；v8 是当前格式。
  */
 function isSupportedJobDefinitionVersion(version: number): boolean {
   return version >= 7 && version <= DEFINITION_VERSION
@@ -245,7 +245,7 @@ export class WorkflowEngine {
   // 生命周期
   // ---------------------------------------------------------------------
 
-  /** 启动引擎：刷新打工人登记表并恢复未完成的作业。 */
+  /** 启动引擎：刷新执行者登记表并恢复未完成的作业。 */
   async start(): Promise<void> {
     if (this.started || this.disposed) return
     this.started = true
@@ -285,7 +285,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * 刷新打工人登记表（默认 5s 缓存）。
+   * 刷新执行者登记表（默认 5s 缓存）。
    *
    * 空表不缓存：workers 插件可能晚于本插件注册服务，缓存空表会让定义图 / 作业页
    * 一直拿不到头像，直到某个写操作恰好触发下一次刷新。
@@ -313,7 +313,7 @@ export class WorkflowEngine {
     return this.catalog
   }
 
-  /** 取打工人登记表（按标识符）。 */
+  /** 取执行者登记表（按标识符）。 */
   private async workers(): Promise<Map<string, WorkerInfo>> {
     return await this.refreshWorkers()
   }
@@ -359,8 +359,8 @@ export class WorkflowEngine {
   /**
    * 工作流列表投影。
    *
-   * 读时现取打工人登记表，给每条工作流算派生的可用性：引用了已不存在的
-   * 打工人时标不可用并列出缺失的标识符（不落盘）。
+   * 读时现取执行者登记表，给每条工作流算派生的可用性：引用了已不存在的
+   * 执行者时标不可用并列出缺失的标识符（不落盘）。
    *
    * @returns 工作流摘要
    */
@@ -389,7 +389,7 @@ export class WorkflowEngine {
   /**
    * 读工作流详情（含某个版本的完整定义）。
    *
-   * 展示投影要在读取时刷新打工人登记表：图上岗位头像来自 workers 服务，而服务
+   * 展示投影要在读取时刷新执行者登记表：图上岗位头像来自 workers 服务，而服务
    * 可能晚于本插件就绪。
    *
    * @param workflowId 工作流 id
@@ -460,7 +460,7 @@ export class WorkflowEngine {
     readonly delivery?: DeliveryRule | undefined
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    // 启动前强制刷新登记表：刚被删除的打工人不能靠缓存再启动一个作业。
+    // 启动前强制刷新登记表：刚被删除的执行者不能靠缓存再启动一个作业。
     const workers = await this.refreshWorkers(true)
     this.assertDefinitionAvailable(definition, workers, workflow.name)
     return await this.startJob({
@@ -486,7 +486,7 @@ export class WorkflowEngine {
     readonly delivery?: DeliveryRule | undefined
   }): Promise<JobRecord> {
     const { workflow, definition } = this.requireStartableWorkflow(input.workflowId)
-    // 启动前强制刷新登记表：刚被删除的打工人不能靠缓存再启动一个作业。
+    // 启动前强制刷新登记表：刚被删除的执行者不能靠缓存再启动一个作业。
     const workers = await this.refreshWorkers(true)
     this.assertDefinitionAvailable(definition, workers, workflow.name)
     const starter: Starter = { kind: 'session', sessionId: input.sessionId }
@@ -627,7 +627,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * 启动作业前检查派生可用性：引用了已不存在的打工人时拒绝启动，并列出
+   * 启动作业前检查派生可用性：引用了已不存在的执行者时拒绝启动，并列出
    * 缺哪个标识符。读取既有定义本身不校验，只在真正要跑的时候收紧。
    *
    */
@@ -712,7 +712,7 @@ export class WorkflowEngine {
   /**
    * 作业详情（契约形状）。
    *
-   * 与工作流详情一样，展示投影在读取时刷新打工人登记表，让岗位头像保持最新。
+   * 与工作流详情一样，展示投影在读取时刷新执行者登记表，让岗位头像保持最新。
    *
    * @param jobId 作业 id
    * @returns 作业详情；不存在时 null
@@ -794,7 +794,7 @@ export class WorkflowEngine {
   /**
    * 作业列表（某个工作流下）。
    *
-   * 每条作业都带派生的可用性：钉住的定义或交回方式引用了已不存在的打工人时，
+   * 每条作业都带派生的可用性：钉住的定义或交回方式引用了已不存在的执行者时，
    * 页面据此标注「不可用」。
    *
    * @param workflowId 工作流 id
@@ -808,13 +808,13 @@ export class WorkflowEngine {
   }
 
   /**
-   * 一个打工人标识符的引用面：给 Workers 插件删除前算阻塞与影响面。
+   * 一个执行者标识符的引用面：给 Workers 插件删除前算阻塞与影响面。
    *
-   * 引用 = 工作流任一版本定义、或作业钉住的定义里出现该标识符（岗位执行者、
+   * 引用 = 工作流任一版本定义、或作业钉住的定义里出现该标识符（岗位主体、
    * 任务类型助理），或作业的交回方式点名了它。运行中的作业阻塞删除；已结束
    * 的作业只计数；工作流（含停用）全部列出但不阻塞。
    *
-   * @param id 打工人标识符
+   * @param id 执行者标识符
    * @returns 引用摘要
    */
   async workerUsage(id: string): Promise<WorkerUsage> {
@@ -1223,7 +1223,7 @@ export class WorkflowEngine {
       const claimant = task.claimant
       const createdBy =
         claimant === null || claimant.kind === 'human'
-          ? (claimant?.name ?? '执行者')
+          ? (claimant?.name ?? '工作人员')
           : this.workerDisplayName(claimant.name)
       const updated =
         task.assignee.kind === 'human'
@@ -1757,7 +1757,7 @@ export class WorkflowEngine {
         queuedTasks: queued,
         unblockedTasks: unblocked,
       })
-      // 重新调度：失败任务重新派给原执行者（新的执行记录），终止时被取消的
+      // 重新调度：失败任务重新派给原主体（新的执行记录），终止时被取消的
       // 任务按依赖重新排队；已完成任务与其执行记录保持原样。
       await this.recomputeLocked(job.id)
       return { mode: 'failed', job: this.store.getJob(job.id) ?? updated, source: job }
@@ -2035,7 +2035,7 @@ export class WorkflowEngine {
     const tasks = this.store.listTasks(jobId)
     const ready = tasks.filter((task) => task.status === 'ready')
     if (ready.length === 0) return []
-    // 调度前现取打工人登记表：执行者标识符查不到时任务直接失败并写明原因，
+    // 调度前现取执行者登记表：执行者标识符查不到时任务直接失败并写明原因，
     // 而不是等到开会话时才报一个笼统的「unknown worker」。
     const workers = await this.refreshWorkers()
     const launches: Launch[] = []
@@ -2111,7 +2111,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * 任务执行者是否已不在登记表里：机器人不走登记表（由 `program` 驱动），
+   * 任务主体是否已不在登记表里：机器人不走登记表（由 `program` 驱动），
    * 只检查智能体执行者。返回缺失的标识符，没有缺失时返回 null。
    *
    */
@@ -2367,7 +2367,7 @@ export class WorkflowEngine {
       await this.failOutside(
         launch.jobId,
         launch.taskId,
-        'the Buka Workers service with dispatchSession() is unavailable; install or update @buka/dsh-plugin-workers',
+        'the workers service (ctx.bukaWorkers) with dispatchSession() is unavailable in this composition; update the plugin or check the composition',
       )
       return
     }
@@ -2456,10 +2456,7 @@ export class WorkflowEngine {
       if (execution.timeout !== null) clearTimeout(execution.timeout)
       this.active.delete(input.taskId)
       this.disposeHandle(input.handle)
-      if (input.sessionId !== null) {
-        const current = this.sessionTasks.get(input.sessionId)
-        if (current?.taskId === input.taskId) this.sessionTasks.delete(input.sessionId)
-      }
+      if (input.sessionId !== null) this.unbindSessionTask(input.sessionId, input.taskId)
     }
     let waiting = false
     execution.stopPoll = poll(this.options.pollIntervalMs, async () => {
@@ -2588,6 +2585,11 @@ export class WorkflowEngine {
       await this.finishAttemptOutside(attemptId, 'cancelled', 'cancelled before delivery')
       return
     }
+    // 先写会话 → 任务句柄，再投递：投递会立刻在发起人会话开启新回合，
+    // 该回合的工具清单按 taskForSession() 计算（buka_task_complete 等）。
+    // 会话原来绑着别的任务时记下来：投递失败要还回去。
+    const displaced = this.sessionTasks.get(sessionId)
+    this.sessionTasks.set(sessionId, { jobId, taskId })
     let delivered = true
     let error: string | null = null
     let startSeq: number | null = null
@@ -2597,35 +2599,66 @@ export class WorkflowEngine {
       delivered = false
       error = describeError(caught)
     }
-    await this.store.runExclusive(jobId, async () => {
-      const current = this.store.getTask(taskId)
-      if (current === undefined) return
-      if (!delivered) {
-        this.deliveryBlocked.add(taskId)
-        this.sessionTasks.delete(sessionId)
+    try {
+      await this.store.runExclusive(jobId, async () => {
+        const current = this.store.getTask(taskId)
+        if (current === undefined) {
+          this.restoreSessionTask(sessionId, taskId, displaced)
+          return
+        }
+        if (!delivered) {
+          this.deliveryBlocked.add(taskId)
+          this.restoreSessionTask(sessionId, taskId, displaced)
+          await this.store.updateAttempt(attemptId, (attempt) => ({
+            ...attempt,
+            status: 'failed',
+            error,
+            finishedAt: nowIso(),
+          }))
+          await this.store.updateTask(taskId, (record) => ({
+            ...record,
+            status: 'ready',
+            claimant: null,
+            updatedAt: nowIso(),
+          }))
+          await this.appendEvent(jobId, 'delivery/failed', { taskId, error })
+          return
+        }
         await this.store.updateAttempt(attemptId, (attempt) => ({
           ...attempt,
-          status: 'failed',
-          error,
-          finishedAt: nowIso(),
+          sessionId,
+          ...(startSeq === null ? {} : { startSeq }),
         }))
-        await this.store.updateTask(taskId, (record) => ({
-          ...record,
-          status: 'ready',
-          claimant: null,
-          updatedAt: nowIso(),
-        }))
-        await this.appendEvent(jobId, 'delivery/failed', { taskId, error })
+        await this.appendEvent(jobId, 'delivery/delivered', { taskId })
+      })
+    } catch (caught) {
+      // 记账失败：不要把发起人会话留在「拿着结束任务」的状态，再抛给上层。
+      this.restoreSessionTask(sessionId, taskId, displaced)
+      throw caught
+    }
+  }
+
+  /** 解绑会话 → 任务句柄，只在它仍指向这个任务时执行（避免误删更新的绑定）。 */
+  private unbindSessionTask(sessionId: string, taskId: string): void {
+    if (this.sessionTasks.get(sessionId)?.taskId !== taskId) return
+    this.sessionTasks.delete(sessionId)
+  }
+
+  /** 结束投递没有落地：解绑当前绑定，并把投递前那条仍在跑的任务还回去。 */
+  private restoreSessionTask(
+    sessionId: string,
+    taskId: string,
+    displaced: { jobId: string; taskId: string } | undefined,
+  ): void {
+    if (displaced !== undefined) {
+      const task = this.store.getTask(displaced.taskId)
+      if (task !== undefined && task.status === 'running') {
+        if (this.sessionTasks.get(sessionId)?.taskId !== taskId) return
+        this.sessionTasks.set(sessionId, displaced)
         return
       }
-      this.sessionTasks.set(sessionId, { jobId, taskId })
-      await this.store.updateAttempt(attemptId, (attempt) => ({
-        ...attempt,
-        sessionId,
-        ...(startSeq === null ? {} : { startSeq }),
-      }))
-      await this.appendEvent(jobId, 'delivery/delivered', { taskId })
-    })
+    }
+    this.unbindSessionTask(sessionId, taskId)
   }
 
   /** 尝试结束任务之外的其它任务在超时后失败。 */
@@ -3014,13 +3047,13 @@ export class WorkflowEngine {
     return undefined
   }
 
-  /** 打工人标识符 → 展示名（登记表查不到时退回标识符）。 */
+  /** 执行者标识符 → 展示名（登记表查不到时退回标识符）。 */
   private workerDisplayName(id: string): string {
     const worker = this.catalog.get(id)
     return worker === undefined ? id : worker.displayName
   }
 
-  /** 任务执行者的工作区（打工人目录）。 */
+  /** 任务主体的工作区（执行者目录）。 */
   private workspaceFor(task: TaskRecord): string | undefined {
     if (task.assignee.kind === 'worker') {
       const id = storedExecutorRef(task.assignee)
@@ -3048,7 +3081,7 @@ export class WorkflowEngine {
     }
     this.disposeHandle(execution.handle)
     this.active.delete(taskId)
-    if (execution.sessionId !== null) this.sessionTasks.delete(execution.sessionId)
+    if (execution.sessionId !== null) this.unbindSessionTask(execution.sessionId, taskId)
   }
 
   /** 从 session→task 索引里删掉某条任务。 */

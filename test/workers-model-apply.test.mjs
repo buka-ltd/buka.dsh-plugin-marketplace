@@ -9,12 +9,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { registerWorkerModelEnforcement } from '../plugins/workers/src/model-apply.ts'
+import { registerWorkerModelEnforcement } from '../plugins/workflows/src/workers/model-apply.ts'
 import {
   addWorker,
   resolveWorkerRegistryFile,
   setWorkerModel,
-} from '../plugins/workers/src/worker-store.ts'
+} from '../plugins/workflows/src/workers/worker-store.ts'
 
 /** 建临时登记表 + 一个配了模型的 writer。 */
 async function makeHarness() {
@@ -77,7 +77,7 @@ function makeAgent({ cwd, events = [] } = {}) {
   }
 }
 
-test('模型套用：新会话按打工人目录使用登记的模型', async () => {
+test('模型套用：新会话按执行者目录使用登记的模型', async () => {
   const harness = await makeHarness()
   try {
     const { agent, selections } = makeAgent({
@@ -116,7 +116,7 @@ test('模型套用：已有显式模型选择、目录不匹配或没有配置�
     await harness.created({ agent: overridden.agent })
     assert.deepEqual(overridden.selections, [])
 
-    // 不在打工人目录里。
+    // 不在执行者目录里。
     const elsewhere = makeAgent({ cwd: path.join(harness.root, 'elsewhere') })
     await harness.created({ agent: elsewhere.agent })
     assert.deepEqual(elsewhere.selections, [])

@@ -18,7 +18,7 @@ import { CLOCK_PROGRAM_ID, programDriver } from './clock.ts'
 /**
  * 归一 program id：登记表缺 `program` 时按内建 clock 处理（与引擎执行一致）。
  *
- * @param program 打工人登记表里的 program 字段
+ * @param program 执行者登记表里的 program 字段
  * @returns program id
  */
 export function normalizeProgramId(program: string | null | undefined): string {

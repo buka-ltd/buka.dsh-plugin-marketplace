@@ -22,7 +22,7 @@ export function avatarPreset(id: unknown): { emoji: string; color: string } | nu
 }
 
 /**
- * 打工人头像小圆片：emoji 画在预设色的浅底上。[size] 是直径（px），`className`
+ * 执行者头像小圆片：emoji 画在预设色的浅底上。[size] 是直径（px），`className`
  * 给胶囊 / 详情标题这类不同位置补间距。
  *
  * @param avatar 头像 id
@@ -55,11 +55,11 @@ export function renderAvatar(
   )
 }
 
-/** 已删打工人的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
+/** 已删执行者的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
 export const MISSING_AVATAR_ID = '__missing-worker__'
 
 /**
- * 已删打工人的占位头像：灰色圆片 + 问号，与预设头像同样尺寸。
+ * 已删执行者的占位头像：灰色圆片 + 问号，与预设头像同样尺寸。
  *
  * @param size 直径（px）
  * @param className 额外类名

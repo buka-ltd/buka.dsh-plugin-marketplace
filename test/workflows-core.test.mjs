@@ -48,7 +48,7 @@ function sampleWorkers() {
       { id: '软件工程师', name: '', driver: 'agent' },
       { id: '质量保障工程师', name: '', driver: 'agent' },
       { id: '发布工程师', name: '', driver: 'agent' },
-      // 助理不是打工人身上的标记：这里不给它任何额外字段。
+      // 助理不是执行者身上的标记：这里不给它任何额外字段。
       { id: '沟通助理', name: '', driver: 'agent' },
       { id: 'clock', name: '', driver: 'robot', program: 'clock' },
     ].map((worker) => [worker.id, worker]),
@@ -1292,7 +1292,7 @@ test('store: init migrates v7 workflow definitions to v8 and normalizes legacy k
   try {
     const domain = new FakeDomain()
     const definition = legacyDefinition()
-    // 术语改名前的作业快照：岗位执行者写成 kind "robot"，承办者也一样。
+    // 术语改名前的作业快照：岗位主体写成 kind "robot"，承办者也一样。
     definition.positions[0].executor = { kind: 'robot', name: '产品经理' }
     await domain.table('workflows').put('wf-1', {
       id: 'wf-1',
@@ -1367,7 +1367,7 @@ test('store: init migrates v7 workflow definitions to v8 and normalizes legacy k
       `migration count should be logged, got: ${logged.join('\n')}`,
     )
 
-    // 作业快照不迁移：仍是 v7，执行者保留 name（术语归一后 kind 为 worker）。
+    // 作业快照不迁移：仍是 v7，主体保留 name（术语归一后 kind 为 worker）。
     const jobDefinition = domain.table('jobs').get('job-1').definition
     assert.equal(jobDefinition.version, 7)
     assert.deepEqual(jobDefinition.positions[0].executor, { kind: 'worker', name: '产品经理' })

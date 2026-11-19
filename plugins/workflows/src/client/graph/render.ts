@@ -258,6 +258,15 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                     node.meta,
                   )
                 : null
+            // 有会话在等用户操作 / 回复：左上角一个不拦点击的小红点。
+            const attention =
+              mode === 'live' && node.awaitingUser === true
+                ? h('span', {
+                    key: 'attention',
+                    className: 'buka-workflows-nodeAttention',
+                    'aria-hidden': true,
+                  })
+                : null
             return h(
               'div',
               {
@@ -283,6 +292,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                     renderAvatar(node.avatar, 16, 'buka-workflows-nodeAvatar'),
                     h('span', { className: 'buka-workflows-nodeLabel' }, node.label),
                     corner,
+                    attention,
                   )
                 : h(
                     'span',
@@ -292,6 +302,7 @@ function GraphView(props: RenderGraphOptions & { page: AppContext }): React.Reac
                     renderAvatar(node.avatar, 16, 'buka-workflows-nodeAvatar'),
                     h('span', { className: 'buka-workflows-nodeLabel' }, node.label),
                     corner,
+                    attention,
                   ),
             )
           }),

@@ -50,7 +50,7 @@ export interface CreateTaskInput {
   readonly content: JsonValue
   readonly deps: readonly string[]
   readonly tasks: readonly TaskRecord[]
-  /** 打工人登记表（按标识符）；机器人带 driver/program。 */
+  /** 执行者登记表（按标识符）；机器人带 driver/program。 */
   readonly workers: ReadonlyMap<string, WorkerInfo>
 }
 
@@ -62,15 +62,15 @@ export interface CreateTaskResult {
 }
 
 /**
- * 解析节点执行者，构造任务记录里钉住的执行者。
+ * 解析节点主体，构造任务记录里钉住的主体。
  *
- * 开始 / 结束任务的执行者都是发起人；结束任务选了「交给助理」时是那个助理。
+ * 开始 / 结束任务的主体都是发起人；结束任务选了「交给助理」时是那个助理。
  *
  * @param definition 定义
  * @param positionId 岗位 id
  * @param job 作业
- * @param workers 打工人登记表
- * @returns 钉住的执行者
+ * @param workers 执行者登记表
+ * @returns 钉住的主体
  */
 export function resolveExecutor(
   definition: WorkflowDefinition,
@@ -128,7 +128,7 @@ export function resolveExecutor(
  * 契约属于程序本身（见 `program/contracts.ts`）；任务类型声明的 schema 是作者
  * 视角的格式约束，两者都不通过就拒绝创建。
  *
- * @param assignee 任务钉住的执行者
+ * @param assignee 任务钉住的主体
  * @param content 渲染后的任务内容
  * @throws `WorkflowError('invalid-content')` 内容不满足机器人契约
  */
@@ -457,7 +457,7 @@ export function renderCreation(
  * 启动任务已完成：它们的唯一依赖是启动任务（`START_TASK_ID`），所以初始状态
  * 都是 `ready`。
  *
- * @param input 作业、启动任务、已有任务与打工人表
+ * @param input 作业、启动任务、已有任务与执行者表
  * @returns 新任务记录
  */
 export function buildInitialTasks(input: {

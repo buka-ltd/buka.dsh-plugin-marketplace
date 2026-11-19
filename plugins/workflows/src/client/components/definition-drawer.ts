@@ -334,7 +334,7 @@ function initialTasks(
   )
 }
 
-/** 通道端点：岗位标签 + 执行者；内建开始 / 结束节点只有标签。 */
+/** 通道端点：岗位标签 + 主体；内建开始 / 结束节点只有标签。 */
 function channelEndpoint(
   page: AppContext,
   definition: WorkflowDefinition,
@@ -356,7 +356,7 @@ function channelEndpoint(
   )
 }
 
-/** 头部第二行：执行者 / 通道 id 与端点 / 回向标记，没有可说的就留空。 */
+/** 头部第二行：主体 / 通道 id 与端点 / 回向标记，没有可说的就留空。 */
 function headerMeta(
   page: AppContext,
   selection: NonNullable<AppContext['state']['definitionSelection']>,

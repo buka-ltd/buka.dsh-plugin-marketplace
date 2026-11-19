@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { preferSharedQueue } from '../plugins/workers/src/serial-runner.ts'
+import { preferSharedQueue } from '../plugins/workflows/src/workers/serial-runner.ts'
 
 /** 建一个假服务：`runSerialized` 真的串行并记录调用数。 */
 function makeSharedService() {

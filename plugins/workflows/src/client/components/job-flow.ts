@@ -34,6 +34,25 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
   const tasksOf = (positionId: string): TaskSummary[] =>
     tasks.filter((task) => task.position === positionId)
 
+  /**
+   * 这个任务的会话是否在等用户：有未处理的交互（审批 / plan 审阅 / 提问），
+   * 或回合已结束、会话空闲。只认运行中的任务与真实存在的会话。
+   */
+  const awaitsUser = (task: TaskSummary): boolean => {
+    if (task.status !== 'running') return false
+    const sessionId = task.claimant?.sessionId
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    const status = page.sessionStatus.get(sessionId)
+    if (status === undefined) return false
+    return (
+      (status.pendingInteraction !== undefined && status.pendingInteraction !== null) ||
+      status.running === false
+    )
+  }
+
+  /** 岗位下任一任务在等用户，就给节点亮小红点。 */
+  const attentionOf = (list: TaskSummary[]): boolean => list.some(awaitsUser)
+
   const metaOf = (list: TaskSummary[]): string => {
     const progress = taskProgress(list)
     return progress.total === 0 ? '' : `${progress.done}/${progress.total}`
@@ -42,13 +61,16 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
   /** 悬浮说明：角标只给数量，具体状态在 title 里展开。 */
   const titleOf = (label: string, list: TaskSummary[]): string => {
     const progress = taskProgress(list)
-    if (progress.total === 0) return label
+    if (progress.total === 0) {
+      return attentionOf(list) ? `${label} · ${t('flowWaitingUser')}` : label
+    }
     const parts = [`${progress.done}/${progress.total} ${t('statusCompleted')}`]
     if (progress.ready > 0) parts.push(`${progress.ready} ${t('statusReady')}`)
     if (progress.running > 0) parts.push(`${progress.running} ${t('statusRunning')}`)
     if (progress.failed > 0) parts.push(`${progress.failed} ${t('statusFailed')}`)
     if (progress.pending > 0) parts.push(`${progress.pending} ${t('statusPending')}`)
-    return `${label} · ${parts.join(' · ')}`
+    const title = `${label} · ${parts.join(' · ')}`
+    return attentionOf(list) ? `${title} · ${t('flowWaitingUser')}` : title
   }
 
   const aggregateOf = (list: TaskSummary[]): string => {
@@ -69,6 +91,7 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
       status: aggregateOf(tasksOf('start')),
       meta: metaOf(tasksOf('start')),
       title: titleOf(t('boardStart'), tasksOf('start')),
+      awaitingUser: attentionOf(tasksOf('start')),
     },
     ...positions.map((position) => {
       const list = tasksOf(position.id)
@@ -85,6 +108,7 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
         status: aggregateOf(list),
         meta: metaOf(list),
         title: titleOf(position.label, list),
+        awaitingUser: attentionOf(list),
       }
     }),
     {
@@ -94,6 +118,7 @@ export function renderJobFlow(page: AppContext): React.ReactElement {
       status: aggregateOf(tasksOf('end')),
       meta: metaOf(tasksOf('end')),
       title: titleOf(t('boardEnd'), tasksOf('end')),
+      awaitingUser: attentionOf(tasksOf('end')),
     },
   ]
   const edges: GraphEdgeInput[] = channelsOf(definition).map((channel) => ({

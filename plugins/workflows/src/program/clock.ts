@@ -2,7 +2,7 @@
  * 机器人驱动：v1 只有内建 `clock`。
  *
  * `clock` 任务在任务内容里带 `until`（ISO 时间）；到点完成，不建会话、不占
- * 打工人实例。重启时按 `until` 重新计时：已过则立即完成。
+ * 执行者实例。重启时按 `until` 重新计时：已过则立即完成。
  *
  * @module @buka/dsh-plugin-workflows/program/clock
  */

@@ -2,7 +2,7 @@
  * 插件配置与数据目录解析。
  *
  * v4 只有少量运行参数：数据目录（大文本 / 附件 / 迁移标记）、任务超时、
- * 轮询间隔、附件限额、编排 preset / 工作区与打工人会话 preset。作业 / 任务
+ * 轮询间隔、附件限额、编排 preset / 工作区与执行者会话 preset。作业 / 任务
  * 元数据进 `ctx.storageDomain`，不在这里配置。
  *
  * @module @buka/dsh-plugin-workflows/options
@@ -61,8 +61,8 @@ export interface ResolvedOptions {
   workerPreset: string
 }
 
-/** 插件配置。 */
-export const Config = z.object({
+/** 工作流一半的配置字段；合并后的插件入口把它与执行者配置拼成一份 `Config`。 */
+export const workflowConfigFields = {
   dataDir: z
     .string()
     .default(defaultDataDir())
@@ -127,7 +127,10 @@ export const Config = z.object({
     .string()
     .default(DEFAULTS.workerPreset)
     .description('智能体任务会话使用的 agent preset。'),
-})
+}
+
+/** 工作流一半单独的配置 schema（合并插件入口拼上执行者字段后使用）。 */
+export const Config = z.object(workflowConfigFields)
 
 /**
  * 合并配置与默认值。

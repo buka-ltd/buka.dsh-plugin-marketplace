@@ -1,5 +1,5 @@
 /**
- * Workers 插件：删除打工人（硬删）与删除影响面的路由级单测。
+ * Workers 插件：删除执行者（硬删）与删除影响面的路由级单测。
  *
  * 直接调用 `registerWorkerRoutes` 注册的路由 handler，用临时目录 + 假的工作区
  * 注册表 / 假 `bukaWorkflows` 服务；不启动 DSH、不联网。覆盖：
@@ -9,7 +9,7 @@
  * - 删除成功后登记条目、目录、工作区注册行都清掉；
  * - 工作区删除失败 / 登记写失败时目录回滚、登记条目保持；
  * - 已挂载但工作区服务不可用时拒绝；
- * - 目录不在打工人根目录下时拒绝。
+ * - 目录不在执行者根目录下时拒绝。
  */
 
 import assert from 'node:assert/strict'
@@ -18,12 +18,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { registerWorkerRoutes } from '../plugins/workers/src/routes/workers.ts'
+import { registerWorkerRoutes } from '../plugins/workflows/src/workers/routes/workers.ts'
 import {
   addWorker,
   readWorkerRegistry,
   writeWorkerRegistry,
-} from '../plugins/workers/src/worker-store.ts'
+} from '../plugins/workflows/src/workers/worker-store.ts'
 
 /** 一个可操纵的假 `bukaWorkflows` 服务。 */
 function makeWorkflowUsage() {
@@ -148,7 +148,7 @@ async function callRoute(routes, routePath, body) {
   return { status: res.statusCode, body: res.text === '' ? null : JSON.parse(res.text) }
 }
 
-/** 新建一个打工人并把它挂到假工作区。 */
+/** 新建一个执行者并把它挂到假工作区。 */
 async function addMountedWorker(harness, id, name = '') {
   const created = await addWorker({
     workersDir: harness.workersDir,
@@ -339,7 +339,7 @@ test('删除：已挂载但工作区服务不可用时拒绝，目录与登记�
   }
 })
 
-test('删除：目录不在打工人根目录下时拒绝', async () => {
+test('删除：目录不在执行者根目录下时拒绝', async () => {
   const harness = await makeHarness()
   try {
     const outside = await fs.mkdtemp(path.join(tmpdir(), 'buka-workers-outside-'))

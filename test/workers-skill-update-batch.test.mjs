@@ -1,5 +1,5 @@
 /**
- * 「更新全部打工人」批量编排的单测。
+ * 「更新全部执行者」批量编排的单测。
  *
  * 覆盖验收标准里的批量行为：只对智能体且装了 skill 的 worker 执行、机器人 /
  * 空 skills 跳过、按登记表顺序执行、单个失败不中断、最后汇总每个 worker 的
@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { updateWorkersSequentially } from '../plugins/workers/src/skill-update-batch.ts'
+import { updateWorkersSequentially } from '../plugins/workflows/src/workers/skill-update-batch.ts'
 
 /** 一条 worker。 */
 function worker(id, overrides = {}) {

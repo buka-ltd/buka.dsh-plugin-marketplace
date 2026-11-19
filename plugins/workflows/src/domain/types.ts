@@ -5,7 +5,7 @@
  * 便于被校验、存储、引擎、路由与单测共同引用。
  *
  * 术语以根 `GLOSSARY.md` 为准：工作流 / 作业 / 任务 / 岗位 / 任务类型 / 动作 /
- * 通道 / 发起人 / 执行者 / 承办者 / 执行记录 / 看板。
+ * 通道 / 发起人 / 主体 / 承办者 / 执行记录 / 看板。
  *
  * @module @buka/dsh-plugin-workflows/domain/types
  */
@@ -43,12 +43,12 @@ export type TaskStatus =
   | 'blocked'
   | 'cancelled'
 
-/** 打工人驱动方式。 */
+/** 执行者驱动方式。 */
 export type WorkerDriver = 'agent' | 'robot'
 
-/** workers 登记表里本插件用到的一条打工人信息（由 workers 服务提供）。 */
+/** workers 登记表里本插件用到的一条执行者信息（由 workers 服务提供）。 */
 export interface WorkerInfo {
-  /** 不可变标识符；工作流定义与作业快照按它引用打工人。 */
+  /** 不可变标识符；工作流定义与作业快照按它引用执行者。 */
   readonly id: string
   /** 可选展示名；空串表示未设置。 */
   readonly name: string
@@ -69,9 +69,9 @@ export interface WorkerCatalog {
 }
 
 /**
- * 岗位执行者：人，或登记表里的打工人。
+ * 岗位主体：人，或登记表里的执行者。
  *
- * v8 用 `id`（不可变标识符）引用打工人；`name` 只出现在 v7 作业快照里，
+ * v8 用 `id`（不可变标识符）引用执行者；`name` 只出现在 v7 作业快照里，
  * 读取时按 `id ?? name` 兜底，不再写入。
  */
 export type ExecutorSpec =
@@ -82,7 +82,7 @@ export type ExecutorSpec =
     }
   | { readonly kind: 'human' }
 
-/** 任务创建时钉住的执行者：打工人额外记录 driver，避免之后登记表变化影响已创建的作业。 */
+/** 任务创建时钉住的主体：执行者额外记录 driver，避免之后登记表变化影响已创建的作业。 */
 export type StoredExecutor =
   | {
       readonly kind: 'worker'
@@ -95,7 +95,7 @@ export type StoredExecutor =
       readonly avatar?: string | undefined
     }
   | { readonly kind: 'human' }
-  /** 开始 / 结束任务的执行者是会话发起人。 */
+  /** 开始 / 结束任务的主体是会话发起人。 */
   | { readonly kind: 'session'; readonly sessionId: string }
 
 /** 承办者：实际接走任务的一方。 */
@@ -117,7 +117,7 @@ export type Starter =
  * 结束任务的交回方式，由发起人在创建作业时决定。
  *
  * - `starter`：交回发起人本人——会话发起时投递进那个会话，人发起时落在看板上；
- * - `assistant`：交给一个助理打工人代收；v8 用 `id` 引用，`name` 只出现在
+ * - `assistant`：交给一个助理执行者代收；v8 用 `id` 引用，`name` 只出现在
  *   v7 作业快照里，读取时按 `id ?? name` 兜底。
  */
 export type DeliveryRule =
@@ -181,9 +181,9 @@ export interface TaskTypeDefinition {
    */
   readonly creates?: readonly CreationDefinition[] | undefined
   /**
-   * 仅人岗位：承担沟通的助理打工人标识符；null / 省略表示无助理。
+   * 仅人岗位：承担沟通的助理执行者标识符；null / 省略表示无助理。
    *
-   * 助理不是打工人身上的标记：这里点名谁，谁就在任务就绪后代办这张任务。
+   * 助理不是执行者身上的标记：这里点名谁，谁就在任务就绪后代办这张任务。
    * 被点名的智能体没交出结果时整个作业失败（不做自动换人或人兜底）。
    */
   readonly assistant?: string | null | undefined
@@ -191,7 +191,7 @@ export interface TaskTypeDefinition {
   readonly mode?: 'plan' | null | undefined
 }
 
-/** 一个岗位：图上的节点，给人看清流程结构；执行者 + 任务类型。 */
+/** 一个岗位：图上的节点，给人看清流程结构；主体 + 任务类型。 */
 export interface PositionDefinition {
   readonly id: string
   readonly label: string
@@ -201,7 +201,7 @@ export interface PositionDefinition {
   readonly taskTypes: readonly TaskTypeDefinition[]
 }
 
-/** 一条通道：`from` 的执行者可以沿它把任务派给 `to`；`label` 给人读，引擎不读。 */
+/** 一条通道：`from` 的主体可以沿它把任务派给 `to`；`label` 给人读，引擎不读。 */
 export interface ChannelDefinition {
   /** 工作流内唯一的小写点分标识，任务记录用它标注自己走过的通道。 */
   readonly id: string
@@ -318,7 +318,7 @@ export interface TaskRecord {
   readonly type: string
   /** 任务沿哪条通道派发而来；启动任务没有入站通道，为 null。 */
   readonly channel: string | null
-  /** 任务内容：创建者产出的、给执行者用的东西。 */
+  /** 任务内容：创建者产出的、给主体用的东西。 */
   readonly content: JsonValue
   readonly deps: readonly string[]
   readonly status: TaskStatus
@@ -392,13 +392,13 @@ export interface DefinitionIssue {
   readonly message: string
 }
 
-/** 一条缺失的打工人引用：引用断了，派生「不可用」时用。 */
+/** 一条缺失的执行者引用：引用断了，派生「不可用」时用。 */
 export interface MissingWorkerRef {
   /** 找不到的标识符（v7 快照里是当时的名字）。 */
   readonly id: string
-  /** 引用出现在哪：岗位执行者、任务类型助理或交回方式的助理。 */
+  /** 引用出现在哪：岗位主体、任务类型助理或交回方式的助理。 */
   readonly role: 'executor' | 'assistant' | 'delivery'
-  /** 岗位 id（执行者 / 任务类型助理）。 */
+  /** 岗位 id（主体 / 任务类型助理）。 */
   readonly positionId?: string | undefined
   /** 岗位展示名。 */
   readonly positionLabel?: string | undefined
@@ -411,8 +411,8 @@ export interface MissingWorkerRef {
 /**
  * 工作流 / 作业的派生可用性。
  *
- * `available: false` 表示至少有一条打工人引用断了：不能启动作业、不能派发
- * 对应任务；重新绑定一个已存在的打工人后自动恢复。
+ * `available: false` 表示至少有一条执行者引用断了：不能启动作业、不能派发
+ * 对应任务；重新绑定一个已存在的执行者后自动恢复。
  */
 export interface WorkerAvailability {
   readonly available: boolean
@@ -420,7 +420,7 @@ export interface WorkerAvailability {
 }
 
 /**
- * 一个打工人被工作流 / 作业引用的摘要；Workers 插件删除前用它展示影响面。
+ * 一个执行者被工作流 / 作业引用的摘要；Workers 插件删除前用它展示影响面。
  */
 export interface WorkerUsage {
   /** 引用该标识符且仍在运行的作业；它们阻塞删除。 */
@@ -431,7 +431,7 @@ export interface WorkerUsage {
   readonly finishedJobs: number
 }
 
-/** 一条引用某个打工人的运行中作业。 */
+/** 一条引用某个执行者的运行中作业。 */
 export interface WorkerUsageJob {
   readonly jobId: string
   /** 作业在所属工作流内的编号。 */
@@ -442,7 +442,7 @@ export interface WorkerUsageJob {
   readonly jobName: string
 }
 
-/** 一条引用某个打工人的工作流。 */
+/** 一条引用某个执行者的工作流。 */
 export interface WorkerUsageWorkflow {
   readonly workflowId: string
   readonly name: string

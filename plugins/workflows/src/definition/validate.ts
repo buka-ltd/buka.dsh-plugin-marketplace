@@ -1,7 +1,7 @@
 /**
  * 工作流 v8 定义校验。
  *
- * 纯函数：不读盘、不依赖 DSH。打工人存在性由调用方传入 `workers` 目录（按
+ * 纯函数：不读盘、不依赖 DSH。执行者存在性由调用方传入 `workers` 目录（按
  * 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
  * 固定目录。
  *
@@ -34,7 +34,7 @@ import { containsTemplate, inspectPayload } from './payload.ts'
 
 /** 校验入参。 */
 export interface ValidateDefinitionOptions {
-  /** workers 登记表里本插件关心的字段；执行者 / 助理的存在性据此判断。 */
+  /** workers 登记表里本插件关心的字段；主体 / 助理的存在性据此判断。 */
   readonly workers: ReadonlyMap<string, WorkerInfo>
 }
 
@@ -70,7 +70,7 @@ class Issues {
  * 校验一份工作流 v8 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
- * @param options 打工人目录
+ * @param options 执行者目录
  * @returns 规范化定义，或全部校验错误
  */
 export function validateWorkflowDefinition(
@@ -257,7 +257,7 @@ function readPositionId(
   return id
 }
 
-/** 解析岗位执行者。 */
+/** 解析岗位主体。 */
 function readExecutor(
   raw: unknown,
   path: string,
@@ -429,7 +429,7 @@ function checkRobotContent(
   }
 }
 
-/** 执行者是不是机器人（登记表里 driver 为 robot）。 */
+/** 主体是不是机器人（登记表里 driver 为 robot）。 */
 function isRobotExecutor(
   executor: ExecutorSpec | null,
   workers: ReadonlyMap<string, WorkerInfo>,
@@ -559,7 +559,7 @@ function readCreations(raw: unknown, path: string, issues: Issues): CreationDefi
 /**
  * 解析助理字段；只对人岗位有效。
  *
- * 助理是工作流上的点名：只要求标识符已登记且是智能体，不要求打工人身上带
+ * 助理是工作流上的点名：只要求标识符已登记且是智能体，不要求执行者身上带
  * 任何标记（ADR 0022）。
  */
 function readAssistant(

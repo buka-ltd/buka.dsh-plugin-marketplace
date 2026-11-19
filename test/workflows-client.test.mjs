@@ -72,6 +72,8 @@ export const Modal = (props) => (props.open === false ? null : h('div', { classN
 export const MarkdownText = () => null
 export const CodeBlock = () => null
 export const FileTypeIcon = () => null
+export const ReadBlock = () => null
+export const languageForPath = () => ''
 export const IconChevronRightOutlineRegular = () => null
 export const IconCloseOutlineRegular = () => null
 export const IconRefreshOutlineRegular = () => null
@@ -81,6 +83,10 @@ export const IconDownloadOutlineRegular = () => null
 export const IconNewChatOutlineRegular = () => null
 export const IconFolderOpenOutlineRegular = () => null
 export const IconSettingsOutlineRegular = () => null
+export const IconEditOutlineRegular = () => null
+export const IconPlusOutlineRegular = () => null
+export const IconTrashOutlineRegular = () => null
+export const Tooltip = (props) => h('span', props, ...(props.children ?? []))
 `
 
 const REACT_URL = `data:text/javascript,${encodeURIComponent(REACT_STUB)}`
@@ -132,6 +138,9 @@ async function loadClient() {
   const indexUrl = `${pathToFileURL(path.join(CLIENT_DIR, 'index.ts')).href}${suffix}`
   const client = await import(indexUrl)
   const i18n = await import(`${pathToFileURL(path.join(CLIENT_DIR, 'i18n.ts')).href}${suffix}`)
+  const workersI18n = await import(
+    `${pathToFileURL(path.join(CLIENT_DIR, 'workers/i18n.ts')).href}${suffix}`
+  )
   const stateModule = await import(
     `${pathToFileURL(path.join(CLIENT_DIR, 'state/use-page-state.ts')).href}${suffix}`
   )
@@ -145,15 +154,21 @@ async function loadClient() {
         fn()
       },
       register(options, component) {
-        if (options.name === 'main') components.page = component
+        // 合并后的 client 只注册一个首页（两个页签）；按 key 存下来供测试取。
+        if (options.name === 'main') components[options.key] = component
         return () => {}
       },
     },
   })
-  assert.equal(typeof components.page, 'function', 'client should register a main page component')
+  assert.equal(
+    typeof components['buka-workflows'],
+    'function',
+    'client should register the workflows main page component',
+  )
   return {
-    Page: components.page,
+    Page: components['buka-workflows'],
     zh: i18n.zh,
+    workersZh: workersI18n.zh,
     createInitialState: stateModule.createInitialState,
     css: () => css,
   }
@@ -169,7 +184,12 @@ function walk(node, visit) {
   if (typeof node !== 'object') return
   visit(node)
   if (typeof node.type === 'function') {
-    walk(node.type({ ...node.props, children: node.children }), visit)
+    // 函数组件只展开一次并缓存：首页包裹了页面组件，同一棵树被反复遍历时
+    // 不能再消费页面内部的 useState（第二次展开会越界回落到初值）。
+    if (node.__walkExpanded === undefined) {
+      node.__walkExpanded = node.type({ ...node.props, children: node.children })
+    }
+    walk(node.__walkExpanded, visit)
     return
   }
   if (node.type === 'fragment') {
@@ -244,14 +264,31 @@ function clickButton(tree, label) {
   return node
 }
 
-/** 渲染一次页面。 */
-function render(client, patch) {
+/**
+ * 渲染一次页面。
+ *
+ * @param client loadClient() 的返回值
+ * @param patch 覆盖初始页面状态
+ * @param options sessionStatus：注入的会话状态快照（按 sessionId 索引）
+ */
+function render(client, patch, options = {}) {
   const state = { ...client.createInitialState(), ...patch }
-  harness.queue = [state]
+  // 首页（HomePage）的页签 useState 占第 0 位，工作流页状态从第 1 位开始。
+  harness.queue = ['workflow', state]
   harness.index = 0
   harness.updates = []
   const t = (key) => client.zh[key] ?? key
-  const tree = client.Page({ t, getService: () => null })
+  const workersT = (key) => client.workersZh[key] ?? key
+  const sessionStatus = options.sessionStatus
+  const tree = client.Page({
+    t,
+    workersT,
+    getService: () => null,
+    // 不注入时走页面自己的空快照 fallback；注入时模拟 `main` 插槽的会话状态钩子。
+    ...(sessionStatus === undefined
+      ? {}
+      : { useSessionStatus: (selector) => selector(sessionStatus) }),
+  })
   const collected = collect(tree)
   return { tree, ...collected, state }
 }
@@ -526,7 +563,7 @@ const FINAL_TASK = {
   },
 }
 
-/** 打工人任务详情。 */
+/** 执行者任务详情。 */
 const TASK_DETAIL = {
   task: {
     id: 'task-1',
@@ -600,6 +637,58 @@ const HUMAN_TASK_DETAIL = {
     allowedActions: ['complete'],
   },
 }
+
+test('首页：顶部两个页签，默认 Workflow，切到 Worker 更新页签状态', async () => {
+  const client = await loadClient()
+  const { tree, texts } = render(client, {
+    workflows: { status: 'ready', data: [], error: null },
+  })
+  const text = texts.join(' ')
+  assert.match(text, /工作流/u, 'the Workflow tab renders first')
+  assert.match(text, /执行者/u, 'the Worker tab renders second')
+  assert.ok(text.indexOf('工作流') < text.indexOf('执行者'), 'Workflow tab comes first')
+
+  // 列表页不再重复「工作流」大标题：首页页签已经是标题。
+  assert.equal(
+    findBy(tree, (node) => node.type === 'h1'),
+    null,
+    'the workflow list no longer renders a duplicate h1 title',
+  )
+  // 页签栏左对齐（不再居中）。
+  assert.doesNotMatch(
+    client.css(),
+    /\.buka-workflows-homeTabs\{[^}]*justify-content:center/u,
+    'the home tab bar is left-aligned',
+  )
+  // 内容区进入动画只做透明度：它在滚动容器里，translate 会临时撑大
+  // scrollable overflow，从执行者页切过来时右侧会闪一条滚动条。
+  assert.doesNotMatch(
+    client.css(),
+    /@keyframes buka-enter\{[^}]*transform/u,
+    'the page enter animation must not transform content inside the scroll container',
+  )
+
+  // 首页页签栏是树里唯一的 SegmentedTabs（列表页没有页内页签）。
+  const tabBar = findBy(
+    tree,
+    (node) =>
+      typeof node.props?.onChange === 'function' &&
+      Array.isArray(node.props?.items) &&
+      node.props.items.length === 2,
+  )
+  assert.ok(tabBar !== null, 'the home tab bar should render')
+  assert.deepEqual(
+    tabBar.props.items.map((item) => item.value),
+    ['workflow', 'worker'],
+    'tab values are workflow then worker',
+  )
+  assert.equal(tabBar.props.value, 'workflow', 'the home defaults to the Workflow tab')
+  assert.equal(tabBar.props.label, '主视图', 'the tab bar carries its accessible name')
+
+  tabBar.props.onChange('worker')
+  assert.equal(harness.updates.length, 1)
+  assert.equal(harness.updates[0], 'worker', 'selecting the Worker tab updates the home tab')
+})
 
 test('工作流列表：停用的工作流灰显并排在后面', async () => {
   const client = await loadClient()
@@ -753,7 +842,7 @@ test('结构图：同一对节点的并行通道分别画线，名称默认都�
   assert.ok(text.includes('加急提测'), '并行通道的名称也默认显示')
 })
 
-test('结构图：节点头像来自打工人登记，而不是定义快照', async () => {
+test('结构图：节点头像来自执行者登记，而不是定义快照', async () => {
   const client = await loadClient()
   const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
     position.id === 'dev'
@@ -785,7 +874,7 @@ test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
   })
   const text = texts.join(' ')
   assert.match(text, /研发/u)
-  assert.match(text, /打工人 · 软件工程师/u, 'executor identity lives in the drawer header')
+  assert.match(text, /执行者 · 软件工程师/u, 'executor identity lives in the drawer header')
   assert.match(text, /开发/u)
   assert.match(text, /实现功能/u)
   assert.match(text, /requirement/u, 'schema fields are listed')
@@ -798,7 +887,7 @@ test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
     /通道/u,
     'channels are inspected on the edge, not on the node',
   )
-  assert.doesNotMatch(text, /执行者:/u, 'the executor is no longer a loose key-value row')
+  assert.doesNotMatch(text, /主体:/u, 'the executor is no longer a loose key-value row')
   assert.doesNotMatch(text, /原始 schema/u, 'no raw schema dump')
 })
 
@@ -853,12 +942,12 @@ test('定义抽屉：通道显示发送方、接收方与允许的任务类型',
   assert.match(text, /接收方/u)
   assert.match(text, /测试/u, 'the sender is the source position')
   assert.match(text, /研发/u, 'the receiver is the target position')
-  assert.match(text, /打工人 · 质量保障工程师/u, 'the sender executor is shown')
+  assert.match(text, /执行者 · 质量保障工程师/u, 'the sender executor is shown')
   assert.match(text, /允许的任务类型/u)
   assert.match(text, /开发/u, 'the allowed task type is listed')
 })
 
-test('客户端展示：执行者与助理显示「展示名 · 标识符」', async () => {
+test('客户端展示：主体与助理显示「展示名 · 标识符」', async () => {
   const client = await loadClient()
   const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
     position.id === 'qa'
@@ -877,7 +966,7 @@ test('客户端展示：执行者与助理显示「展示名 · 标识符」', a
   const text = texts.join(' ')
   assert.match(
     text,
-    /打工人 · 质量保障工程师 · qa-engineer/u,
+    /执行者 · 质量保障工程师 · qa-engineer/u,
     'executor shows display name and identifier',
   )
 
@@ -1049,6 +1138,70 @@ test('实时流程：节点聚合、待认领徽标、已走过的通道与点�
   assert.equal(harness.updates[0].taskId, 'task-1', 'a single task opens its drawer directly')
 })
 
+test('实时流程：会话等用户操作或等回复时，节点左上角显示小红点', async () => {
+  const client = await loadClient()
+  const flowState = {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'flow' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+  }
+  const isAttention = (node) =>
+    typeof node.props?.className === 'string' &&
+    node.props.className.split(/\s+/).includes('buka-workflows-nodeAttention')
+  const devButton = (tree) =>
+    findBy(tree, (node) => node.type === 'button' && textOf(node).includes('研发'))
+  const attentionDot = (tree) => {
+    const dev = devButton(tree)
+    assert.ok(dev !== null, 'the dev node renders')
+    return findBy(dev, isAttention)
+  }
+
+  // 回合已结束、会话空闲：等用户回复。
+  const idle = render(client, flowState, {
+    sessionStatus: new Map([['session-1', { running: false }]]),
+  })
+  assert.ok(attentionDot(idle.tree) !== null, 'idle session shows the red dot')
+  assert.match(
+    String(devButton(idle.tree).props.title),
+    /等你回复/u,
+    'the node tooltip explains the wait',
+  )
+
+  // 会话还在跑，但正在等用户审批 / 回答。
+  const pending = render(client, flowState, {
+    sessionStatus: new Map([
+      ['session-1', { running: true, pendingInteraction: { kind: 'question' } }],
+    ]),
+  })
+  assert.ok(attentionDot(pending.tree) !== null, 'pending interaction shows the red dot')
+
+  // 会话在忙且没有待处理交互：不打扰。
+  const running = render(client, flowState, {
+    sessionStatus: new Map([['session-1', { running: true }]]),
+  })
+  assert.equal(attentionDot(running.tree), null, 'a busy session shows no red dot')
+
+  // 定义图不显示运行态提醒。
+  const suffix = `?attention=${Date.now()}`
+  const renderGraph = await import(
+    `${pathToFileURL(path.join(CLIENT_DIR, 'graph/render.ts')).href}${suffix}`
+  )
+  const definition = renderGraph.renderWorkflowGraph(
+    { t: (key) => client.zh[key] ?? key },
+    {
+      nodes: [{ id: 'dev', label: '研发', kind: 'position', awaitingUser: true }],
+      edges: [],
+      mode: 'definition',
+      showLegend: false,
+    },
+  )
+  assert.equal(
+    collect(definition).classes.includes('buka-workflows-nodeAttention'),
+    false,
+    'the definition graph never shows the runtime dot',
+  )
+})
+
 test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡片打开任务抽屉', async () => {
   const client = await loadClient()
   const { tree, texts, classes } = render(client, {
@@ -1141,7 +1294,7 @@ test('节点任务抽屉：岗位身份、任务数与任务卡', async () => {
   const text = texts.join(' ')
   assert.match(text, /测试 · 任务/u)
   assert.match(text, /1 个任务/u)
-  assert.match(text, /打工人 · 质量保障工程师/u)
+  assert.match(text, /执行者 · 质量保障工程师/u)
 
   clickButton(tree, '验证')
   assert.equal(harness.updates[0].taskId, 'task-2', 'the first task card opens its drawer')
@@ -1234,7 +1387,7 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
   }
 })
 
-test('人任务与打工人任务：只显示代办 / 待你办理 / 你在办理或执行者', async () => {
+test('人任务与执行者任务：只显示代办 / 待你办理 / 你在办理或执行者', async () => {
   const client = await loadClient()
   const definition = {
     ...DEFINITION,
@@ -1280,7 +1433,7 @@ test('人任务与打工人任务：只显示代办 / 待你办理 / 你在办�
   assert.match(rendered.texts.join(' '), /你在办理/u)
   assert.doesNotMatch(rendered.texts.join(' '), /承办者/u)
 
-  // 打工人任务只显示执行者，不出现代办 / 承办者。
+  // 执行者任务只显示执行者，不出现代办 / 承办者。
   rendered = render(client, {
     route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
     workflow: { status: 'ready', data: workflow, error: null },
@@ -1499,7 +1652,7 @@ test('派生不可用：工作流列表 / 详情标出缺失的标识符，新�
   assert.ok(list.texts.includes('不可用'), 'list marks the workflow unavailable')
   assert.match(
     list.texts.join(' '),
-    /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u,
+    /岗位「研发」引用的执行者标识符「软件工程师」已不存在/u,
     'the list names the missing identifier',
   )
 
@@ -1511,13 +1664,13 @@ test('派生不可用：工作流列表 / 详情标出缺失的标识符，新�
   })
   const text = texts.join(' ')
   assert.ok(text.includes('不可用'), 'the detail keeps an unavailable tag')
-  assert.match(text, /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u)
+  assert.match(text, /岗位「研发」引用的执行者标识符「软件工程师」已不存在/u)
   const newJob = findBy(tree, (node) => node.type === 'button' && textOf(node) === '新建作业')
   assert.ok(newJob, 'the new job button still renders')
   assert.equal(newJob.props.disabled, true, 'starting a job is blocked while unavailable')
 })
 
-test('派生不可用：作业页标注，执行者与交回助理显示「已删除」与占位头像', async () => {
+test('派生不可用：作业页标注，主体与交回助理显示「已删除」与占位头像', async () => {
   const client = await loadClient()
   const missing = [
     { id: '软件工程师', role: 'executor', positionId: 'dev', positionLabel: '研发' },
@@ -1548,7 +1701,7 @@ test('派生不可用：作业页标注，执行者与交回助理显示「已�
   })
   const text = texts.join(' ')
   assert.ok(text.includes('不可用'), 'the job page marks the job unavailable')
-  assert.match(text, /岗位「研发」引用的打工人标识符「软件工程师」已不存在/u)
+  assert.match(text, /岗位「研发」引用的执行者标识符「软件工程师」已不存在/u)
   assert.match(text, /交回方式里的助理「secretary」已不存在/u)
   assert.match(text, /软件工程师 · 已删除/u, 'the executor is marked deleted')
   assert.match(text, /沟通助理 · secretary · 已删除/u, 'the delivery assistant is marked deleted')
