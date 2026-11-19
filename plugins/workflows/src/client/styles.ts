@@ -23,7 +23,7 @@ ${THEME}
 .buka-workflows-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-4, 16px);min-height:var(--buka-control-sm, 28px)}
 .buka-workflows-barTabs{display:flex;align-items:center;min-width:0;flex:1 1 auto}
 .buka-workflows-titleRow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:var(--buka-space-3, 12px) var(--buka-space-4, 16px);min-width:0}
-.buka-workflows-titleGroup{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex-wrap:wrap}
+.buka-workflows-titleGroup{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex:1 1 auto;flex-wrap:wrap}
 .buka-workflows-title{font-size:var(--buka-text-page, 20px);font-weight:500;line-height:var(--buka-line-28, 28px);margin:0;overflow-wrap:anywhere}
 .buka-workflows-titleMeta{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex-wrap:wrap}
 .buka-workflows-titleSub{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);font-weight:400}

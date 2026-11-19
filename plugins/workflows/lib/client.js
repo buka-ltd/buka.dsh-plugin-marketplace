@@ -5191,13 +5191,15 @@ window.__ModuleLoader__.load({
     		disabled: state.busy === "workflow-status"
     	}, t("disableWorkflow")))));
     	const body = route.kind === "workflows" ? renderWorkflowList(page) : route.kind === "workflow" ? route.tab === "definition" ? renderWorkflowDefinition(page) : renderWorkflowJobs(page) : renderJobDetail(page);
-    	return h("div", { className: `buka-workflows-page${graphView ? " is-graph" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, h("div", { className: "buka-workflows-bar" }, h("div", { className: "buka-workflows-barTabs" }, page.topTabs), h("div", { className: "buka-workflows-toolbar" }, ...toolbar)), route.kind === "workflows" ? null : h("div", { className: "buka-workflows-titleRow" }, h("div", { className: "buka-workflows-titleGroup" }, h("button", {
+    	const toolbarNode = h("div", { className: "buka-workflows-toolbar" }, ...toolbar);
+    	const titleGroup = h("div", { className: "buka-workflows-titleGroup" }, h("button", {
     		type: "button",
     		className: "buka-workflows-back",
     		title: t("back"),
     		"aria-label": t("back"),
     		onClick: route.kind === "workflow" ? actions.backToWorkflows : actions.backToWorkflow
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })), h("h1", { className: "buka-workflows-title" }, heading.title), route.kind === "workflow" && retired ? renderStatusTag(t, workflowStatus, "workflow") : null, route.kind === "workflow" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-titleSub" }, heading.subtitle), renderStatusTag(t, jobStatus, "job"), live ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }) : null) : null), tabs === null ? null : h("div", { className: "buka-workflows-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })), h("h1", { className: "buka-workflows-title" }, heading.title), route.kind === "workflow" && retired ? renderStatusTag(t, workflowStatus, "workflow") : null, route.kind === "workflow" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-titleSub" }, heading.subtitle), renderStatusTag(t, jobStatus, "job"), live ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }) : null) : null);
+    	const tabsNode = tabs === null ? null : h("div", { className: "buka-workflows-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-workflows-tabList",
     		label: route.kind === "workflow" ? t("workflowTabsAria") : t("jobTabsAria"),
@@ -5207,7 +5209,8 @@ window.__ModuleLoader__.load({
     			else if (route.kind === "job") actions.setJobView(value);
     		},
     		items: tabs
-    	}))))), h("div", {
+    	}));
+    	return h("div", { className: `buka-workflows-page${graphView ? " is-graph" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, route.kind === "workflows" ? h("div", { className: "buka-workflows-bar" }, h("div", { className: "buka-workflows-barTabs" }, page.topTabs), toolbarNode) : h("div", { className: "buka-workflows-titleRow" }, titleGroup, toolbarNode), tabsNode)), h("div", {
     		key: routeHash(route),
     		className: `buka-workflows-body${graphView ? " is-graph" : ""}`
     	}, renderAvailabilityNotice(page, availability), body), renderNewJobDialog(page), renderRestartDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
@@ -8256,7 +8259,8 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("reveal")} ${workerDisplayName(selectedWorker)}`,
     		onClick: () => revealWorker(selectedWorker)
     	}, t("reveal"))];
-    	return h("div", { className: "buka-workers-head" }, h("div", { className: "buka-workers-headInner" }, h("div", { className: "buka-workers-bar" }, h("div", { className: "buka-workers-barTabs" }, topTabs), h("div", { className: "buka-workers-toolbar" }, detailActions, updateAllButton, refreshButton, createButton)), selectedWorker === null ? null : h("div", { className: "buka-workers-titleRow" }, h("div", { className: "buka-workers-heading" }, h("div", { className: "buka-workers-headingRow" }, selectedWorker === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    	const toolbarNode = h("div", { className: "buka-workers-toolbar" }, detailActions, updateAllButton, refreshButton, createButton);
+    	const heading = selectedWorker === null ? null : h("div", { className: "buka-workers-heading" }, h("div", { className: "buka-workers-headingRow" }, h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("back"),
     		side: "top",
     		delayMs: 400
@@ -8266,7 +8270,7 @@ window.__ModuleLoader__.load({
     		"aria-label": t("back"),
     		disabled: mutating,
     		onClick: backToList
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 16 }))), selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 16 }))), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: t("changeAvatar"),
     		side: "top",
     		delayMs: 400
@@ -8276,7 +8280,7 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("changeAvatar")} ${workerDisplayName(selectedWorker)}`,
     		disabled: mutating,
     		onClick: () => openAvatarDialog(selectedWorker)
-    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, selectedWorker === null ? t("title") : workerIdentityLabel(selectedWorker)), selectedWorker === null || robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
+    	}, renderAvatar(selectedWorker.avatar, 32))), h("h1", { className: "buka-workers-title" }, workerIdentityLabel(selectedWorker)), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tooltip, {
     		label: `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
     		side: "top",
     		delayMs: 400
@@ -8286,10 +8290,11 @@ window.__ModuleLoader__.load({
     		"aria-label": `${t("renameLabel")} ${workerDisplayName(selectedWorker)}`,
     		disabled: mutating || corrupt,
     		onClick: openRenameDialog
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), selectedWorker === null ? null : h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconEditOutlineRegular, { size: 16 }))), h("span", { className: "buka-workers-headingTag" }, robot ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("driverRobot")) : h(MountedTag, {
     		t,
     		worker: selectedWorker
-    	})))), h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
+    	}))));
+    	const tabsNode = h("div", { className: "buka-workers-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
     		className: "buka-workers-tabList",
     		label: t("tabsLabel"),
@@ -8315,7 +8320,8 @@ window.__ModuleLoader__.load({
     				panelId: TABS[2].panelId
     			}
     		]
-    	})))));
+    	}));
+    	return h("div", { className: "buka-workers-head" }, h("div", { className: "buka-workers-headInner" }, selectedWorker === null ? h("div", { className: "buka-workers-bar" }, h("div", { className: "buka-workers-barTabs" }, topTabs), toolbarNode) : h("div", { className: "buka-workers-titleRow" }, heading, toolbarNode), selectedWorker === null ? null : tabsNode));
     }
     // .build/workflows/client/workers/components/worker-detail.js
     /**
@@ -9171,6 +9177,9 @@ window.__ModuleLoader__.load({
     * hash 都是工作流路由，落在 Workflow 页签。刷新、浏览器前进 / 后退、执行者
     * 影响面弹窗里的「打开作业」（写 `#/job/...`）都靠同一个 hashchange 监听。
     *
+    * 顶部页签只由两个列表页渲染；工作流 / 作业 / 执行者详情页使用自己的页头
+    * （ADR 0029），页签元素照常传下去，页面按当前视图决定用不用。
+    *
     * 只挂载活动页签：切页签会卸载另一页，执行者页的选中态 / 草稿不跨页签保留
     * （与合并前两个侧边栏面板互切的行为一致）；工作流页的路由与数据都在 hash
     * 与 Host 里，重新挂载即可恢复。
@@ -9341,7 +9350,7 @@ window.__ModuleLoader__.load({
     .buka-workflows-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-4, 16px);min-height:var(--buka-control-sm, 28px)}
     .buka-workflows-barTabs{display:flex;align-items:center;min-width:0;flex:1 1 auto}
     .buka-workflows-titleRow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:var(--buka-space-3, 12px) var(--buka-space-4, 16px);min-width:0}
-    .buka-workflows-titleGroup{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex-wrap:wrap}
+    .buka-workflows-titleGroup{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex:1 1 auto;flex-wrap:wrap}
     .buka-workflows-title{font-size:var(--buka-text-page, 20px);font-weight:500;line-height:var(--buka-line-28, 28px);margin:0;overflow-wrap:anywhere}
     .buka-workflows-titleMeta{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex-wrap:wrap}
     .buka-workflows-titleSub{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);font-weight:400}
@@ -10097,6 +10106,7 @@ window.__ModuleLoader__.load({
     .buka-workers-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-4, 16px);min-height:var(--buka-control-sm, 28px)}
     .buka-workers-barTabs{display:flex;align-items:center;min-width:0;flex:1 1 auto}
     .buka-workers-titleRow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:var(--buka-space-2, 8px);min-width:0}
+    .buka-workers-head .buka-workers-titleRow{align-items:center;gap:var(--buka-space-3, 12px) var(--buka-space-4, 16px)}
     .buka-workers-heading{flex:1 1 auto;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:var(--buka-space-2, 8px)}
     .buka-workers-title{margin:0;font-size:var(--buka-text-page, 20px);font-weight:500;line-height:var(--buka-line-28, 28px);overflow-wrap:anywhere}
     .buka-workers-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:var(--buka-space-2, 8px);flex:none;flex-wrap:wrap;min-width:0}
@@ -10248,8 +10258,9 @@ window.__ModuleLoader__.load({
     `;
     // .build/workflows/client/index.js
     /**
-    * `@buka/dsh-plugin-workflows` 的浏览器一半：侧边栏的一个入口，页面首页
-    * 顶部两个页签——「工作流」与「执行者」。
+    * `@buka/dsh-plugin-workflows` 的浏览器一半：侧边栏的一个入口，首页顶部
+    * 两个页签——「工作流」与「执行者」；页签只出现在两个列表页，详情页使用
+    * 各自的独立页头（ADR 0029）。
     *
     * 两半页面各自的契约不变：
     *

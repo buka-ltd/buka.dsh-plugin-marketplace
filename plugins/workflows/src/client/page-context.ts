@@ -16,7 +16,7 @@ export interface AppContext {
   actions: AppActions
   /** 当前视口是否窄屏（看板等视图据此切换布局）。 */
   narrow: boolean
-  /** 顶部 Workflow / Worker 页签，由首页装配、放进页签带左侧。 */
+  /** 顶部 Workflow / Worker 页签，由首页装配；只在列表视图放进页签带左侧。 */
   topTabs: React.ReactElement
   /** 会话 id → 会话即时状态；实时流程据此判断节点是否在等用户。 */
   sessionStatus: SessionStatusSnapshot

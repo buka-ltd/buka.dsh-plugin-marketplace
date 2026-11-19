@@ -39,7 +39,7 @@ export function WorkflowsPage(props: WorkflowsPageProps): React.ReactElement {
   const useSessionStatus =
     typeof props.useSessionStatus === 'function' ? props.useSessionStatus : useEmptySessionStatus
   const sessionStatus = useSessionStatus((snapshot) => snapshot)
-  // 页签带左侧的顶部页签：首页装配、页面只负责摆放。
+  // 顶部页签：首页装配；页面只在列表视图摆放，详情页用独立页头。
   const topTabs = props.topTabs ?? (null as unknown as React.ReactElement)
   const page: AppContext = {
     t,

@@ -219,6 +219,66 @@ export function renderPage(page: AppContext): React.ReactElement {
           : renderWorkflowJobs(page)
         : renderJobDetail(page)
 
+  const toolbarNode = h('div', { className: 'buka-workflows-toolbar' }, ...toolbar)
+  const titleGroup = h(
+    'div',
+    { className: 'buka-workflows-titleGroup' },
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'buka-workflows-back',
+        title: t('back'),
+        'aria-label': t('back'),
+        onClick: route.kind === 'workflow' ? actions.backToWorkflows : actions.backToWorkflow,
+      },
+      h(IconChevronRightOutlineRegular, { size: 13 }),
+    ),
+    h('h1', { className: 'buka-workflows-title' }, heading.title),
+    route.kind === 'workflow' && retired ? renderStatusTag(t, workflowStatus, 'workflow') : null,
+    route.kind === 'workflow' && unavailable
+      ? h(
+          'span',
+          { className: 'buka-workflows-titleMeta' },
+          h('span', { className: 'buka-workflows-unavailableTag' }, t('workerUnavailable')),
+        )
+      : null,
+    route.kind === 'job' && unavailable
+      ? h(
+          'span',
+          { className: 'buka-workflows-titleMeta' },
+          h('span', { className: 'buka-workflows-unavailableTag' }, t('workerUnavailable')),
+        )
+      : null,
+    route.kind === 'job'
+      ? h(
+          'span',
+          { className: 'buka-workflows-titleMeta' },
+          h('span', { className: 'buka-workflows-titleSub' }, heading.subtitle),
+          renderStatusTag(t, jobStatus, 'job'),
+          live ? h(StateDot, { state: 'ongoing' }) : null,
+        )
+      : null,
+  )
+  const tabsNode =
+    tabs === null
+      ? null
+      : h(
+          'div',
+          { className: 'buka-workflows-tabs' },
+          h(SegmentedTabs, {
+            size: 'sm',
+            className: 'buka-workflows-tabList',
+            label: route.kind === 'workflow' ? t('workflowTabsAria') : t('jobTabsAria'),
+            value: activeTab,
+            onChange: (value: string) => {
+              if (route.kind === 'workflow') actions.setWorkflowTab(value as WorkflowTab)
+              else if (route.kind === 'job') actions.setJobView(value as JobView)
+            },
+            items: tabs,
+          }),
+        )
+
   return h(
     'div',
     {
@@ -230,87 +290,18 @@ export function renderPage(page: AppContext): React.ReactElement {
       h(
         'div',
         { className: 'buka-workflows-headInner' },
-        h(
-          'div',
-          { className: 'buka-workflows-bar' },
-          h('div', { className: 'buka-workflows-barTabs' }, page.topTabs),
-          h('div', { className: 'buka-workflows-toolbar' }, ...toolbar),
-        ),
         route.kind === 'workflows'
-          ? // 列表页没有标题行：顶部页签就是这一屏的标题，操作按钮在页签带右侧。
-            null
-          : h(
+          ? // 列表页是首页：顶部两个页签就是这一屏的标题，操作按钮在页签带右侧。
+            h(
               'div',
-              { className: 'buka-workflows-titleRow' },
-              h(
-                'div',
-                { className: 'buka-workflows-titleGroup' },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'buka-workflows-back',
-                    title: t('back'),
-                    'aria-label': t('back'),
-                    onClick:
-                      route.kind === 'workflow' ? actions.backToWorkflows : actions.backToWorkflow,
-                  },
-                  h(IconChevronRightOutlineRegular, { size: 13 }),
-                ),
-                h('h1', { className: 'buka-workflows-title' }, heading.title),
-                route.kind === 'workflow' && retired
-                  ? renderStatusTag(t, workflowStatus, 'workflow')
-                  : null,
-                route.kind === 'workflow' && unavailable
-                  ? h(
-                      'span',
-                      { className: 'buka-workflows-titleMeta' },
-                      h(
-                        'span',
-                        { className: 'buka-workflows-unavailableTag' },
-                        t('workerUnavailable'),
-                      ),
-                    )
-                  : null,
-                route.kind === 'job' && unavailable
-                  ? h(
-                      'span',
-                      { className: 'buka-workflows-titleMeta' },
-                      h(
-                        'span',
-                        { className: 'buka-workflows-unavailableTag' },
-                        t('workerUnavailable'),
-                      ),
-                    )
-                  : null,
-                route.kind === 'job'
-                  ? h(
-                      'span',
-                      { className: 'buka-workflows-titleMeta' },
-                      h('span', { className: 'buka-workflows-titleSub' }, heading.subtitle),
-                      renderStatusTag(t, jobStatus, 'job'),
-                      live ? h(StateDot, { state: 'ongoing' }) : null,
-                    )
-                  : null,
-              ),
-              tabs === null
-                ? null
-                : h(
-                    'div',
-                    { className: 'buka-workflows-tabs' },
-                    h(SegmentedTabs, {
-                      size: 'sm',
-                      className: 'buka-workflows-tabList',
-                      label: route.kind === 'workflow' ? t('workflowTabsAria') : t('jobTabsAria'),
-                      value: activeTab,
-                      onChange: (value: string) => {
-                        if (route.kind === 'workflow') actions.setWorkflowTab(value as WorkflowTab)
-                        else if (route.kind === 'job') actions.setJobView(value as JobView)
-                      },
-                      items: tabs,
-                    }),
-                  ),
-            ),
+              { className: 'buka-workflows-bar' },
+              h('div', { className: 'buka-workflows-barTabs' }, page.topTabs),
+              toolbarNode,
+            )
+          : // 详情页独立页头：返回 / 标题 / 状态与操作同一行，页内页签单独一行；
+            // 首页的「工作流 / 执行者」页签只留在列表页，不再压在详情页上方。
+            h('div', { className: 'buka-workflows-titleRow' }, titleGroup, toolbarNode),
+        tabsNode,
       ),
     ),
     h(

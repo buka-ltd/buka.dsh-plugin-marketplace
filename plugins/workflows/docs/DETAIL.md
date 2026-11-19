@@ -121,6 +121,8 @@ Each job has one attachment store. Every attachment records its source task / po
 
 The sidebar keeps one entry whose home page has two tabs at the top, **Workflow** first and **Worker** second. The tabs are hash-driven: `#/workers` (or `#/workers/…`) lands on the Worker tab, every other hash is a workflow route; refresh and back / forward keep the tab, and switching back to the Workflow tab restores the last workflow hash (for example a job page).
 
+The home tabs only appear on the two list pages. A workflow, job or worker detail page uses an independent header instead: the first row is back + title + state / actions, the second row holds the page's own tabs (Jobs / Structure, Overview / Live flow / Board / Assets, Settings / Files / Skills); the home tabs are not stacked above it.
+
 - **Workflow**: one path — **workflow list → workflow → job**:
   - **Workflow list**: name, version and job count. Disabled workflows stay in the list, greyed out and sorted last; workflows on an old definition version carry a "needs upgrade" tag.
   - **Workflow page**: **Jobs** (default, filterable; jobs pinned to a v7 snapshot carry an "old version" tag but stay readable and keep running) and **Structure** (an interactive layered graph; select a position for its executor and task types, start / end for their content contracts, a channel for its sender, receiver and allowed types).

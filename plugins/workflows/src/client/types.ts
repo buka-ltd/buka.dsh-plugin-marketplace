@@ -542,7 +542,7 @@ export interface PageState {
 export interface WorkflowsPageProps {
   t: Translate
   getService?: ((name: string) => unknown) | null
-  /** 首页装配好的顶部页签，透传给页签带。 */
+  /** 首页装配好的顶部页签；列表视图才渲染，详情页用独立页头。 */
   topTabs?: React.ReactElement
   /** `main` 插槽注入的会话状态钩子；旧组合没有时退化为空快照。 */
   useSessionStatus?: UseSessionStatus | undefined

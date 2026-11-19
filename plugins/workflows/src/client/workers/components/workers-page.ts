@@ -37,7 +37,7 @@ import { WorkerList } from './worker-list.ts'
 export function WorkersPage(props: {
   t: Translate
   getService: (name: string) => unknown
-  /** 首页装配好的顶部页签，放进页签带左侧。 */
+  /** 首页装配好的顶部页签；列表视图才放进页签带左侧。 */
   topTabs?: ReactElement
 }): ReactElement {
   const t = props.t

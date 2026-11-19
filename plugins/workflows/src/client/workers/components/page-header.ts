@@ -163,143 +163,140 @@ export function PageHeader({
           ),
         ]
 
+  const toolbarNode = h(
+    'div',
+    { className: 'buka-workers-toolbar' },
+    detailActions,
+    updateAllButton,
+    refreshButton,
+    createButton,
+  )
+
+  const heading =
+    selectedWorker === null
+      ? null
+      : h(
+          'div',
+          { className: 'buka-workers-heading' },
+          h(
+            'div',
+            { className: 'buka-workers-headingRow' },
+            h(
+              Tooltip,
+              { label: t('back'), side: 'top', delayMs: 400 },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'buka-workers-iconButton buka-workers-back buka-workers-backButton',
+                  'aria-label': t('back'),
+                  disabled: mutating,
+                  onClick: backToList,
+                },
+                h(IconChevronRightOutlineRegular, { size: 16 }),
+              ),
+            ),
+            robot
+              ? null
+              : h(
+                  Tooltip,
+                  { label: t('changeAvatar'), side: 'top', delayMs: 400 },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'buka-workers-avatarButton',
+                      'aria-label': `${t('changeAvatar')} ${workerDisplayName(selectedWorker)}`,
+                      disabled: mutating,
+                      onClick: () => openAvatarDialog(selectedWorker),
+                    },
+                    renderAvatar(selectedWorker.avatar, 32),
+                  ),
+                ),
+            h('h1', { className: 'buka-workers-title' }, workerIdentityLabel(selectedWorker)),
+            // 重命名入口紧挨执行者标题：只改展示名，目录与工作区注册不变；
+            // 登记文件损坏或写操作进行中时禁用（目录缺失不影响改展示名）。
+            robot
+              ? null
+              : h(
+                  Tooltip,
+                  {
+                    label: `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
+                    side: 'top',
+                    delayMs: 400,
+                  },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'buka-workers-iconButton',
+                      'aria-label': `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
+                      disabled: mutating || corrupt,
+                      onClick: openRenameDialog,
+                    },
+                    h(IconEditOutlineRegular, { size: 16 }),
+                  ),
+                ),
+            h(
+              'span',
+              { className: 'buka-workers-headingTag' },
+              robot
+                ? h(Tag, { tone: 'info' }, t('driverRobot'))
+                : h(MountedTag, { t, worker: selectedWorker }),
+            ),
+          ),
+        )
+
+  const tabsNode = h(
+    'div',
+    { className: 'buka-workers-tabs' },
+    h(SegmentedTabs, {
+      size: 'sm',
+      className: 'buka-workers-tabList',
+      label: t('tabsLabel'),
+      value: tab,
+      onChange: switchTab,
+      items: [
+        {
+          value: TABS[0].value,
+          label: h(TabLabel, { text: t('tabSettings') }),
+          id: TABS[0].id,
+          panelId: TABS[0].panelId,
+        },
+        {
+          value: TABS[1].value,
+          label: h(TabLabel, { text: t('tabFiles') }),
+          id: TABS[1].id,
+          panelId: TABS[1].panelId,
+        },
+        {
+          value: TABS[2].value,
+          label: h(TabLabel, { text: t('tabSkills') }),
+          id: TABS[2].id,
+          panelId: TABS[2].panelId,
+        },
+      ],
+    }),
+  )
+
   return h(
     'div',
     { className: 'buka-workers-head' },
     h(
       'div',
       { className: 'buka-workers-headInner' },
-      h(
-        'div',
-        { className: 'buka-workers-bar' },
-        h('div', { className: 'buka-workers-barTabs' }, topTabs),
-        h(
-          'div',
-          { className: 'buka-workers-toolbar' },
-          detailActions,
-          updateAllButton,
-          refreshButton,
-          createButton,
-        ),
-      ),
       selectedWorker === null
-        ? // 列表页没有标题行：顶部页签就是这一屏的标题，操作按钮在页签带右侧。
-          null
-        : h(
+        ? // 列表页是首页：顶部两个页签就是这一屏的标题，操作按钮在页签带右侧。
+          h(
             'div',
-            { className: 'buka-workers-titleRow' },
-            h(
-              'div',
-              { className: 'buka-workers-heading' },
-              h(
-                'div',
-                { className: 'buka-workers-headingRow' },
-                selectedWorker === null
-                  ? null
-                  : h(
-                      Tooltip,
-                      { label: t('back'), side: 'top', delayMs: 400 },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className:
-                            'buka-workers-iconButton buka-workers-back buka-workers-backButton',
-                          'aria-label': t('back'),
-                          disabled: mutating,
-                          onClick: backToList,
-                        },
-                        h(IconChevronRightOutlineRegular, { size: 16 }),
-                      ),
-                    ),
-                selectedWorker === null || robot
-                  ? null
-                  : h(
-                      Tooltip,
-                      { label: t('changeAvatar'), side: 'top', delayMs: 400 },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'buka-workers-avatarButton',
-                          'aria-label': `${t('changeAvatar')} ${workerDisplayName(selectedWorker)}`,
-                          disabled: mutating,
-                          onClick: () => openAvatarDialog(selectedWorker),
-                        },
-                        renderAvatar(selectedWorker.avatar, 32),
-                      ),
-                    ),
-                h(
-                  'h1',
-                  { className: 'buka-workers-title' },
-                  selectedWorker === null ? t('title') : workerIdentityLabel(selectedWorker),
-                ),
-                // 重命名入口紧挨执行者标题：只改展示名，目录与工作区注册不变；
-                // 登记文件损坏或写操作进行中时禁用（目录缺失不影响改展示名）。
-                selectedWorker === null || robot
-                  ? null
-                  : h(
-                      Tooltip,
-                      {
-                        label: `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
-                        side: 'top',
-                        delayMs: 400,
-                      },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'buka-workers-iconButton',
-                          'aria-label': `${t('renameLabel')} ${workerDisplayName(selectedWorker)}`,
-                          disabled: mutating || corrupt,
-                          onClick: openRenameDialog,
-                        },
-                        h(IconEditOutlineRegular, { size: 16 }),
-                      ),
-                    ),
-                selectedWorker === null
-                  ? null
-                  : h(
-                      'span',
-                      { className: 'buka-workers-headingTag' },
-                      robot
-                        ? h(Tag, { tone: 'info' }, t('driverRobot'))
-                        : h(MountedTag, { t, worker: selectedWorker }),
-                    ),
-              ),
-            ),
-            h(
-              'div',
-              { className: 'buka-workers-tabs' },
-              h(SegmentedTabs, {
-                size: 'sm',
-                className: 'buka-workers-tabList',
-                label: t('tabsLabel'),
-                value: tab,
-                onChange: switchTab,
-                items: [
-                  {
-                    value: TABS[0].value,
-                    label: h(TabLabel, { text: t('tabSettings') }),
-                    id: TABS[0].id,
-                    panelId: TABS[0].panelId,
-                  },
-                  {
-                    value: TABS[1].value,
-                    label: h(TabLabel, { text: t('tabFiles') }),
-                    id: TABS[1].id,
-                    panelId: TABS[1].panelId,
-                  },
-                  {
-                    value: TABS[2].value,
-                    label: h(TabLabel, { text: t('tabSkills') }),
-                    id: TABS[2].id,
-                    panelId: TABS[2].panelId,
-                  },
-                ],
-              }),
-            ),
-          ),
+            { className: 'buka-workers-bar' },
+            h('div', { className: 'buka-workers-barTabs' }, topTabs),
+            toolbarNode,
+          )
+        : // 详情页独立页头：返回 / 头像 / 标题与操作同一行，页内页签单独一行；
+          // 首页的「工作流 / 执行者」页签只留在列表页，不再压在详情页上方。
+          h('div', { className: 'buka-workers-titleRow' }, heading, toolbarNode),
+      selectedWorker === null ? null : tabsNode,
     ),
   )
 }

@@ -649,6 +649,23 @@ function states({
   ]
 }
 
+test('执行者详情：独立页头，不显示首页的工作流 / 执行者页签', async () => {
+  const client = await loadClient()
+  const tabLabels = (tree) =>
+    collect(tree)
+      .nodes.filter((node) => node.props?.className === 'x-tab')
+      .map((node) => collect(node).texts.join(''))
+
+  // 详情页只保留自己的「设置 / 文件 / 技能」页签。
+  const detail = client.render(states({ data: listData(), selectedId: 'writer' }))
+  assert.deepEqual(tabLabels(detail), ['设置', '文件', '技能'])
+  assert.ok(collect(detail).texts.includes('writer'), '详情标题仍在')
+
+  // 列表页仍以首页两个页签作为标题。
+  const list = client.render(states({ data: listData() }))
+  assert.deepEqual(tabLabels(list), ['工作流', '执行者'])
+})
+
 test('执行者页：main 插槽注入的 workersT 是已绑定的翻译函数', async () => {
   const client = await loadClient()
   const { workersT } = client.injected()

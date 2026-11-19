@@ -22,6 +22,7 @@ export const CSS = `
 .buka-workers-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-4, 16px);min-height:var(--buka-control-sm, 28px)}
 .buka-workers-barTabs{display:flex;align-items:center;min-width:0;flex:1 1 auto}
 .buka-workers-titleRow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:var(--buka-space-2, 8px);min-width:0}
+.buka-workers-head .buka-workers-titleRow{align-items:center;gap:var(--buka-space-3, 12px) var(--buka-space-4, 16px)}
 .buka-workers-heading{flex:1 1 auto;min-width:0;max-width:100%;display:flex;flex-direction:column;gap:var(--buka-space-2, 8px)}
 .buka-workers-title{margin:0;font-size:var(--buka-text-page, 20px);font-weight:500;line-height:var(--buka-line-28, 28px);overflow-wrap:anywhere}
 .buka-workers-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:var(--buka-space-2, 8px);flex:none;flex-wrap:wrap;min-width:0}

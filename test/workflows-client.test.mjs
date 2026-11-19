@@ -690,6 +690,44 @@ test('首页：顶部两个页签，默认 Workflow，切到 Worker 更新页签
   assert.equal(harness.updates[0], 'worker', 'selecting the Worker tab updates the home tab')
 })
 
+test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行者」页签', async () => {
+  const client = await loadClient()
+  const tabValues = (node) =>
+    Array.isArray(node.props?.items) ? node.props.items.map((item) => item.value) : null
+  const homeTabs = (node) => {
+    const values = tabValues(node)
+    return values !== null && values.join(',') === 'workflow,worker'
+  }
+
+  // 工作流详情：标题 + 操作一行，页内「作业 / 结构图」页签单独一行。
+  const workflowPage = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  assert.equal(findBy(workflowPage.tree, homeTabs), null, '工作流详情不显示首页页签')
+  const workflowTabs = findBy(
+    workflowPage.tree,
+    (node) => (tabValues(node) ?? []).join(',') === 'jobs,definition',
+  )
+  assert.ok(workflowTabs !== null, '工作流详情保留页内页签')
+  assert.ok(workflowPage.texts.includes('研发交付'), '详情标题仍在')
+  assert.ok(workflowPage.texts.includes('新建作业'), '详情操作仍在')
+
+  // 作业详情同理：首页页签消失，作业自己的四个视图页签保留。
+  const jobPage = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    finalTask: { status: 'ready', data: FINAL_TASK.task, error: null },
+  })
+  assert.equal(findBy(jobPage.tree, homeTabs), null, '作业详情不显示首页页签')
+  const jobTabs = findBy(
+    jobPage.tree,
+    (node) => (tabValues(node) ?? []).join(',') === 'overview,flow,board,outputs',
+  )
+  assert.ok(jobTabs !== null, '作业详情保留页内页签')
+})
+
 test('工作流列表：停用的工作流灰显并排在后面', async () => {
   const client = await loadClient()
   const { texts, classes } = render(client, {
