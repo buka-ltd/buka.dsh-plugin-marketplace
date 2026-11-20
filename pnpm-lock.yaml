@@ -114,6 +114,12 @@ importers:
 
   plugins/pen: {}
 
+  plugins/skill-update-check:
+    dependencies:
+      skills:
+        specifier: 1.9.0
+        version: 1.9.0
+
   plugins/skills:
     dependencies:
       skills:

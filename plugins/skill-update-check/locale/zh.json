@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SKILL 更新提示",
+    "description": "在当前工作区通过 npx skills 检查项目技能是否有上游更新：有更新时，在新建会话输入框的左下角显示 warn 色提示。只提示，不自动更新。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "../../.build/skill-update-check",
+    "tsBuildInfoFile": "../../.build/skill-update-check.tsbuildinfo"
+  },
+  "include": ["src", "../../types"]
+}
