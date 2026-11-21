@@ -1,8 +1,8 @@
 # SKILL update notice
 
-Warns you at the bottom left of the New Session composer when the project
-skills in the current workspace have upstream updates. It only reports; it
-never updates anything.
+Warns you below the New Session composer, at the right end of the statistics
+row (after the "context used" ring), when the project skills in the current
+workspace have upstream updates. It only reports; it never updates anything.
 
 The check uses the CLI shipped by the `skills` package — the same
 implementation behind `npx skills` — reads the workspace's `skills-lock.json`,
@@ -12,8 +12,9 @@ required.
 
 ## What you see
 
-- On a new session, the bottom left of the composer tool row shows
-  `N skill updates` in the DSH warn colour (`--dsw-alias-state-warn-primary`).
+- On a new session, the right end of the statistics row below the composer card
+  (after the "context used" ring) shows `N skill updates` in the DSH warn
+  colour (`--dsw-alias-state-warn-primary`).
 - Hovering lists the first few skill names and tells you to click to recheck.
 - Clicking skips the five-minute cache and checks again. Nothing is rendered
   when everything is up to date, when the workspace has no project skills, or
@@ -67,8 +68,10 @@ is up to date.
   after that it runs when you click the prompt.
 - The first check may contact the skill sources and take seconds or tens of
   seconds. The prompt does not occupy space while it runs.
-- The prompt lives in `conversation.input.left` (the left side of the composer
-  tool row). It needs a session; a blank New Session has an id and works.
+- The prompt lives in `conversation.composer.dock` (the statistics row below the
+  composer card) and uses flex `order` to sit after the "context used" ring;
+  when the ring is hidden it still takes the row's right end. It needs a
+  session; a blank New Session has an id and works.
 
 ## Requirements
 

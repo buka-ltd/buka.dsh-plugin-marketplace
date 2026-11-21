@@ -1,7 +1,8 @@
 # `@buka/dsh-plugin-skill-update-check` 的 bundle 层：把本插件自己插进组成。
 #
 # 只插入一行：Host 一半按会话解析当前工作区并跑 `skills check -p`，浏览器
-# 一半把 warn 色提示注册到新建会话输入框的左下角。
+# 一半把 warn 色提示注册到新建会话输入框下方统计行的最右端（上下文用量圆环
+# 之后）。
 - insert:
     - id: check-buka-skill-update
       name: '@buka/dsh-plugin-skill-update-check'

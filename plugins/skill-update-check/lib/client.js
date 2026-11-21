@@ -250,7 +250,7 @@ window.__ModuleLoader__.load({
     }
     // .build/skill-update-check/client/badge.js
     /**
-    * 新建会话输入框左下角的 warn 色提示。
+    * 新建会话输入框下方统计行最右侧（「上下文已用」圆环之后）的 warn 色提示。
     *
     * 只在有更新时出现：`{count} 个技能可更新`，tooltip 列出前几个 skill 与
     * 「点击重新检查」。检查失败时缩成一个 `!`，tooltip 给出原因；没有项目技能、
@@ -396,15 +396,20 @@ window.__ModuleLoader__.load({
     /**
     * 提示的样式。
     *
-    * 高度、字号与圆角对齐输入框工具栏里的其它紧凑控件（26px 左右），颜色用
+    * 这是输入框卡片下方统计行里的环境提示条：24px 高、12px 字号。颜色用
     * DSH 主题 token：有更新时是 `--dsw-alias-state-warn-primary`，检查失败时
     * 退到 `--dsw-alias-state-error-primary`。浅色 tint 用 `color-mix` 从同一个
     * token 派生，两种主题都跟着走。
     *
+    * 统计行是 flex 容器：`activity` / `usage` 两个统计条目由插槽渲染，之后的
+    * 「上下文已用」圆环由输入框自己追加。提示要排在这个圆环之后，而插槽只能
+    * 决定条目之间的顺序，所以用 flex 的 `order` 把它放到所有默认项（含圆环）
+    * 后面。圆环不在时效果同样成立：提示仍然在统计行最右端。
+    *
     * @module @buka/dsh-plugin-skill-update-check/client/styles
     */
     /** 注入到 `document.head` 的样式表。 */
-    const CSS = `.buka-skill-update-check-badge{align-items:center;gap:5px;height:24px;min-width:0;max-width:200px;color:var(--dsw-alias-state-warn-primary);white-space:nowrap;cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);border:none;border-radius:var(--dsw-radius-sm);padding:0 8px;font-size:12px;font-weight:600;line-height:18px;display:inline-flex}
+    const CSS = `.buka-skill-update-check-badge{order:1;align-items:center;gap:5px;height:24px;min-width:0;max-width:200px;color:var(--dsw-alias-state-warn-primary);white-space:nowrap;cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);border:none;border-radius:var(--dsw-radius-sm);padding:0 8px;font-size:12px;font-weight:600;line-height:18px;display:inline-flex}
     @media (hover:hover){.buka-skill-update-check-badge:hover{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 18%,transparent)}}
     .buka-skill-update-check-badge[data-state=error]{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
     @media (hover:hover){.buka-skill-update-check-badge[data-state=error]:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 18%,transparent)}}
@@ -417,9 +422,11 @@ window.__ModuleLoader__.load({
     /**
     * `@buka/dsh-plugin-skill-update-check` 的浏览器一半。
     *
-    * 只注册一个插槽：`conversation.input.left`——新建会话输入框工具栏的左下
-    * 角落。组件在 `badge.ts`，请求在 `api.ts`，文案在 `dictionary.ts`，样式在
-    * `styles.ts`。提示只在当前工作区有项目技能更新时出现，点击可重新检查。
+    * 只注册一个插槽：`conversation.composer.dock`——新建会话输入框卡片下方的
+    * 统计行。提示在统计行里用 flex `order` 排到「上下文已用」圆环之后
+    * （见 `styles.ts`）。组件在 `badge.ts`，请求在 `api.ts`，文案在
+    * `dictionary.ts`，样式在 `styles.ts`。提示只在当前工作区有项目技能更新时
+    * 出现，点击可重新检查。
     *
     * 本文件只导出 `inject` 与 `apply`；`window.__ModuleLoader__.load(...)` 外壳
     * 由构建脚本生成。
@@ -429,7 +436,7 @@ window.__ModuleLoader__.load({
     /** 浏览器一半依赖的两个客户端服务。 */
     const inject = ["slots", "locale"];
     /**
-    * 注册词典、样式与输入框左下角的提示。
+    * 注册词典、样式与输入框下方的提示。
     *
     * @param ctx 浏览器插件上下文
     */
@@ -446,8 +453,8 @@ window.__ModuleLoader__.load({
     		document.head.appendChild(tag);
     		return () => tag.remove();
     	}, "buka-skill-update-check: styles");
-    	ctx.slots.inject("conversation.input.left", () => ctx.slots.register({
-    		name: "conversation.input.left",
+    	ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
+    		name: "conversation.composer.dock",
     		id: "buka-skill-update-check",
     		order: 20,
     		label: () => t("label"),

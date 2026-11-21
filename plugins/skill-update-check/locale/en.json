@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SKILL update notice",
-    "description": "Shows a warning at the bottom left of the New Session composer when the project skills installed in the current workspace have upstream updates. The check runs the skills CLI that npx skills ships, uses the workspace's skills-lock.json, and updates nothing automatically.",
+    "description": "Shows a warning at the right end of the New Session statistics row (after the context-used ring, below the composer) when the project skills installed in the current workspace have upstream updates. The check runs the skills CLI that npx skills ships, uses the workspace's skills-lock.json, and updates nothing automatically.",
     "detail": "docs/DETAIL.md"
   }
 }

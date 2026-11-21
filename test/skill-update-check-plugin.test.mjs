@@ -7,7 +7,7 @@
  * - 退出码 0 / 1 是正常结论，其它退出码与坏 lock 明确失败；
  * - 同一工作区的 5 分钟缓存与手动刷新；
  * - 会话 → 当前工作区的解析规则（sessionIds 优先、cwd 包含关系兜底）；
- * - 浏览器一半挂在输入框左下角，文案、样式与 bundle 清单齐全。
+ * - 浏览器一半挂在输入框下方的统计行最右端，文案、样式与 bundle 清单齐全。
  */
 
 import assert from 'node:assert/strict'
@@ -230,17 +230,22 @@ test('resolveWorkspaceDir：sessionIds 优先，其次 cwd 包含关系，最后
   )
 })
 
-test('浏览器一半注册在输入框左下角，Host 与浏览器共用检查路由', async () => {
+test('浏览器一半注册在输入框下方统计行，Host 与浏览器共用检查路由', async () => {
   assert.equal(CHECK_ROUTE, '/buka-skill-update-check/status')
   const api = await source('api.ts', CLIENT_DIR)
   assert.ok(api.includes(`'${CHECK_ROUTE}'`), 'api.ts 的路由与 Host 不一致')
 
   const client = await source('index.ts', CLIENT_DIR)
-  assert.ok(client.includes("'conversation.input.left'"), '没有注册到输入框左下角')
+  assert.ok(client.includes("'conversation.composer.dock'"), '没有注册到输入框下方的统计行')
   assert.ok(client.includes("id: 'buka-skill-update-check'"))
   assert.ok(client.includes('locale: NS'))
   const styles = await source('styles.ts', CLIENT_DIR)
   assert.ok(styles.includes('--dsw-alias-state-warn-primary'), '提示没有使用 warn 色 token')
+  assert.match(
+    styles,
+    /\.buka-skill-update-check-badge\{order:1;/,
+    '提示没有排到「上下文已用」圆环之后',
+  )
 })
 
 test('bundle 清单、locale 与详情文件齐全', async () => {

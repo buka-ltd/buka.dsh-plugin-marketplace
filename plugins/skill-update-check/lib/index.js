@@ -498,7 +498,7 @@ function registryOf(ctx) {
 * `@buka/dsh-plugin-skill-update-check` 的 Host 一半。
 *
 * 浏览器一半只传会话 id，Host 解析出当前工作区后调用 `skills` 包自带的 CLI
-* 检查项目技能是否有上游更新；有更新时浏览器在新建会话输入框左下角显示
+* 检查项目技能是否有上游更新；有更新时浏览器在新建会话输入框下方显示
 * warn 色提示。具体检查逻辑在 `check.ts`，工作区解析在 `workspace.ts`，
 * HTTP 路由在 `routes.ts`。
 *

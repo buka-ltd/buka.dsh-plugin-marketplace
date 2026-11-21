@@ -1,9 +1,11 @@
 /**
  * `@buka/dsh-plugin-skill-update-check` 的浏览器一半。
  *
- * 只注册一个插槽：`conversation.input.left`——新建会话输入框工具栏的左下
- * 角落。组件在 `badge.ts`，请求在 `api.ts`，文案在 `dictionary.ts`，样式在
- * `styles.ts`。提示只在当前工作区有项目技能更新时出现，点击可重新检查。
+ * 只注册一个插槽：`conversation.composer.dock`——新建会话输入框卡片下方的
+ * 统计行。提示在统计行里用 flex `order` 排到「上下文已用」圆环之后
+ * （见 `styles.ts`）。组件在 `badge.ts`，请求在 `api.ts`，文案在
+ * `dictionary.ts`，样式在 `styles.ts`。提示只在当前工作区有项目技能更新时
+ * 出现，点击可重新检查。
  *
  * 本文件只导出 `inject` 与 `apply`；`window.__ModuleLoader__.load(...)` 外壳
  * 由构建脚本生成。
@@ -21,7 +23,7 @@ import { CSS } from './styles.ts'
 export const inject = ['slots', 'locale']
 
 /**
- * 注册词典、样式与输入框左下角的提示。
+ * 注册词典、样式与输入框下方的提示。
  *
  * @param ctx 浏览器插件上下文
  */
@@ -36,10 +38,10 @@ export function apply(ctx: Context): void {
     return () => tag.remove()
   }, 'buka-skill-update-check: styles')
 
-  ctx.slots.inject('conversation.input.left', () =>
+  ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(
       {
-        name: 'conversation.input.left',
+        name: 'conversation.composer.dock',
         id: 'buka-skill-update-check',
         order: 20,
         label: () => t('label'),
