@@ -751,7 +751,7 @@ test('执行者详情：下划线页签的 ARIA 与「技能」更新圆点', as
   const skillsTab = tabs[2]
   assert.ok(
     collect(skillsTab).nodes.some((node) =>
-      String(node.props?.className ?? '').includes('buka-workers-tabDot'),
+      String(node.props?.className ?? '').includes('buka-workflows-detailTabDot'),
     ),
     '有更新时「技能」页签带圆点',
   )
@@ -761,7 +761,7 @@ test('执行者详情：下划线页签的 ARIA 与「技能」更新圆点', as
   const plainTabs = collect(noUpdate).nodes.filter((node) => node.props?.role === 'tab')
   assert.equal(
     collect(plainTabs[2]).nodes.some((node) =>
-      String(node.props?.className ?? '').includes('buka-workers-tabDot'),
+      String(node.props?.className ?? '').includes('buka-workflows-detailTabDot'),
     ),
     false,
     '没有更新时不显示圆点',

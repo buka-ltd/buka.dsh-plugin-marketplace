@@ -1,18 +1,21 @@
 /**
- * 执行者详情页的下划线页签。
+ * 详情页的下划线页签。
  *
- * 详情页里的三个页签是「同一个对象的三种视图」，用轻量的下划线式页签比等宽
- * 胶囊更像导航：选中态只靠文字颜色、字重与 2px 下划线区分，底部一条 0.5px
- * 分隔线接住内容区，也方便在标签后挂一个表示「技能有更新」的小圆点。
+ * 工作流、作业与执行者三个详情页的页内页签都是「同一个对象的几种视图」，
+ * 用轻量的下划线式页签比等宽胶囊更像导航：选中态只靠文字颜色、字重与 2px
+ * 下划线区分，底部一条 0.5px 分隔线接住内容区，也方便在标签后挂一个表示
+ * 「有更新」的小圆点。
+ *
+ * 样式在 `../styles.ts`（`.buka-workflows-detailTabs` 等），三个详情页共用。
  *
  * 键盘：← / → 循环切换，Home / End 跳到首尾；只有选中项是 Tab 停靠点
  * （与 WAI-ARIA tabs 模式一致）。页面仍自己渲染 `role="tabpanel"` 的面板。
  *
- * @module @buka/dsh-plugin-workflows/workers/client/components/detail-tabs
+ * @module @buka/dsh-plugin-workflows/client/components/detail-tabs
  */
 
 import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
-import { h } from '../h.ts'
+import { h } from '../element.ts'
 
 /** 一个页签；`id` / `panelId` 与页面面板的 ARIA 关联一致。 */
 export interface DetailTab {
@@ -66,7 +69,7 @@ export function DetailTabs({
   return h(
     'div',
     {
-      className: 'buka-workers-detailTabs',
+      className: 'buka-workflows-detailTabs',
       role: 'tablist',
       'aria-label': label,
       onKeyDown,
@@ -80,7 +83,7 @@ export function DetailTabs({
           type: 'button',
           role: 'tab',
           id: item.id,
-          className: 'buka-workers-detailTab',
+          className: 'buka-workflows-detailTab',
           'aria-selected': selected,
           'aria-controls': item.panelId,
           tabIndex: selected ? 0 : -1,
@@ -91,7 +94,7 @@ export function DetailTabs({
         },
         item.label,
         item.dot === true
-          ? h('span', { className: 'buka-workers-tabDot', 'aria-hidden': true })
+          ? h('span', { className: 'buka-workflows-detailTabDot', 'aria-hidden': true })
           : null,
       )
     }),

@@ -2,13 +2,11 @@
  * 页面外壳：返回、标题、状态、工具栏、页签、内容区、Toast 与抽屉 / 对话框。
  */
 
-import { TabLabel } from '@buka/plugin-ui'
 import {
   Button,
   IconChevronRightOutlineRegular,
   IconRefreshOutlineRegular,
   IconWarningOutlineRegular,
-  SegmentedTabs,
   StateDot,
   Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -21,6 +19,7 @@ import { routeHash } from '../routing.ts'
 import type { JobView, WorkflowTab } from '../types.ts'
 import { renderAttachmentDrawer } from './attachments.ts'
 import { renderDefinitionDrawer } from './definition-drawer.ts'
+import { type DetailTab, DetailTabs } from './detail-tabs.ts'
 import { renderJobDetail } from './job-detail.ts'
 import { renderNewJobDialog } from './new-job-dialog.ts'
 import { renderNodeTasksDrawer } from './node-tasks-drawer.ts'
@@ -71,18 +70,18 @@ export function renderPage(page: AppContext): React.ReactElement {
   const workflowAvailable =
     workflowStatus !== undefined && workflowStatus !== 'retired' && !unavailable
 
-  const tabs =
+  const tabs: [DetailTab, ...DetailTab[]] | null =
     route.kind === 'workflow'
       ? [
           {
             value: 'jobs',
-            label: h(TabLabel, { text: t('jobsTab') }),
+            label: t('jobsTab'),
             id: 'buka-workflows-tab-jobs',
             panelId: 'buka-workflows-panel-jobs',
           },
           {
             value: 'definition',
-            label: h(TabLabel, { text: t('definitionTab') }),
+            label: t('definitionTab'),
             id: 'buka-workflows-tab-definition',
             panelId: 'buka-workflows-panel-definition',
           },
@@ -91,25 +90,25 @@ export function renderPage(page: AppContext): React.ReactElement {
         ? [
             {
               value: 'overview',
-              label: h(TabLabel, { text: t('overviewTab') }),
+              label: t('overviewTab'),
               id: 'buka-workflows-tab-overview',
               panelId: 'buka-workflows-panel-overview',
             },
             {
               value: 'flow',
-              label: h(TabLabel, { text: t('flowTab') }),
+              label: t('flowTab'),
               id: 'buka-workflows-tab-flow',
               panelId: 'buka-workflows-panel-flow',
             },
             {
               value: 'board',
-              label: h(TabLabel, { text: t('boardTab') }),
+              label: t('boardTab'),
               id: 'buka-workflows-tab-board',
               panelId: 'buka-workflows-panel-board',
             },
             {
               value: 'outputs',
-              label: h(TabLabel, { text: t('outputsTab') }),
+              label: t('outputsTab'),
               id: 'buka-workflows-tab-outputs',
               panelId: 'buka-workflows-panel-outputs',
             },
@@ -263,21 +262,15 @@ export function renderPage(page: AppContext): React.ReactElement {
   const tabsNode =
     tabs === null
       ? null
-      : h(
-          'div',
-          { className: 'buka-workflows-tabs' },
-          h(SegmentedTabs, {
-            size: 'sm',
-            className: 'buka-workflows-tabList',
-            label: route.kind === 'workflow' ? t('workflowTabsAria') : t('jobTabsAria'),
-            value: activeTab,
-            onChange: (value: string) => {
-              if (route.kind === 'workflow') actions.setWorkflowTab(value as WorkflowTab)
-              else if (route.kind === 'job') actions.setJobView(value as JobView)
-            },
-            items: tabs,
-          }),
-        )
+      : h(DetailTabs, {
+          label: route.kind === 'workflow' ? t('workflowTabsAria') : t('jobTabsAria'),
+          value: activeTab,
+          onChange: (value: string) => {
+            if (route.kind === 'workflow') actions.setWorkflowTab(value as WorkflowTab)
+            else if (route.kind === 'job') actions.setJobView(value as JobView)
+          },
+          items: tabs,
+        })
 
   return h(
     'div',

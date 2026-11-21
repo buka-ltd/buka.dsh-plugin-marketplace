@@ -32,7 +32,13 @@ ${THEME}
 .buka-workflows-back svg{transform:rotate(180deg)}
 @media (hover:hover){.buka-workflows-back:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
 .buka-workflows-back:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
-.buka-workflows-tabs{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain}
+.buka-workflows-detailTabs{display:flex;align-items:center;gap:0;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:0.5px solid var(--dsw-alias-border-l1)}
+.buka-workflows-detailTab{position:relative;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);height:40px;margin:0;padding:0 var(--buka-space-3, 12px);border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-20, 20px);white-space:nowrap;cursor:pointer}
+@media (hover:hover){.buka-workflows-detailTab:hover{color:var(--dsw-alias-label-primary)}}
+.buka-workflows-detailTab[aria-selected="true"]{color:var(--dsw-alias-label-primary);font-weight:500}
+.buka-workflows-detailTab[aria-selected="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary)}
+.buka-workflows-detailTab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
+.buka-workflows-detailTabDot{width:7px;height:7px;flex:none;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
 .buka-workflows-tabList{width:fit-content;max-width:100%}
 .buka-workflows-body{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:var(--buka-space-5, 24px) 0 var(--buka-space-7, 48px);animation:buka-enter var(--buka-motion, 160ms) var(--buka-ease, cubic-bezier(.2,0,0,1))}
 .buka-workflows-body.is-graph{overflow:hidden;padding-bottom:0}

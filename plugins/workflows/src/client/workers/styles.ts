@@ -136,13 +136,6 @@ export const CSS = `
 .buka-workers-descriptionInput:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
 .buka-workers-descriptionInput:disabled{opacity:.65}
 .buka-workers-backButton{flex:none;margin-left:calc(-1 * var(--buka-space-1, 4px))}
-.buka-workers-detailTabs{display:flex;align-items:center;gap:0;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:0.5px solid var(--dsw-alias-border-l1)}
-.buka-workers-detailTab{position:relative;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);height:40px;margin:0;padding:0 var(--buka-space-3, 12px);border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-20, 20px);white-space:nowrap;cursor:pointer}
-@media (hover:hover){.buka-workers-detailTab:hover{color:var(--dsw-alias-label-primary)}}
-.buka-workers-detailTab[aria-selected="true"]{color:var(--dsw-alias-label-primary);font-weight:500}
-.buka-workers-detailTab[aria-selected="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary)}
-.buka-workers-detailTab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
-.buka-workers-tabDot{width:7px;height:7px;flex:none;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
 .buka-workers-panel{display:flex;flex-direction:column;gap:var(--buka-space-5, 24px);flex:1 1 auto;min-height:0}
 .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
 .buka-workers-jobBlocker{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-2, 8px)}

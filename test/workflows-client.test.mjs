@@ -730,6 +730,46 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
   assert.ok(jobTabs !== null, '作业详情保留页内页签')
 })
 
+test('详情页页内页签：工作流与作业都沿用执行者详情的下划线样式', async () => {
+  const client = await loadClient()
+  const roleTabs = (tree) => collect(tree).nodes.filter((node) => node.props?.role === 'tab')
+  const underline = (tab) => String(tab.props?.className ?? '').includes('buka-workflows-detailTab')
+
+  const workflowPage = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  const workflowTabs = roleTabs(workflowPage.tree)
+  assert.deepEqual(
+    workflowTabs.map((node) => textOf(node)),
+    ['作业', '结构图'],
+  )
+  assert.ok(workflowTabs.every(underline), '工作流详情用下划线页签，而不是胶囊分段控件')
+  assert.deepEqual(
+    workflowTabs.map((node) => node.props?.['aria-selected']),
+    [true, false],
+  )
+  assert.deepEqual(
+    workflowTabs.map((node) => node.props?.tabIndex),
+    [0, -1],
+    '只有选中页签是 Tab 停靠点',
+  )
+
+  const jobPage = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'overview' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    finalTask: { status: 'ready', data: FINAL_TASK.task, error: null },
+  })
+  const jobTabs = roleTabs(jobPage.tree)
+  assert.deepEqual(
+    jobTabs.map((node) => textOf(node)),
+    ['概览', '实时流程', '看板', '资产'],
+  )
+  assert.ok(jobTabs.every(underline), '作业详情与工作流详情保持同一种页签样式')
+  assert.equal(jobTabs[0].props?.['aria-selected'], true)
+})
+
 test('工作流列表：停用的工作流灰显并排在后面', async () => {
   const client = await loadClient()
   const { texts, classes } = render(client, {

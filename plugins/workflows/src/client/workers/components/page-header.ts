@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactElement } from 'react'
 import React from 'react'
+import { DetailTabs } from '../../components/detail-tabs.ts'
 import type { createDetailActions } from '../actions/detail.ts'
 import type { createSkillActions } from '../actions/skills.ts'
 import type { createWorkerActions } from '../actions/workers.ts'
@@ -30,7 +31,6 @@ import { openInAppLabel } from '../open-in-app.ts'
 import type { WorkersPageState } from '../state.ts'
 import type { Translate } from '../types.ts'
 import { MountedTag } from './common.ts'
-import { DetailTabs } from './detail-tabs.ts'
 
 /**
  * 菜单里的一个应用图标；图标路由不可用时退回文件夹图标。
