@@ -30,6 +30,7 @@ import type {
 import type { JsonSchema } from '../json-schema.ts'
 import { isPlainObject, parseJsonSchema, resolveSchemaPath } from '../json-schema.ts'
 import { isKnownProgram, normalizeProgramId, programRequiredContent } from '../program/contracts.ts'
+import { isSystemOnlyWorkerId } from '../workers/store/builtin.ts'
 import { containsTemplate, inspectPayload } from './payload.ts'
 
 /** 校验入参。 */
@@ -67,6 +68,26 @@ class Issues {
 }
 
 /**
+ * 拒绝对象上的未知字段。
+ *
+ * 以前未知字段被静默剥离，拼错的开关（例如 `workTree`）等于悄悄关掉一个保护；
+ * 内建任务类型上禁用 `actions` / `assistant` / `mode` / `worktree` 也靠这条规则
+ * 落地。
+ */
+function checkUnknownKeys(
+  raw: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+  issues: Issues,
+): void {
+  const known = new Set(allowed)
+  for (const key of Object.keys(raw)) {
+    if (known.has(key)) continue
+    issues.add(path === '' ? key : `${path}.${key}`, 'unexpected field')
+  }
+}
+
+/**
  * 校验一份工作流 v8 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
@@ -82,6 +103,12 @@ export function validateWorkflowDefinition(
     issues.add('', 'workflow definition must be a JSON object')
     return { ok: false, issues: issues.list }
   }
+  checkUnknownKeys(
+    raw,
+    ['version', 'name', 'description', 'budgets', 'positions', 'channels', 'start', 'end'],
+    '',
+    issues,
+  )
 
   if (raw.version !== 8) issues.add('version', 'must be 8')
   const name = readName(raw, 'name', '', issues)
@@ -166,6 +193,7 @@ function readBudgets(raw: unknown, issues: Issues): BudgetDefinition | null {
     issues.add('budgets', 'must declare maxTasks and maxDurationHours')
     return null
   }
+  checkUnknownKeys(raw, ['maxTasks', 'maxDurationHours'], 'budgets', issues)
   let valid = true
   const maxTasks = raw.maxTasks
   if (typeof maxTasks !== 'number' || !Number.isInteger(maxTasks) || maxTasks < 1) {
@@ -204,6 +232,7 @@ function readPositions(
       issues.add(path, 'must be an object')
       continue
     }
+    checkUnknownKeys(entry, ['id', 'label', 'note', 'executor', 'taskTypes'], path, issues)
     const id = readPositionId(entry, path, seenPositions, issues)
     if (id === null) continue
     const label = readName(entry, 'label', path, issues)
@@ -269,6 +298,7 @@ function readExecutor(
     issues.add(path, 'must be { kind: "worker", id } or { kind: "human" }')
     return null
   }
+  checkUnknownKeys(raw, ['kind', 'id', 'name'], path, issues)
   if (raw.kind === 'human') return { kind: 'human' }
   if (raw.kind !== 'worker') {
     issues.add(`${path}.kind`, 'must be "worker" or "human"')
@@ -284,6 +314,13 @@ function readExecutor(
     issues.add(
       `${path}.id`,
       `unknown worker identifier "${id}" for position "${positionId}": register it with the Buka Workers plugin first`,
+    )
+    return null
+  }
+  if (isSystemOnlyWorkerId(worker.id)) {
+    issues.add(
+      `${path}.id`,
+      `"${worker.id}" is the built-in system executor of the start node and cannot fill a position`,
     )
     return null
   }
@@ -334,9 +371,19 @@ function readTaskType(
   seenTypes: Set<string>,
   issues: Issues,
 ): TaskTypeDefinition | null {
+  checkUnknownKeys(
+    entry,
+    ['id', 'label', 'definition', 'content', 'actions', 'creates', 'assistant', 'mode', 'worktree'],
+    path,
+    issues,
+  )
   const id = entry.id
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
     issues.add(`${path}.id`, 'must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+    return null
+  }
+  if (id === START_ID || id === END_ID) {
+    issues.add(`${path}.id`, `"${id}" is reserved by the built-in task type of the ${id} node`)
     return null
   }
   if (seenTypes.has(id)) {
@@ -496,6 +543,7 @@ function readActions(
       issues.add(at, 'must be an object')
       continue
     }
+    checkUnknownKeys(entry, ['id', 'label', 'input', 'creates'], at, issues)
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
     if (id === '' || !ID_PATTERN.test(id)) {
       issues.add(`${at}.id`, 'must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
@@ -534,6 +582,7 @@ function readCreations(raw: unknown, path: string, issues: Issues): CreationDefi
       issues.add(at, 'must be an object')
       continue
     }
+    checkUnknownKeys(entry, ['channel', 'type', 'content'], at, issues)
     const channel = typeof entry.channel === 'string' ? entry.channel.trim() : ''
     if (channel === '') {
       issues.add(`${at}.channel`, 'must be a channel id')
@@ -686,6 +735,7 @@ function readChannels(
       issues.add(path, 'must be an object')
       continue
     }
+    checkUnknownKeys(entry, ['id', 'label', 'from', 'to', 'types', 'back'], path, issues)
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
     if (id === '' || !CHANNEL_ID_PATTERN.test(id)) {
       issues.add(
@@ -793,6 +843,7 @@ function readStart(raw: unknown, issues: Issues): StartDefinition | null {
     issues.add('start', 'must declare the built-in start node task contract')
     return null
   }
+  checkUnknownKeys(raw, ['content', 'next'], 'start', issues)
   const content = readSchema(raw.content, 'start.content', issues)
   const next = readCreations(raw.next, 'start.next', issues)
   if (next === null || next.length === 0) {
@@ -808,6 +859,7 @@ function readEnd(raw: unknown, issues: Issues): EndDefinition | null {
     issues.add('end', 'must declare the built-in end node task contract')
     return null
   }
+  checkUnknownKeys(raw, ['content'], 'end', issues)
   const content = readSchema(raw.content, 'end.content', issues, 'value')
   return { ...(content === null ? {} : { content }) }
 }

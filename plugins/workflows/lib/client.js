@@ -417,14 +417,15 @@ window.__ModuleLoader__.load({
     	jobErrorTitle: "Error",
     	definitionInfo: "Definition info",
     	definitionHint: "Select a node or a connection to inspect it.",
+    	definitionHandler: "Handler",
+    	endHandlerHint: "Starter (or the delivery assistant chosen for the job)",
     	definitionPositions: "Positions",
-    	definitionStartContract: "Start contract",
-    	definitionEndContract: "End contract",
     	definitionInitialTasks: "Initial tasks",
-    	definitionInitialEmpty: "No initial tasks are defined.",
+    	definitionInitialEmpty: "No tasks are created when the start task finishes.",
     	definitionTabsAria: "Definition sections",
     	definitionTabOverview: "Overview",
-    	definitionTabContract: "Contracts",
+    	builtinTypeTag: "Built-in task type",
+    	builtinTypeHint: "Id, label and switches are fixed; actions, assistant, plan and worktree are unavailable.",
     	positionTaskTypes: "Task types it handles",
     	initialContent: "Creates a task with content",
     	initialNoContent: "Creates a task",
@@ -533,6 +534,7 @@ window.__ModuleLoader__.load({
     	restartSourceOpen: "Open the job it came from",
     	restartReasonJobNotFailed: "Only a failed job can be restarted.",
     	restartReasonNoFailedTasks: "This job has no failed task; start over in a new job instead.",
+    	restartReasonStartTaskFailed: "The start task failed, so the input cannot be retried; start a new job with corrected input.",
     	restartReasonWorkflowNotFound: "The workflow no longer exists.",
     	restartReasonWorkflowRetired: "The workflow is disabled; enable it before starting over.",
     	restartReasonDefinitionOutdated: "The workflow is not on the current definition version.",
@@ -548,6 +550,7 @@ window.__ModuleLoader__.load({
     	boardStart: "Start",
     	boardEnd: "End",
     	boardStarter: "Starter",
+    	boardEngine: "Engine",
     	boardColumnPending: "Queued",
     	boardColumnReady: "Claimable",
     	boardColumnRunning: "In progress",
@@ -715,14 +718,15 @@ window.__ModuleLoader__.load({
     	jobErrorTitle: "错误",
     	definitionInfo: "定义信息",
     	definitionHint: "点节点或通道查看详情。",
+    	definitionHandler: "处理人",
+    	endHandlerHint: "发起人（或作业指定的交付助理）",
     	definitionPositions: "岗位",
-    	definitionStartContract: "开始契约",
-    	definitionEndContract: "结束契约",
     	definitionInitialTasks: "初始任务",
-    	definitionInitialEmpty: "没有定义初始任务。",
+    	definitionInitialEmpty: "没有定义完成后创建的任务。",
     	definitionTabsAria: "定义分区",
     	definitionTabOverview: "概览",
-    	definitionTabContract: "契约",
+    	builtinTypeTag: "内建任务类型",
+    	builtinTypeHint: "id、展示名与动作 / 助理 / plan / 工作树等开关固定，不可在定义里配置。",
     	positionTaskTypes: "可处理的任务类型",
     	initialContent: "创建带任务内容的任务",
     	initialNoContent: "创建任务（无内容）",
@@ -831,6 +835,7 @@ window.__ModuleLoader__.load({
     	restartSourceOpen: "打开来源作业",
     	restartReasonJobNotFailed: "只有失败的作业能重启。",
     	restartReasonNoFailedTasks: "这个作业没有失败任务，请从头开始新建作业。",
+    	restartReasonStartTaskFailed: "启动任务失败，输入无法重试；请用修正后的输入新建作业。",
     	restartReasonWorkflowNotFound: "工作流已不存在。",
     	restartReasonWorkflowRetired: "工作流已停用；启用后才能从头开始。",
     	restartReasonDefinitionOutdated: "工作流不在当前定义版本。",
@@ -846,6 +851,7 @@ window.__ModuleLoader__.load({
     	boardStart: "开始",
     	boardEnd: "结束",
     	boardStarter: "发起人",
+    	boardEngine: "引擎",
     	boardColumnPending: "排队",
     	boardColumnReady: "待认领",
     	boardColumnRunning: "进行中",
@@ -1598,10 +1604,10 @@ window.__ModuleLoader__.load({
     	});
     }
     /**
-    * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
+    * 看板行：引擎（启动任务）、发起人（结束任务）+ 岗位（定义顺序）。
     *
-    * 内建开始 / 结束任务的主体是同一个发起人，因此合并成一行；岗位行只放
-    * 定义里仍存在的岗位，契约外任务由调用方补行。
+    * 内建开始任务由引擎处理，结束任务由发起人 / 交付助理处理，因此分成两行；
+    * 岗位行只放定义里仍存在的岗位，契约外任务由调用方补行。
     *
     * @param definition
     * @param tasks
@@ -1611,20 +1617,29 @@ window.__ModuleLoader__.load({
     function boardRows(definition, tasks, builtin) {
     	const positions = positionsOf(definition);
     	const known = new Set(positions.map((position) => position.id));
-    	const starterTasks = sortTasks(tasks.filter((task) => task.position === "start" || task.position === "end"));
-    	const rows = [{
-    		id: "starter",
-    		kind: "starter",
-    		label: builtin.starter,
-    		executor: null,
-    		tasks: starterTasks
-    	}, ...positions.map((position) => ({
-    		id: position.id,
-    		kind: "position",
-    		label: position.label,
-    		executor: position.executor,
-    		tasks: sortTasks(tasks.filter((task) => task.position === position.id))
-    	}))];
+    	const rows = [
+    		{
+    			id: "engine",
+    			kind: "engine",
+    			label: builtin.engine,
+    			executor: null,
+    			tasks: sortTasks(tasks.filter((task) => task.position === "start"))
+    		},
+    		{
+    			id: "starter",
+    			kind: "starter",
+    			label: builtin.starter,
+    			executor: null,
+    			tasks: sortTasks(tasks.filter((task) => task.position === "end"))
+    		},
+    		...positions.map((position) => ({
+    			id: position.id,
+    			kind: "position",
+    			label: position.label,
+    			executor: position.executor,
+    			tasks: sortTasks(tasks.filter((task) => task.position === position.id))
+    		}))
+    	];
     	const extras = tasks.filter((task) => task.position !== "start" && task.position !== "end" && (typeof task.position !== "string" || !known.has(task.position)));
     	for (const task of sortTasks(extras)) {
     		const id = typeof task.position === "string" ? task.position : "(unknown)";
@@ -1669,7 +1684,8 @@ window.__ModuleLoader__.load({
     */
     function taskActor(state, task) {
     	const position = typeof task.position === "string" ? task.position : "";
-    	if (position === "" || position === "start" || position === "end") return { kind: "none" };
+    	if (position === "start") return { kind: "engine" };
+    	if (position === "" || position === "end") return { kind: "none" };
     	if (isHumanTask(state, task)) {
     		const assistantId = taskAssistantId(state, task);
     		if (assistantId !== null) return {
@@ -2316,6 +2332,7 @@ window.__ModuleLoader__.load({
     		case "waiting": return t("taskWaitingForYou");
     		case "handling": return t("taskYouAreHandling");
     		case "executor": return actor.missing ? `${actor.text} · ${t("workerDeleted")}` : actor.text;
+    		case "engine": return t("boardEngine");
     		default: return "";
     	}
     }
@@ -2626,8 +2643,9 @@ window.__ModuleLoader__.load({
     * 结构图的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
     *
     * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，正文按
-    * 页签分区：岗位看可处理的任务类型（卡片），开始 / 结束看契约，通道看发送方、
-    * 接收方与允许的任务类型，定义信息看概览、初始任务与契约。
+    * 页签分区：岗位看可处理的任务类型（卡片），开始看作业输入与初始任务，结束看
+    * 最终报告，通道看发送方、接收方与允许的任务类型；定义信息只剩概览，契约与
+    * 初始任务都跟着开始 / 结束节点走。
     */
     /** 定义抽屉。 */
     function renderDefinitionDrawer(page) {
@@ -2703,23 +2721,11 @@ window.__ModuleLoader__.load({
     			expandLabel: t("expandText"),
     			collapseLabel: t("collapseText")
     		}));
-    		return [
-    			{
-    				id: "overview",
-    				label: t("definitionTabOverview"),
-    				content: h("div", { className: "buka-workflows-drawerStack" }, ...overview)
-    			},
-    			{
-    				id: "initial",
-    				label: t("definitionInitialTasks"),
-    				content: initialTasks(page, definition, labels, builtin)
-    			},
-    			{
-    				id: "contract",
-    				label: t("definitionTabContract"),
-    				content: h("div", { className: "buka-workflows-drawerStack" }, renderFold(t("definitionStartContract"), h("div", { className: "buka-workflows-contractStack" }, contractBlock(page, t("startContentTitle"), t("startPayloadHint"), definition.start?.content))), renderFold(t("definitionEndContract"), contractBlock(page, t("endContentTitle"), t("endPayloadHint"), definition.end?.content)))
-    			}
-    		];
+    		return [{
+    			id: "overview",
+    			label: t("definitionTabOverview"),
+    			content: h("div", { className: "buka-workflows-drawerStack" }, ...overview)
+    		}];
     	}
     	if (selection.kind === "position") {
     		const position = positions.find((item) => item.id === selection.id);
@@ -2735,15 +2741,14 @@ window.__ModuleLoader__.load({
     		}];
     	}
     	if (selection.kind === "start" || selection.kind === "end") {
-    		if (!(selection.kind === "start")) return [{
-    			id: "deliverable",
-    			label: t("finalDeliverableTitle"),
-    			content: h("div", { className: "buka-workflows-contractStack" }, h("p", { className: "buka-workflows-sectionHint" }, t("endPayloadHint")), renderContractFields(page, definition.end?.content))
-    		}];
+    		const isStart = selection.kind === "start";
+    		const typeName = isStart ? t("startTaskTitle") : t("endTaskTitle");
+    		const typeId = isStart ? "start" : "end";
+    		const hint = isStart ? `${t("startContentTitle")} · ${t("startPayloadHint")}` : `${t("endContentTitle")} · ${t("endPayloadHint")}`;
     		return [{
-    			id: "input",
-    			label: t("startContentTitle"),
-    			content: h("div", { className: "buka-workflows-contractStack" }, h("p", { className: "buka-workflows-sectionHint" }, t("startPayloadHint")), renderContractFields(page, definition.start?.content))
+    			id: isStart ? "content" : "deliverable",
+    			label: isStart ? t("startTaskTitle") : t("finalDeliverableTitle"),
+    			content: h("article", { className: "buka-workflows-typeCard" }, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, typeName), h("code", { className: "buka-workflows-inlineCode" }, typeId), h("span", { className: "buka-workflows-typeTags" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("builtinTypeTag")))), h("p", { className: "buka-workflows-typeDesc" }, t("builtinTypeHint")), h("p", { className: "buka-workflows-sectionHint" }, hint), contractLine(t("taskTypeContent"), contractOrDash(page, isStart ? definition.start?.content : definition.end?.content)), isStart ? contractLine(t("taskTypeCreates"), initialTasks(page, definition, labels, builtin)) : null)
     		}];
     	}
     	const channel = channelOf(definition, selection.id);
@@ -2791,6 +2796,8 @@ window.__ModuleLoader__.load({
     		const text = renderExecutor(page, position.executor);
     		return text === t("taskTypeUnset") ? null : text;
     	}
+    	if (selection.kind === "start") return `${t("definitionHandler")}: ${t("boardEngine")}`;
+    	if (selection.kind === "end") return `${t("definitionHandler")}: ${t("endHandlerHint")}`;
     	if (selection.kind === "channel") {
     		const channel = channelOf(definition, selection.id);
     		return channel === null ? null : channel.id;
@@ -2846,10 +2853,6 @@ window.__ModuleLoader__.load({
     function contractOrDash(page, schema) {
     	return schema === null || schema === void 0 ? h("span", { className: "buka-workflows-hint" }, page.t("taskTypeUnset")) : renderContractFields(page, schema);
     }
-    /** 带说明的契约块（开始 / 结束节点）。 */
-    function contractBlock(page, label, hint, schema) {
-    	return h("div", { className: "buka-workflows-contractBlock" }, h("span", { className: "buka-workflows-fieldLabel" }, label), h("p", { className: "buka-workflows-sectionHint" }, hint), renderContractFields(page, schema));
-    }
     /** 预算：任务数。 */
     function budgetTasks(page, definition) {
     	const value = definition.budgets?.maxTasks;
@@ -2860,9 +2863,74 @@ window.__ModuleLoader__.load({
     	const value = definition.budgets?.maxDurationHours;
     	return typeof value === "number" ? `${value} ${page.t("budgetHours")}` : page.t("budgetUnset");
     }
+    // .build/workflows/client/components/detail-tabs.js
+    /**
+    * 详情页的下划线页签。
+    *
+    * 工作流、作业与执行者三个详情页的页内页签都是「同一个对象的几种视图」，
+    * 用轻量的下划线式页签比等宽胶囊更像导航：选中态只靠文字颜色、字重与 2px
+    * 下划线区分，底部一条 0.5px 分隔线接住内容区，也方便在标签后挂一个表示
+    * 「有更新」的小圆点。
+    *
+    * 样式在 `../styles.ts`（`.buka-workflows-detailTabs` 等），三个详情页共用。
+    *
+    * 键盘：← / → 循环切换，Home / End 跳到首尾；只有选中项是 Tab 停靠点
+    * （与 WAI-ARIA tabs 模式一致）。页面仍自己渲染 `role="tabpanel"` 的面板。
+    *
+    * @module @buka/dsh-plugin-workflows/client/components/detail-tabs
+    */
+    /**
+    * 下划线式页签条。
+    *
+    * @param props.items 非空且值唯一的页签
+    * @param props.value 当前选中值（必须属于 `items`）
+    * @param props.onChange 点击、← / →、Home / End 触发的切换
+    * @param props.label 页签列表的无障碍名称
+    */
+    function DetailTabs({ items, value, onChange, label }) {
+    	/** 方向键 / Home / End：切换页签并把焦点移到新页签上。 */
+    	function onKeyDown(event) {
+    		const index = items.findIndex((item) => item.value === value);
+    		const last = items.length - 1;
+    		let next = -1;
+    		if (event.key === "ArrowRight") next = index >= last ? 0 : index + 1;
+    		else if (event.key === "ArrowLeft") next = index <= 0 ? last : index - 1;
+    		else if (event.key === "Home") next = 0;
+    		else if (event.key === "End") next = last;
+    		else return;
+    		const target = items[next];
+    		if (target === void 0) return;
+    		event.preventDefault();
+    		onChange(target.value);
+    		event.currentTarget.querySelectorAll("[role=\"tab\"]")[next]?.focus();
+    	}
+    	return h("div", {
+    		className: "buka-workflows-detailTabs",
+    		role: "tablist",
+    		"aria-label": label,
+    		onKeyDown
+    	}, ...items.map((item) => {
+    		const selected = item.value === value;
+    		return h("button", {
+    			key: item.value,
+    			type: "button",
+    			role: "tab",
+    			id: item.id,
+    			className: "buka-workflows-detailTab",
+    			"aria-selected": selected,
+    			"aria-controls": item.panelId,
+    			tabIndex: selected ? 0 : -1,
+    			...item.dot === true && item.labelWithDot !== void 0 ? { "aria-label": item.labelWithDot } : {},
+    			onClick: () => onChange(item.value)
+    		}, item.label, item.dot === true ? h("span", {
+    			className: "buka-workflows-detailTabDot",
+    			"aria-hidden": true
+    		}) : null);
+    	}));
+    }
     // .build/workflows/client/components/board.js
     /**
-    * 作业看板：行 = 发起人（开始 / 结束任务合并）+ 岗位，
+    * 作业看板：行 = 引擎（启动任务）+ 发起人（结束任务）+ 岗位，
     * 列 = 排队 / 待认领 / 进行中 / 已完成 / 异常。
     *
     * 宽屏是网格；窄屏退化成按状态分组的纵向列表。
@@ -2895,7 +2963,10 @@ window.__ModuleLoader__.load({
     	const { t, state } = page;
     	const tasks = jobTasks(state);
     	if (tasks.length === 0) return renderEmpty(t("boardEmpty"), t("boardEmptyHint"));
-    	const rows = boardRows(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), tasks, { starter: t("boardStarter") }).filter((row) => row.kind === "position" || row.tasks.length > 0);
+    	const rows = boardRows(mergedDefinition(currentJobDefinition(state), currentDefinition(state)), tasks, {
+    		engine: t("boardEngine"),
+    		starter: t("boardStarter")
+    	}).filter((row) => row.kind === "position" || row.tasks.length > 0);
     	return h("div", { className: "buka-workflows-boardPane" }, h("p", { className: "buka-workflows-hint" }, t("boardHint")), page.narrow ? renderCompactBoard(page, rows) : h("div", { className: "buka-workflows-board" }, h("div", { className: "buka-workflows-boardGrid" }, h("div", {
     		className: "buka-workflows-boardHeader",
     		role: "row"
@@ -2943,10 +3014,8 @@ window.__ModuleLoader__.load({
     	const labels = /* @__PURE__ */ new Map();
     	for (const row of rows) {
     		labels.set(row.id, row.label);
-    		if (row.kind === "starter") {
-    			labels.set("start", row.label);
-    			labels.set("end", row.label);
-    		}
+    		if (row.kind === "engine") labels.set("start", row.label);
+    		if (row.kind === "starter") labels.set("end", row.label);
     	}
     	const groups = COLUMNS.map((column) => ({
     		column,
@@ -4362,7 +4431,11 @@ window.__ModuleLoader__.load({
     	if (job === void 0) return renderEmpty(t("notFound"));
     	const view = state.route.kind === "job" ? state.route.view : "overview";
     	const body = view === "flow" ? renderJobFlow(page) : view === "board" ? renderBoard(page) : view === "outputs" ? renderJobOutputs(page) : renderJobOverview(page);
-    	return h("div", { className: "buka-workflows-detail" }, job.status === "failed" ? h("div", {
+    	const startFailed = page.state.job.data?.restart?.failed?.reason === "start-task-failed";
+    	return h("div", { className: "buka-workflows-detail" }, job.status === "failed" && startFailed ? h("div", {
+    		className: "buka-workflows-notice",
+    		role: "status"
+    	}, h("p", { className: "buka-workflows-noticeText" }, t("restartReasonStartTaskFailed"))) : job.status === "failed" ? h("div", {
     		className: "buka-workflows-notice",
     		role: "status"
     	}, h("p", { className: "buka-workflows-noticeText" }, t("restartEntryHint")), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -4503,6 +4576,7 @@ window.__ModuleLoader__.load({
     const REASON_KEYS = {
     	"job-not-failed": "restartReasonJobNotFailed",
     	"no-failed-tasks": "restartReasonNoFailedTasks",
+    	"start-task-failed": "restartReasonStartTaskFailed",
     	"workflow-not-found": "restartReasonWorkflowNotFound",
     	"workflow-retired": "restartReasonWorkflowRetired",
     	"definition-outdated": "restartReasonDefinitionOutdated"
@@ -5126,36 +5200,36 @@ window.__ModuleLoader__.load({
     	const workflowAvailable = workflowStatus !== void 0 && workflowStatus !== "retired" && !unavailable;
     	const tabs = route.kind === "workflow" ? [{
     		value: "jobs",
-    		label: h(TabLabel, { text: t("jobsTab") }),
+    		label: t("jobsTab"),
     		id: "buka-workflows-tab-jobs",
     		panelId: "buka-workflows-panel-jobs"
     	}, {
     		value: "definition",
-    		label: h(TabLabel, { text: t("definitionTab") }),
+    		label: t("definitionTab"),
     		id: "buka-workflows-tab-definition",
     		panelId: "buka-workflows-panel-definition"
     	}] : route.kind === "job" ? [
     		{
     			value: "overview",
-    			label: h(TabLabel, { text: t("overviewTab") }),
+    			label: t("overviewTab"),
     			id: "buka-workflows-tab-overview",
     			panelId: "buka-workflows-panel-overview"
     		},
     		{
     			value: "flow",
-    			label: h(TabLabel, { text: t("flowTab") }),
+    			label: t("flowTab"),
     			id: "buka-workflows-tab-flow",
     			panelId: "buka-workflows-panel-flow"
     		},
     		{
     			value: "board",
-    			label: h(TabLabel, { text: t("boardTab") }),
+    			label: t("boardTab"),
     			id: "buka-workflows-tab-board",
     			panelId: "buka-workflows-panel-board"
     		},
     		{
     			value: "outputs",
-    			label: h(TabLabel, { text: t("outputsTab") }),
+    			label: t("outputsTab"),
     			id: "buka-workflows-tab-outputs",
     			panelId: "buka-workflows-panel-outputs"
     		}
@@ -5221,9 +5295,7 @@ window.__ModuleLoader__.load({
     		"aria-label": t("back"),
     		onClick: route.kind === "workflow" ? actions.backToWorkflows : actions.backToWorkflow
     	}, h(_deepseek_ai_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })), h("h1", { className: "buka-workflows-title" }, heading.title), route.kind === "workflow" && retired ? renderStatusTag(t, workflowStatus, "workflow") : null, route.kind === "workflow" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" && unavailable ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-unavailableTag" }, t("workerUnavailable"))) : null, route.kind === "job" ? h("span", { className: "buka-workflows-titleMeta" }, h("span", { className: "buka-workflows-titleSub" }, heading.subtitle), renderStatusTag(t, jobStatus, "job"), live ? h(_deepseek_ai_dsh_client_ui_primitives.StateDot, { state: "ongoing" }) : null) : null);
-    	const tabsNode = tabs === null ? null : h("div", { className: "buka-workflows-tabs" }, h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
-    		size: "sm",
-    		className: "buka-workflows-tabList",
+    	const tabsNode = tabs === null ? null : h(DetailTabs, {
     		label: route.kind === "workflow" ? t("workflowTabsAria") : t("jobTabsAria"),
     		value: activeTab,
     		onChange: (value) => {
@@ -5231,7 +5303,7 @@ window.__ModuleLoader__.load({
     			else if (route.kind === "job") actions.setJobView(value);
     		},
     		items: tabs
-    	}));
+    	});
     	return h("div", { className: `buka-workflows-page${graphView ? " is-graph" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, route.kind === "workflows" ? h("div", { className: "buka-workflows-bar" }, h("div", { className: "buka-workflows-barTabs" }, page.topTabs), toolbarNode) : h("div", { className: "buka-workflows-titleRow" }, titleGroup, toolbarNode), tabsNode)), h("div", {
     		key: routeHash(route),
     		className: `buka-workflows-body${graphView ? " is-graph" : ""}`
@@ -5688,7 +5760,8 @@ window.__ModuleLoader__.load({
     						...now.newJob,
     						submitting: false,
     						error: `${t("newJobFailed")} ${messageOf(failure)}`
-    					}
+    					},
+    					tick: now.tick + 1
     				}));
     			}
     		},
@@ -8425,68 +8498,6 @@ window.__ModuleLoader__.load({
     function MountedTag({ t, worker }) {
     	return h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: worker.mounted === true ? "success" : "neutral" }, worker.mounted === true ? t("mountedBadge") : t("unmountedBadge"));
     }
-    // .build/workflows/client/workers/components/detail-tabs.js
-    /**
-    * 执行者详情页的下划线页签。
-    *
-    * 详情页里的三个页签是「同一个对象的三种视图」，用轻量的下划线式页签比等宽
-    * 胶囊更像导航：选中态只靠文字颜色、字重与 2px 下划线区分，底部一条 0.5px
-    * 分隔线接住内容区，也方便在标签后挂一个表示「技能有更新」的小圆点。
-    *
-    * 键盘：← / → 循环切换，Home / End 跳到首尾；只有选中项是 Tab 停靠点
-    * （与 WAI-ARIA tabs 模式一致）。页面仍自己渲染 `role="tabpanel"` 的面板。
-    *
-    * @module @buka/dsh-plugin-workflows/workers/client/components/detail-tabs
-    */
-    /**
-    * 下划线式页签条。
-    *
-    * @param props.items 非空且值唯一的页签
-    * @param props.value 当前选中值（必须属于 `items`）
-    * @param props.onChange 点击、← / →、Home / End 触发的切换
-    * @param props.label 页签列表的无障碍名称
-    */
-    function DetailTabs({ items, value, onChange, label }) {
-    	/** 方向键 / Home / End：切换页签并把焦点移到新页签上。 */
-    	function onKeyDown(event) {
-    		const index = items.findIndex((item) => item.value === value);
-    		const last = items.length - 1;
-    		let next = -1;
-    		if (event.key === "ArrowRight") next = index >= last ? 0 : index + 1;
-    		else if (event.key === "ArrowLeft") next = index <= 0 ? last : index - 1;
-    		else if (event.key === "Home") next = 0;
-    		else if (event.key === "End") next = last;
-    		else return;
-    		const target = items[next];
-    		if (target === void 0) return;
-    		event.preventDefault();
-    		onChange(target.value);
-    		event.currentTarget.querySelectorAll("[role=\"tab\"]")[next]?.focus();
-    	}
-    	return h("div", {
-    		className: "buka-workers-detailTabs",
-    		role: "tablist",
-    		"aria-label": label,
-    		onKeyDown
-    	}, ...items.map((item) => {
-    		const selected = item.value === value;
-    		return h("button", {
-    			key: item.value,
-    			type: "button",
-    			role: "tab",
-    			id: item.id,
-    			className: "buka-workers-detailTab",
-    			"aria-selected": selected,
-    			"aria-controls": item.panelId,
-    			tabIndex: selected ? 0 : -1,
-    			...item.dot === true && item.labelWithDot !== void 0 ? { "aria-label": item.labelWithDot } : {},
-    			onClick: () => onChange(item.value)
-    		}, item.label, item.dot === true ? h("span", {
-    			className: "buka-workers-tabDot",
-    			"aria-hidden": true
-    		}) : null);
-    	}));
-    }
     // .build/workflows/client/workers/components/page-header.js
     /**
     * 「执行者」页面标题行：返回 / 头像 / 标题 / 重命名、工具栏与详情页签。
@@ -9573,7 +9584,7 @@ window.__ModuleLoader__.load({
     			event.stopPropagation();
     			if (canOpen) openDetail(worker);
     		}
-    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), robot ? null : h(MountedTag, {
+    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.builtin === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("systemWorker")) : null, robot ? null : h(MountedTag, {
     		t,
     		worker
     	}), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
@@ -9858,7 +9869,13 @@ window.__ModuleLoader__.load({
     .buka-workflows-back svg{transform:rotate(180deg)}
     @media (hover:hover){.buka-workflows-back:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
     .buka-workflows-back:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
-    .buka-workflows-tabs{display:flex;align-items:center;gap:var(--buka-space-2, 8px);min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain}
+    .buka-workflows-detailTabs{display:flex;align-items:center;gap:0;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:0.5px solid var(--dsw-alias-border-l1)}
+    .buka-workflows-detailTab{position:relative;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);height:40px;margin:0;padding:0 var(--buka-space-3, 12px);border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-20, 20px);white-space:nowrap;cursor:pointer}
+    @media (hover:hover){.buka-workflows-detailTab:hover{color:var(--dsw-alias-label-primary)}}
+    .buka-workflows-detailTab[aria-selected="true"]{color:var(--dsw-alias-label-primary);font-weight:500}
+    .buka-workflows-detailTab[aria-selected="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary)}
+    .buka-workflows-detailTab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
+    .buka-workflows-detailTabDot{width:7px;height:7px;flex:none;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
     .buka-workflows-tabList{width:fit-content;max-width:100%}
     .buka-workflows-body{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:var(--buka-space-5, 24px) 0 var(--buka-space-7, 48px);animation:buka-enter var(--buka-motion, 160ms) var(--buka-ease, cubic-bezier(.2,0,0,1))}
     .buka-workflows-body.is-graph{overflow:hidden;padding-bottom:0}
@@ -10084,7 +10101,6 @@ window.__ModuleLoader__.load({
     .buka-workflows-typeDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
     .buka-workflows-contractStack{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0}
     .buka-workflows-contractStack.is-tight{gap:var(--buka-space-1, 4px)}
-    .buka-workflows-contractBlock{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
     .buka-workflows-contractLine{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);align-items:start;min-width:0}
     .buka-workflows-contractLabel{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-18, 18px);white-space:nowrap;padding-top:2px}
     .buka-workflows-contractValue{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
@@ -10267,6 +10283,7 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "Not mounted",
     	driverAgent: "Agent",
     	driverRobot: "Robot",
+    	systemWorker: "System",
     	robotReadOnly: "Built-in robot: read-only, with no directory, session or settings.",
     	missingDir: "Missing directory",
     	missingDirHint: "This worker directory no longer exists. You can delete the record and create it again.",
@@ -10487,6 +10504,7 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "未挂载",
     	driverAgent: "智能体",
     	driverRobot: "机器人",
+    	systemWorker: "系统",
     	robotReadOnly: "内建机器人：只读，没有目录、会话与配置。",
     	missingDir: "目录缺失",
     	missingDirHint: "这个执行者目录已经不存在了，可以删除记录后重新创建。",
@@ -10749,13 +10767,6 @@ window.__ModuleLoader__.load({
     .buka-workers-descriptionInput:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
     .buka-workers-descriptionInput:disabled{opacity:.65}
     .buka-workers-backButton{flex:none;margin-left:calc(-1 * var(--buka-space-1, 4px))}
-    .buka-workers-detailTabs{display:flex;align-items:center;gap:0;min-width:0;flex:none;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:0.5px solid var(--dsw-alias-border-l1)}
-    .buka-workers-detailTab{position:relative;box-sizing:border-box;flex:none;display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);height:40px;margin:0;padding:0 var(--buka-space-3, 12px);border:0;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-20, 20px);white-space:nowrap;cursor:pointer}
-    @media (hover:hover){.buka-workers-detailTab:hover{color:var(--dsw-alias-label-primary)}}
-    .buka-workers-detailTab[aria-selected="true"]{color:var(--dsw-alias-label-primary);font-weight:500}
-    .buka-workers-detailTab[aria-selected="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--dsw-alias-state-business-primary)}
-    .buka-workers-detailTab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:calc(-1 * var(--dsw-focus-ring-width))}
-    .buka-workers-tabDot{width:7px;height:7px;flex:none;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
     .buka-workers-panel{display:flex;flex-direction:column;gap:var(--buka-space-5, 24px);flex:1 1 auto;min-height:0}
     .buka-workers-fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
     .buka-workers-jobBlocker{display:flex;align-items:center;justify-content:space-between;gap:var(--buka-space-2, 8px)}

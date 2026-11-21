@@ -34,26 +34,35 @@ export function renderJobDetail(page: AppContext): React.ReactElement {
           ? renderJobOutputs(page)
           : renderJobOverview(page)
 
+  // 启动任务失败是终态：不给重启入口，直接说明为什么要新建作业（Q17）。
+  const startFailed = page.state.job.data?.restart?.failed?.reason === 'start-task-failed'
+
   return h(
     'div',
     { className: 'buka-workflows-detail' },
-    job.status === 'failed'
+    job.status === 'failed' && startFailed
       ? h(
           'div',
           { className: 'buka-workflows-notice', role: 'status' },
-          h('p', { className: 'buka-workflows-noticeText' }, t('restartEntryHint')),
-          h(
-            Button,
-            {
-              variant: 'outline',
-              size: 'sm',
-              className: 'buka-workflows-smallButton',
-              onClick: actions.openRestart,
-            },
-            t('restartJob'),
-          ),
+          h('p', { className: 'buka-workflows-noticeText' }, t('restartReasonStartTaskFailed')),
         )
-      : null,
+      : job.status === 'failed'
+        ? h(
+            'div',
+            { className: 'buka-workflows-notice', role: 'status' },
+            h('p', { className: 'buka-workflows-noticeText' }, t('restartEntryHint')),
+            h(
+              Button,
+              {
+                variant: 'outline',
+                size: 'sm',
+                className: 'buka-workflows-smallButton',
+                onClick: actions.openRestart,
+              },
+              t('restartJob'),
+            ),
+          )
+        : null,
     page.state.job.data?.canRetryDelivery === true
       ? h(
           'div',

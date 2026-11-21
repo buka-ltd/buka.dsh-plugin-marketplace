@@ -52,6 +52,7 @@ function sampleWorkers() {
       // 助理不是执行者身上的标记：这里不给它任何额外字段。
       { id: '沟通助理', name: '', driver: 'agent' },
       { id: 'clock', name: '', driver: 'robot', program: 'clock' },
+      { id: 'engine', name: '引擎', driver: 'robot', program: 'engine' },
     ].map((worker) => [worker.id, worker]),
   )
 }
@@ -611,6 +612,57 @@ test('definition: rejects structural and identity errors', () => {
       mutate((d) => (d.start.content = { type: 'string' })),
       /start\.content\.type/,
       /must be "object"/,
+    ],
+  ]
+  for (const [definition, pathPattern, messagePattern] of cases) {
+    expectIssue(validateWorkflowDefinition(definition, { workers }), pathPattern, messagePattern)
+  }
+})
+
+test('definition: rejects unknown fields, reserved type ids and the engine executor', () => {
+  const workers = sampleWorkers()
+  const cases = [
+    [
+      mutate((d) => {
+        d.extra = true
+      }),
+      /^extra$/u,
+      /unexpected field/u,
+    ],
+    [
+      mutate((d) => {
+        d.start.actions = []
+      }),
+      /^start\.actions$/u,
+      /unexpected field/u,
+    ],
+    [
+      mutate((d) => {
+        d.end.worktree = 'create'
+      }),
+      /^end\.worktree$/u,
+      /unexpected field/u,
+    ],
+    [
+      mutate((d) => {
+        d.positions[0].taskTypes[0].workTree = 'guard'
+      }),
+      /positions\[0\]\.taskTypes\[0\]\.workTree/u,
+      /unexpected field/u,
+    ],
+    [
+      mutate((d) => {
+        d.positions[0].taskTypes[0].id = 'start'
+      }),
+      /positions\[0\]\.taskTypes\[0\]\.id/u,
+      /reserved/u,
+    ],
+    [
+      mutate((d) => {
+        d.positions[0].executor = { kind: 'worker', id: 'engine' }
+      }),
+      /positions\[0\]\.executor\.id/u,
+      /start node/u,
     ],
   ]
   for (const [definition, pathPattern, messagePattern] of cases) {

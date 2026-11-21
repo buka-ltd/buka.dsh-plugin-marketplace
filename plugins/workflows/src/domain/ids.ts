@@ -10,14 +10,28 @@
 import { randomUUID } from 'node:crypto'
 
 /**
- * 启动任务的保留 id。
+ * 启动任务 id 的保留前缀，也是旧作业里启动任务的完整 id。
  *
- * 定义格式里用 `dependsOn: ["$start"]` 引用启动任务，但**记录 id 必须能当
- * 文件名**：storageDomain 的 json 后端按记录 id 分文件，只接受
- * `[a-zA-Z0-9_-]`，`$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。
- * 所以落盘的启动任务 id 用 `start-task`，创建初始任务时把 `$start` 映射成它。
+ * 定义格式里用 `$start` 引用启动任务，但**记录 id 必须能当文件名**：
+ * storageDomain 的 json 后端按记录 id 分文件，只接受 `[a-zA-Z0-9_-]`，
+ * `$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。新作业用
+ * `start-task-<jobId>`（见 `startTaskId`）；旧的作业快照仍用这个保留 id。
  */
 export const START_TASK_ID = 'start-task'
+
+/**
+ * 新作业的启动任务 id。
+ *
+ * 任务表按记录 id 做键，`START_TASK_ID` 是所有旧作业共用的保留 id：同一张
+ * 表里第二个作业的启动任务会覆盖第一个。新作业改用带作业 id 的键；旧作业
+ * 继续读 `start-task`，依赖字段不需要迁移。
+ *
+ * @param jobId 作业 id
+ * @returns 路径安全的启动任务 id
+ */
+export function startTaskId(jobId: string): string {
+  return `${START_TASK_ID}-${jobId}`
+}
 
 /** 一段 base36 时间戳。 */
 function timeSegment(): string {

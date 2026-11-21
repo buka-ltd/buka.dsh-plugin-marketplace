@@ -24,7 +24,7 @@ import {
   findTaskType,
 } from '../definition/validate.ts'
 import { deliveryWorkerRef, executorRef, storedExecutorRef } from '../domain/identity.ts'
-import { newTaskId, nowIso, START_TASK_ID } from '../domain/ids.ts'
+import { newTaskId, nowIso } from '../domain/ids.ts'
 import type {
   ChannelDefinition,
   CreationDefinition,
@@ -37,6 +37,7 @@ import type {
   WorkflowDefinition,
 } from '../domain/types.ts'
 import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
+import { ENGINE_PROGRAM_ID, ENGINE_WORKER_ID } from '../workers/store/builtin.ts'
 import { WorkflowError } from './types.ts'
 
 /** 创建任务的入参。 */
@@ -78,8 +79,17 @@ export function resolveExecutor(
   job: JobRecord,
   workers: ReadonlyMap<string, WorkerInfo>,
 ): StoredExecutor {
-  if (positionId === 'start' || positionId === 'end') {
-    if (positionId === 'end' && job.delivery.kind === 'assistant') {
+  if (positionId === 'start') {
+    // 开始节点由引擎处理；任务记录上钉住引擎这个内建执行者。
+    return {
+      kind: 'worker',
+      id: ENGINE_WORKER_ID,
+      driver: 'robot',
+      program: ENGINE_PROGRAM_ID,
+    }
+  }
+  if (positionId === 'end') {
+    if (job.delivery.kind === 'assistant') {
       const deliveryId = deliveryWorkerRef(job.delivery)
       const worker = deliveryId === null ? undefined : workers.get(deliveryId)
       if (worker === undefined) {
@@ -454,8 +464,8 @@ export function renderCreation(
 /**
  * 生成 `start.next` 发布的初始任务。
  *
- * 启动任务已完成：它们的唯一依赖是启动任务（`START_TASK_ID`），所以初始状态
- * 都是 `ready`。
+ * 启动任务已完成：它们的唯一依赖是本次作业的启动任务，所以初始状态都是
+ * `ready`。
  *
  * @param input 作业、启动任务、已有任务与执行者表
  * @returns 新任务记录
@@ -488,7 +498,7 @@ export function buildInitialTasks(input: {
       type: parsed.taskType.id,
       channel: parsed.channel.id,
       content: parsed.content,
-      deps: [START_TASK_ID],
+      deps: [startTask.id],
       status: 'ready',
       createdBy: { taskId: startTask.id, position: 'start' },
       assignee,

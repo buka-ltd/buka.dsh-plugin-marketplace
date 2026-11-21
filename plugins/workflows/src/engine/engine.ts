@@ -31,7 +31,7 @@ import {
   jobReferencesWorker,
 } from '../domain/availability.ts'
 import { deliveryWorkerRef, storedExecutorRef } from '../domain/identity.ts'
-import { newAttemptId, newJobId, nowIso, START_TASK_ID } from '../domain/ids.ts'
+import { newAttemptId, newJobId, nowIso, startTaskId } from '../domain/ids.ts'
 import {
   assertJobTransition,
   assertTaskTransition,
@@ -66,6 +66,7 @@ import type { ResolvedOptions } from '../options.ts'
 import { programDriver } from '../program/clock.ts'
 import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
+import { ENGINE_PROGRAM_ID, ENGINE_WORKER_ID } from '../workers/store/builtin.ts'
 import {
   canRetryDelivery,
   deliveryView,
@@ -520,7 +521,13 @@ export class WorkflowEngine {
     })
   }
 
-  /** 建作业 + 启动任务 + 初始任务。 */
+  /**
+   * 建作业 + 启动任务 + 初始任务。
+   *
+   * 作业与启动任务都由引擎程序创建（ADR 0030）：作业先落盘，随后引擎程序按
+   * 开始任务类型的参数 schema 校验输入；失败时保留 `failed` 作业与 `failed`
+   * 启动任务，调用方拿到带 job id 的错误。
+   */
   private async startJob(input: {
     readonly workflow: WorkflowRecord
     readonly definition: WorkflowDefinition
@@ -532,7 +539,6 @@ export class WorkflowEngine {
     readonly restartedFrom?: string | undefined
   }): Promise<JobRecord> {
     const { definition, workers, starter } = input
-    this.checkStartContent(definition, input.content)
     const job = await this.insertJob({
       workflow: input.workflow,
       definition,
@@ -544,69 +550,125 @@ export class WorkflowEngine {
     try {
       await this.store.runExclusive(job.id, async () => {
         const now = nowIso()
-        const startTask: TaskRecord = {
-          id: START_TASK_ID,
-          jobId: job.id,
-          position: 'start',
-          type: 'start',
-          channel: null,
-          content: input.content,
-          deps: [],
-          status: 'completed',
-          createdBy: null,
-          assignee:
-            starter.kind === 'human'
-              ? { kind: 'human' }
-              : { kind: 'session', sessionId: starter.sessionId },
-          claimant:
-            starter.kind === 'human'
-              ? { kind: 'human', name: '本地用户', sessionId: null }
-              : { kind: 'worker', name: 'starter', sessionId: starter.sessionId },
-          attemptIds: [],
-          result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
-          error: null,
-          createdAt: now,
-          startedAt: now,
-          finishedAt: now,
-          updatedAt: now,
-        }
-        await this.store.insertTask(startTask)
-        await this.appendEvent(job.id, 'job/created', {
-          seq: job.seq,
-          starter: starter.kind,
-        })
-        await this.appendEvent(job.id, 'task/completed', { taskId: startTask.id, type: 'start' })
-        const initial = buildInitialTasks({
-          job,
-          startTask,
-          tasks: [startTask],
-          workers,
-        })
-        for (const task of initial) {
-          await this.store.insertTask(task)
+        await this.appendEvent(job.id, 'job/created', { seq: job.seq, starter: starter.kind })
+        try {
+          this.checkStartContent(definition, input.content)
+          const startTask = this.startTaskRecord(job, input.content, now)
+          const initial = buildInitialTasks({ job, startTask, tasks: [startTask], workers })
+          await this.store.insertTask(startTask)
           await this.appendEvent(job.id, 'task/created', {
-            taskId: task.id,
-            position: task.position,
-            type: task.type,
-            channel: task.channel,
-            deps: task.deps,
+            taskId: startTask.id,
+            position: 'start',
+            type: 'start',
+            channel: null,
+            deps: [],
           })
+          await this.appendEvent(job.id, 'task/completed', {
+            taskId: startTask.id,
+            type: 'start',
+          })
+          for (const task of initial) {
+            await this.store.insertTask(task)
+            await this.appendEvent(job.id, 'task/created', {
+              taskId: task.id,
+              position: task.position,
+              type: task.type,
+              channel: task.channel,
+              deps: task.deps,
+            })
+          }
+          await this.recomputeLocked(job.id)
+        } catch (error) {
+          const reason = describeError(error)
+          const failed = this.startTaskRecord(job, input.content, now, reason)
+          // 校验或构造初始任务失败时启动任务还没落盘；构造完之后才失败的情况
+          // 不覆盖已有记录，只把作业置为失败。
+          if (this.store.getTask(failed.id) === undefined) {
+            await this.store.insertTask(failed)
+            await this.appendEvent(job.id, 'task/created', {
+              taskId: failed.id,
+              position: 'start',
+              type: 'start',
+              channel: null,
+              deps: [],
+            })
+            await this.appendEvent(job.id, 'task/failed', {
+              taskId: failed.id,
+              error: reason,
+            })
+          }
+          const current = this.store.getJob(job.id)
+          if (current !== undefined && current.status === 'running') {
+            await this.failJobLocked(current, reason, 'job/start-failed', {
+              taskId: failed.id,
+            })
+          }
+          throw this.startFailure(error, job.id)
         }
-        await this.recomputeLocked(job.id)
       })
     } catch (error) {
-      await this.store
-        .updateJob(job.id, (current) => ({
-          ...current,
-          status: 'failed',
-          error: describeError(error),
-          finishedAt: nowIso(),
-          updatedAt: nowIso(),
-        }))
-        .catch(() => undefined)
+      // 兜底：锁内失败已把作业置为 failed；这里只处理锁本身或写在锁外的错误。
+      const current = this.store.getJob(job.id)
+      if (current !== undefined && current.status === 'running') {
+        await this.store
+          .updateJob(job.id, (record) => ({
+            ...record,
+            status: 'failed',
+            error: describeError(error),
+            finishedAt: nowIso(),
+            updatedAt: nowIso(),
+          }))
+          .catch(() => undefined)
+      }
       throw error
     }
     return this.store.getJob(job.id) ?? job
+  }
+
+  /** 启动任务记录：引擎是主体与承办者；成功时已完成，失败时带错误。 */
+  private startTaskRecord(
+    job: JobRecord,
+    content: JsonValue,
+    now: string,
+    error: string | null = null,
+  ): TaskRecord {
+    const failed = error !== null
+    return {
+      id: startTaskId(job.id),
+      jobId: job.id,
+      position: 'start',
+      type: 'start',
+      channel: null,
+      content,
+      deps: [],
+      status: failed ? 'failed' : 'completed',
+      createdBy: null,
+      assignee: {
+        kind: 'worker',
+        id: ENGINE_WORKER_ID,
+        driver: 'robot',
+        program: ENGINE_PROGRAM_ID,
+      },
+      claimant: { kind: 'worker', name: ENGINE_WORKER_ID, sessionId: null },
+      attemptIds: [],
+      result: failed ? null : { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
+      error,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: now,
+      updatedAt: now,
+    }
+  }
+
+  /** 把启动失败包装成带 job id 的稳定错误（Q16：留痕 + 抛错）。 */
+  private startFailure(error: unknown, jobId: string): WorkflowError {
+    if (error instanceof WorkflowError) {
+      return new WorkflowError(error.code, `${error.message} (job ${jobId})`)
+    }
+    return new WorkflowError(
+      'start-failed',
+      `job ${jobId} could not be initialized: ${describeError(error)}`,
+    )
   }
 
   /** 校验发起人给的任务内容。 */
@@ -788,6 +850,13 @@ export class WorkflowEngine {
       return {
         failed: { available: false, reason: 'job-not-failed' },
         scratch: { available: false, reason: 'job-not-failed' },
+      }
+    }
+    // 启动任务失败是终态：输入不可变，重试只会重复失败（Q17）。
+    if (tasks.some((task) => task.position === 'start' && task.status === 'failed')) {
+      return {
+        failed: { available: false, reason: 'start-task-failed' },
+        scratch: { available: false, reason: 'start-task-failed' },
       }
     }
     const scratchProblem = this.scratchRestartProblem(job)
@@ -1658,6 +1727,16 @@ export class WorkflowEngine {
         `job ${jobId} is ${job.status}; only failed jobs can be restarted`,
       )
     }
+    if (
+      this.store
+        .listTasks(jobId)
+        .some((task) => task.position === 'start' && task.status === 'failed')
+    ) {
+      throw new WorkflowError(
+        'start-task-failed',
+        `job ${jobId} failed on its start task; the input cannot be retried — start a new job with corrected input instead`,
+      )
+    }
     if (mode === 'scratch') return await this.restartJobFromScratch(job)
     return await this.restartJobInPlace(job)
   }
@@ -1930,7 +2009,7 @@ export class WorkflowEngine {
       }
     }
     const tasks = this.store.listTasks(jobId)
-    const startTask = tasks.find((task) => task.id === START_TASK_ID)
+    const startTask = tasks.find((task) => task.position === 'start')
     if (
       startTask !== undefined &&
       startTask.status === 'completed' &&

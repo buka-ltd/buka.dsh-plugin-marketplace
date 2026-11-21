@@ -2,8 +2,9 @@
  * 结构图的右侧抽屉：全局信息、岗位、开始 / 结束节点与通道。
  *
  * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，正文按
- * 页签分区：岗位看可处理的任务类型（卡片），开始 / 结束看契约，通道看发送方、
- * 接收方与允许的任务类型，定义信息看概览、初始任务与契约。
+ * 页签分区：岗位看可处理的任务类型（卡片），开始看作业输入与初始任务，结束看
+ * 最终报告，通道看发送方、接收方与允许的任务类型；定义信息只剩概览，契约与
+ * 初始任务都跟着开始 / 结束节点走。
  */
 
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -29,7 +30,6 @@ import {
   renderContractFields,
   renderDrawerHead,
   renderExecutor,
-  renderFold,
   renderKv,
   renderStatStrip,
 } from './parts.ts'
@@ -153,36 +153,6 @@ function definitionTabs(
         label: t('definitionTabOverview'),
         content: h('div', { className: 'buka-workflows-drawerStack' }, ...overview),
       },
-      {
-        id: 'initial',
-        label: t('definitionInitialTasks'),
-        content: initialTasks(page, definition, labels, builtin),
-      },
-      {
-        id: 'contract',
-        label: t('definitionTabContract'),
-        content: h(
-          'div',
-          { className: 'buka-workflows-drawerStack' },
-          renderFold(
-            t('definitionStartContract'),
-            h(
-              'div',
-              { className: 'buka-workflows-contractStack' },
-              contractBlock(
-                page,
-                t('startContentTitle'),
-                t('startPayloadHint'),
-                definition.start?.content,
-              ),
-            ),
-          ),
-          renderFold(
-            t('definitionEndContract'),
-            contractBlock(page, t('endContentTitle'), t('endPayloadHint'), definition.end?.content),
-          ),
-        ),
-      },
     ]
   }
   if (selection.kind === 'position') {
@@ -216,30 +186,40 @@ function definitionTabs(
     ]
   }
   if (selection.kind === 'start' || selection.kind === 'end') {
+    // 开始 / 结束是内建任务类型：用与岗位任务类型一致的卡片展示契约与处理人。
     const isStart = selection.kind === 'start'
-    if (!isStart) {
-      return [
-        {
-          id: 'deliverable',
-          label: t('finalDeliverableTitle'),
-          content: h(
-            'div',
-            { className: 'buka-workflows-contractStack' },
-            h('p', { className: 'buka-workflows-sectionHint' }, t('endPayloadHint')),
-            renderContractFields(page, definition.end?.content),
-          ),
-        },
-      ]
-    }
+    const typeName = isStart ? t('startTaskTitle') : t('endTaskTitle')
+    const typeId = isStart ? 'start' : 'end'
+    const hint = isStart
+      ? `${t('startContentTitle')} · ${t('startPayloadHint')}`
+      : `${t('endContentTitle')} · ${t('endPayloadHint')}`
     return [
       {
-        id: 'input',
-        label: t('startContentTitle'),
+        id: isStart ? 'content' : 'deliverable',
+        label: isStart ? t('startTaskTitle') : t('finalDeliverableTitle'),
         content: h(
-          'div',
-          { className: 'buka-workflows-contractStack' },
-          h('p', { className: 'buka-workflows-sectionHint' }, t('startPayloadHint')),
-          renderContractFields(page, definition.start?.content),
+          'article',
+          { className: 'buka-workflows-typeCard' },
+          h(
+            'div',
+            { className: 'buka-workflows-typeRowHead' },
+            h('span', { className: 'buka-workflows-typeName' }, typeName),
+            h('code', { className: 'buka-workflows-inlineCode' }, typeId),
+            h(
+              'span',
+              { className: 'buka-workflows-typeTags' },
+              h(Tag, { tone: 'info' }, t('builtinTypeTag')),
+            ),
+          ),
+          h('p', { className: 'buka-workflows-typeDesc' }, t('builtinTypeHint')),
+          h('p', { className: 'buka-workflows-sectionHint' }, hint),
+          contractLine(
+            t('taskTypeContent'),
+            contractOrDash(page, isStart ? definition.start?.content : definition.end?.content),
+          ),
+          isStart
+            ? contractLine(t('taskTypeCreates'), initialTasks(page, definition, labels, builtin))
+            : null,
         ),
       },
     ]
@@ -368,6 +348,12 @@ function headerMeta(
     if (position === undefined) return null
     const text = renderExecutor(page, position.executor)
     return text === t('taskTypeUnset') ? null : text
+  }
+  if (selection.kind === 'start') {
+    return `${t('definitionHandler')}: ${t('boardEngine')}`
+  }
+  if (selection.kind === 'end') {
+    return `${t('definitionHandler')}: ${t('endHandlerHint')}`
   }
   if (selection.kind === 'channel') {
     const channel = channelOf(definition, selection.id)
@@ -507,22 +493,6 @@ function contractOrDash(page: AppContext, schema: JsonSchema | null | undefined)
   return schema === null || schema === undefined
     ? h('span', { className: 'buka-workflows-hint' }, page.t('taskTypeUnset'))
     : renderContractFields(page, schema)
-}
-
-/** 带说明的契约块（开始 / 结束节点）。 */
-function contractBlock(
-  page: AppContext,
-  label: string,
-  hint: string,
-  schema: JsonSchema | null | undefined,
-): React.ReactElement {
-  return h(
-    'div',
-    { className: 'buka-workflows-contractBlock' },
-    h('span', { className: 'buka-workflows-fieldLabel' }, label),
-    h('p', { className: 'buka-workflows-sectionHint' }, hint),
-    renderContractFields(page, schema),
-  )
 }
 
 /** 预算：任务数。 */

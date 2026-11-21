@@ -70,6 +70,7 @@ function statusForError(error: unknown): number {
       case 'no-pending-delivery':
       case 'job-not-failed':
       case 'no-failed-tasks':
+      case 'start-task-failed':
       case 'definition-outdated':
         return 409
       default:

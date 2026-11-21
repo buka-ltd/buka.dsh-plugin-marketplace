@@ -156,6 +156,7 @@ export function WorkerCard({
             workerIdentityLabel(worker),
           ),
           h(Tag, { tone: robot ? 'info' : 'neutral' }, robot ? t('driverRobot') : t('driverAgent')),
+          worker.builtin === true ? h(Tag, { tone: 'neutral' }, t('systemWorker')) : null,
           robot ? null : h(MountedTag, { t, worker }),
           robot ? null : h(Tag, { tone: 'neutral' }, countBadge(skills.length, t)),
           missing ? h(Tag, { tone: 'warning' }, t('missingDir')) : null,

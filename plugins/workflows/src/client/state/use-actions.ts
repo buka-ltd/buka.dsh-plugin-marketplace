@@ -435,6 +435,8 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
             submitting: false,
             error: `${t('newJobFailed')} ${messageOf(failure)}`,
           },
+          // 启动失败会留下一条 failed 作业（Q13/Q16）：刷新列表让留痕可见。
+          tick: now.tick + 1,
         }))
       }
     },

@@ -5,6 +5,7 @@
  */
 
 import { resolveAvatar } from '../avatar.ts'
+import { isBuiltinWorkerId } from '../store/builtin.ts'
 import { workerDisplayName } from '../store/types.ts'
 import type { WorkerListEntry } from '../worker-store.ts'
 
@@ -27,6 +28,7 @@ export function summarizeWorker(worker: WorkerListEntry): Record<string, unknown
     displayName: workerDisplayName(worker ?? {}),
     driver: worker?.driver === 'robot' ? 'robot' : 'agent',
     program: typeof worker?.program === 'string' ? worker.program : '',
+    builtin: isBuiltinWorkerId(worker?.id),
     path: worker?.path ?? '',
     createdAt: worker?.createdAt ?? null,
     avatar: resolveAvatar(worker?.avatar, worker?.id),

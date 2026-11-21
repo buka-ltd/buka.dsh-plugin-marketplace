@@ -218,7 +218,7 @@ test('POST /buka-workers/rename：只改展示名，目录与工作区注册不�
     const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
     assert.deepEqual(
       registry.workers.map((worker) => worker.id),
-      ['writer', 'clock'],
+      ['writer', 'clock', 'engine'],
     )
     assert.equal(registry.version, 4)
     assert.equal(registry.workers[0].name, '写作助手')
@@ -305,7 +305,7 @@ test('POST /buka-workers/rename：错误码映射（内置名 409、非法名 40
       JSON.parse(await fs.readFile(harness.registryFile, 'utf8')).workers.map(
         (worker) => worker.id,
       ),
-      ['painter', 'writer', 'clock'],
+      ['painter', 'writer', 'clock', 'engine'],
     )
   } finally {
     await harness.cleanup()

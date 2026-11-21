@@ -1,5 +1,5 @@
 /**
- * 作业看板：行 = 发起人（开始 / 结束任务合并）+ 岗位，
+ * 作业看板：行 = 引擎（启动任务）+ 发起人（结束任务）+ 岗位，
  * 列 = 排队 / 待认领 / 进行中 / 已完成 / 异常。
  *
  * 宽屏是网格；窄屏退化成按状态分组的纵向列表。
@@ -41,9 +41,10 @@ export function renderBoard(page: AppContext): React.ReactElement {
     return renderEmpty(t('boardEmpty'), t('boardEmptyHint'))
   }
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
-  const rows = boardRows(definition, tasks, { starter: t('boardStarter') }).filter(
-    (row) => row.kind === 'position' || row.tasks.length > 0,
-  )
+  const rows = boardRows(definition, tasks, {
+    engine: t('boardEngine'),
+    starter: t('boardStarter'),
+  }).filter((row) => row.kind === 'position' || row.tasks.length > 0)
 
   return h(
     'div',
@@ -142,14 +143,12 @@ function renderBoardRow(page: AppContext, row: BoardRow): React.ReactElement {
 /** 窄屏：按状态分组的纵向列表。 */
 function renderCompactBoard(page: AppContext, rows: BoardRow[]): React.ReactElement {
   const { t } = page
-  // 卡片按任务自己的 position 找行名；发起人行同时覆盖 start 与 end。
+  // 卡片按任务自己的 position 找行名；引擎行覆盖 start，发起人行覆盖 end。
   const labels = new Map<string, string>()
   for (const row of rows) {
     labels.set(row.id, row.label)
-    if (row.kind === 'starter') {
-      labels.set('start', row.label)
-      labels.set('end', row.label)
-    }
+    if (row.kind === 'engine') labels.set('start', row.label)
+    if (row.kind === 'starter') labels.set('end', row.label)
   }
   const groups = COLUMNS.map((column) => ({
     column,

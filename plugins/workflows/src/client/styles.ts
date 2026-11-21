@@ -258,7 +258,6 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-typeDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
 .buka-workflows-contractStack{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0}
 .buka-workflows-contractStack.is-tight{gap:var(--buka-space-1, 4px)}
-.buka-workflows-contractBlock{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
 .buka-workflows-contractLine{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);align-items:start;min-width:0}
 .buka-workflows-contractLabel{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-18, 18px);white-space:nowrap;padding-top:2px}
 .buka-workflows-contractValue{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}

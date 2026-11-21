@@ -417,6 +417,8 @@ export function renderTaskActor(
       return t('taskYouAreHandling')
     case 'executor':
       return actor.missing ? `${actor.text} · ${t('workerDeleted')}` : actor.text
+    case 'engine':
+      return t('boardEngine')
     default:
       return ''
   }

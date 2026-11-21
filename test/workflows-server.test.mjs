@@ -18,7 +18,7 @@ import {
   attachmentPreviewInfo,
   visibleAttachmentsForTask,
 } from '../plugins/workflows/src/attachments/index.ts'
-import { START_TASK_ID } from '../plugins/workflows/src/domain/ids.ts'
+import { START_TASK_ID, startTaskId } from '../plugins/workflows/src/domain/ids.ts'
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
@@ -729,11 +729,81 @@ test('engine: the start task id can be used as a storageDomain record key', asyn
       workflowId: env.workflowId,
       content: { requirement: '登录页需求' },
     })
+    const expected = startTaskId(job.id)
+    assert.match(expected, /^[a-zA-Z0-9_-]+$/u)
     const tasks = jobTasks(env.store, job.id)
     const start = tasks.find((task) => task.position === 'start')
-    assert.equal(start.id, START_TASK_ID)
+    assert.equal(start.id, expected)
+    assert.equal(start.assignee.id, 'engine')
     const dev = tasks.find((task) => task.position === 'dev')
-    assert.deepEqual(dev.deps, [START_TASK_ID])
+    assert.deepEqual(dev.deps, [expected])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: invalid input leaves a failed job and a failed start task', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    let captured = null
+    await assert.rejects(
+      () =>
+        env.engine.createJobFromHuman({
+          workflowId: env.workflowId,
+          content: {},
+        }),
+      (error) => {
+        captured = error
+        return error.code === 'invalid-input'
+      },
+    )
+    const jobs = env.store.listJobs(env.workflowId)
+    assert.equal(jobs.length, 1, 'the failed job is kept as a trace')
+    const job = jobs[0]
+    assert.equal(job.status, 'failed')
+    assert.match(job.error, /content does not match the workflow input/u)
+    assert.match(captured.message, new RegExp(job.id, 'u'), 'the error names the job')
+
+    const start = taskAt(env.store, job.id, 'start')
+    assert.equal(start.status, 'failed')
+    assert.match(start.error, /content does not match the workflow input/u)
+    assert.equal(start.assignee.kind, 'worker')
+    assert.equal(start.assignee.id, 'engine')
+    assert.equal(start.claimant.kind, 'worker')
+    assert.equal(start.claimant.name, 'engine')
+
+    const detail = await env.engine.jobDetail(job.id)
+    assert.equal(detail.restart.failed.reason, 'start-task-failed')
+    assert.equal(detail.restart.scratch.reason, 'start-task-failed')
+    await assert.rejects(
+      () => env.engine.restartJob(job.id, 'failed'),
+      (error) => error.code === 'start-task-failed',
+    )
+    await assert.rejects(
+      () => env.engine.restartJob(job.id, 'scratch'),
+      (error) => error.code === 'start-task-failed',
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: the start task is handled by the built-in engine worker', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    const start = taskAt(env.store, job.id, 'start')
+    assert.equal(start.status, 'completed')
+    assert.deepEqual(start.assignee, {
+      kind: 'worker',
+      id: 'engine',
+      driver: 'robot',
+      program: 'engine',
+    })
+    assert.deepEqual(start.claimant, { kind: 'worker', name: 'engine', sessionId: null })
   } finally {
     await env.cleanup()
   }
@@ -1947,7 +2017,7 @@ test('engine: restarting from the failure re-dispatches failed tasks and re-queu
     assert.match(dev.error, /delegated task/u, 'the cancellation carries the termination reason')
     assert.equal(env.store.getTask(qa.id).status, 'cancelled')
     assert.equal(env.store.getTask(qa.id).error, null, 'a person cancellation has no error')
-    const startBefore = env.store.getTask(START_TASK_ID)
+    const startBefore = env.store.getTask(startTaskId(job.id))
 
     const outcome = await env.engine.restartJob(job.id, 'failed')
     assert.equal(outcome.mode, 'failed')
@@ -1994,7 +2064,7 @@ test('engine: restarting from the failure re-dispatches failed tasks and re-queu
     )
 
     assert.equal(env.store.getTask(qa.id).status, 'cancelled')
-    const startAfter = env.store.getTask(START_TASK_ID)
+    const startAfter = env.store.getTask(startTaskId(job.id))
     assert.equal(startAfter.status, 'completed', 'completed tasks are untouched')
     assert.deepEqual(startAfter.result, startBefore.result)
     assert.equal(startAfter.attemptIds.length, startBefore.attemptIds.length)

@@ -43,17 +43,18 @@ function convert(v6, version) {
     },
     end: v6.end?.task?.payload === undefined ? {} : { content: v6.end.task.payload },
     positions: (v6.positions ?? []).map((position) => ({
-      ...position,
-      ...(version >= 8 && position.executor?.kind === 'worker'
-        ? {
-            executor: {
+      id: position.id,
+      label: position.label,
+      ...(position.prompt === undefined ? {} : { note: position.prompt }),
+      executor:
+        version >= 8 && position.executor?.kind === 'worker'
+          ? {
               kind: 'worker',
               ...(position.executor.id === undefined && position.executor.name === undefined
                 ? {}
                 : { id: position.executor.id ?? position.executor.name }),
-            },
-          }
-        : {}),
+            }
+          : position.executor,
       taskTypes: (position.taskTypes ?? []).map((type) => ({
         id: type.id,
         label: type.label,

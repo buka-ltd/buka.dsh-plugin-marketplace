@@ -419,6 +419,7 @@ const zh = {
   openDetail: '打开详情',
   driverAgent: '智能体',
   driverRobot: '机器人',
+  systemWorker: '系统',
   robotReadOnly: '机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
@@ -566,6 +567,7 @@ function clockWorker() {
   return worker('clock', 'ghost', '到点完成任务的定时执行者', {
     driver: 'robot',
     program: 'clock',
+    builtin: true,
     path: '',
     exists: false,
     mounted: false,
@@ -1207,6 +1209,7 @@ test('执行者页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
 
   // 驱动与职责展示；明确说明只读。
   assert.ok(list.texts.includes('机器人'))
+  assert.ok(list.texts.includes('系统'), 'built-in robots carry the system badge')
   assert.ok(list.texts.includes('到点完成任务的定时执行者'))
   assert.ok(list.texts.includes('机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。'))
   // 没有新会话 / 挂载 / 删除 / 助理入口，也不显示目录缺失警告。

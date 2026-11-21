@@ -408,7 +408,7 @@ function makePlanCommands({ available = true, kind = 'success' } = {}) {
   return { state, service }
 }
 
-test('workers service: list returns summarized registry workers including the built-in clock', async () => {
+test('workers service: list returns summarized registry workers including built-in robots', async () => {
   const home = await makeWorkerHome()
   try {
     const service = new WorkerSessionService({
@@ -420,7 +420,7 @@ test('workers service: list returns summarized registry workers including the bu
     assert.equal(listed.corrupt, false)
     assert.deepEqual(
       listed.workers.map((worker) => worker.id),
-      ['writer', 'clock'],
+      ['writer', 'clock', 'engine'],
     )
     const writer = listed.workers.find((worker) => worker.id === 'writer')
     assert.equal(writer.name, '写作助手')
@@ -449,9 +449,10 @@ test('workers service: avatarMap is a lightweight id -> avatar lookup with built
     })
     // 新建的执行者一定有头像；内建 clock 按名字兜底。
     const first = await service.avatarMap()
-    assert.deepEqual(Object.keys(first), ['writer', 'clock'])
+    assert.deepEqual(Object.keys(first), ['writer', 'clock', 'engine'])
     assert.ok(typeof first.writer === 'string' && first.writer !== '')
     assert.equal(first.clock, defaultAvatarFor('clock'))
+    assert.equal(first.engine, defaultAvatarFor('engine'))
 
     // version 1 旧登记表：缺 avatar 的按名字兜底；显式设置过的用设置值。
     await fs.writeFile(
@@ -477,6 +478,7 @@ test('workers service: avatarMap is a lightweight id -> avatar lookup with built
       writer: 'panda',
       legacy: defaultAvatarFor('legacy'),
       clock: defaultAvatarFor('clock'),
+      engine: defaultAvatarFor('engine'),
     })
 
     // 登记表损坏：返回空表，不抛错。

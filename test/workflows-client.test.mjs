@@ -987,6 +987,47 @@ test('定义抽屉：通道显示发送方、接收方与允许的任务类型',
   assert.match(text, /开发/u, 'the allowed task type is listed')
 })
 
+test('定义抽屉：概览只留概览，内建类型卡片跟着开始 / 结束节点', async () => {
+  const client = await loadClient()
+  const base = {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  }
+
+  const info = render(client, { ...base, definitionSelection: { kind: 'info' } })
+  const infoDrawer = drawerOf(info.tree)
+  assert.ok(infoDrawer !== null, 'the definition info drawer renders')
+  const infoText = textOf(infoDrawer)
+  assert.match(infoText, /v3/u, 'the overview keeps the version stat')
+  assert.match(infoText, /任务上限/u, 'the overview keeps budget stats')
+  assert.doesNotMatch(infoText, /初始任务/u, 'initial tasks live on the start node')
+  assert.doesNotMatch(infoText, /契约/u, 'contracts live on the start / end nodes')
+
+  const start = render(client, { ...base, definitionSelection: { kind: 'start' } })
+  const startDrawer = drawerOf(start.tree)
+  assert.ok(startDrawer !== null, 'the start drawer renders')
+  const startText = textOf(startDrawer)
+  assert.match(startText, /开始任务/u, 'the start node keeps its own title')
+  assert.match(startText, /处理人: 引擎/u, 'the start node is handled by the engine')
+  assert.match(startText, /作业输入/u)
+  assert.match(startText, /启动作业的人填写的内容/u)
+  assert.match(startText, /内建任务类型/u, 'the start node shows the built-in task type card')
+  assert.match(startText, /完成后创建/u, 'the creates are shown on the start task type')
+  assert.match(startText, /开发/u, 'the created task type is labelled')
+  assert.doesNotMatch(startText, /最终报告/u)
+  assert.doesNotMatch(startText, /初始任务/u)
+
+  const end = render(client, { ...base, definitionSelection: { kind: 'end' } })
+  const endDrawer = drawerOf(end.tree)
+  assert.ok(endDrawer !== null, 'the end drawer renders')
+  const endText = textOf(endDrawer)
+  assert.match(endText, /结束任务/u, 'the end node keeps its own title')
+  assert.match(endText, /处理人: 发起人/u, 'the end node is handled by the starter')
+  assert.match(endText, /最终报告/u)
+  assert.match(endText, /summary/u, 'the end contract fields are listed')
+  assert.doesNotMatch(endText, /完成后创建/u)
+})
+
 test('客户端展示：主体与助理显示「展示名 · 标识符」', async () => {
   const client = await loadClient()
   const graphPositions = WORKFLOW_DETAIL.graph.positions.map((position) =>
@@ -1242,7 +1283,7 @@ test('实时流程：会话等用户操作或等回复时，节点左上角显�
   )
 })
 
-test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡片打开任务抽屉', async () => {
+test('看板：五列、引擎 / 发起人 / 岗位行、卡片打开任务抽屉', async () => {
   const client = await loadClient()
   const { tree, texts, classes } = render(client, {
     route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
@@ -1255,8 +1296,8 @@ test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡�
   }
   assert.equal(
     classes.filter((name) => name === 'buka-workflows-boardDivider').length,
-    3,
-    '四行之间各有一条分割虚线',
+    4,
+    '五行之间各有一条分割虚线',
   )
 
   const rowTitle = (node) => {
@@ -1272,20 +1313,26 @@ test('看板：五列、岗位行（开始 / 结束合并为发起人）、卡�
   })
   assert.deepEqual(
     titles,
-    ['发起人', '研发', '测试', '发布审批'],
-    'start / end share one starter row',
+    ['引擎', '发起人', '研发', '测试', '发布审批'],
+    'the engine and the starter get their own rows',
   )
 
-  const starterRow = findBy(
-    tree,
-    (node) =>
-      typeof node.props?.className === 'string' &&
-      node.props.className.split(/\s+/).includes('buka-workflows-boardRow') &&
-      textOf(node).includes('发起人'),
-  )
+  const boardRow = (label) =>
+    findBy(
+      tree,
+      (node) =>
+        typeof node.props?.className === 'string' &&
+        node.props.className.split(/\s+/).includes('buka-workflows-boardRow') &&
+        textOf(node).includes(label),
+    )
+  const engineRow = boardRow('引擎')
+  assert.ok(engineRow !== null, 'the engine row should exist')
+  assert.match(textOf(engineRow), /启动/u, 'the engine row holds the start task')
+
+  const starterRow = boardRow('发起人')
   assert.ok(starterRow !== null, 'the starter row should exist')
   assert.match(textOf(starterRow), /人（页面启动）/u, 'the row names the starter')
-  assert.match(textOf(starterRow), /2 个任务/u, 'start and end tasks sit in the same row')
+  assert.match(textOf(starterRow), /1 个任务/u, 'the starter row holds only the end task')
 
   assert.match(text, /开发/u)
   assert.match(text, /验证/u)

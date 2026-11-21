@@ -264,14 +264,27 @@ async function describeAvailableWorkflows(engine) {
 * @module @buka/dsh-plugin-workflows/domain/ids
 */
 /**
-* 启动任务的保留 id。
+* 启动任务 id 的保留前缀，也是旧作业里启动任务的完整 id。
 *
-* 定义格式里用 `dependsOn: ["$start"]` 引用启动任务，但**记录 id 必须能当
-* 文件名**：storageDomain 的 json 后端按记录 id 分文件，只接受
-* `[a-zA-Z0-9_-]`，`$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。
-* 所以落盘的启动任务 id 用 `start-task`，创建初始任务时把 `$start` 映射成它。
+* 定义格式里用 `$start` 引用启动任务，但**记录 id 必须能当文件名**：
+* storageDomain 的 json 后端按记录 id 分文件，只接受 `[a-zA-Z0-9_-]`，
+* `$start` 会被宿主拒绝（`per-record key ... is not path-safe`）。新作业用
+* `start-task-<jobId>`（见 `startTaskId`）；旧的作业快照仍用这个保留 id。
 */
 const START_TASK_ID = "start-task";
+/**
+* 新作业的启动任务 id。
+*
+* 任务表按记录 id 做键，`START_TASK_ID` 是所有旧作业共用的保留 id：同一张
+* 表里第二个作业的启动任务会覆盖第一个。新作业改用带作业 id 的键；旧作业
+* 继续读 `start-task`，依赖字段不需要迁移。
+*
+* @param jobId 作业 id
+* @returns 路径安全的启动任务 id
+*/
+function startTaskId(jobId) {
+	return `${START_TASK_ID}-${jobId}`;
+}
 /** 一段 base36 时间戳。 */
 function timeSegment() {
 	return Date.now().toString(36);
@@ -1392,6 +1405,86 @@ function programContentProblems(program, content) {
 	if (schema === void 0) return [];
 	return schemaProblems(schema, content, "content");
 }
+// .build/workflows/workers/store/builtin.js
+/**
+* 内建机器人。
+*
+* 机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
+* 项目 skills；目前有 `clock` 与 `engine`，由 workflows 插件执行驱动。它们
+* 登记在 workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的
+* 标识符固定；展示名可以是标识符，也可以是一个可读的名字。
+*
+* `engine` 是工作流引擎自己：它只处理内建开始节点，岗位不能引用它。
+*
+* 本模块只依赖类型与常量，可被 `node --test` 直接 import。
+*
+* @module @buka/dsh-plugin-workflows/workers/store/builtin
+*/
+/** 内建定时执行者的标识符，也是它的 program id。 */
+const CLOCK_WORKER_ID = "clock";
+/** 工作流引擎的标识符，也是它的 program id。 */
+const ENGINE_WORKER_ID = "engine";
+/** 引擎 program id；与 worker 标识符同源。 */
+const ENGINE_PROGRAM_ID = ENGINE_WORKER_ID;
+/**
+* 内建机器人清单（按登记顺序）。
+*
+* `createdAt` 是固定的登记时刻：内建执行者不随安装时间变化，重复补写也不会
+* 让它看起来是新的。
+*/
+const BUILTIN_WORKERS = Object.freeze([{
+	id: CLOCK_WORKER_ID,
+	name: CLOCK_WORKER_ID,
+	driver: "robot",
+	path: "",
+	program: CLOCK_WORKER_ID,
+	createdAt: "2026-11-12T00:00:00.000Z",
+	avatar: "",
+	description: "到点完成任务的定时执行者：任务内容带 until，到点后自动完成。"
+}, {
+	id: ENGINE_WORKER_ID,
+	name: "引擎",
+	driver: "robot",
+	path: "",
+	program: ENGINE_PROGRAM_ID,
+	createdAt: "2026-11-20T00:00:00.000Z",
+	avatar: "",
+	description: "工作流引擎：接受开始任务类型，校验作业输入并创建初始任务；只处理内建开始节点。"
+}]);
+/** 按标识符取内建机器人；不是内建执行者时返回 undefined。 */
+function builtinWorker(id) {
+	if (typeof id !== "string") return void 0;
+	const trimmed = id.trim();
+	return BUILTIN_WORKERS.find((worker) => worker.id === trimmed);
+}
+/** 标识符是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
+function isBuiltinWorkerId(id) {
+	return builtinWorker(id) !== void 0;
+}
+/**
+* 标识符是否只能由内建节点使用。
+*
+* 引擎是开始节点的处理人；岗位如果把引擎当执行者，会得到一个只会初始化
+* 作业、不会执行岗位任务的机器人。定义校验直接拒绝这种引用。
+*/
+function isSystemOnlyWorkerId(id) {
+	return typeof id === "string" && id.trim() === "engine";
+}
+/**
+* 把登记表里缺的内建执行者补到末尾。
+*
+* 只影响内存里的视图：页面与 `list()` 用它保证内建执行者总是可见；写回由
+* `ensureBuiltinWorkers` 负责。
+*/
+function withBuiltinWorkers(workers) {
+	const ids = new Set(workers.map((worker) => worker.id));
+	return [...workers, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))];
+}
+/** 生成「内建执行者不可改动」错误。 */
+function builtinWorkerError(id) {
+	const error = /* @__PURE__ */ new Error(`内建执行者不可创建、修改或删除：${String(id)}`);
+	return Object.assign(error, { code: "builtin-worker" });
+}
 // .build/workflows/template.js
 /**
 * 节点 prompt 的模板渲染。
@@ -1674,6 +1767,20 @@ var Issues = class {
 	}
 };
 /**
+* 拒绝对象上的未知字段。
+*
+* 以前未知字段被静默剥离，拼错的开关（例如 `workTree`）等于悄悄关掉一个保护；
+* 内建任务类型上禁用 `actions` / `assistant` / `mode` / `worktree` 也靠这条规则
+* 落地。
+*/
+function checkUnknownKeys(raw, allowed, path, issues) {
+	const known = new Set(allowed);
+	for (const key of Object.keys(raw)) {
+		if (known.has(key)) continue;
+		issues.add(path === "" ? key : `${path}.${key}`, "unexpected field");
+	}
+}
+/**
 * 校验一份工作流 v8 定义。
 *
 * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
@@ -1689,6 +1796,16 @@ function validateWorkflowDefinition(raw, options) {
 			issues: issues.list
 		};
 	}
+	checkUnknownKeys(raw, [
+		"version",
+		"name",
+		"description",
+		"budgets",
+		"positions",
+		"channels",
+		"start",
+		"end"
+	], "", issues);
 	if (raw.version !== 8) issues.add("version", "must be 8");
 	const name = readName(raw, "name", "", issues);
 	const description = readOptionalString(raw, "description", "description", issues) ?? "";
@@ -1756,6 +1873,7 @@ function readBudgets(raw, issues) {
 		issues.add("budgets", "must declare maxTasks and maxDurationHours");
 		return null;
 	}
+	checkUnknownKeys(raw, ["maxTasks", "maxDurationHours"], "budgets", issues);
 	let valid = true;
 	const maxTasks = raw.maxTasks;
 	if (typeof maxTasks !== "number" || !Number.isInteger(maxTasks) || maxTasks < 1) {
@@ -1788,6 +1906,13 @@ function readPositions(raw, workers, issues) {
 			issues.add(path, "must be an object");
 			continue;
 		}
+		checkUnknownKeys(entry, [
+			"id",
+			"label",
+			"note",
+			"executor",
+			"taskTypes"
+		], path, issues);
 		const id = readPositionId(entry, path, seenPositions, issues);
 		if (id === null) continue;
 		const label = readName(entry, "label", path, issues);
@@ -1830,6 +1955,11 @@ function readExecutor(raw, path, positionId, workers, issues) {
 		issues.add(path, "must be { kind: \"worker\", id } or { kind: \"human\" }");
 		return null;
 	}
+	checkUnknownKeys(raw, [
+		"kind",
+		"id",
+		"name"
+	], path, issues);
 	if (raw.kind === "human") return { kind: "human" };
 	if (raw.kind !== "worker") {
 		issues.add(`${path}.kind`, "must be \"worker\" or \"human\"");
@@ -1843,6 +1973,10 @@ function readExecutor(raw, path, positionId, workers, issues) {
 	const worker = workers.get(id);
 	if (worker === void 0) {
 		issues.add(`${path}.id`, `unknown worker identifier "${id}" for position "${positionId}": register it with the Buka Workers plugin first`);
+		return null;
+	}
+	if (isSystemOnlyWorkerId(worker.id)) {
+		issues.add(`${path}.id`, `"${worker.id}" is the built-in system executor of the start node and cannot fill a position`);
 		return null;
 	}
 	if (worker.driver === "robot" && !isKnownProgram(worker.program)) {
@@ -1874,9 +2008,24 @@ function readTaskTypes(raw, path, positionId, executor, workers, seenTypes, issu
 }
 /** 解析一个任务类型。 */
 function readTaskType(entry, path, positionId, executor, workers, seenTypes, issues) {
+	checkUnknownKeys(entry, [
+		"id",
+		"label",
+		"definition",
+		"content",
+		"actions",
+		"creates",
+		"assistant",
+		"mode",
+		"worktree"
+	], path, issues);
 	const id = entry.id;
 	if (typeof id !== "string" || !ID_PATTERN.test(id)) {
 		issues.add(`${path}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+		return null;
+	}
+	if (id === START_ID || id === END_ID) {
+		issues.add(`${path}.id`, `"${id}" is reserved by the built-in task type of the ${id} node`);
 		return null;
 	}
 	if (seenTypes.has(id)) {
@@ -1981,6 +2130,12 @@ function readActions(raw, path, human, issues) {
 			issues.add(at, "must be an object");
 			continue;
 		}
+		checkUnknownKeys(entry, [
+			"id",
+			"label",
+			"input",
+			"creates"
+		], at, issues);
 		const id = typeof entry.id === "string" ? entry.id.trim() : "";
 		if (id === "" || !ID_PATTERN.test(id)) {
 			issues.add(`${at}.id`, "must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -2018,6 +2173,11 @@ function readCreations(raw, path, issues) {
 			issues.add(at, "must be an object");
 			continue;
 		}
+		checkUnknownKeys(entry, [
+			"channel",
+			"type",
+			"content"
+		], at, issues);
 		const channel = typeof entry.channel === "string" ? entry.channel.trim() : "";
 		if (channel === "") {
 			issues.add(`${at}.channel`, "must be a channel id");
@@ -2128,6 +2288,14 @@ function readChannels(raw, positionById, typeById, issues) {
 			issues.add(path, "must be an object");
 			continue;
 		}
+		checkUnknownKeys(entry, [
+			"id",
+			"label",
+			"from",
+			"to",
+			"types",
+			"back"
+		], path, issues);
 		const id = typeof entry.id === "string" ? entry.id.trim() : "";
 		if (id === "" || !CHANNEL_ID_PATTERN.test(id)) {
 			issues.add(`${path}.id`, "must be a lowercase identifier (letters, digits, dots, hyphens or underscores), e.g. \"qa.dev.rework\"");
@@ -2217,6 +2385,7 @@ function readStart(raw, issues) {
 		issues.add("start", "must declare the built-in start node task contract");
 		return null;
 	}
+	checkUnknownKeys(raw, ["content", "next"], "start", issues);
 	const content = readSchema(raw.content, "start.content", issues);
 	const next = readCreations(raw.next, "start.next", issues);
 	if (next === null || next.length === 0) {
@@ -2234,6 +2403,7 @@ function readEnd(raw, issues) {
 		issues.add("end", "must declare the built-in end node task contract");
 		return null;
 	}
+	checkUnknownKeys(raw, ["content"], "end", issues);
 	const content = readSchema(raw.content, "end.content", issues, "value");
 	return { ...content === null ? {} : { content } };
 }
@@ -3506,8 +3676,14 @@ function poll(intervalMs, check) {
 * @returns 钉住的主体
 */
 function resolveExecutor(definition, positionId, job, workers) {
-	if (positionId === "start" || positionId === "end") {
-		if (positionId === "end" && job.delivery.kind === "assistant") {
+	if (positionId === "start") return {
+		kind: "worker",
+		id: ENGINE_WORKER_ID,
+		driver: "robot",
+		program: ENGINE_PROGRAM_ID
+	};
+	if (positionId === "end") {
+		if (job.delivery.kind === "assistant") {
 			const deliveryId = deliveryWorkerRef(job.delivery);
 			const worker = deliveryId === null ? void 0 : workers.get(deliveryId);
 			if (worker === void 0) throw new WorkflowError("unknown-worker", `the delivery assistant identifier "${deliveryId ?? ""}" is not registered`);
@@ -3751,8 +3927,8 @@ function renderCreation(definition, from, creation, context) {
 /**
 * 生成 `start.next` 发布的初始任务。
 *
-* 启动任务已完成：它们的唯一依赖是启动任务（`START_TASK_ID`），所以初始状态
-* 都是 `ready`。
+* 启动任务已完成：它们的唯一依赖是本次作业的启动任务，所以初始状态都是
+* `ready`。
 *
 * @param input 作业、启动任务、已有任务与执行者表
 * @returns 新任务记录
@@ -3775,7 +3951,7 @@ function buildInitialTasks(input) {
 			type: parsed.taskType.id,
 			channel: parsed.channel.id,
 			content: parsed.content,
-			deps: [START_TASK_ID],
+			deps: [startTask.id],
 			status: "ready",
 			createdBy: {
 				taskId: startTask.id,
@@ -4116,10 +4292,15 @@ var WorkflowEngine = class {
 			delivery: this.resolveDelivery(definition, input.delivery, starter, workers)
 		});
 	}
-	/** 建作业 + 启动任务 + 初始任务。 */
+	/**
+	* 建作业 + 启动任务 + 初始任务。
+	*
+	* 作业与启动任务都由引擎程序创建（ADR 0030）：作业先落盘，随后引擎程序按
+	* 开始任务类型的参数 schema 校验输入；失败时保留 `failed` 作业与 `failed`
+	* 启动任务，调用方拿到带 job id 的错误。
+	*/
 	async startJob(input) {
 		const { definition, workers, starter } = input;
-		this.checkStartContent(definition, input.content);
 		const job = await this.insertJob({
 			workflow: input.workflow,
 			definition,
@@ -4131,72 +4312,68 @@ var WorkflowEngine = class {
 		try {
 			await this.store.runExclusive(job.id, async () => {
 				const now = nowIso();
-				const startTask = {
-					id: START_TASK_ID,
-					jobId: job.id,
-					position: "start",
-					type: "start",
-					channel: null,
-					content: input.content,
-					deps: [],
-					status: "completed",
-					createdBy: null,
-					assignee: starter.kind === "human" ? { kind: "human" } : {
-						kind: "session",
-						sessionId: starter.sessionId
-					},
-					claimant: starter.kind === "human" ? {
-						kind: "human",
-						name: "本地用户",
-						sessionId: null
-					} : {
-						kind: "worker",
-						name: "starter",
-						sessionId: starter.sessionId
-					},
-					attemptIds: [],
-					result: {
-						text: "",
-						textBytes: 0,
-						textFile: null,
-						attachmentIds: []
-					},
-					error: null,
-					createdAt: now,
-					startedAt: now,
-					finishedAt: now,
-					updatedAt: now
-				};
-				await this.store.insertTask(startTask);
 				await this.appendEvent(job.id, "job/created", {
 					seq: job.seq,
 					starter: starter.kind
 				});
-				await this.appendEvent(job.id, "task/completed", {
-					taskId: startTask.id,
-					type: "start"
-				});
-				const initial = buildInitialTasks({
-					job,
-					startTask,
-					tasks: [startTask],
-					workers
-				});
-				for (const task of initial) {
-					await this.store.insertTask(task);
-					await this.appendEvent(job.id, "task/created", {
-						taskId: task.id,
-						position: task.position,
-						type: task.type,
-						channel: task.channel,
-						deps: task.deps
+				try {
+					this.checkStartContent(definition, input.content);
+					const startTask = this.startTaskRecord(job, input.content, now);
+					const initial = buildInitialTasks({
+						job,
+						startTask,
+						tasks: [startTask],
+						workers
 					});
+					await this.store.insertTask(startTask);
+					await this.appendEvent(job.id, "task/created", {
+						taskId: startTask.id,
+						position: "start",
+						type: "start",
+						channel: null,
+						deps: []
+					});
+					await this.appendEvent(job.id, "task/completed", {
+						taskId: startTask.id,
+						type: "start"
+					});
+					for (const task of initial) {
+						await this.store.insertTask(task);
+						await this.appendEvent(job.id, "task/created", {
+							taskId: task.id,
+							position: task.position,
+							type: task.type,
+							channel: task.channel,
+							deps: task.deps
+						});
+					}
+					await this.recomputeLocked(job.id);
+				} catch (error) {
+					const reason = describeError$4(error);
+					const failed = this.startTaskRecord(job, input.content, now, reason);
+					if (this.store.getTask(failed.id) === void 0) {
+						await this.store.insertTask(failed);
+						await this.appendEvent(job.id, "task/created", {
+							taskId: failed.id,
+							position: "start",
+							type: "start",
+							channel: null,
+							deps: []
+						});
+						await this.appendEvent(job.id, "task/failed", {
+							taskId: failed.id,
+							error: reason
+						});
+					}
+					const current = this.store.getJob(job.id);
+					if (current !== void 0 && current.status === "running") await this.failJobLocked(current, reason, "job/start-failed", { taskId: failed.id });
+					throw this.startFailure(error, job.id);
 				}
-				await this.recomputeLocked(job.id);
 			});
 		} catch (error) {
-			await this.store.updateJob(job.id, (current) => ({
-				...current,
+			const current = this.store.getJob(job.id);
+			if (current !== void 0 && current.status === "running") await this.store.updateJob(job.id, (record) => ({
+				...record,
 				status: "failed",
 				error: describeError$4(error),
 				finishedAt: nowIso(),
@@ -4205,6 +4382,49 @@ var WorkflowEngine = class {
 			throw error;
 		}
 		return this.store.getJob(job.id) ?? job;
+	}
+	/** 启动任务记录：引擎是主体与承办者；成功时已完成，失败时带错误。 */
+	startTaskRecord(job, content, now, error = null) {
+		const failed = error !== null;
+		return {
+			id: startTaskId(job.id),
+			jobId: job.id,
+			position: "start",
+			type: "start",
+			channel: null,
+			content,
+			deps: [],
+			status: failed ? "failed" : "completed",
+			createdBy: null,
+			assignee: {
+				kind: "worker",
+				id: ENGINE_WORKER_ID,
+				driver: "robot",
+				program: ENGINE_PROGRAM_ID
+			},
+			claimant: {
+				kind: "worker",
+				name: ENGINE_WORKER_ID,
+				sessionId: null
+			},
+			attemptIds: [],
+			result: failed ? null : {
+				text: "",
+				textBytes: 0,
+				textFile: null,
+				attachmentIds: []
+			},
+			error,
+			createdAt: now,
+			startedAt: now,
+			finishedAt: now,
+			updatedAt: now
+		};
+	}
+	/** 把启动失败包装成带 job id 的稳定错误（Q16：留痕 + 抛错）。 */
+	startFailure(error, jobId) {
+		if (error instanceof WorkflowError) return new WorkflowError(error.code, `${error.message} (job ${jobId})`);
+		return new WorkflowError("start-failed", `job ${jobId} could not be initialized: ${describeError$4(error)}`);
 	}
 	/** 校验发起人给的任务内容。 */
 	checkStartContent(definition, content) {
@@ -4333,6 +4553,16 @@ var WorkflowEngine = class {
 			scratch: {
 				available: false,
 				reason: "job-not-failed"
+			}
+		};
+		if (tasks.some((task) => task.position === "start" && task.status === "failed")) return {
+			failed: {
+				available: false,
+				reason: "start-task-failed"
+			},
+			scratch: {
+				available: false,
+				reason: "start-task-failed"
 			}
 		};
 		const scratchProblem = this.scratchRestartProblem(job);
@@ -5032,6 +5262,7 @@ var WorkflowEngine = class {
 		const job = this.store.getJob(jobId);
 		if (job === void 0) throw new WorkflowError("not-found", `job not found: ${jobId}`);
 		if (job.status !== "failed") throw new WorkflowError("job-not-failed", `job ${jobId} is ${job.status}; only failed jobs can be restarted`);
+		if (this.store.listTasks(jobId).some((task) => task.position === "start" && task.status === "failed")) throw new WorkflowError("start-task-failed", `job ${jobId} failed on its start task; the input cannot be retried — start a new job with corrected input instead`);
 		if (mode === "scratch") return await this.restartJobFromScratch(job);
 		return await this.restartJobInPlace(job);
 	}
@@ -5229,7 +5460,7 @@ var WorkflowEngine = class {
 			}
 		}
 		const tasks = this.store.listTasks(jobId);
-		const startTask = tasks.find((task) => task.id === START_TASK_ID);
+		const startTask = tasks.find((task) => task.position === "start");
 		if (startTask !== void 0 && startTask.status === "completed" && tasks.length === 1 && job.definition.start.next.length > 0) try {
 			await this.spawnInitialTasksLocked(job, startTask);
 		} catch (error) {
@@ -6543,6 +6774,7 @@ function statusForError(error) {
 		case "no-pending-delivery":
 		case "job-not-failed":
 		case "no-failed-tasks":
+		case "start-task-failed":
 		case "definition-outdated": return 409;
 		default: return 400;
 	}
@@ -12217,7 +12449,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
+The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "mode" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
 /**
 * 注册全部工作流工具。
 *
@@ -12352,7 +12584,7 @@ function registerWorkflowTools(deps) {
 	}), orchestratorVisible);
 	register(defineTool({
 		name: "buka_job_start",
-		description: "Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema; on mismatch the error lists the missing fields). The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.",
+		description: "Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema). If the input or initialization fails, a failed job and a failed start task are kept as a trace and the error names the job; such a job cannot be restarted. The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.",
 		parameters: {
 			workflowId: {
 				type: "string",
@@ -13863,62 +14095,6 @@ function workerAgentsTemplate(label, workerPath) {
 - 动手前先读仓库里已有的文档、脚本与测试。
 - 提交信息用 Conventional Commits；一个 commit 只做一件事。
 `;
-}
-// .build/workflows/workers/store/builtin.js
-/**
-* 内建机器人。
-*
-* 机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
-* 项目 skills；v1 只有内建 `clock`，由 workflows 插件执行驱动。它们登记在
-* workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的标识符
-* 固定为 `clock`；展示名可以是 `clock`，也可以为空。
-*
-* 本模块只依赖类型与常量，可被 `node --test` 直接 import。
-*
-* @module @buka/dsh-plugin-workflows/workers/store/builtin
-*/
-/** 内建定时执行者的标识符，也是它的 program id。 */
-const CLOCK_WORKER_ID = "clock";
-/**
-* 内建机器人清单（按登记顺序）。
-*
-* `createdAt` 是固定的登记时刻：内建执行者不随安装时间变化，重复补写也不会
-* 让它看起来是新的。
-*/
-const BUILTIN_WORKERS = Object.freeze([{
-	id: CLOCK_WORKER_ID,
-	name: CLOCK_WORKER_ID,
-	driver: "robot",
-	path: "",
-	program: CLOCK_WORKER_ID,
-	createdAt: "2026-11-12T00:00:00.000Z",
-	avatar: "",
-	description: "到点完成任务的定时执行者：任务 payload 带 until，到点后自动完成。"
-}]);
-/** 按标识符取内建机器人；不是内建执行者时返回 undefined。 */
-function builtinWorker(id) {
-	if (typeof id !== "string") return void 0;
-	const trimmed = id.trim();
-	return BUILTIN_WORKERS.find((worker) => worker.id === trimmed);
-}
-/** 标识符是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
-function isBuiltinWorkerId(id) {
-	return builtinWorker(id) !== void 0;
-}
-/**
-* 把登记表里缺的内建执行者补到末尾。
-*
-* 只影响内存里的视图：页面与 `list()` 用它保证内建执行者总是可见；写回由
-* `ensureBuiltinWorkers` 负责。
-*/
-function withBuiltinWorkers(workers) {
-	const ids = new Set(workers.map((worker) => worker.id));
-	return [...workers, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))];
-}
-/** 生成「内建执行者不可改动」错误。 */
-function builtinWorkerError(id) {
-	const error = /* @__PURE__ */ new Error(`内建执行者不可创建、修改或删除：${String(id)}`);
-	return Object.assign(error, { code: "builtin-worker" });
 }
 // packages/plugin-kit/lib/npx.js
 /**
@@ -18119,6 +18295,7 @@ function summarizeWorker(worker) {
 		displayName: workerDisplayName(worker ?? {}),
 		driver: worker?.driver === "robot" ? "robot" : "agent",
 		program: typeof worker?.program === "string" ? worker.program : "",
+		builtin: isBuiltinWorkerId(worker?.id),
 		path: worker?.path ?? "",
 		createdAt: worker?.createdAt ?? null,
 		avatar: resolveAvatar(worker?.avatar, worker?.id),

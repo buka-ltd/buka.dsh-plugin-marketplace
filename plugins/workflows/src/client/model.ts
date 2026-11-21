@@ -180,13 +180,13 @@ export interface ChannelView {
 }
 
 /**
- * 看板的一行：发起人（开始 / 结束任务合并）或岗位。
+ * 看板的一行：引擎（启动任务）、发起人（结束任务）或岗位。
  *
- * 开始与结束任务的主体是同一个发起人，合成一行才不会把同一个人画两次。
+ * 开始任务的处理人是引擎，结束任务是发起人；两者不再是同一个人，分行展示。
  */
 export interface BoardRow {
   id: string
-  kind: 'starter' | 'position'
+  kind: 'engine' | 'starter' | 'position'
   label: string
   executor: Executor | null
   tasks: TaskSummary[]
@@ -442,10 +442,10 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 }
 
 /**
- * 看板行：发起人（开始 + 结束任务）+ 岗位（定义顺序）。
+ * 看板行：引擎（启动任务）、发起人（结束任务）+ 岗位（定义顺序）。
  *
- * 内建开始 / 结束任务的主体是同一个发起人，因此合并成一行；岗位行只放
- * 定义里仍存在的岗位，契约外任务由调用方补行。
+ * 内建开始任务由引擎处理，结束任务由发起人 / 交付助理处理，因此分成两行；
+ * 岗位行只放定义里仍存在的岗位，契约外任务由调用方补行。
  *
  * @param definition
  * @param tasks
@@ -455,20 +455,24 @@ export function sortTasks(tasks: TaskSummary[]): TaskSummary[] {
 export function boardRows(
   definition: WorkflowDefinition | null,
   tasks: TaskSummary[],
-  builtin: { starter: string },
+  builtin: { engine: string; starter: string },
 ): BoardRow[] {
   const positions = positionsOf(definition)
   const known = new Set(positions.map((position) => position.id))
-  const starterTasks = sortTasks(
-    tasks.filter((task) => task.position === 'start' || task.position === 'end'),
-  )
   const rows: BoardRow[] = [
+    {
+      id: 'engine',
+      kind: 'engine',
+      label: builtin.engine,
+      executor: null,
+      tasks: sortTasks(tasks.filter((task) => task.position === 'start')),
+    },
     {
       id: 'starter',
       kind: 'starter',
       label: builtin.starter,
       executor: null,
-      tasks: starterTasks,
+      tasks: sortTasks(tasks.filter((task) => task.position === 'end')),
     },
     ...positions.map((position) => ({
       id: position.id,
@@ -565,6 +569,7 @@ export type TaskActor =
   | { readonly kind: 'waiting' }
   | { readonly kind: 'handling' }
   | { readonly kind: 'executor'; readonly text: string; readonly missing: boolean }
+  | { readonly kind: 'engine' }
   | { readonly kind: 'none' }
 
 /** 任务里「谁在办」判定用到的最小字段。 */
@@ -604,7 +609,8 @@ function positionExecutorOf(state: PageState, positionId: string): Executor | nu
  */
 export function taskActor(state: PageState, task: TaskActorInput): TaskActor {
   const position = typeof task.position === 'string' ? task.position : ''
-  if (position === '' || position === 'start' || position === 'end') return { kind: 'none' }
+  if (position === 'start') return { kind: 'engine' }
+  if (position === '' || position === 'end') return { kind: 'none' }
   if (isHumanTask(state, task)) {
     const assistantId = taskAssistantId(state, task)
     if (assistantId !== null) return { kind: 'assistant', assistantId }

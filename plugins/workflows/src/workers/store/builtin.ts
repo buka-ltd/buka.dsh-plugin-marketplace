@@ -2,9 +2,11 @@
  * 内建机器人。
  *
  * 机器人是固定程序（接收输入 → 产出输出），没有目录、AGENTS.md 与
- * 项目 skills；v1 只有内建 `clock`，由 workflows 插件执行驱动。它们登记在
- * workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的标识符
- * 固定为 `clock`；展示名可以是 `clock`，也可以为空。
+ * 项目 skills；目前有 `clock` 与 `engine`，由 workflows 插件执行驱动。它们
+ * 登记在 workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的
+ * 标识符固定；展示名可以是标识符，也可以是一个可读的名字。
+ *
+ * `engine` 是工作流引擎自己：它只处理内建开始节点，岗位不能引用它。
  *
  * 本模块只依赖类型与常量，可被 `node --test` 直接 import。
  *
@@ -15,6 +17,12 @@ import type { WorkerRecord } from './types.ts'
 
 /** 内建定时执行者的标识符，也是它的 program id。 */
 export const CLOCK_WORKER_ID = 'clock'
+
+/** 工作流引擎的标识符，也是它的 program id。 */
+export const ENGINE_WORKER_ID = 'engine'
+
+/** 引擎 program id；与 worker 标识符同源。 */
+export const ENGINE_PROGRAM_ID = ENGINE_WORKER_ID
 
 /**
  * 内建机器人清单（按登记顺序）。
@@ -31,7 +39,17 @@ export const BUILTIN_WORKERS: ReadonlyArray<WorkerRecord> = Object.freeze([
     program: CLOCK_WORKER_ID,
     createdAt: '2026-11-12T00:00:00.000Z',
     avatar: '',
-    description: '到点完成任务的定时执行者：任务 payload 带 until，到点后自动完成。',
+    description: '到点完成任务的定时执行者：任务内容带 until，到点后自动完成。',
+  },
+  {
+    id: ENGINE_WORKER_ID,
+    name: '引擎',
+    driver: 'robot',
+    path: '',
+    program: ENGINE_PROGRAM_ID,
+    createdAt: '2026-11-20T00:00:00.000Z',
+    avatar: '',
+    description: '工作流引擎：接受开始任务类型，校验作业输入并创建初始任务；只处理内建开始节点。',
   },
 ])
 
@@ -45,6 +63,16 @@ export function builtinWorker(id: unknown): WorkerRecord | undefined {
 /** 标识符是否属于内建（不可创建 / 删除 / 改动的）机器人。 */
 export function isBuiltinWorkerId(id: unknown): boolean {
   return builtinWorker(id) !== undefined
+}
+
+/**
+ * 标识符是否只能由内建节点使用。
+ *
+ * 引擎是开始节点的处理人；岗位如果把引擎当执行者，会得到一个只会初始化
+ * 作业、不会执行岗位任务的机器人。定义校验直接拒绝这种引用。
+ */
+export function isSystemOnlyWorkerId(id: unknown): boolean {
+  return typeof id === 'string' && id.trim() === ENGINE_WORKER_ID
 }
 
 /**

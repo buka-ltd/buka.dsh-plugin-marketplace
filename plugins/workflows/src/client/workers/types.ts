@@ -96,6 +96,8 @@ export interface Worker {
   driver: WorkerDriver
   /** 机器人的程序 id（稳定契约）；智能体为空串。 */
   program: string
+  /** 内建执行者（clock / engine）：只读、带「系统」标记。 */
+  builtin?: boolean
   path: string
   createdAt: string
   avatar: string

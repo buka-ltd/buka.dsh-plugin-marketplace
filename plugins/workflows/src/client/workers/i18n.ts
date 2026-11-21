@@ -110,6 +110,7 @@ export const en = {
   unmountedBadge: 'Not mounted',
   driverAgent: 'Agent',
   driverRobot: 'Robot',
+  systemWorker: 'System',
   robotReadOnly: 'Built-in robot: read-only, with no directory, session or settings.',
   missingDir: 'Missing directory',
   missingDirHint:
@@ -352,6 +353,7 @@ export const zh: Record<keyof typeof en, string> = {
   unmountedBadge: '未挂载',
   driverAgent: '智能体',
   driverRobot: '机器人',
+  systemWorker: '系统',
   robotReadOnly: '内建机器人：只读，没有目录、会话与配置。',
   missingDir: '目录缺失',
   missingDirHint: '这个执行者目录已经不存在了，可以删除记录后重新创建。',

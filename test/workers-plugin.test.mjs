@@ -33,7 +33,6 @@ import {
   addWorker,
   BUILTIN_WORKERS,
   CLAUDE_FILE,
-  CLOCK_WORKER_ID,
   defaultWorkersRoot,
   emptyAgentsFile,
   ensureBuiltinWorkers,
@@ -595,14 +594,14 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    // 没有任何用户登记时，视图里只有内建机器人 clock，不抛错。
+    // 没有任何用户登记时，视图里只有内建机器人，不抛错。
     const empty = await listWorkers({ file, workersDir })
     assert.equal(empty.root, workersDir)
     assert.equal(empty.registry, file)
     assert.equal(empty.corrupt, false)
     assert.deepEqual(
       empty.workers.map((worker) => worker.id),
-      ['clock'],
+      ['clock', 'engine'],
     )
     assert.equal(empty.workers[0].driver, 'robot')
     assert.equal(empty.workers[0].program, 'clock')
@@ -641,7 +640,7 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     assert.equal(snapshot.corrupt, false)
     assert.deepEqual(
       snapshot.workers.map((worker) => worker.id),
-      ['ghost', 'painter', 'writer', 'clock'],
+      ['ghost', 'painter', 'writer', 'clock', 'engine'],
     )
 
     const byName = new Map(snapshot.workers.map((worker) => [worker.id, worker]))
@@ -1367,22 +1366,23 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
     const workersDir = path.join(pluginDir, 'workers')
     const file = path.join(pluginDir, 'workers.json')
 
-    // 首次补写：clock 进表，文件升到 version 4，条目没有 path。
+    // 首次补写：内建机器人进表，文件升到 version 4，条目没有 path。
     const first = await ensureBuiltinWorkers({ file })
-    assert.deepEqual(first, { added: [CLOCK_WORKER_ID] })
+    assert.deepEqual(first, { added: ['clock', 'engine'] })
     const raw = JSON.parse(await fs.readFile(file, 'utf8'))
     assert.equal(raw.version, 4)
-    assert.deepEqual(raw.workers, [
-      {
-        id: 'clock',
-        name: 'clock',
+    assert.deepEqual(
+      raw.workers,
+      BUILTIN_WORKERS.map((worker) => ({
+        id: worker.id,
+        name: worker.name,
         driver: 'robot',
-        program: 'clock',
-        createdAt: BUILTIN_WORKERS[0].createdAt,
-        avatar: defaultAvatarFor(CLOCK_WORKER_ID),
-        description: BUILTIN_WORKERS[0].description,
-      },
-    ])
+        program: worker.program,
+        createdAt: worker.createdAt,
+        avatar: defaultAvatarFor(worker.id),
+        description: worker.description,
+      })),
+    )
 
     // 幂等：第二次不再写。
     assert.deepEqual(await ensureBuiltinWorkers({ file }), { added: [] })
@@ -1499,7 +1499,11 @@ test('预设执行者：已有内建 clock 时仍然补两个 agent 起点执行
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
       registry.workers.map((worker) => [worker.id, worker.driver]).sort(),
-      [...PRESET_WORKERS.map((preset) => [preset.id, 'agent']), ['clock', 'robot']].sort(),
+      [
+        ...PRESET_WORKERS.map((preset) => [preset.id, 'agent']),
+        ['clock', 'robot'],
+        ['engine', 'robot'],
+      ].sort(),
     )
 
     // 再种一次：已经有智能体，不再新增。
@@ -1766,7 +1770,7 @@ test('智能体模型：setWorkerModel 保存 / 清除、形状校验与机器�
     const registry = await readWorkerRegistry({ file })
     assert.deepEqual(
       registry.workers.map((worker) => worker.id),
-      ['writer', 'clock'],
+      ['writer', 'clock', 'engine'],
     )
 
     // null 清除配置；读回来没有 model 字段。

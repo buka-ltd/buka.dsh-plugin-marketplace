@@ -17,6 +17,7 @@ import type { JobRestartOption } from '../types.ts'
 const REASON_KEYS: Record<string, string> = {
   'job-not-failed': 'restartReasonJobNotFailed',
   'no-failed-tasks': 'restartReasonNoFailedTasks',
+  'start-task-failed': 'restartReasonStartTaskFailed',
   'workflow-not-found': 'restartReasonWorkflowNotFound',
   'workflow-retired': 'restartReasonWorkflowRetired',
   'definition-outdated': 'restartReasonDefinitionOutdated',
