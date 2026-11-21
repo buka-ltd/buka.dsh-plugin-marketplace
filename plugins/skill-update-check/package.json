@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-skill-update-check",
   "version": "0.1.0",
-  "description": "检查当前工作区的项目技能是否有上游更新，并在新建会话输入框下方统计行的最右侧（上下文用量圆环之后）用 warn 色提示。",
+  "description": "检查当前工作区的项目技能是否有上游更新，在新建会话输入框下方统计行的最右侧（上下文用量圆环之后）用 warn 色提示；点击弹出更新弹窗，可逐个或全部更新。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

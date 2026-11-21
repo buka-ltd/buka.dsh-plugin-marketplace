@@ -3,9 +3,10 @@
  *
  * 只注册一个插槽：`conversation.composer.dock`——新建会话输入框卡片下方的
  * 统计行。提示在统计行里用 flex `order` 排到「上下文已用」圆环之后
- * （见 `styles.ts`）。组件在 `badge.ts`，请求在 `api.ts`，文案在
- * `dictionary.ts`，样式在 `styles.ts`。提示只在当前工作区有项目技能更新时
- * 出现，点击可重新检查。
+ * （见 `styles.ts`）。组件在 `badge.ts`，点击后弹出的更新弹窗在 `dialog.ts`，
+ * 更新任务在页面级的 `update-store.ts`（关掉弹窗也会继续），请求在 `api.ts`，
+ * 文案在 `dictionary.ts`，样式在 `styles.ts`。提示只在当前工作区有项目技能
+ * 更新时出现；点击打开弹窗，可逐个或一次性更新。
  *
  * 本文件只导出 `inject` 与 `apply`；`window.__ModuleLoader__.load(...)` 外壳
  * 由构建脚本生成。

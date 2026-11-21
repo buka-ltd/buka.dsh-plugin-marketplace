@@ -27,6 +27,11 @@
     "SKILL",
     "check",
     "skill check",
-    "update check"
+    "update check",
+    "update all",
+    "dialog",
+    "更新弹窗",
+    "全部更新",
+    "skill update"
   ]
 }
