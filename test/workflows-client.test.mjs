@@ -701,7 +701,7 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
     return values !== null && values.join(',') === 'workflow,worker'
   }
 
-  // 工作流详情：标题 + 操作一行，页内「作业 / 结构图」页签单独一行。
+  // 工作流详情：标题 + 操作一行，页内「作业 / 结构图 / 定义信息」页签单独一行。
   const workflowPage = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
@@ -709,7 +709,7 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
   assert.equal(findBy(workflowPage.tree, homeTabs), null, '工作流详情不显示首页页签')
   const workflowTabs = findBy(
     workflowPage.tree,
-    (node) => (tabValues(node) ?? []).join(',') === 'jobs,definition',
+    (node) => (tabValues(node) ?? []).join(',') === 'jobs,definition,info',
   )
   assert.ok(workflowTabs !== null, '工作流详情保留页内页签')
   assert.ok(workflowPage.texts.includes('研发交付'), '详情标题仍在')
@@ -730,6 +730,68 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
   assert.ok(jobTabs !== null, '作业详情保留页内页签')
 })
 
+test('工作流详情：停用直接在工具栏里，不再藏进「更多」菜单', async () => {
+  const client = await loadClient()
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: init?.body })
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  /** 工具栏里的按钮文案。 */
+  const toolbarButtons = (tree) => {
+    const toolbar = findBy(
+      tree,
+      (node) =>
+        typeof node.props?.className === 'string' &&
+        node.props.className.split(/\s+/).includes('buka-workflows-toolbar'),
+    )
+    assert.ok(toolbar !== null, 'the workflow toolbar should render')
+    return collect(toolbar)
+      .nodes.filter((node) => node.type === 'button')
+      .map((node) => textOf(node))
+  }
+
+  try {
+    const active = render(client, {
+      route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+      workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    })
+    assert.deepEqual(toolbarButtons(active.tree), ['新建作业', '刷新', '停用'])
+    assert.equal(
+      findBy(active.tree, (node) => node.type === 'details' || node.type === 'summary'),
+      null,
+      'the More dropdown is gone',
+    )
+    assert.ok(!active.texts.includes('更多'), 'no More label is rendered')
+
+    clickButton(active.tree, '停用')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(requests.length, 1, 'disable posts exactly once')
+    assert.equal(requests[0].url, '/buka-workflows/workflow/activate')
+    assert.deepEqual(JSON.parse(requests[0].body), { id: 'wf-1', active: false })
+
+    // 已停用的工作流只给「重新启用」，工具栏里不再出现停用。
+    const retired = render(client, {
+      route: { kind: 'workflow', workflowId: 'wf-2', tab: 'jobs' },
+      workflow: {
+        status: 'ready',
+        data: {
+          ...WORKFLOW_DETAIL,
+          workflow: { ...WORKFLOW_DETAIL.workflow, id: 'wf-2', status: 'retired' },
+        },
+        error: null,
+      },
+    })
+    assert.deepEqual(toolbarButtons(retired.tree), ['重新启用', '刷新'])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('详情页页内页签：工作流与作业都沿用执行者详情的下划线样式', async () => {
   const client = await loadClient()
   const roleTabs = (tree) => collect(tree).nodes.filter((node) => node.props?.role === 'tab')
@@ -742,16 +804,16 @@ test('详情页页内页签：工作流与作业都沿用执行者详情的下�
   const workflowTabs = roleTabs(workflowPage.tree)
   assert.deepEqual(
     workflowTabs.map((node) => textOf(node)),
-    ['作业', '结构图'],
+    ['作业', '结构图', '定义信息'],
   )
   assert.ok(workflowTabs.every(underline), '工作流详情用下划线页签，而不是胶囊分段控件')
   assert.deepEqual(
     workflowTabs.map((node) => node.props?.['aria-selected']),
-    [true, false],
+    [true, false, false],
   )
   assert.deepEqual(
     workflowTabs.map((node) => node.props?.tabIndex),
-    [0, -1],
+    [0, -1, -1],
     '只有选中页签是 Tab 停靠点',
   )
 
@@ -768,6 +830,98 @@ test('详情页页内页签：工作流与作业都沿用执行者详情的下�
   )
   assert.ok(jobTabs.every(underline), '作业详情与工作流详情保持同一种页签样式')
   assert.equal(jobTabs[0].props?.['aria-selected'], true)
+})
+
+test('定义信息：只留概览、岗位与流转，细节交给结构图', async () => {
+  const client = await loadClient()
+
+  // 从作业页签点「定义信息」：路由切到 info，页面按普通滚动页渲染。
+  const jobs = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  const infoTab = findBy(
+    jobs.tree,
+    (node) => node.props?.role === 'tab' && textOf(node) === '定义信息',
+  )
+  assert.ok(infoTab !== null, '定义信息 是页内页签')
+  infoTab.props.onClick()
+  assert.equal(harness.updates.length, 1)
+  assert.equal(harness.updates[0].route.tab, 'info')
+
+  const info = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'info' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  const text = info.texts.join(' ')
+  // 概览只留版本、岗位数与预算。
+  for (const label of ['v3', '版本', '岗位', '任务上限', '最长时长']) {
+    assert.match(text, new RegExp(label, 'u'), `overview keeps ${label}`)
+  }
+  assert.match(text, /需求 → 研发/u, 'the definition description is the lead')
+  // 正文只留岗位与任务流转。
+  assert.match(text, /任务流转/u)
+  assert.ok(!text.includes('开始与结束'), 'built-in cards are gone')
+  for (const label of ['研发', '测试', '发布审批']) {
+    assert.match(text, new RegExp(label, 'u'), `position ${label}`)
+  }
+  assert.match(text, /负责实现与返工/u, 'the position note is shown')
+  assert.match(text, /执行者 · 软件工程师/u, 'the worker executor is shown')
+  assert.match(text, /工作人员/u, 'the human executor is shown')
+  for (const label of ['开发', '返工', '验证', '批准发布']) {
+    assert.match(text, new RegExp(label, 'u'), `task type ${label}`)
+  }
+  // 任务流转：只看方向、名称、类型限制与回向。
+  for (const route of [
+    '开始 → 研发',
+    '研发 → 测试',
+    '测试 → 研发',
+    '测试 → 发布审批',
+    '发布审批 → 结束',
+  ]) {
+    assert.ok(text.includes(route), `flow route ${route}`)
+  }
+  for (const label of ['提测', '回向通道']) {
+    assert.match(text, new RegExp(label, 'u'), `channel ${label}`)
+  }
+  assert.match(text, /点节点查看/u, 'a footnote points at Structure for details')
+
+  // 技术细节不铺在摘要页上：id、任务类型说明、契约、助理 / 动作 / 内建卡片。
+  for (const noise of [
+    'dev.implement',
+    'qa.verify',
+    'approve.release',
+    'start.dev',
+    'dev.qa',
+    'qa.approve',
+    'approve.end',
+    '按需求实现功能',
+    'requirement',
+    '内建任务类型',
+    '开始任务',
+    '助理 · 沟通助理',
+    '全部任务类型',
+  ]) {
+    assert.ok(!text.includes(noise), `summary page drops ${noise}`)
+  }
+
+  const nodes = collect(info.tree).nodes
+  const countClass = (name) =>
+    nodes.filter((node) =>
+      String(node.props?.className ?? '')
+        .split(/\s+/)
+        .includes(name),
+    ).length
+  assert.equal(countClass('buka-workflows-infoPosition'), 3, 'one row per position')
+  assert.equal(
+    countClass('buka-workflows-infoFlowRow'),
+    DEFINITION.channels.length,
+    'one row per channel',
+  )
+  assert.equal(countClass('buka-workflows-typeCard'), 0, 'no task type cards on the summary page')
+  assert.deepEqual(info.paths, [], 'the info tab draws no graph')
+  assert.ok(!info.classes.includes('is-graph'), 'the info tab scrolls like a normal page')
+  assert.equal(drawerOf(info.tree), null, 'the info tab opens no drawer')
 })
 
 test('工作流列表：停用的工作流灰显并排在后面', async () => {
@@ -864,7 +1018,14 @@ test('结构图：画通道、点节点打开抽屉、点通道记录选中', as
   for (const label of ['研发', '测试', '发布审批', '开始', '结束']) {
     assert.match(text, new RegExp(label, 'u'))
   }
-  assert.match(text, /定义信息/u)
+  const graphPane = findBy(
+    tree,
+    (node) =>
+      typeof node.props?.className === 'string' &&
+      node.props.className.split(/\s+/).includes('buka-workflows-definitionPane'),
+  )
+  assert.ok(graphPane !== null, 'the structure view renders')
+  assert.doesNotMatch(textOf(graphPane), /定义信息/u, '定义信息是页面页签，不再占结构图顶部')
   assert.match(text, /点节点或通道查看详情/u)
 
   clickButton(tree, '研发')
@@ -1027,21 +1188,12 @@ test('定义抽屉：通道显示发送方、接收方与允许的任务类型',
   assert.match(text, /开发/u, 'the allowed task type is listed')
 })
 
-test('定义抽屉：概览只留概览，内建类型卡片跟着开始 / 结束节点', async () => {
+test('定义抽屉：开始 / 结束节点展示内建任务类型与契约', async () => {
   const client = await loadClient()
   const base = {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
   }
-
-  const info = render(client, { ...base, definitionSelection: { kind: 'info' } })
-  const infoDrawer = drawerOf(info.tree)
-  assert.ok(infoDrawer !== null, 'the definition info drawer renders')
-  const infoText = textOf(infoDrawer)
-  assert.match(infoText, /v3/u, 'the overview keeps the version stat')
-  assert.match(infoText, /任务上限/u, 'the overview keeps budget stats')
-  assert.doesNotMatch(infoText, /初始任务/u, 'initial tasks live on the start node')
-  assert.doesNotMatch(infoText, /契约/u, 'contracts live on the start / end nodes')
 
   const start = render(client, { ...base, definitionSelection: { kind: 'start' } })
   const startDrawer = drawerOf(start.tree)

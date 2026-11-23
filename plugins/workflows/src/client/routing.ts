@@ -11,7 +11,7 @@ import type { JobView, Route, WorkflowTab } from './types.ts'
 const JOB_VIEWS: readonly JobView[] = ['overview', 'flow', 'board', 'outputs']
 
 /** 合法的工作流页签。 */
-const WORKFLOW_TABS: readonly WorkflowTab[] = ['jobs', 'definition']
+const WORKFLOW_TABS: readonly WorkflowTab[] = ['jobs', 'definition', 'info']
 
 /**
  * 把地址里的 hash 解析成路由；认不出来时回工作流列表。

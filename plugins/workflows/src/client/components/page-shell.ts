@@ -27,6 +27,7 @@ import { ConfirmButton, renderAvailabilityNotice, renderStatusTag } from './part
 import { renderRestartDialog } from './restart-dialog.ts'
 import { renderTaskDrawer } from './task-drawer.ts'
 import { renderWorkflowDefinition } from './workflow-definition.ts'
+import { renderWorkflowInfo } from './workflow-info.ts'
 import { renderWorkflowJobs } from './workflow-jobs.ts'
 import { renderWorkflowList } from './workflow-list.ts'
 
@@ -84,6 +85,12 @@ export function renderPage(page: AppContext): React.ReactElement {
             label: t('definitionTab'),
             id: 'buka-workflows-tab-definition',
             panelId: 'buka-workflows-panel-definition',
+          },
+          {
+            value: 'info',
+            label: t('definitionInfo'),
+            id: 'buka-workflows-tab-info',
+            panelId: 'buka-workflows-panel-info',
           },
         ]
       : route.kind === 'job'
@@ -184,27 +191,16 @@ export function renderPage(page: AppContext): React.ReactElement {
   if (route.kind === 'workflow' && !retired && workflowStatus !== undefined) {
     toolbar.push(
       h(
-        'details',
-        { key: 'more', className: 'buka-workflows-more' },
-        h('summary', { className: 'buka-workflows-moreSummary' }, t('more')),
-        h(
-          'div',
-          { className: 'buka-workflows-moreMenu' },
-          h(
-            Button,
-            {
-              variant: 'outline',
-              size: 'sm',
-              className: 'buka-workflows-smallButton',
-              onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
-                event.currentTarget.closest('details')?.removeAttribute('open')
-                void actions.setWorkflowEnabled(false)
-              },
-              disabled: state.busy === 'workflow-status',
-            },
-            t('disableWorkflow'),
-          ),
-        ),
+        Button,
+        {
+          key: 'disable',
+          variant: 'outline',
+          size: 'sm',
+          className: 'buka-workflows-toolbarButton',
+          onClick: () => void actions.setWorkflowEnabled(false),
+          disabled: state.busy === 'workflow-status',
+        },
+        t('disableWorkflow'),
       ),
     )
   }
@@ -215,7 +211,9 @@ export function renderPage(page: AppContext): React.ReactElement {
       : route.kind === 'workflow'
         ? route.tab === 'definition'
           ? renderWorkflowDefinition(page)
-          : renderWorkflowJobs(page)
+          : route.tab === 'info'
+            ? renderWorkflowInfo(page)
+            : renderWorkflowJobs(page)
         : renderJobDetail(page)
 
   const toolbarNode = h('div', { className: 'buka-workflows-toolbar' }, ...toolbar)

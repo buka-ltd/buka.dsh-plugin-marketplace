@@ -2,7 +2,6 @@
  * 工作流页的「结构图」Tab：可交互的分层图；点节点 / 通道在右侧抽屉里看细节。
  */
 
-import { Button, IconInfoOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type React from 'react'
 
 import { MISSING_AVATAR_ID } from '../avatars.ts'
@@ -73,21 +72,6 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
   return h(
     'div',
     { className: 'buka-workflows-definitionPane' },
-    h(
-      'div',
-      { className: 'buka-workflows-definitionToolbar' },
-      h(
-        Button,
-        {
-          variant: 'outline',
-          size: 'sm',
-          className: 'buka-workflows-smallButton',
-          icon: h(IconInfoOutlineRegular, { size: 13 }),
-          onClick: () => actions.selectDefinition({ kind: 'info' }),
-        },
-        t('definitionInfo'),
-      ),
-    ),
     renderWorkflowGraph(page, {
       nodes,
       edges,

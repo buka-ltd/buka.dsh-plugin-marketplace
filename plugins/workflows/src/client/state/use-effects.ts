@@ -69,7 +69,7 @@ function applyHashRoute(current: PageState, next: Route): PageState {
     return {
       ...current,
       route: next,
-      ...(next.kind === 'workflow' && current.route.kind === 'workflow' && next.tab === 'jobs'
+      ...(next.kind === 'workflow' && current.route.kind === 'workflow' && next.tab !== 'definition'
         ? { definitionSelection: null }
         : {}),
       ...(next.kind === 'job' && current.route.kind === 'job' && next.view !== 'flow'

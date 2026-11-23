@@ -415,18 +415,17 @@ export type JobRestartMode = 'failed' | 'scratch'
 export type JobView = 'overview' | 'flow' | 'board' | 'outputs'
 
 /** 工作流页签。 */
-export type WorkflowTab = 'jobs' | 'definition'
+export type WorkflowTab = 'jobs' | 'definition' | 'info'
 
 /** 作业列表筛选。 */
 export type JobFilter = 'all' | 'running' | 'completed' | 'problem'
 
-/** 结构图画布上的选中项：节点、边或全局信息。 */
+/** 结构图画布上的选中项：节点或边。 */
 export type DefinitionSelection =
   | { kind: 'position'; id: string }
   | { kind: 'channel'; id: string }
   | { kind: 'start' }
   | { kind: 'end' }
-  | { kind: 'info' }
   | null
 
 /** 实时流程里打开的节点任务列表。 */
