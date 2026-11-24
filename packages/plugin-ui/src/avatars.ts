@@ -41,6 +41,7 @@ export const AVATARS = [
   { id: 'penguin', emoji: '🐧', color: '#2D9CDB', labelKey: 'avatarPenguin' },
   { id: 'unicorn', emoji: '🦄', color: '#BB6BD9', labelKey: 'avatarUnicorn' },
   { id: 'mushroom', emoji: '🍄', color: '#EB5757', labelKey: 'avatarMushroom' },
+  { id: 'robot', emoji: '🤖', color: '#2F80ED', labelKey: 'avatarRobot' },
 ] as const
 
 /** 预设 id，顺序与 `AVATARS` 一致。 */

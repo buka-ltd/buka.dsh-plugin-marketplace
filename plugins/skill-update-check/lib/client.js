@@ -133,6 +133,12 @@ window.__ModuleLoader__.load({
     		emoji: "🍄",
     		color: "#EB5757",
     		labelKey: "avatarMushroom"
+    	},
+    	{
+    		id: "robot",
+    		emoji: "🤖",
+    		color: "#2F80ED",
+    		labelKey: "avatarRobot"
     	}
     ];
     AVATARS.map((preset) => preset.id);
