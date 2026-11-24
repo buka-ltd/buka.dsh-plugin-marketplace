@@ -1710,6 +1710,78 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
   }
 })
 
+test('人任务：未认领也能直接提交，提交时自动认领（页面不再显示认领按钮）', async () => {
+  const client = await loadClient()
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: init?.body })
+    return new Response(JSON.stringify({ ok: true, task: { id: 'task-3', status: 'completed' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  try {
+    const { tree, texts } = render(client, {
+      route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+      workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+      job: { status: 'ready', data: JOB_DETAIL, error: null },
+      taskId: 'task-3',
+      task: {
+        status: 'ready',
+        data: {
+          ...HUMAN_TASK_DETAIL.task,
+          status: 'ready',
+          startedAt: null,
+          claimant: null,
+          allowedActions: ['claim', 'complete', 'cancel'],
+        },
+        error: null,
+      },
+      taskForm: {
+        action: 'approve',
+        values: { approved: 'yes' },
+        text: '',
+        error: null,
+        submitting: false,
+      },
+    })
+    const text = texts.join(' ')
+    assert.match(
+      text,
+      /没认领的任务会在提交时自动认领/u,
+      'the form says submitting claims the task',
+    )
+
+    const claimButton = findBy(
+      tree,
+      (node) => typeof node.props?.onClick === 'function' && textOf(node) === '认领',
+    )
+    assert.equal(claimButton, null, 'the claim step is gone from the drawer')
+
+    const submit = findBy(
+      tree,
+      (node) => typeof node.props?.onClick === 'function' && textOf(node) === '执行这个动作',
+    )
+    assert.ok(submit !== null, 'the submit button should render')
+    assert.equal(
+      submit.props.disabled,
+      false,
+      'a ready human task can be submitted without claiming',
+    )
+
+    submit.props.onClick({})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(requests.length, 1, 'the implicit claim does not need a separate request')
+    assert.equal(requests[0].url, '/buka-workflows/task/action')
+    const body = JSON.parse(requests[0].body)
+    assert.equal(body.action, 'complete', 'submitting goes straight to complete')
+    assert.equal(body.taskId, 'task-3')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('人任务与执行者任务：只显示代办 / 待你办理 / 你在办理或执行者', async () => {
   const client = await loadClient()
   const definition = {

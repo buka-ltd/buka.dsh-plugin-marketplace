@@ -623,7 +623,6 @@ window.__ModuleLoader__.load({
     	finalDeliverableTitle: "Final deliverable",
     	taskActionsTitle: "Actions",
     	taskActionsEmpty: "No actions are available.",
-    	actionClaim: "Claim",
     	actionCancel: "Cancel task",
     	actionRetry: "Retry",
     	actionSubmitAction: "Apply this action",
@@ -631,7 +630,7 @@ window.__ModuleLoader__.load({
     	actionSubmitting: "Submitting…",
     	actionTextLabel: "Summary (optional)",
     	actionFormTitle: "What happens next",
-    	actionFormHint: "Pick an action, fill in its form if it has one, then submit.",
+    	actionFormHint: "Pick an action, fill in its form if it has one, then submit. A task that is not claimed yet is claimed on submit.",
     	actionFormNoActions: "This task has no actions; submitting records a result only.",
     	actionFormNoSchema: "This action takes no structured form.",
     	actionJsonInvalid: "Result is not valid JSON: ",
@@ -923,7 +922,6 @@ window.__ModuleLoader__.load({
     	finalDeliverableTitle: "最终交付物",
     	taskActionsTitle: "操作",
     	taskActionsEmpty: "当前没有可执行的操作。",
-    	actionClaim: "认领",
     	actionCancel: "取消任务",
     	actionRetry: "重试",
     	actionSubmitAction: "执行这个动作",
@@ -931,7 +929,7 @@ window.__ModuleLoader__.load({
     	actionSubmitting: "正在提交…",
     	actionTextLabel: "说明（可选）",
     	actionFormTitle: "接下来做什么",
-    	actionFormHint: "选一个动作；有表单的填完再提交。",
+    	actionFormHint: "选一个动作；有表单的填完再提交；没认领的任务会在提交时自动认领。",
     	actionFormNoActions: "这个任务没有动作，提交只会记下结果。",
     	actionFormNoSchema: "这个动作没有结构化表单。",
     	actionJsonInvalid: "结果不是合法 JSON：",
@@ -4857,17 +4855,16 @@ window.__ModuleLoader__.load({
     	const typeDefinition = taskTypeOf(state, task);
     	const allowed = Array.isArray(task.allowedActions) ? task.allowedActions : [];
     	const human = isHumanTask(state, task);
-    	const canClaim = allowed.includes("claim") && task.status === "ready";
     	const canComplete = allowed.includes("complete");
     	const showForm = human && (task.status === "ready" || task.status === "running") && allowed.length > 0;
     	const elements = [];
-    	if (showForm) elements.push(renderFormSection(page, task, allowed, canClaim, canComplete));
+    	if (showForm) elements.push(renderFormSection(page, task, allowed, canComplete));
     	const isEnd = task.position === "end";
     	if (isEnd) elements.push(renderFinalDeliverable(page, task));
     	const result = renderTaskResult(page, task);
     	if (result !== null) elements.push(renderSection(t("taskResultTitle"), result));
     	if (!showForm) {
-    		const actionsBlock = renderActionSection(page, allowed, canClaim, canComplete);
+    		const actionsBlock = renderActionSection(page, allowed, canComplete);
     		if (actionsBlock !== null) elements.push(actionsBlock);
     	}
     	if (!isEnd) {
@@ -4889,7 +4886,7 @@ window.__ModuleLoader__.load({
     	return elements;
     }
     /** 人任务的填写表单：先选动作，再按动作的表单填，最后提交。 */
-    function renderFormSection(page, task, allowed, canClaim, canComplete) {
+    function renderFormSection(page, task, allowed, canComplete) {
     	const { t, state, actions } = page;
     	const typeDefinition = taskTypeOf(state, task);
     	const actionList = Array.isArray(typeDefinition?.actions) ? typeDefinition.actions : [];
@@ -4903,7 +4900,7 @@ window.__ModuleLoader__.load({
     		className: "buka-workflows-smallButton",
     		onClick: () => actions.selectTaskAction(String(action.id ?? "")),
     		disabled: state.taskForm.submitting
-    	}, action.label ?? String(action.id ?? "")))) : null, ...renderTaskForm(page, task, inputSchema), h("div", { className: "buka-workflows-formActions" }, ...actionButtons(page, allowed, canClaim), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
+    	}, action.label ?? String(action.id ?? "")))) : null, ...renderTaskForm(page, task, inputSchema), h("div", { className: "buka-workflows-formActions" }, ...actionButtons(page, allowed), h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		variant: "primary",
     		size: "sm",
     		className: "buka-workflows-smallButton",
@@ -4912,9 +4909,9 @@ window.__ModuleLoader__.load({
     	}, state.taskForm.submitting ? t("actionSubmitting") : state.taskForm.action === null ? t("actionSubmitCompleteOnly") : t("actionSubmitAction")))));
     }
     /** 非表单任务的操作区；没有可用动作时整块不出现。 */
-    function renderActionSection(page, allowed, canClaim, canComplete) {
+    function renderActionSection(page, allowed, canComplete) {
     	const { t, state, actions } = page;
-    	const buttons = actionButtons(page, allowed, canClaim);
+    	const buttons = actionButtons(page, allowed);
     	if (canComplete) buttons.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "complete",
     		variant: "primary",
@@ -4926,18 +4923,14 @@ window.__ModuleLoader__.load({
     	if (buttons.length === 0) return null;
     	return renderSection(t("taskActionsTitle"), h("div", { className: "buka-workflows-formActions" }, ...buttons));
     }
-    /** 认领 / 重试 / 取消；表单和操作区共用。 */
-    function actionButtons(page, allowed, canClaim) {
+    /**
+    * 重试 / 取消；表单和操作区共用。
+    *
+    * 人任务不再有独立的「认领」按钮：就绪任务直接提交，服务端在提交时自动认领。
+    */
+    function actionButtons(page, allowed) {
     	const { t, state, actions } = page;
     	const buttons = [];
-    	if (canClaim) buttons.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
-    		key: "claim",
-    		variant: "primary",
-    		size: "sm",
-    		className: "buka-workflows-smallButton",
-    		onClick: () => void actions.runTaskAction("claim"),
-    		disabled: state.taskForm.submitting
-    	}, t("actionClaim")));
     	if (allowed.includes("retry")) buttons.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     		key: "retry",
     		variant: "outline",

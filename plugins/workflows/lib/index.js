@@ -3571,7 +3571,11 @@ function allowedTaskActions(job, task) {
 	if (job.status !== "running") return [];
 	switch (task.status) {
 		case "pending": return ["cancel"];
-		case "ready": return task.assignee.kind === "human" ? ["claim", "cancel"] : ["cancel"];
+		case "ready": return task.assignee.kind === "human" ? [
+			"claim",
+			"complete",
+			"cancel"
+		] : ["cancel"];
 		case "running": return task.assignee.kind === "human" ? ["complete", "cancel"] : ["cancel"];
 		case "failed": return ["retry", "cancel"];
 		case "blocked": return ["cancel"];

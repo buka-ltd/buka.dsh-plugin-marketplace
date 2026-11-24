@@ -500,7 +500,7 @@ function assistantDefinition() {
   return definition
 }
 
-/** 人任务不再点名助理：人自己认领并点动作。 */
+/** 人任务不再点名助理：人直接点动作提交，提交时自动认领。 */
 function humanOnlyDefinition() {
   const definition = assistantDefinition()
   delete definition.positions[0].taskTypes[0].assistant
@@ -2295,6 +2295,11 @@ test('engine: a human action creates the declared task only after validation', a
     await waitFor(() => taskAt(env.store, job.id, 'approve').status === 'ready')
     const approve = taskAt(env.store, job.id, 'approve')
 
+    // 就绪的人任务可以直接提交：页面不再要求先认领，allowedActions 同时给出 claim 与 complete。
+    const detail = env.engine.taskDetail(job.id, approve.id)
+    assert.ok(detail.allowedActions.includes('complete'), 'a ready human task can be completed')
+    assert.ok(detail.allowedActions.includes('claim'), 'the claim flow itself is kept')
+
     await assert.rejects(
       () =>
         env.engine.completeTaskAsHuman({
@@ -2325,6 +2330,14 @@ test('engine: a human action creates the declared task only after validation', a
     const end = taskAt(env.store, job.id, 'end')
     assert.equal(end.status, 'ready')
     assert.equal(end.content.summary, '回去改')
+
+    // 没认领就提交：完成时自动补上认领者、开始时间与一条执行记录。
+    const completed = taskAt(env.store, job.id, 'approve')
+    assert.equal(completed.status, 'completed')
+    assert.equal(completed.claimant.kind, 'human', 'submitting claims the task for the person')
+    assert.equal(completed.claimant.name, '本地用户')
+    assert.equal(completed.attemptIds.length, 1, 'the implicit claim records one attempt')
+    assert.ok(completed.startedAt !== null, 'the implicit claim records a start time')
   } finally {
     await env.cleanup()
   }

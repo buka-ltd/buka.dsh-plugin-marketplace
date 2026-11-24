@@ -114,7 +114,6 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
   const typeDefinition = taskTypeOf(state, task)
   const allowed = Array.isArray(task.allowedActions) ? task.allowedActions : []
   const human = isHumanTask(state, task)
-  const canClaim = allowed.includes('claim') && task.status === 'ready'
   const canComplete = allowed.includes('complete')
   const showForm =
     human && (task.status === 'ready' || task.status === 'running') && allowed.length > 0
@@ -122,7 +121,7 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
   const elements: React.ReactElement[] = []
 
   if (showForm) {
-    elements.push(renderFormSection(page, task, allowed, canClaim, canComplete))
+    elements.push(renderFormSection(page, task, allowed, canComplete))
   }
 
   const isEnd = task.position === 'end'
@@ -132,7 +131,7 @@ function renderTaskBody(page: AppContext, task: TaskDetail): React.ReactElement[
   if (result !== null) elements.push(renderSection(t('taskResultTitle'), result))
 
   if (!showForm) {
-    const actionsBlock = renderActionSection(page, allowed, canClaim, canComplete)
+    const actionsBlock = renderActionSection(page, allowed, canComplete)
     if (actionsBlock !== null) elements.push(actionsBlock)
   }
 
@@ -210,7 +209,6 @@ function renderFormSection(
   page: AppContext,
   task: TaskDetail,
   allowed: string[],
-  canClaim: boolean,
   canComplete: boolean,
 ): React.ReactElement {
   const { t, state, actions } = page
@@ -253,7 +251,7 @@ function renderFormSection(
       h(
         'div',
         { className: 'buka-workflows-formActions' },
-        ...actionButtons(page, allowed, canClaim),
+        ...actionButtons(page, allowed),
         h(
           Button,
           {
@@ -278,11 +276,10 @@ function renderFormSection(
 function renderActionSection(
   page: AppContext,
   allowed: string[],
-  canClaim: boolean,
   canComplete: boolean,
 ): React.ReactElement | null {
   const { t, state, actions } = page
-  const buttons = actionButtons(page, allowed, canClaim)
+  const buttons = actionButtons(page, allowed)
   if (canComplete) {
     buttons.push(
       h(
@@ -306,30 +303,14 @@ function renderActionSection(
   )
 }
 
-/** 认领 / 重试 / 取消；表单和操作区共用。 */
-function actionButtons(
-  page: AppContext,
-  allowed: string[],
-  canClaim: boolean,
-): React.ReactElement[] {
+/**
+ * 重试 / 取消；表单和操作区共用。
+ *
+ * 人任务不再有独立的「认领」按钮：就绪任务直接提交，服务端在提交时自动认领。
+ */
+function actionButtons(page: AppContext, allowed: string[]): React.ReactElement[] {
   const { t, state, actions } = page
   const buttons: React.ReactElement[] = []
-  if (canClaim) {
-    buttons.push(
-      h(
-        Button,
-        {
-          key: 'claim',
-          variant: 'primary',
-          size: 'sm',
-          className: 'buka-workflows-smallButton',
-          onClick: () => void actions.runTaskAction('claim'),
-          disabled: state.taskForm.submitting,
-        },
-        t('actionClaim'),
-      ),
-    )
-  }
   if (allowed.includes('retry')) {
     buttons.push(
       h(

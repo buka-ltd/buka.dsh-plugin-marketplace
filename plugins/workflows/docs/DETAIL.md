@@ -48,7 +48,7 @@ History: the plugin used to be `@buka/dsh-plugin-robots` (later renamed workers)
 3. Create a job:
    - page: fill the job input (the start node content schema) and choose whether the final report comes back to you or to an assistant; the starter is the person;
    - session: use `buka_job_start` or `/job` with the job input; the starter is that session.
-4. On the job board, worker positions auto-claim ready tasks; human tasks are handled by the named assistant or by the person, who picks an action. Executors create follow-up tasks along channels; the end task goes back to the starter, and confirming it settles the job.
+4. On the job board, worker positions auto-claim ready tasks; human tasks are handled by the named assistant, or by the person, who picks an action (submitting claims the task for them). Executors create follow-up tasks along channels; the end task goes back to the starter, and confirming it settles the job.
 
 ## Tools
 
@@ -87,7 +87,7 @@ Running v8-and-earlier job snapshots keep the old shape (context carries the tas
 - An assistant is a **name on the workflow**, not a flag on a worker: a human task type names an `assistant` (an agent identifier) or `null`, and the delivery rule can name one for the final report. Validation only requires the identifier to exist and be an agent; any registered agent can be named, whether or not it was ever "marked" as an assistant.
 - A human task type names an `assistant` (an agent identifier) or `null`:
   - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets one fixed sentence (the task type and the task id), reads the task content with `buka_task_get`, finds the actions in the `buka_task_complete` description, talks to the person, and applies the action on their behalf.
-  - `null`: the task waits in ready; the person claims it, picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything.
+  - `null`: the task waits in ready; the person picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything. Submitting claims the task for them.
 - If the named assistant does not hand back a result (its session ends without submitting, the task times out, or the session cannot be resumed), the task fails and the job immediately fails: the other open tasks are cancelled with a written reason, and the job error names the task, the assistant and the cause. There is no automatic switch and the person cannot take over.
 
 ## Restarting a failed job

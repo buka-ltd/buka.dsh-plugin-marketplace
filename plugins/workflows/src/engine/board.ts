@@ -160,7 +160,8 @@ export function allowedTaskActions(job: JobRecord, task: TaskRecord): string[] {
     case 'pending':
       return ['cancel']
     case 'ready':
-      return task.assignee.kind === 'human' ? ['claim', 'cancel'] : ['cancel']
+      // 人任务不需要先认领：提交动作时就地认领（页面上不再提供「认领」这一步）。
+      return task.assignee.kind === 'human' ? ['claim', 'complete', 'cancel'] : ['cancel']
     case 'running':
       return task.assignee.kind === 'human' ? ['complete', 'cancel'] : ['cancel']
     case 'failed':
