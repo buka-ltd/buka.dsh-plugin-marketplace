@@ -74,7 +74,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
    */
   async function openWorker(worker: Worker) {
     if (isRobotWorker(worker)) {
-      flash('error', t('robotReadOnly'))
+      flash('error', t('errRobotWorker'))
       return
     }
     if (
@@ -109,7 +109,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   async function revealWorker(worker: Worker) {
     if (mutating) return
     if (isRobotWorker(worker)) {
-      flash('error', t('robotReadOnly'))
+      flash('error', t('errRobotWorker'))
       return
     }
     setBusy(`reveal:${worker.id}`)
@@ -138,7 +138,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
   async function openWorkerWith(worker: Worker, appId: string) {
     if (mutating || appId === '') return
     if (isRobotWorker(worker)) {
-      flash('error', t('robotReadOnly'))
+      flash('error', t('errRobotWorker'))
       return
     }
     setBusy(`reveal:${worker.id}`)
@@ -169,7 +169,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
    */
   async function mountWorker(worker: Worker) {
     if (isRobotWorker(worker)) {
-      flash('error', t('robotReadOnly'))
+      flash('error', t('errRobotWorker'))
       return
     }
     const workspaces = service<WorkspacesService>('workspaces')
@@ -320,7 +320,7 @@ export function createWorkerActions(state: WorkersPageState, t: Translate) {
    */
   async function openDeleteDialog(worker: Worker) {
     if (isRobotWorker(worker)) {
-      flash('error', t('robotReadOnly'))
+      flash('error', t('errRobotWorker'))
       return
     }
     setDeleteDialog({ target: worker, impact: null, loading: true, error: null, saving: false })

@@ -156,7 +156,7 @@ export function WorkerCard({
             workerIdentityLabel(worker),
           ),
           h(Tag, { tone: robot ? 'info' : 'neutral' }, robot ? t('driverRobot') : t('driverAgent')),
-          worker.builtin === true ? h(Tag, { tone: 'neutral' }, t('systemWorker')) : null,
+          worker.builtin === true ? h(Tag, { tone: 'neutral' }, t('builtinWorker')) : null,
           robot ? null : h(MountedTag, { t, worker }),
           robot ? null : h(Tag, { tone: 'neutral' }, countBadge(skills.length, t)),
           missing ? h(Tag, { tone: 'warning' }, t('missingDir')) : null,
@@ -177,7 +177,6 @@ export function WorkerCard({
         { className: `buka-workers-cardDesc${description === '' ? ' is-empty' : ''}` },
         description === '' ? t('noDescription') : description,
       ),
-      robot ? h('p', { className: 'buka-workers-hint' }, t('robotReadOnly')) : null,
       missing ? h('p', { className: 'buka-workers-hint' }, t('missingDirHint')) : null,
     ),
   )

@@ -37,11 +37,23 @@ import { containsTemplate, inspectPayload } from './payload.ts'
 export interface ValidateDefinitionOptions {
   /** workers 登记表里本插件关心的字段；主体 / 助理的存在性据此判断。 */
   readonly workers: ReadonlyMap<string, WorkerInfo>
+  /**
+   * 当前可用的执行者预设 id。
+   *
+   * 省略表示无法判定（composition 里没有 `agentPresets` 服务）：只校验字段形状，
+   * 不校验预设是否存在，派发时挂载失败再按任务失败处理。
+   */
+  readonly presets?: ReadonlySet<string> | undefined
 }
 
 /** 校验结果。 */
 export type ValidateDefinitionResult =
-  | { readonly ok: true; readonly definition: WorkflowDefinition }
+  | {
+      readonly ok: true
+      readonly definition: WorkflowDefinition
+      /** 不拦截保存的提示（例如并行任务没有工作树隔离）。 */
+      readonly warnings: readonly DefinitionIssue[]
+    }
   | { readonly ok: false; readonly issues: readonly DefinitionIssue[] }
 
 /** 岗位 id 与任务类型 id 的形状。 */
@@ -54,12 +66,18 @@ const CHANNEL_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u
 const START_ID = 'start'
 const END_ID = 'end'
 
-/** 收集错误。 */
+/** 收集错误与提示。 */
 class Issues {
   readonly list: DefinitionIssue[] = []
+  readonly warnings: DefinitionIssue[] = []
 
   add(path: string, message: string): void {
     this.list.push({ path, message })
+  }
+
+  /** 记录一条不拦截保存的提示。 */
+  warn(path: string, message: string): void {
+    this.warnings.push({ path, message })
   }
 
   get failed(): boolean {
@@ -71,8 +89,8 @@ class Issues {
  * 拒绝对象上的未知字段。
  *
  * 以前未知字段被静默剥离，拼错的开关（例如 `workTree`）等于悄悄关掉一个保护；
- * 内建任务类型上禁用 `actions` / `assistant` / `mode` / `worktree` 也靠这条规则
- * 落地。
+ * 内建任务类型上禁用 `actions` / `assistant` / `plan` / `agentPreset` /
+ * `concurrency` / `worktree` 也靠这条规则落地。
  */
 function checkUnknownKeys(
   raw: Record<string, unknown>,
@@ -115,7 +133,7 @@ export function validateWorkflowDefinition(
   const description = readOptionalString(raw, 'description', 'description', issues) ?? ''
   const budgets = readBudgets(raw.budgets, issues)
 
-  const positions = readPositions(raw.positions, options.workers, issues)
+  const positions = readPositions(raw.positions, options.workers, options.presets, issues)
   const positionById = new Map(positions.map((position) => [position.id, position]))
   const typeById = new Map<string, TaskTypeDefinition>()
   for (const position of positions) {
@@ -134,6 +152,7 @@ export function validateWorkflowDefinition(
   checkStartRoutes(start, positionById, typeById, channelById, endContent, issues)
   checkActions(positions, positionById, typeById, channelById, endContent, issues)
   checkRobotCreates(positions, positionById, typeById, channelById, endContent, issues)
+  checkConcurrencyWarnings(positions, options.workers, issues)
 
   if (issues.failed) return { ok: false, issues: issues.list }
   if (name === null || budgets === null || start === null || end === null) {
@@ -152,6 +171,7 @@ export function validateWorkflowDefinition(
       positions,
       channels,
     },
+    warnings: issues.warnings,
   }
 }
 
@@ -217,6 +237,7 @@ function readBudgets(raw: unknown, issues: Issues): BudgetDefinition | null {
 function readPositions(
   raw: unknown,
   workers: ReadonlyMap<string, WorkerInfo>,
+  presets: ReadonlySet<string> | undefined,
   issues: Issues,
 ): PositionDefinition[] {
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -244,6 +265,7 @@ function readPositions(
       id,
       executor,
       workers,
+      presets,
       seenTypes,
       issues,
     )
@@ -341,6 +363,7 @@ function readTaskTypes(
   positionId: string,
   executor: ExecutorSpec | null,
   workers: ReadonlyMap<string, WorkerInfo>,
+  presets: ReadonlySet<string> | undefined,
   seenTypes: Set<string>,
   issues: Issues,
 ): TaskTypeDefinition[] {
@@ -355,7 +378,16 @@ function readTaskTypes(
       issues.add(at, 'must be an object')
       continue
     }
-    const taskType = readTaskType(entry, at, positionId, executor, workers, seenTypes, issues)
+    const taskType = readTaskType(
+      entry,
+      at,
+      positionId,
+      executor,
+      workers,
+      presets,
+      seenTypes,
+      issues,
+    )
     if (taskType !== null) taskTypes.push(taskType)
   }
   return taskTypes
@@ -368,12 +400,25 @@ function readTaskType(
   positionId: string,
   executor: ExecutorSpec | null,
   workers: ReadonlyMap<string, WorkerInfo>,
+  presets: ReadonlySet<string> | undefined,
   seenTypes: Set<string>,
   issues: Issues,
 ): TaskTypeDefinition | null {
   checkUnknownKeys(
     entry,
-    ['id', 'label', 'definition', 'content', 'actions', 'creates', 'assistant', 'mode', 'worktree'],
+    [
+      'id',
+      'label',
+      'definition',
+      'content',
+      'actions',
+      'creates',
+      'assistant',
+      'plan',
+      'agentPreset',
+      'concurrency',
+      'worktree',
+    ],
     path,
     issues,
   )
@@ -409,7 +454,17 @@ function readTaskType(
     workers,
     issues,
   )
-  const mode = readMode(entry.mode, `${path}.mode`, path, executor, workers, issues)
+  const plan = readPlan(entry.plan, `${path}.plan`, path, executor, workers, issues)
+  const agentPreset = readAgentPreset(
+    entry.agentPreset,
+    `${path}.agentPreset`,
+    path,
+    executor,
+    workers,
+    presets,
+    issues,
+  )
+  const concurrency = readConcurrency(entry.concurrency, `${path}.concurrency`, executor, issues)
   const worktree = readWorktree(entry.worktree, `${path}.worktree`, path, executor, workers, issues)
   if (label === null) return null
   const taskType: TaskTypeDefinition = {
@@ -420,7 +475,9 @@ function readTaskType(
     ...(actions === undefined ? {} : { actions }),
     ...(creates === undefined ? {} : { creates }),
     ...(assistant === undefined ? {} : { assistant }),
-    ...(mode === undefined ? {} : { mode }),
+    ...(plan === undefined ? {} : { plan }),
+    ...(agentPreset === undefined ? {} : { agentPreset }),
+    ...(concurrency === undefined ? {} : { concurrency }),
     ...(worktree === undefined ? {} : { worktree }),
   }
   // content 写坏了已经报过错，不再叠一条「缺 content schema」。
@@ -651,32 +708,109 @@ function readAssistant(
   return id
 }
 
-/** 解析 plan 模式；只对智能体有效。 */
-function readMode(
+/**
+ * 解析计划模式开关；只对智能体岗位有效。
+ *
+ * `plan` 是会话内状态，与执行者预设正交：同一个任务类型可以既 `plan: true`
+ * 又指定 `agentPreset`。
+ */
+function readPlan(
   raw: unknown,
   path: string,
   ownerPath: string,
   executor: ExecutorSpec | null,
   workers: ReadonlyMap<string, WorkerInfo>,
   issues: Issues,
-): 'plan' | null | undefined {
+): true | undefined {
   if (raw === undefined || raw === null) return undefined
-  if (raw !== 'plan') {
-    issues.add(path, 'must be "plan" or null')
+  if (typeof raw !== 'boolean') {
+    issues.add(path, 'must be true or false')
     return undefined
   }
+  if (!raw) return undefined
   if (executor === null) return undefined
   if (executor.kind !== 'worker') {
-    issues.add(path, 'mode "plan" is only valid for agent positions')
+    issues.add(path, 'plan is only valid for agent positions')
     return undefined
   }
   const executorId = executorRef(executor)
   const worker = executorId === null ? undefined : workers.get(executorId)
   if (worker === undefined || worker.driver !== 'agent') {
-    issues.add(`${ownerPath}.executor`, 'mode "plan" requires an agent executor')
+    issues.add(`${ownerPath}.executor`, 'plan requires an agent executor')
     return undefined
   }
-  return 'plan'
+  return true
+}
+
+/**
+ * 解析任务类型的执行者预设 id；只对智能体岗位有效。
+ *
+ * 有预设目录时校验 id 存在；目录缺失（composition 里没有 `agentPresets` 服务）
+ * 时只校验形状。存在但激活失败（broken）的预设在保存时接受，派发时挂载失败按
+ * 任务失败处理。
+ */
+function readAgentPreset(
+  raw: unknown,
+  path: string,
+  ownerPath: string,
+  executor: ExecutorSpec | null,
+  workers: ReadonlyMap<string, WorkerInfo>,
+  presets: ReadonlySet<string> | undefined,
+  issues: Issues,
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    issues.add(path, 'must be an agent preset id')
+    return undefined
+  }
+  const id = raw.trim()
+  if (executor === null) return undefined
+  if (executor.kind !== 'worker') {
+    issues.add(path, 'agentPreset is only valid for agent positions')
+    return undefined
+  }
+  const executorId = executorRef(executor)
+  const worker = executorId === null ? undefined : workers.get(executorId)
+  if (worker === undefined || worker.driver !== 'agent') {
+    issues.add(`${ownerPath}.executor`, 'agentPreset requires an agent executor')
+    return undefined
+  }
+  if (presets !== undefined && !presets.has(id)) {
+    const available = [...presets].sort().join(', ')
+    issues.add(
+      path,
+      `unknown agent preset "${id}": ${available === '' ? 'no agent preset is available in this composition' : `available presets are ${available}`}`,
+    )
+    return undefined
+  }
+  return id
+}
+
+/**
+ * 解析并发度：同一作业内这类任务最多同时进行几条。
+ *
+ * 只对智能体 / 机器人岗位有意义；人任务不占引擎的并发额度，声明在人工岗位上
+ * 直接拒绝，避免作者以为它改变了人工任务的排队方式。
+ */
+function readConcurrency(
+  raw: unknown,
+  path: string,
+  executor: ExecutorSpec | null,
+  issues: Issues,
+): number | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+    issues.add(path, 'must be a positive integer (1 means one task at a time)')
+    return undefined
+  }
+  if (executor !== null && executor.kind !== 'worker') {
+    issues.add(
+      path,
+      'concurrency is only valid for agent or robot positions: human tasks do not use the engine quota',
+    )
+    return undefined
+  }
+  return raw
 }
 
 /**
@@ -714,6 +848,36 @@ function readWorktree(
     return undefined
   }
   return raw
+}
+
+/**
+ * 并行任务的目录风险提示：不拦截保存。
+ *
+ * 同一执行者的多个任务可以同时改同一个目录；作者把任务类型并发度调高、又没
+ * 有让这些任务用工作树隔离（`worktree: "create"`）时，提示一次。工作树插件是否
+ * 启用要到执行时才知道，所以这里只按定义声明判断。
+ */
+function checkConcurrencyWarnings(
+  positions: readonly PositionDefinition[],
+  workers: ReadonlyMap<string, WorkerInfo>,
+  issues: Issues,
+): void {
+  for (const position of positions) {
+    if (position.executor.kind !== 'worker') continue
+    const executorId = executorRef(position.executor)
+    const worker = executorId === null ? undefined : workers.get(executorId)
+    if (worker === undefined || worker.driver !== 'agent') continue
+    const total = position.taskTypes.reduce((sum, taskType) => sum + (taskType.concurrency ?? 1), 0)
+    if (total <= 1) continue
+    const unisolated = position.taskTypes
+      .filter((taskType) => taskType.worktree !== 'create')
+      .map((taskType) => taskType.id)
+    if (unisolated.length === 0) continue
+    issues.warn(
+      `positions.${position.id}`,
+      `task types can run ${total} tasks in parallel in one job, but ${unisolated.map((id) => `"${id}"`).join(', ')} do not set worktree "create": concurrent tasks of "${worker.id}" may modify the same directory`,
+    )
+  }
 }
 
 /** 解析通道列表。 */

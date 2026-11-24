@@ -17,6 +17,7 @@ import {
   MODELS_ROUTE,
   OPEN_IN_APP_APPS_ROUTE,
   OPEN_IN_APP_CHOICE_KEY,
+  PRESETS_ROUTE,
 } from './constants.ts'
 import type {
   DeleteDialogState,
@@ -28,6 +29,8 @@ import type {
   Notice,
   SkillChecksState,
   Worker,
+  WorkerAgentPresetCatalogData,
+  WorkerAgentPresetCatalogState,
   WorkerFileContentData,
   WorkerFileNode,
   WorkerFileTreeData,
@@ -182,6 +185,21 @@ export function useWorkersState(props: { getService: GetService }) {
   const [modelDraft, setModelDraft] = React.useState<WorkerModelSelection | null>(null)
   const [modelSaving, setModelSaving] = React.useState(false)
   const [modelError, setModelError] = React.useState<string | null>(null)
+
+  /**
+   * 「执行者预设」区块：预设目录按需加载；`agentPresetDraft` 为 null 表示跟随
+   * 工作流插件默认（`workerPreset`）。服务不可用时选择器禁用。
+   */
+  const [agentPresetCatalog, setAgentPresetCatalog] = React.useState<WorkerAgentPresetCatalogState>(
+    {
+      status: 'idle',
+      data: null,
+      error: null,
+    },
+  )
+  const [agentPresetDraft, setAgentPresetDraft] = React.useState<string | null>(null)
+  const [agentPresetSaving, setAgentPresetSaving] = React.useState(false)
+  const [agentPresetError, setAgentPresetError] = React.useState<string | null>(null)
 
   /** 详情页状态：`selectedId` 非空时显示配置视图，`tab` 是页签。 */
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
@@ -354,6 +372,37 @@ export function useWorkersState(props: { getService: GetService }) {
   }
 
   /**
+   * 按需读取执行者预设目录：同一时间只发一个请求；`force` 用于重新读取。
+   *
+   */
+  function loadAgentPresets(force = false) {
+    if (
+      !force &&
+      (agentPresetCatalog.status === 'loading' || agentPresetCatalog.status === 'ready')
+    ) {
+      return
+    }
+    setAgentPresetCatalog((prev) => ({ status: 'loading', data: prev.data, error: null }))
+    requestJson<WorkerAgentPresetCatalogData>(PRESETS_ROUTE).then(
+      (body) =>
+        setAgentPresetCatalog({
+          status: 'ready',
+          data: {
+            available: body.available === true,
+            presets: Array.isArray(body.presets) ? body.presets : [],
+          },
+          error: null,
+        }),
+      (failure) =>
+        setAgentPresetCatalog((prev) => ({
+          status: 'error',
+          data: prev.data,
+          error: messageOf(failure),
+        })),
+    )
+  }
+
+  /**
    * 用 Host 的响应局部更新一个执行者，不整表刷新，避免详情页闪烁。
    *
    */
@@ -480,6 +529,13 @@ export function useWorkersState(props: { getService: GetService }) {
     setInstallError(null)
     setModelDraft(worker.model ?? null)
     setModelError(null)
+    loadAgentPresets()
+    setAgentPresetDraft(
+      typeof worker.agentPreset === 'string' && worker.agentPreset !== ''
+        ? worker.agentPreset
+        : null,
+    )
+    setAgentPresetError(null)
     setNotice(null)
   }
 
@@ -495,6 +551,7 @@ export function useWorkersState(props: { getService: GetService }) {
     setInstallOpen(false)
     setInstallError(null)
     setModelError(null)
+    setAgentPresetError(null)
     setNotice(null)
   }
 
@@ -506,7 +563,10 @@ export function useWorkersState(props: { getService: GetService }) {
     if (next === tab) return
     setNotice(null)
     setTab(next)
-    if (next === 'settings') loadModelCatalog()
+    if (next === 'settings') {
+      loadModelCatalog()
+      loadAgentPresets()
+    }
     if (next === 'files' && selectedWorker !== null) loadFiles(selectedWorker)
   }
 
@@ -562,6 +622,14 @@ export function useWorkersState(props: { getService: GetService }) {
     modelError,
     setModelError,
     loadModelCatalog,
+    agentPresetCatalog,
+    agentPresetDraft,
+    setAgentPresetDraft,
+    agentPresetSaving,
+    setAgentPresetSaving,
+    agentPresetError,
+    setAgentPresetError,
+    loadAgentPresets,
     selectedId,
     setSelectedId,
     tab,

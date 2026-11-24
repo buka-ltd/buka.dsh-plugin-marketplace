@@ -156,10 +156,13 @@ function makeWorkers(entries = WORKER_ENTRIES) {
   return {
     dispatched,
     handles,
+    /** 投递前的钩子；测试用它观察执行工具可见性依赖的会话绑定。 */
+    beforeDispatch: null,
     async list() {
       return { workers: entries, corrupt: false }
     },
     async dispatchSession(request) {
+      this.beforeDispatch?.(request)
       const sessionId = `session-${dispatched.length + 1}`
       const handle = makeHandle(sessionId)
       handles.set(sessionId, handle)
@@ -674,10 +677,10 @@ async function setup(definition, overrides = {}) {
   const domain = new FakeDomain()
   const store = new WorkflowStore({ domain, dataDir })
   await store.init()
-  const workers = makeWorkers()
+  const workers = overrides.workers ?? makeWorkers()
   const delivery = overrides.delivery ?? makeDelivery()
   const engine = new WorkflowEngine({
-    ctx: {},
+    ctx: overrides.ctx ?? {},
     store,
     options: makeOptions(dataDir, overrides.options),
     logger: overrides.logger,
@@ -1150,6 +1153,86 @@ test('engine: a human-started job completes the start task and dispatches the fi
   }
 })
 
+test('engine: the execution session is bound before the first prompt is delivered', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    const boundAtDispatch = []
+    env.workers.beforeDispatch = (request) => {
+      boundAtDispatch.push(env.engine.taskForSession(request.newSessionId))
+    }
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    // dispatchSession 返回前提示词就已经投递，第一轮组装工具清单时依赖这条绑定。
+    assert.equal(boundAtDispatch.length, 1)
+    assert.equal(boundAtDispatch[0]?.jobId, job.id)
+    assert.equal(boundAtDispatch[0]?.taskId, dev.id)
+    // 假服务回报的会话 id 与请求的不同：绑定要跟到真实 id 上。
+    assert.equal(env.engine.taskForSession(env.workers.dispatched[0].sessionId)?.taskId, dev.id)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a failed dispatch does not leave a session binding behind', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    let requestedSessionId = ''
+    env.workers.dispatchSession = async (request) => {
+      requestedSessionId = request.newSessionId
+      throw new Error('boom')
+    }
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    const dev = taskAt(env.store, job.id, 'dev')
+    await waitFor(() => env.store.getTask(dev.id).status === 'failed')
+    assert.notEqual(requestedSessionId, '')
+    assert.equal(env.engine.taskForSession(requestedSessionId), null)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a completed task releases its session only after the turn settles', async () => {
+  const env = await setup(simpleDevDefinition())
+  try {
+    let releaseIdle = () => {}
+    const idle = new Promise((resolve) => {
+      releaseIdle = resolve
+    })
+    const handle = makeHandle('session-1')
+    handle.whenIdle = () => idle
+    env.workers.dispatchSession = async (request) => {
+      env.workers.dispatched.push({ request, sessionId: 'session-1', handle })
+      return handle
+    }
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    await env.engine.completeTaskFromSession({
+      sessionId: 'session-1',
+      text: '页面已完成',
+      attachments: [],
+    })
+    await delay(20)
+    assert.equal(env.store.getTask(dev.id).status, 'completed')
+    // 任务结果已记录，但句柄要等当前轮落定：立刻释放会掐断模型收尾。
+    assert.equal(handle.state.disposed, false)
+    releaseIdle()
+    await waitFor(() => handle.state.disposed === true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('engine: the task type definition is dispatched as the user prompt, the file keeps the full text', async () => {
   const definition = simpleDevDefinition()
   definition.positions[0].taskTypes[0].definition = '先读代码。\n\n/grill-with-docs'
@@ -1179,7 +1262,7 @@ test('engine: the task type definition is dispatched as the user prompt, the fil
 
 test('engine: a plan-mode task type keeps the single-message dispatch without a user prompt', async () => {
   const definition = simpleDevDefinition()
-  definition.positions[0].taskTypes[0].mode = 'plan'
+  definition.positions[0].taskTypes[0].plan = true
   const env = await setup(definition)
   try {
     const job = await env.engine.createJobFromHuman({
@@ -1200,6 +1283,178 @@ test('engine: a plan-mode task type keeps the single-message dispatch without a 
     const dev = taskAt(env.store, job.id, 'dev')
     const attempt = env.store.listAttempts(dev.id)[0]
     assert.equal(await env.store.readText(job.id, attempt.promptFile), dispatch.request.prompt)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/** 同一岗位两个任务类型的定义：初始任务可重复，用来观察并发度。 */
+function parallelDefinition({ concurrency, secondType = false } = {}) {
+  const definition = simpleDevDefinition()
+  definition.budgets.maxTasks = 10
+  const dev = definition.positions[0]
+  if (concurrency !== undefined) dev.taskTypes[0].concurrency = concurrency
+  if (secondType) {
+    dev.taskTypes.push({
+      id: 'dev.review',
+      label: '复核',
+      content: { type: 'object', properties: { requirement: { type: 'string' } } },
+    })
+  }
+  definition.start.next = [
+    { channel: 'start.dev', type: dev.taskTypes[0].id, content: { requirement: 'a' } },
+    {
+      channel: 'start.dev',
+      type: secondType ? 'dev.review' : dev.taskTypes[0].id,
+      content: secondType ? {} : { requirement: 'b' },
+    },
+  ]
+  return definition
+}
+
+test('engine: a task type runs one task at a time by default and queues the rest', async () => {
+  const env = await setup(parallelDefinition())
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    await delay(30)
+    assert.equal(env.workers.dispatched.length, 1, 'a second task of the same type waits')
+    const waiting = jobTasks(env.store, job.id).find(
+      (task) => task.type === 'dev.implement' && task.status === 'ready',
+    )
+    assert.ok(waiting, 'the queued task stays ready')
+
+    await env.engine.completeTaskFromSession({
+      sessionId: env.workers.dispatched[0].sessionId,
+      text: '完成第一条',
+      attachments: [],
+    })
+    await waitFor(() => env.workers.dispatched.length === 2)
+    assert.equal(
+      env.store.getTask(waiting.id).status,
+      'running',
+      'the queued task starts after the first one finishes',
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: task type concurrency lets several tasks of the same type run', async () => {
+  const env = await setup(parallelDefinition({ concurrency: 2 }))
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: different task types on one position run in parallel', async () => {
+  const env = await setup(parallelDefinition({ secondType: true }))
+  try {
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 2)
+    const running = jobTasks(env.store, job.id).filter(
+      (task) => task.position === 'dev' && task.status === 'running',
+    )
+    assert.deepEqual(running.map((task) => task.type).sort(), ['dev.implement', 'dev.review'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/** 带默认执行者预设的登记表。 */
+function presetWorkers(defaultPreset) {
+  return makeWorkers(
+    WORKER_ENTRIES.map((entry) =>
+      entry.id === '软件工程师' && defaultPreset !== undefined
+        ? { ...entry, agentPreset: defaultPreset }
+        : entry,
+    ),
+  )
+}
+
+test('engine: the task type agent preset wins over the worker default', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].agentPreset = 'ptc'
+  const env = await setup(definition, { workers: presetWorkers('worker-mode') })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    assert.equal(env.workers.dispatched[0].request.agentPreset, 'ptc')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: the worker default agent preset applies when the task type has none', async () => {
+  const env = await setup(simpleDevDefinition(), { workers: presetWorkers('worker-mode') })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    assert.equal(env.workers.dispatched[0].request.agentPreset, 'worker-mode')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: the plugin worker preset is the last fallback', async () => {
+  const env = await setup(simpleDevDefinition(), { workers: presetWorkers(undefined) })
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    assert.equal(env.workers.dispatched[0].request.agentPreset, 'standard')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: saving a definition validates agent presets against the roster', async () => {
+  const ctx = {
+    get(name) {
+      if (name !== 'agentPresets') return undefined
+      return {
+        list: async () => [{ id: 'standard' }, { id: 'ptc' }, { id: 'broken', broken: 'nope' }],
+      }
+    },
+  }
+  const env = await setup(simpleDevDefinition(), { ctx })
+  try {
+    const definition = simpleDevDefinition()
+    definition.positions[0].taskTypes[0].agentPreset = 'nope'
+    await assert.rejects(
+      () => env.engine.saveWorkflow({ definition }),
+      (error) => {
+        assert.equal(error.code, 'invalid-definition')
+        assert.match(error.message, /positions\[0\]\.taskTypes\[0\]\.agentPreset/u)
+        assert.match(error.message, /unknown agent preset "nope"/u)
+        return true
+      },
+    )
+    // broken 的预设也接受：激活失败在派发时按任务失败处理。
+    definition.positions[0].taskTypes[0].agentPreset = 'broken'
+    const saved = await env.engine.saveWorkflow({ definition })
+    const latest = env.store.readWorkflowVersion(saved.id)
+    assert.equal(latest?.versionRecord.definition.positions[0].taskTypes[0].agentPreset, 'broken')
   } finally {
     await env.cleanup()
   }

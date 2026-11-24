@@ -1200,7 +1200,7 @@ test('定义抽屉：开始 / 结束节点展示内建任务类型与契约', as
   assert.ok(startDrawer !== null, 'the start drawer renders')
   const startText = textOf(startDrawer)
   assert.match(startText, /开始任务/u, 'the start node keeps its own title')
-  assert.match(startText, /处理人: 引擎/u, 'the start node is handled by the engine')
+  assert.match(startText, /处理人: Workflow引擎/u, 'the start node is handled by the engine')
   assert.match(startText, /作业输入/u)
   assert.match(startText, /启动作业的人填写的内容/u)
   assert.match(startText, /内建任务类型/u, 'the start node shows the built-in task type card')
@@ -1505,7 +1505,7 @@ test('看板：五列、引擎 / 发起人 / 岗位行、卡片打开任务抽�
   })
   assert.deepEqual(
     titles,
-    ['引擎', '发起人', '研发', '测试', '发布审批'],
+    ['Workflow引擎', '发起人', '研发', '测试', '发布审批'],
     'the engine and the starter get their own rows',
   )
 
@@ -1517,7 +1517,7 @@ test('看板：五列、引擎 / 发起人 / 岗位行、卡片打开任务抽�
         node.props.className.split(/\s+/).includes('buka-workflows-boardRow') &&
         textOf(node).includes(label),
     )
-  const engineRow = boardRow('引擎')
+  const engineRow = boardRow('Workflow引擎')
   assert.ok(engineRow !== null, 'the engine row should exist')
   assert.match(textOf(engineRow), /启动/u, 'the engine row holds the start task')
 

@@ -126,7 +126,9 @@ export const workflowConfigFields = {
   workerPreset: z
     .string()
     .default(DEFAULTS.workerPreset)
-    .description('智能体任务会话使用的 agent preset。'),
+    .description(
+      '智能体任务会话的兜底 agent preset：任务类型的 agentPreset 优先，其次是执行者登记的默认；两者都没配置时用它。',
+    ),
 }
 
 /** 工作流一半单独的配置 schema（合并插件入口拼上执行者字段后使用）。 */

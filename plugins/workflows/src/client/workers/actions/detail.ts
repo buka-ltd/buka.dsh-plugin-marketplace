@@ -7,7 +7,13 @@
 
 import { failureText, requestJson } from '../api.ts'
 import { avatarPreset } from '../avatar.ts'
-import { AVATAR_ROUTE, DESCRIPTION_ROUTE, MODEL_ROUTE, RENAME_ROUTE } from '../constants.ts'
+import {
+  AVATAR_ROUTE,
+  DESCRIPTION_ROUTE,
+  MODEL_ROUTE,
+  PRESET_ROUTE,
+  RENAME_ROUTE,
+} from '../constants.ts'
 import type { WorkersPageState } from '../state.ts'
 import type { Translate, Worker, WorkerModelSelection } from '../types.ts'
 
@@ -39,6 +45,10 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     modelSaving,
     setModelSaving,
     setModelError,
+    agentPresetDraft,
+    agentPresetSaving,
+    setAgentPresetSaving,
+    setAgentPresetError,
     patchWorker,
     flash,
   } = state
@@ -177,6 +187,31 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     }
   }
 
+  /**
+   * 保存智能体的默认执行者预设；`null` 表示跟随工作流插件的 `workerPreset`。
+   *
+   * 与模型一样由页面在改动后自动调用，成功后只局部更新列表。
+   */
+  async function saveWorkerPreset() {
+    if (selectedId === null || agentPresetSaving) return
+    setAgentPresetSaving(true)
+    setAgentPresetError(null)
+    try {
+      const body = await requestJson(PRESET_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ id: selectedId, agentPreset: agentPresetDraft }),
+      })
+      const saved = body?.worker?.agentPreset
+      patchWorker(selectedId, {
+        agentPreset: typeof saved === 'string' && saved !== '' ? saved : null,
+      })
+    } catch (failure) {
+      setAgentPresetError(`${t('presetSaveFailed')} ${failureText(t, failure)}`)
+    } finally {
+      setAgentPresetSaving(false)
+    }
+  }
+
   return {
     openAvatarDialog,
     closeAvatarDialog,
@@ -186,5 +221,6 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
     normalizedDescription,
     saveDescription,
     saveWorkerModel,
+    saveWorkerPreset,
   }
 }

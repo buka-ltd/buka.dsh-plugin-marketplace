@@ -603,9 +603,9 @@ test('definition: rejects structural and identity errors', () => {
     ],
     [
       mutate((d) => {
-        d.positions[3].taskTypes[0].mode = 'plan'
+        d.positions[3].taskTypes[0].plan = true
       }),
-      /positions\[3\]\.taskTypes\[0\]\.mode/,
+      /positions\[3\]\.taskTypes\[0\]\.plan/,
       /only valid for agent positions/,
     ],
     [
@@ -1063,6 +1063,166 @@ test('definition: worktree is a three-value mode on agent task types', () => {
     /positions\[0\]\.taskTypes\[0\]\.executor/,
     /worktree requires an agent executor/,
   )
+})
+
+test('definition: concurrency is a positive integer on agent / robot task types', () => {
+  const workers = sampleWorkers()
+  const definition = sampleDefinition()
+  definition.positions[1].taskTypes[0].concurrency = 2
+  const normalized = expectOk(validateWorkflowDefinition(definition, { workers }))
+  assert.equal(findTaskType(normalized, 'dev.implement')?.concurrency, 2)
+  // 省略即 1：规范化定义里不补字段。
+  assert.equal(findTaskType(normalized, 'dev.rework')?.concurrency, undefined)
+
+  const clock = sampleClockDefinition()
+  clock.positions[0].taskTypes[0].concurrency = 10
+  assert.equal(
+    findTaskType(expectOk(validateWorkflowDefinition(clock, { workers })), 'wait.until')
+      ?.concurrency,
+    10,
+  )
+
+  for (const value of [0, -1, 1.5, '2']) {
+    const candidate = sampleDefinition()
+    candidate.positions[1].taskTypes[0].concurrency = value
+    expectIssue(
+      validateWorkflowDefinition(candidate, { workers }),
+      /positions\[1\]\.taskTypes\[0\]\.concurrency/,
+      /positive integer/,
+    )
+  }
+
+  // 人任务不占引擎额度：声明即错，避免作者以为它改变了人工任务的排队。
+  const human = sampleDefinition()
+  human.positions[3].taskTypes[0].concurrency = 2
+  expectIssue(
+    validateWorkflowDefinition(human, { workers }),
+    /positions\[3\]\.taskTypes\[0\]\.concurrency/,
+    /only valid for agent or robot positions/,
+  )
+})
+
+test('definition: plan is a boolean switch and the old mode field is rejected', () => {
+  const workers = sampleWorkers()
+  const definition = sampleDefinition()
+  definition.positions[1].taskTypes[0].plan = true
+  assert.equal(
+    findTaskType(expectOk(validateWorkflowDefinition(definition, { workers })), 'dev.implement')
+      ?.plan,
+    true,
+  )
+
+  for (const value of [false, null]) {
+    const candidate = sampleDefinition()
+    candidate.positions[1].taskTypes[0].plan = value
+    assert.equal(
+      findTaskType(expectOk(validateWorkflowDefinition(candidate, { workers })), 'dev.implement')
+        ?.plan,
+      undefined,
+    )
+  }
+
+  const typed = sampleDefinition()
+  typed.positions[1].taskTypes[0].plan = 'plan'
+  expectIssue(
+    validateWorkflowDefinition(typed, { workers }),
+    /positions\[1\]\.taskTypes\[0\]\.plan/,
+    /must be true or false/,
+  )
+
+  // ADR 0032：mode 改名为 plan，不保留别名；旧定义重新保存时报未知字段。
+  const legacy = sampleDefinition()
+  legacy.positions[1].taskTypes[0].mode = 'plan'
+  expectIssue(
+    validateWorkflowDefinition(legacy, { workers }),
+    /positions\[1\]\.taskTypes\[0\]\.mode/,
+    /unexpected field/,
+  )
+
+  const robot = sampleClockDefinition()
+  robot.positions[0].taskTypes[0].plan = true
+  expectIssue(
+    validateWorkflowDefinition(robot, { workers }),
+    /positions\[0\]\.taskTypes\[0\]\.executor/,
+    /plan requires an agent executor/,
+  )
+})
+
+test('definition: agentPreset is validated against the available presets', () => {
+  const workers = sampleWorkers()
+  const definition = sampleDefinition()
+  definition.positions[1].taskTypes[0].agentPreset = 'ptc'
+  const normalized = expectOk(
+    validateWorkflowDefinition(definition, { workers, presets: new Set(['standard', 'ptc']) }),
+  )
+  assert.equal(findTaskType(normalized, 'dev.implement')?.agentPreset, 'ptc')
+
+  // 没有预设目录时只校验形状（composition 里没有 agentPresets 服务）。
+  expectOk(validateWorkflowDefinition(definition, { workers }))
+
+  const unknown = sampleDefinition()
+  unknown.positions[1].taskTypes[0].agentPreset = 'nope'
+  expectIssue(
+    validateWorkflowDefinition(unknown, { workers, presets: new Set(['standard', 'ptc']) }),
+    /positions\[1\]\.taskTypes\[0\]\.agentPreset/,
+    /unknown agent preset "nope"/,
+  )
+
+  const empty = sampleDefinition()
+  empty.positions[1].taskTypes[0].agentPreset = '  '
+  expectIssue(
+    validateWorkflowDefinition(empty, { workers }),
+    /positions\[1\]\.taskTypes\[0\]\.agentPreset/,
+    /must be an agent preset id/,
+  )
+
+  const human = sampleDefinition()
+  human.positions[3].taskTypes[0].agentPreset = 'ptc'
+  expectIssue(
+    validateWorkflowDefinition(human, { workers }),
+    /positions\[3\]\.taskTypes\[0\]\.agentPreset/,
+    /only valid for agent positions/,
+  )
+
+  const robot = sampleClockDefinition()
+  robot.positions[0].taskTypes[0].agentPreset = 'ptc'
+  expectIssue(
+    validateWorkflowDefinition(robot, { workers }),
+    /positions\[0\]\.taskTypes\[0\]\.executor/,
+    /agentPreset requires an agent executor/,
+  )
+})
+
+test('definition: parallel agent task types without worktree isolation only warn', () => {
+  const workers = sampleWorkers()
+  const parallel = sampleDefinition()
+  parallel.positions[1].taskTypes[0].concurrency = 2
+  const warned = validateWorkflowDefinition(parallel, { workers })
+  assert.equal(warned.ok, true)
+  assert.ok(
+    warned.warnings.some((warning) => warning.path === 'positions.dev'),
+    JSON.stringify(warned.warnings),
+  )
+  assert.match(
+    warned.warnings.find((warning) => warning.path === 'positions.dev').message,
+    /worktree "create"/u,
+  )
+  // 提示不进入错误列表，保存不会被拦下。
+  assert.deepEqual(warned.issues ?? [], [])
+
+  // 所有智能体任务类型都声明工作树隔离后不再提示。
+  const isolated = sampleDefinition()
+  isolated.positions[1].taskTypes[0].concurrency = 2
+  for (const position of isolated.positions) {
+    if (position.executor.kind !== 'worker') continue
+    for (const taskType of position.taskTypes) taskType.worktree = 'create'
+  }
+  assert.deepEqual(validateWorkflowDefinition(isolated, { workers }).warnings, [])
+
+  // 机器人并行不涉及同一个会话的工作目录。
+  const clock = sampleClockDefinition()
+  clock.positions[0].taskTypes[0].concurrency = 10
+  assert.deepEqual(validateWorkflowDefinition(clock, { workers }).warnings, [])
 })
 
 test('definition: robot executors must use a known program', () => {

@@ -86,6 +86,29 @@ export interface WorkerModelCatalogState {
   error: string | null
 }
 
+/** `/buka-workers/presets` 返回的一个执行者预设。 */
+export interface WorkerAgentPreset {
+  id: string
+  name: string
+  description: string
+  /** 激活失败的原因；非空时页面把这一项标灰。 */
+  broken: string | null
+}
+
+/** `/buka-workers/presets` 的成功响应。 */
+export interface WorkerAgentPresetCatalogData {
+  /** `agentPresets` 服务是否可用；不可用时页面禁用选择器并提示。 */
+  available: boolean
+  presets: WorkerAgentPreset[]
+}
+
+/** 执行者预设目录请求的状态。 */
+export interface WorkerAgentPresetCatalogState {
+  status: 'idle' | 'loading' | 'ready' | 'error'
+  data: WorkerAgentPresetCatalogData | null
+  error: string | null
+}
+
 /** 列表接口里的一行执行者。 */
 export interface Worker {
   /** 不可变标识符：引用键与目录名。 */
@@ -96,7 +119,7 @@ export interface Worker {
   driver: WorkerDriver
   /** 机器人的程序 id（稳定契约）；智能体为空串。 */
   program: string
-  /** 内建执行者（clock / engine）：只读、带「系统」标记。 */
+  /** 内建执行者（clock / engine）：只读、带「内置」标记。 */
   builtin?: boolean
   path: string
   createdAt: string
@@ -110,6 +133,8 @@ export interface Worker {
   claude: WorkerClaude
   /** 新会话使用的模型；没有配置时省略（跟随宿主默认模型）。 */
   model?: WorkerModelSelection | null
+  /** 新会话默认的执行者预设；没有配置时省略（跟随工作流插件的 `workerPreset`）。 */
+  agentPreset?: string | null
 }
 
 /** `/buka-workers/list` 的成功响应。 */

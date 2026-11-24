@@ -79,6 +79,22 @@ export function normalizeWorkerModel(value: unknown): WorkerModelSelection | und
   }
 }
 
+/** 执行者预设 id 的长度上限；只防脏数据，存在性由路由按 `agentPresets` 校验。 */
+export const WORKER_AGENT_PRESET_MAX_LENGTH = 128
+
+/**
+ * 规范化执行者预设 id：trim 后为空或类型不对时返回 undefined。
+ *
+ * 只校验形状：预设可能只在另一台机器上存在；保存的选择仍然保留，派发时挂载
+ * 失败按任务失败处理（ADR 0032）。
+ */
+export function normalizeAgentPreset(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const id = value.trim()
+  if (id === '' || id.length > WORKER_AGENT_PRESET_MAX_LENGTH) return undefined
+  return id
+}
+
 /**
  * 规范化展示名：折叠连续空白并 trim；非字符串按空串处理。
  *
@@ -142,6 +158,7 @@ function readEntry(entry: Record<string, unknown>, version: number): WorkerRecor
   const workerPath = typeof entry.path === 'string' ? entry.path.trim() : ''
   if (driver === 'agent' && workerPath === '') return undefined
   const model = driver === 'agent' ? normalizeWorkerModel(entry.model) : undefined
+  const agentPreset = driver === 'agent' ? normalizeAgentPreset(entry.agentPreset) : undefined
 
   return {
     id,
@@ -156,6 +173,7 @@ function readEntry(entry: Record<string, unknown>, version: number): WorkerRecor
       WORKER_DESCRIPTION_MAX_LENGTH,
     ),
     ...(model === undefined ? {} : { model }),
+    ...(agentPreset === undefined ? {} : { agentPreset }),
   }
 }
 
@@ -171,6 +189,7 @@ function readEntry(entry: Record<string, unknown>, version: number): WorkerRecor
 function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
   const driver: WorkerDriver = worker.driver === 'robot' ? 'robot' : 'agent'
   const model = driver === 'agent' ? normalizeWorkerModel(worker.model) : undefined
+  const agentPreset = driver === 'agent' ? normalizeAgentPreset(worker.agentPreset) : undefined
   const id = typeof worker.id === 'string' ? worker.id.trim() : ''
   return {
     id,
@@ -185,6 +204,7 @@ function normalizeRecord(worker: WorkerRecordInput): WorkerRecord {
       WORKER_DESCRIPTION_MAX_LENGTH,
     ),
     ...(model === undefined ? {} : { model }),
+    ...(agentPreset === undefined ? {} : { agentPreset }),
   }
 }
 
@@ -295,6 +315,7 @@ export async function writeWorkerRegistry({
         avatar: worker.avatar,
         description: worker.description,
         ...(worker.model === undefined ? {} : { model: worker.model }),
+        ...(worker.agentPreset === undefined ? {} : { agentPreset: worker.agentPreset }),
       }
     }),
   }
@@ -386,6 +407,15 @@ export function invalidModelError(model: unknown): Error & { code: string } {
     `模型选择不合法：需要非空的 provider 与 model（收到 ${JSON.stringify(model)}）`,
   )
   return Object.assign(error, { code: 'invalid-model' })
+}
+
+/**
+ * 生成「执行者预设不合法」错误。
+ *
+ */
+export function invalidAgentPresetError(preset: unknown): Error & { code: string } {
+  const error = new Error(`执行者预设不合法：需要非空的预设 id（收到 ${JSON.stringify(preset)}）`)
+  return Object.assign(error, { code: 'invalid-agent-preset' })
 }
 
 /**
@@ -632,6 +662,56 @@ export async function setWorkerModel({
     delete worker.model
   } else {
     worker.model = next
+  }
+  await writeWorkerRegistry({
+    file: registryFile,
+    workers: registry.workers.map((entry) => (entry.id === workerId ? worker : entry)),
+  })
+  return { worker }
+}
+
+/**
+ * 改一个智能体新会话的默认执行者预设：只动登记表里的 `agentPreset` 字段。
+ *
+ * - `agentPreset: null` 表示清除配置、跟随工作流插件的 `workerPreset`；
+ * - 非空字符串原样保存；空串 / 类型不对抛 `code = 'invalid-agent-preset'`；
+ *   预设是否存在由路由用 `agentPresets` 服务校验（服务缺失时只校验形状）；
+ * - 标识符不在登记表里抛 `code = 'unknown-worker'`；
+ * - 机器人只读，抛 `code = 'robot-worker'`；
+ * - 登记文件损坏抛 `code = 'registry-unreadable'`。
+ */
+export async function setWorkerPreset({
+  file,
+  id,
+  agentPreset,
+}: {
+  file?: string | undefined
+  id?: string | undefined
+  agentPreset?: string | null | undefined
+} = {}): Promise<{ worker: WorkerRecord }> {
+  const registryFile = requireRegistryFile(file)
+  if (!isResolvableWorkerId(id)) throw invalidIdError(id)
+  const next =
+    agentPreset === null || agentPreset === undefined
+      ? undefined
+      : normalizeAgentPreset(agentPreset)
+  if (agentPreset !== null && agentPreset !== undefined && next === undefined) {
+    throw invalidAgentPresetError(agentPreset)
+  }
+
+  const registry = await readWorkerRegistry({ file: registryFile })
+  if (registry.corrupt) throw registryUnreadableError(registryFile)
+
+  const workerId = id.trim()
+  const current = findWorker(registry, workerId)
+  if (current === undefined) throw unknownWorkerError(workerId)
+  if (current.driver !== 'agent') throw robotWorkerError(workerId)
+
+  const worker: WorkerRecord = { ...current }
+  if (next === undefined) {
+    delete worker.agentPreset
+  } else {
+    worker.agentPreset = next
   }
   await writeWorkerRegistry({
     file: registryFile,

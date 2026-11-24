@@ -172,7 +172,12 @@ export interface TaskTypeDefinition {
   creates?: CreationDefinition[]
   /** 仅人岗位：点名的助理执行者标识符。 */
   assistant?: string | null
-  mode?: string | null
+  /** 仅智能体岗位：以计划模式起步。 */
+  plan?: boolean
+  /** 仅智能体岗位：执行会话使用的执行者预设 id。 */
+  agentPreset?: string
+  /** 同一作业内这类任务最多同时进行几条；省略等同 1。 */
+  concurrency?: number
   /** 仅智能体岗位：`none` 不注入、`guard` 保护检查、`create` 让执行者建 worktree。 */
   worktree?: 'none' | 'guard' | 'create'
 }

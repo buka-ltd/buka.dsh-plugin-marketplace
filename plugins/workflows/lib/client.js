@@ -133,6 +133,12 @@ window.__ModuleLoader__.load({
     		emoji: "🍄",
     		color: "#EB5757",
     		labelKey: "avatarMushroom"
+    	},
+    	{
+    		id: "robot",
+    		emoji: "🤖",
+    		color: "#2F80ED",
+    		labelKey: "avatarRobot"
     	}
     ];
     AVATARS.map((preset) => preset.id);
@@ -427,7 +433,7 @@ window.__ModuleLoader__.load({
     	positionsEmpty: "This definition has no positions.",
     	channelsEmpty: "This definition has no channels.",
     	builtinTypeTag: "Built-in task type",
-    	builtinTypeHint: "Id, label and switches are fixed; actions, assistant, plan and worktree are unavailable.",
+    	builtinTypeHint: "Id, label and switches are fixed; actions, assistant, plan, preset, concurrency and worktree are unavailable.",
     	positionTaskTypes: "Task types it handles",
     	initialContent: "Creates a task with content",
     	initialNoContent: "Creates a task",
@@ -437,6 +443,8 @@ window.__ModuleLoader__.load({
     	taskTypeActions: "Actions",
     	taskTypeCreates: "Creates",
     	taskTypeAssistant: "Assistant",
+    	taskTypePreset: "Preset",
+    	taskTypeConcurrency: "Concurrency",
     	taskTypeModePlan: "Plan",
     	taskTypeWorktree: "New worktree",
     	taskTypeWorktreeGuard: "Worktree guard",
@@ -551,7 +559,7 @@ window.__ModuleLoader__.load({
     	boardStart: "Start",
     	boardEnd: "End",
     	boardStarter: "Starter",
-    	boardEngine: "Engine",
+    	boardEngine: "Workflow Engine",
     	boardColumnPending: "Queued",
     	boardColumnReady: "Claimable",
     	boardColumnRunning: "In progress",
@@ -729,7 +737,7 @@ window.__ModuleLoader__.load({
     	positionsEmpty: "这个定义没有岗位。",
     	channelsEmpty: "这个定义没有通道。",
     	builtinTypeTag: "内建任务类型",
-    	builtinTypeHint: "id、展示名与动作 / 助理 / plan / 工作树等开关固定，不可在定义里配置。",
+    	builtinTypeHint: "id、展示名与动作 / 助理 / 计划 / 预设 / 并发 / 工作树等开关固定，不可在定义里配置。",
     	positionTaskTypes: "可处理的任务类型",
     	initialContent: "创建带任务内容的任务",
     	initialNoContent: "创建任务（无内容）",
@@ -739,6 +747,8 @@ window.__ModuleLoader__.load({
     	taskTypeActions: "动作",
     	taskTypeCreates: "完成后创建",
     	taskTypeAssistant: "助理",
+    	taskTypePreset: "模式",
+    	taskTypeConcurrency: "并发",
     	taskTypeModePlan: "计划",
     	taskTypeWorktree: "新建工作树",
     	taskTypeWorktreeGuard: "工作树保护",
@@ -853,7 +863,7 @@ window.__ModuleLoader__.load({
     	boardStart: "开始",
     	boardEnd: "结束",
     	boardStarter: "发起人",
-    	boardEngine: "引擎",
+    	boardEngine: "Workflow引擎",
     	boardColumnPending: "排队",
     	boardColumnReady: "待认领",
     	boardColumnRunning: "进行中",
@@ -2661,7 +2671,7 @@ window.__ModuleLoader__.load({
     	return h("article", {
     		key: id === "" ? type.label ?? "type" : id,
     		className: "buka-workflows-typeCard"
-    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.mode === "plan" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null, type.worktree === "guard" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktreeGuard")) : type.worktree === "create" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktree")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
+    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.plan === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null, typeof type.agentPreset === "string" && type.agentPreset !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypePreset")} · ${type.agentPreset}`) : null, typeof type.concurrency === "number" && type.concurrency > 1 ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeConcurrency")} · ${String(type.concurrency)}`) : null, type.worktree === "guard" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktreeGuard")) : type.worktree === "create" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktree")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
     		text: type.definition,
     		className: "buka-workflows-typeDesc",
     		expandLabel: t("expandText"),
@@ -3070,6 +3080,13 @@ window.__ModuleLoader__.load({
     /** 并行前向通道的标签沿曲线错开的起点 / 跨度，避免彼此压字。 */
     const PARALLEL_LABEL_START = .26;
     const PARALLEL_LABEL_SPREAD = .48;
+    /** 通道标签的字号，与样式表里 `.buka-workflows-edgeLabel` 保持一致。 */
+    const EDGE_LABEL_FONT_SIZE = 11;
+    /** 标签里拉丁字符的估算字宽（中文按一个字号算）。 */
+    const EDGE_LABEL_LATIN_WIDTH = 6.2;
+    /** 标签离画布边缘、离节点的最小留白。 */
+    const EDGE_LABEL_MARGIN = 6;
+    const EDGE_LABEL_CLEARANCE = 4;
     /** 回向通道绕行额外留白（单侧）。 */
     const BACK_EXTRA = 12;
     /** 同一节点侧边多个端口展开的最大高度。 */
@@ -3082,6 +3099,13 @@ window.__ModuleLoader__.load({
     const PORT_INSET = 4;
     /** 箭头离节点边缘的距离。 */
     const ARROW_INSET = 5;
+    /**
+    * 回向通道固定走右侧：向上的回边和向下的跨层通道分居两侧，避免两条线在
+    * 同一条车道上重叠或交错。
+    */
+    const BACK_SIDE = "right";
+    /** 跨层前向通道固定走左侧，与回向通道分居两侧。 */
+    const STRADDLE_SIDE = "left";
     /**
     * 计算分层的上下坐标与通道路径。
     *
@@ -3210,9 +3234,23 @@ window.__ModuleLoader__.load({
     	}
     	let maxLaneLeft = -1;
     	let maxLaneRight = -1;
-    	for (const plan of detours) if (plan.side === "left") maxLaneLeft = Math.max(maxLaneLeft, plan.lane);
-    	else maxLaneRight = Math.max(maxLaneRight, plan.lane);
-    	const padLeft = maxLaneLeft < 0 ? 0 : BACK_OFFSET + maxLaneLeft * BACK_STEP + BACK_EXTRA;
+    	for (const plan of detours) {
+    		if (!usesOuterLane(plan)) continue;
+    		if (plan.side === "left") maxLaneLeft = Math.max(maxLaneLeft, plan.lane);
+    		else maxLaneRight = Math.max(maxLaneRight, plan.lane);
+    	}
+    	let labelHalfLeft = 0;
+    	for (const plan of straddlePlans.values()) {
+    		if (plan.side !== "left") continue;
+    		const labelled = edges[plan.index];
+    		if (labelled === void 0) continue;
+    		const text = typeof labelled.label === "string" ? labelled.label : "";
+    		labelHalfLeft = Math.max(labelHalfLeft, edgeLabelWidth(text) / 2);
+    	}
+    	const straddleInset = labelHalfLeft === 0 ? 0 : labelHalfLeft + EDGE_LABEL_CLEARANCE;
+    	const padLeftLane = maxLaneLeft < 0 ? 0 : BACK_OFFSET + maxLaneLeft * BACK_STEP + BACK_EXTRA;
+    	const padLeftLabel = labelHalfLeft === 0 ? 0 : BACK_OFFSET + Math.max(0, maxLaneLeft) * BACK_STEP + straddleInset + labelHalfLeft + EDGE_LABEL_MARGIN - SIDE_PAD;
+    	const padLeft = Math.max(padLeftLane, padLeftLabel);
     	const padRight = maxLaneRight < 0 ? 0 : BACK_OFFSET + maxLaneRight * BACK_STEP + BACK_EXTRA;
     	const width = width0 + padLeft + padRight;
     	const dx = SIDE_PAD + padLeft - nodeLeft;
@@ -3236,7 +3274,7 @@ window.__ModuleLoader__.load({
     		const key = seen === 0 ? baseKey : `${baseKey}#${seen}`;
     		const types = Array.isArray(edge.types) ? edge.types.filter((type) => typeof type === "string") : [];
     		const lanePlan = straddle ?? backPlan;
-    		const laneX = lanePlan === void 0 ? 0 : lanePlan.side === "right" ? curveRight + BACK_OFFSET + lanePlan.lane * BACK_STEP : curveLeft - BACK_OFFSET - lanePlan.lane * BACK_STEP;
+    		const laneX = lanePlan === void 0 ? 0 : lanePlan.side === "right" ? curveRight + BACK_OFFSET + lanePlan.lane * BACK_STEP : curveLeft - BACK_OFFSET - lanePlan.lane * BACK_STEP - (lanePlan === straddle ? straddleInset : 0);
     		const source = ports.source[index] ?? 0;
     		const target = ports.target[index] ?? 0;
     		const geometry = back && backPlan !== void 0 ? backEdgeGeometry(backPlan, laneX) : straddle !== void 0 ? straddleEdgeGeometry(straddle, laneX, source, target) : forwardEdgeGeometry(from, to, forwardOffsets.get(index) ?? 0, forwardLabelTs.get(index) ?? .5, source, target);
@@ -3319,7 +3357,10 @@ window.__ModuleLoader__.load({
     	return layers;
     }
     /**
-    * 给回向通道选边、分端口。全部用节点中心坐标判断，结果与横向平移无关。
+    * 给回向通道排车道、分端口。全部用节点中心坐标判断，结果与横向平移无关。
+    *
+    * 回向通道固定走右侧车道；某一端的右侧被同排兄弟挡住时，这一端改从底边 /
+    * 顶边经层间空隙的横向轨道接入，不会为了绕开兄弟而换到左侧和向下的线抢道。
     *
     * @param edges
     * @param layers
@@ -3337,14 +3378,11 @@ window.__ModuleLoader__.load({
     		const from = byId.get(edge.from);
     		const to = byId.get(edge.to);
     		if (from === void 0 || to === void 0) continue;
-    		const sameLayer = from.layer === to.layer;
-    		const left = blockerCount(from, "left", rows) + (sameLayer ? 0 : blockerCount(to, "left", rows));
-    		const right = blockerCount(from, "right", rows) + (sameLayer ? 0 : blockerCount(to, "right", rows));
     		plans.push({
     			index,
     			from,
     			to,
-    			side: left < right ? "left" : "right",
+    			side: BACK_SIDE,
     			lane: 0,
     			yLow: Math.min(from.y, to.y),
     			yHigh: Math.max(from.y, to.y),
@@ -3356,12 +3394,14 @@ window.__ModuleLoader__.load({
     			targetTrackY: 0,
     			sourceOffset: 0,
     			targetOffset: 0,
+    			sourceFallbackOffset: 0,
+    			targetFallbackOffset: 0,
     			entryOffset: 0
     		});
     	}
     	for (const plan of plans) {
-    		if (plan.from.layer === plan.to.layer) continue;
     		plan.sourceSide = blockerCount(plan.from, plan.side, rows) === 0;
+    		if (plan.from.layer === plan.to.layer) continue;
     		plan.targetSide = blockerCount(plan.to, plan.side, rows) === 0;
     		if (!plan.sourceSide) slotOf(rowOf.get(plan.from.layer) ?? 0, (y) => {
     			plan.sourceTrackY = y;
@@ -3381,6 +3421,7 @@ window.__ModuleLoader__.load({
     		});
     	}
     	assignSameLayerEntries(plans);
+    	assignBackFallbackPorts(plans);
     	const byIndex = /* @__PURE__ */ new Map();
     	for (const plan of plans) byIndex.set(plan.index, plan);
     	return byIndex;
@@ -3388,9 +3429,9 @@ window.__ModuleLoader__.load({
     /**
     * 跨层前向通道：跳过中间层的边不能垂直穿过中间层的节点。
     *
-    * 优先从源节点侧边出线（该侧没有同排节点遮挡时），沿所有节点外侧的纵向车道
-    * 绕过中间层，再从目标侧边进线；侧边被挡住时退回层间空隙的横向轨道。
-    * 车道与回向通道共用，按 y 区间复用。
+    * 固定从左侧车道绕行：两侧都能从侧边进出时贴左侧走，某一端被同排兄弟挡住时
+    * 这一端退回层间空隙的横向轨道。左侧车道不给回向通道使用，向上的线不会和
+    * 向下的线叠在同一条车道上。
     *
     * @param edges
     * @param layers
@@ -3407,26 +3448,16 @@ window.__ModuleLoader__.load({
     		const from = byId.get(edge.from);
     		const to = byId.get(edge.to);
     		if (from === void 0 || to === void 0) continue;
-    		let innerLeft = Number.POSITIVE_INFINITY;
-    		let innerRight = Number.NEGATIVE_INFINITY;
-    		for (const [layer, group] of rows) {
-    			if (layer <= from.layer || layer >= to.layer) continue;
-    			for (const node of group) {
-    				innerLeft = Math.min(innerLeft, node.x - node.width / 2);
-    				innerRight = Math.max(innerRight, node.x + node.width / 2);
-    			}
-    		}
-    		const side = Math.abs(from.x - innerLeft) + Math.abs(to.x - innerLeft) < Math.abs(innerRight - from.x) + Math.abs(innerRight - to.x) ? "left" : "right";
     		const plan = {
     			index,
     			from,
     			to,
-    			side,
+    			side: STRADDLE_SIDE,
     			lane: 0,
     			yLow: from.y,
     			yHigh: to.y,
-    			sourceSide: blockerCount(from, side, rows) === 0,
-    			targetSide: blockerCount(to, side, rows) === 0,
+    			sourceSide: blockerCount(from, STRADDLE_SIDE, rows) === 0,
+    			targetSide: blockerCount(to, STRADDLE_SIDE, rows) === 0,
     			sourceTrackY: 0,
     			targetTrackY: 0,
     			sourceOffset: 0,
@@ -3445,6 +3476,22 @@ window.__ModuleLoader__.load({
     	const byIndex = /* @__PURE__ */ new Map();
     	for (const plan of plans) byIndex.set(plan.index, plan);
     	return byIndex;
+    }
+    /**
+    * 估算通道标签的宽度：渲染层会把超长标签截断成省略号，估宽按截断后的字符算，
+    * 免得一条很长但没有展示完的标签把落位推到别处。
+    *
+    * @param label 标签原文
+    * @returns 估算宽度
+    */
+    function edgeLabelWidth(label) {
+    	const chars = [...label];
+    	const shown = chars.length <= 14 ? chars : [...chars.slice(0, 13), "…"];
+    	let width = 0;
+    	for (const char of shown) if (char === "…") width += EDGE_LABEL_LATIN_WIDTH * 1.6;
+    	else if ((char.codePointAt(0) ?? 0) >= 11904) width += EDGE_LABEL_FONT_SIZE;
+    	else width += EDGE_LABEL_LATIN_WIDTH;
+    	return Math.round(width);
     }
     /**
     * 跨层前向通道的走线：侧边出 / 侧边入时直接沿车道上下；被挡住的一侧退回
@@ -3481,12 +3528,9 @@ window.__ModuleLoader__.load({
     			y: ty - ARROW_INSET,
     			angle: 90
     		},
-    		labelAt: plan.targetSide ? {
-    			x: (tx + laneX) / 2,
-    			y: ty - to.height / 2 - 7
-    		} : {
-    			x: tx + (laneX - tx) * .55,
-    			y: plan.targetTrackY
+    		labelAt: {
+    			x: laneX,
+    			y: (sy + ty) / 2
     		}
     	};
     }
@@ -3597,13 +3641,24 @@ window.__ModuleLoader__.load({
     	return count;
     }
     /**
+    * 绕行是否占用节点外侧的纵向车道：同层回绕在源侧被挡住时直接从行下方折回，
+    * 只走层间空隙，不需要外侧车道。
+    *
+    * @param plan
+    * @returns
+    */
+    function usesOuterLane(plan) {
+    	if (!("trackY" in plan)) return true;
+    	return !(plan.from.layer === plan.to.layer && !plan.sourceSide);
+    }
+    /**
     * 按纵向区间分配车道：短绕行先占内圈，长绕行套在外圈；区间不重叠的绕行复用同一条。
     *
     * @param plans 回向通道与跨层前向通道
     */
     function assignDetourLanes(plans) {
     	for (const side of ["left", "right"]) {
-    		const list = plans.filter((plan) => plan.side === side);
+    		const list = plans.filter((plan) => plan.side === side && usesOuterLane(plan));
     		list.sort((left, right) => left.yHigh - left.yLow - (right.yHigh - right.yLow) || left.yLow - right.yLow || left.index - right.index);
     		const lanes = [];
     		for (const plan of list) {
@@ -3726,6 +3781,46 @@ window.__ModuleLoader__.load({
     	}
     }
     /**
+    * 底边 / 顶边进出的回向通道在节点边缘上的横向端口：同一节点的多个绕行入口
+    * 沿胶囊直边错开，避免几条线在同一位置纵向重叠。
+    *
+    * @param plans
+    */
+    function assignBackFallbackPorts(plans) {
+    	const sources = /* @__PURE__ */ new Map();
+    	const targets = /* @__PURE__ */ new Map();
+    	for (const plan of plans) {
+    		if (!plan.sourceSide) {
+    			const list = sources.get(plan.from.id);
+    			if (list === void 0) sources.set(plan.from.id, [plan]);
+    			else list.push(plan);
+    		}
+    		if (!plan.targetSide && plan.from.layer !== plan.to.layer) {
+    			const list = targets.get(plan.to.id);
+    			if (list === void 0) targets.set(plan.to.id, [plan]);
+    			else list.push(plan);
+    		}
+    	}
+    	for (const list of sources.values()) {
+    		const node = list[0]?.from;
+    		if (node === void 0) continue;
+    		list.sort((left, right) => left.index - right.index);
+    		const offsets = portOffsets(list.length, node);
+    		list.forEach((plan, slot) => {
+    			plan.sourceFallbackOffset = offsets[slot] ?? 0;
+    		});
+    	}
+    	for (const list of targets.values()) {
+    		const node = list[0]?.to;
+    		if (node === void 0) continue;
+    		list.sort((left, right) => left.index - right.index);
+    		const offsets = portOffsets(list.length, node);
+    		list.forEach((plan, slot) => {
+    			plan.targetFallbackOffset = offsets[slot] ?? 0;
+    		});
+    	}
+    }
+    /**
     * 回向通道：从侧边出线，沿节点外侧的车道折回目标侧边。全程只有水平/垂直线段。
     *
     * @param plan
@@ -3734,10 +3829,11 @@ window.__ModuleLoader__.load({
     */
     function backEdgeGeometry(plan, laneX) {
     	const { from, to, side } = plan;
-    	const sx = plan.sourceSide ? sidePortX(from, side, plan.sourceOffset) : from.x;
-    	const sy = plan.sourceSide ? from.y + plan.sourceOffset : from.y + from.height / 2;
-    	if (from.layer === to.layer) return sameLayerBackGeometry(plan, laneX, sx, sy);
-    	const tx = plan.targetSide ? sidePortX(to, side, plan.targetOffset) : to.x;
+    	const sameLayer = from.layer === to.layer;
+    	const sx = plan.sourceSide ? sidePortX(from, side, plan.sourceOffset) : from.x + plan.sourceFallbackOffset;
+    	const sy = plan.sourceSide ? from.y + plan.sourceOffset : from.y + (sameLayer && !plan.trackBelow ? -from.height / 2 : from.height / 2);
+    	if (sameLayer) return sameLayerBackGeometry(plan, laneX, sx, sy);
+    	const tx = plan.targetSide ? sidePortX(to, side, plan.targetOffset) : to.x + plan.targetFallbackOffset;
     	const ty = plan.targetSide ? to.y + plan.targetOffset : to.y + to.height / 2;
     	const points = [[sx, sy]];
     	if (!plan.sourceSide) points.push([sx, plan.sourceTrackY]);
@@ -3781,7 +3877,7 @@ window.__ModuleLoader__.load({
     	const cap = Math.max(0, Math.abs(plan.entryOffset) - straight);
     	const reach = Math.sqrt(Math.max(0, radius * radius - cap * cap));
     	const edgeY = plan.trackBelow ? to.y + reach : to.y - reach;
-    	const d = `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`;
+    	const d = plan.sourceSide ? `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}` : `M ${fmt(sx)} ${fmt(sy)} L ${fmt(sx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`;
     	return {
     		d,
     		hit: d,
@@ -3791,7 +3887,7 @@ window.__ModuleLoader__.load({
     			angle: plan.trackBelow ? -90 : 90
     		},
     		labelAt: {
-    			x: (laneX + tx) / 2,
+    			x: ((plan.sourceSide ? laneX : sx) + tx) / 2,
     			y: plan.trackY
     		}
     	};
@@ -4124,10 +4220,8 @@ window.__ModuleLoader__.load({
     function round(value) {
     	return Math.round(value * 100) / 100;
     }
-    /** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断。 */
-    const LABEL_MAX = 14;
-    /** 截断后的画布标签。 */
-    function clipLabel(label, max = LABEL_MAX) {
+    /** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断，截断上限与布局估宽共用。 */
+    function clipLabel(label, max = 14) {
     	const chars = [...label];
     	return chars.length <= max ? label : `${chars.slice(0, max - 1).join("")}…`;
     }
@@ -6809,6 +6903,8 @@ window.__ModuleLoader__.load({
     		case "outside-root": return t("errOutsideRoot");
     		case "workspace-unavailable": return t("errWorkspaceUnavailable");
     		case "invalid-model": return t("errInvalidModel");
+    		case "invalid-agent-preset": return t("errInvalidAgentPreset");
+    		case "unknown-agent-preset": return t("errUnknownAgentPreset");
     		case "invalid-driver": return t("errInvalidDriver");
     		case "too-large": return t("errTooLarge");
     		case "invalid-content": return t("errInvalidContent");
@@ -6932,6 +7028,8 @@ window.__ModuleLoader__.load({
     const FILE_ROUTE = "/buka-workers/file";
     const DESCRIPTION_ROUTE = "/buka-workers/description";
     const MODELS_ROUTE = "/buka-workers/models";
+    const PRESETS_ROUTE = "/buka-workers/presets";
+    const PRESET_ROUTE = "/buka-workers/preset";
     const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
     const REMOVE_ROUTE = "/buka-workers/remove";
     const REVEAL_ROUTE = "/buka-workers/reveal";
@@ -6998,7 +7096,7 @@ window.__ModuleLoader__.load({
     *
     */
     function createDetailActions(state, t) {
-    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, nameDraft, nameSaving, setNameSaving, setNameError, selectedId, descriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, modelSaving, setModelSaving, setModelError, patchWorker, flash } = state;
+    	const { mutating, avatarTarget, setAvatarTarget, draftAvatar, setDraftAvatar, avatarSaving, setAvatarSaving, setAvatarError, setAvatarOpen, nameDraft, nameSaving, setNameSaving, setNameError, selectedId, descriptionDraft, descriptionSaving, setDescriptionSaving, setDescriptionError, modelDraft, modelSaving, setModelSaving, setModelError, agentPresetDraft, agentPresetSaving, setAgentPresetSaving, setAgentPresetError, patchWorker, flash } = state;
     	/**
     	* 打开「更换头像」对话框：草稿从执行者当前头像开始。
     	*
@@ -7132,6 +7230,30 @@ window.__ModuleLoader__.load({
     			setModelSaving(false);
     		}
     	}
+    	/**
+    	* 保存智能体的默认执行者预设；`null` 表示跟随工作流插件的 `workerPreset`。
+    	*
+    	* 与模型一样由页面在改动后自动调用，成功后只局部更新列表。
+    	*/
+    	async function saveWorkerPreset() {
+    		if (selectedId === null || agentPresetSaving) return;
+    		setAgentPresetSaving(true);
+    		setAgentPresetError(null);
+    		try {
+    			const saved = (await requestJson(PRESET_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({
+    					id: selectedId,
+    					agentPreset: agentPresetDraft
+    				})
+    			}))?.worker?.agentPreset;
+    			patchWorker(selectedId, { agentPreset: typeof saved === "string" && saved !== "" ? saved : null });
+    		} catch (failure) {
+    			setAgentPresetError(`${t("presetSaveFailed")} ${failureText(t, failure)}`);
+    		} finally {
+    			setAgentPresetSaving(false);
+    		}
+    	}
     	return {
     		openAvatarDialog,
     		closeAvatarDialog,
@@ -7140,7 +7262,8 @@ window.__ModuleLoader__.load({
     		saveWorkerName,
     		normalizedDescription,
     		saveDescription,
-    		saveWorkerModel
+    		saveWorkerModel,
+    		saveWorkerPreset
     	};
     }
     // .build/workflows/client/workers/actions/skills.js
@@ -7523,7 +7646,7 @@ window.__ModuleLoader__.load({
     	*/
     	async function openWorker(worker) {
     		if (isRobotWorker(worker)) {
-    			flash("error", t("robotReadOnly"));
+    			flash("error", t("errRobotWorker"));
     			return;
     		}
     		if (worker.mounted !== true || typeof worker.workspaceId !== "string" || worker.workspaceId === "") {
@@ -7553,7 +7676,7 @@ window.__ModuleLoader__.load({
     	async function revealWorker(worker) {
     		if (mutating) return;
     		if (isRobotWorker(worker)) {
-    			flash("error", t("robotReadOnly"));
+    			flash("error", t("errRobotWorker"));
     			return;
     		}
     		setBusy(`reveal:${worker.id}`);
@@ -7581,7 +7704,7 @@ window.__ModuleLoader__.load({
     	async function openWorkerWith(worker, appId) {
     		if (mutating || appId === "") return;
     		if (isRobotWorker(worker)) {
-    			flash("error", t("robotReadOnly"));
+    			flash("error", t("errRobotWorker"));
     			return;
     		}
     		setBusy(`reveal:${worker.id}`);
@@ -7612,7 +7735,7 @@ window.__ModuleLoader__.load({
     	*/
     	async function mountWorker(worker) {
     		if (isRobotWorker(worker)) {
-    			flash("error", t("robotReadOnly"));
+    			flash("error", t("errRobotWorker"));
     			return;
     		}
     		const workspaces = service("workspaces");
@@ -7762,7 +7885,7 @@ window.__ModuleLoader__.load({
     	*/
     	async function openDeleteDialog(worker) {
     		if (isRobotWorker(worker)) {
-    			flash("error", t("robotReadOnly"));
+    			flash("error", t("errRobotWorker"));
     			return;
     		}
     		setDeleteDialog({
@@ -7948,6 +8071,18 @@ window.__ModuleLoader__.load({
     	const [modelDraft, setModelDraft] = react.default.useState(null);
     	const [modelSaving, setModelSaving] = react.default.useState(false);
     	const [modelError, setModelError] = react.default.useState(null);
+    	/**
+    	* 「执行者预设」区块：预设目录按需加载；`agentPresetDraft` 为 null 表示跟随
+    	* 工作流插件默认（`workerPreset`）。服务不可用时选择器禁用。
+    	*/
+    	const [agentPresetCatalog, setAgentPresetCatalog] = react.default.useState({
+    		status: "idle",
+    		data: null,
+    		error: null
+    	});
+    	const [agentPresetDraft, setAgentPresetDraft] = react.default.useState(null);
+    	const [agentPresetSaving, setAgentPresetSaving] = react.default.useState(false);
+    	const [agentPresetError, setAgentPresetError] = react.default.useState(null);
     	/** 详情页状态：`selectedId` 非空时显示配置视图，`tab` 是页签。 */
     	const [selectedId, setSelectedId] = react.default.useState(null);
     	const [tab, setTab] = react.default.useState("settings");
@@ -8101,6 +8236,30 @@ window.__ModuleLoader__.load({
     		})));
     	}
     	/**
+    	* 按需读取执行者预设目录：同一时间只发一个请求；`force` 用于重新读取。
+    	*
+    	*/
+    	function loadAgentPresets(force = false) {
+    		if (!force && (agentPresetCatalog.status === "loading" || agentPresetCatalog.status === "ready")) return;
+    		setAgentPresetCatalog((prev) => ({
+    			status: "loading",
+    			data: prev.data,
+    			error: null
+    		}));
+    		requestJson(PRESETS_ROUTE).then((body) => setAgentPresetCatalog({
+    			status: "ready",
+    			data: {
+    				available: body.available === true,
+    				presets: Array.isArray(body.presets) ? body.presets : []
+    			},
+    			error: null
+    		}), (failure) => setAgentPresetCatalog((prev) => ({
+    			status: "error",
+    			data: prev.data,
+    			error: messageOf$1(failure)
+    		})));
+    	}
+    	/**
     	* 用 Host 的响应局部更新一个执行者，不整表刷新，避免详情页闪烁。
     	*
     	*/
@@ -8217,6 +8376,9 @@ window.__ModuleLoader__.load({
     		setInstallError(null);
     		setModelDraft(worker.model ?? null);
     		setModelError(null);
+    		loadAgentPresets();
+    		setAgentPresetDraft(typeof worker.agentPreset === "string" && worker.agentPreset !== "" ? worker.agentPreset : null);
+    		setAgentPresetError(null);
     		setNotice(null);
     	}
     	/** 返回列表页，并清掉详情页临时状态。 */
@@ -8231,6 +8393,7 @@ window.__ModuleLoader__.load({
     		setInstallOpen(false);
     		setInstallError(null);
     		setModelError(null);
+    		setAgentPresetError(null);
     		setNotice(null);
     	}
     	/**
@@ -8241,7 +8404,10 @@ window.__ModuleLoader__.load({
     		if (next === tab) return;
     		setNotice(null);
     		setTab(next);
-    		if (next === "settings") loadModelCatalog();
+    		if (next === "settings") {
+    			loadModelCatalog();
+    			loadAgentPresets();
+    		}
     		if (next === "files" && selectedWorker !== null) loadFiles(selectedWorker);
     	}
     	return {
@@ -8296,6 +8462,14 @@ window.__ModuleLoader__.load({
     		modelError,
     		setModelError,
     		loadModelCatalog,
+    		agentPresetCatalog,
+    		agentPresetDraft,
+    		setAgentPresetDraft,
+    		agentPresetSaving,
+    		setAgentPresetSaving,
+    		agentPresetError,
+    		setAgentPresetError,
+    		loadAgentPresets,
     		selectedId,
     		setSelectedId,
     		tab,
@@ -9064,10 +9238,10 @@ window.__ModuleLoader__.load({
     	})));
     }
     /**
-    * 「设置」页签：把名称、职责与模型收在同一个页面里。
+    * 「设置」页签：把名称、职责、执行者预设与模型收在同一个页面里。
     *
-    * 三块都没有保存按钮：名称与职责写登记表，模型写新会话的模型选择；都按改动
-    * 自动保存，失败的提示留在各自的区块里；进入页签时会预读模型目录。
+    * 四块都没有保存按钮：名称与职责写登记表，预设与模型决定新会话怎么开；都按
+    * 改动自动保存，失败的提示留在各自的区块里；进入页签时会预读预设与模型目录。
     *
     */
     function SettingsSection({ t, worker, state, detailActions }) {
@@ -9081,12 +9255,99 @@ window.__ModuleLoader__.load({
     		worker,
     		state,
     		detailActions
+    	}), h(PresetSection, {
+    		t,
+    		worker,
+    		state,
+    		detailActions
     	}), h(ModelSection, {
     		t,
     		worker,
     		state,
     		detailActions
     	}));
+    }
+    /**
+    * 「执行者预设」区块：给智能体选新会话默认使用的模式（DSH 的 agent preset）。
+    *
+    * 空选项表示跟随工作流插件的 `workerPreset`；`agentPresets` 服务不可用时选择器
+    * 禁用并提示；激活失败（broken）的预设标灰。只影响之后新开的会话。
+    */
+    function PresetSection({ t, worker, state, detailActions }) {
+    	const { agentPresetCatalog, agentPresetDraft, setAgentPresetDraft, agentPresetSaving, agentPresetError, setAgentPresetError } = state;
+    	const { saveWorkerPreset } = detailActions;
+    	const catalog = agentPresetCatalog.data;
+    	const available = catalog?.available === true;
+    	const presets = catalog?.presets ?? [];
+    	const dirty = agentPresetDraft !== (typeof worker.agentPreset === "string" && worker.agentPreset !== "" ? worker.agentPreset : null);
+    	const current = presets.find((preset) => preset.id === agentPresetDraft);
+    	const pendingSave = react.default.useRef({
+    		dirty: false,
+    		save: saveWorkerPreset
+    	});
+    	react.default.useEffect(() => {
+    		const pending = dirty && agentPresetError === null;
+    		pendingSave.current = {
+    			dirty: pending,
+    			save: saveWorkerPreset
+    		};
+    		if (!pending || agentPresetSaving) return void 0;
+    		const timer = setTimeout(() => void saveWorkerPreset(), 250);
+    		return () => clearTimeout(timer);
+    	}, [
+    		agentPresetDraft,
+    		dirty,
+    		agentPresetError,
+    		agentPresetSaving
+    	]);
+    	react.default.useEffect(() => () => {
+    		if (pendingSave.current.dirty) pendingSave.current.save();
+    	}, []);
+    	const options = [h("option", {
+    		key: "follow",
+    		value: ""
+    	}, t("presetFollowWorkflow")), ...presets.map((preset) => h("option", {
+    		key: preset.id,
+    		value: preset.id,
+    		disabled: preset.broken !== null,
+    		...preset.broken === null ? {} : { title: preset.broken }
+    	}, preset.name !== "" ? preset.name : preset.id))];
+    	if (agentPresetDraft !== null && current === void 0) options.push(h("option", {
+    		key: `saved:${agentPresetDraft}`,
+    		value: agentPresetDraft
+    	}, agentPresetDraft));
+    	function pickPreset(value) {
+    		setAgentPresetError(null);
+    		setAgentPresetDraft(value === "" ? null : value);
+    	}
+    	const currentLabel = current === void 0 ? agentPresetDraft ?? "" : current.name !== "" ? current.name : current.id;
+    	const currentHint = agentPresetDraft === null ? h("p", { className: "buka-workers-fieldHint" }, t("presetFollowWorkflowHint")) : current !== void 0 && current.broken !== null ? h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, `${t("presetBroken")} ${current.broken}`) : h("p", { className: "buka-workers-fieldHint" }, `${t("presetCurrent")} ${currentLabel}`);
+    	return h("section", { className: "buka-workers-modelSection" }, h("div", { className: "buka-workers-sectionHead" }, h("h2", { className: "buka-workers-sectionTitle" }, t("presetTitle")), h("span", {
+    		className: "buka-workers-autosave",
+    		role: "status",
+    		"aria-live": "polite"
+    	}, agentPresetSaving ? t("saving") : dirty ? t("autosavePending") : null)), h("p", { className: "buka-workers-fieldHint" }, t("presetHint")), agentPresetCatalog.status === "loading" && catalog === null ? h("p", {
+    		className: "buka-workers-fieldHint",
+    		role: "status"
+    	}, t("loading")) : null, agentPresetCatalog.status === "error" ? h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, `${t("presetLoadFailed")} ${agentPresetCatalog.error ?? ""}`) : null, catalog !== null && !available ? h("p", {
+    		className: "buka-workers-notice",
+    		role: "status"
+    	}, t("presetUnavailable")) : null, h("label", { className: "buka-workers-field" }, h("span", { className: "buka-workers-fieldLabel" }, t("presetTitle")), h("select", {
+    		className: "buka-workers-select",
+    		value: agentPresetDraft ?? "",
+    		"aria-label": t("presetTitle"),
+    		disabled: !available,
+    		onChange: (event) => pickPreset(event.target.value)
+    	}, ...options)), currentHint, agentPresetError === null ? null : h("p", {
+    		className: "buka-workers-formError",
+    		role: "alert"
+    	}, agentPresetError));
     }
     /**
     * 「名称」区块：执行者的展示名（可选）。目录与工作区都按标识符定位，改名只改
@@ -9658,13 +9919,13 @@ window.__ModuleLoader__.load({
     			event.stopPropagation();
     			if (canOpen) openDetail(worker);
     		}
-    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.builtin === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("systemWorker")) : null, robot ? null : h(MountedTag, {
+    	}, workerIdentityLabel(worker)), h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: robot ? "info" : "neutral" }, robot ? t("driverRobot") : t("driverAgent")), worker.builtin === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("builtinWorker")) : null, robot ? null : h(MountedTag, {
     		t,
     		worker
     	}), robot ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, countBadge(skills.length, t)), missing ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "warning" }, t("missingDir")) : null), h("div", {
     		className: "buka-workers-titleActions",
     		onClick: (event) => event.stopPropagation()
-    	}, ...actions.filter(Boolean))), h("p", { className: `buka-workers-cardDesc${description === "" ? " is-empty" : ""}` }, description === "" ? t("noDescription") : description), robot ? h("p", { className: "buka-workers-hint" }, t("robotReadOnly")) : null, missing ? h("p", { className: "buka-workers-hint" }, t("missingDirHint")) : null));
+    	}, ...actions.filter(Boolean))), h("p", { className: `buka-workers-cardDesc${description === "" ? " is-empty" : ""}` }, description === "" ? t("noDescription") : description), missing ? h("p", { className: "buka-workers-hint" }, t("missingDirHint")) : null));
     }
     /** 列表页：登记文件提示、加载 / 失败 / 空状态与执行者卡片（不展示目录）。 */
     function WorkerList({ t, state, actions }) {
@@ -10326,6 +10587,15 @@ window.__ModuleLoader__.load({
     	modelEmpty: "No models are available. Configure a provider in the DSH model settings first.",
     	modelSomeFailed: "Some providers could not be read:",
     	modelUnavailable: "This composition has no model catalog (ctx.llm is unavailable), so no model can be selected.",
+    	presetTitle: "Mode",
+    	presetHint: "Pick the agent preset (mode) new sessions of this worker start with. Task types can override it; changes are saved automatically and only affect new sessions.",
+    	presetFollowWorkflow: "Follow the workflow default",
+    	presetFollowWorkflowHint: "New sessions start with the workflow plugin default mode.",
+    	presetCurrent: "Current mode:",
+    	presetBroken: "This mode cannot start a session:",
+    	presetSaveFailed: "Could not save the mode:",
+    	presetLoadFailed: "Could not read the modes:",
+    	presetUnavailable: "This composition has no agent presets service (ctx.agentPresets is unavailable), so no mode can be selected.",
     	created: "Created worker:",
     	createExisting: "Worker already existed:",
     	createFailed: "Could not create the worker:",
@@ -10379,8 +10649,7 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "Not mounted",
     	driverAgent: "Agent",
     	driverRobot: "Robot",
-    	systemWorker: "System",
-    	robotReadOnly: "Built-in robot: read-only, with no directory, session or settings.",
+    	builtinWorker: "Built-in",
     	missingDir: "Missing directory",
     	missingDirHint: "This worker directory no longer exists. You can delete the record and create it again.",
     	missingDirDetail: "This worker directory no longer exists, so file browsing and skills operations will fail.",
@@ -10475,6 +10744,7 @@ window.__ModuleLoader__.load({
     	avatarPenguin: "Penguin",
     	avatarUnicorn: "Unicorn",
     	avatarMushroom: "Mushroom",
+    	avatarRobot: "Robot",
     	errInvalidId: "Invalid identifier: use ^[a-z][a-z0-9_-]{0,63}$ (lowercase letters, digits, \"_\" and \"-\", starting with a letter). It cannot be changed after creation.",
     	errInvalidName: "Invalid name: use a single line of at most 64 characters.",
     	errInvalidAvatar: "That avatar is not available. Pick one from the list.",
@@ -10490,6 +10760,8 @@ window.__ModuleLoader__.load({
     	errWorkspaceUnavailable: "The workspace registry is unavailable, so the worker could not be deleted safely. Refresh and try again.",
     	errInvalidDriver: "Only agents can be created; robots are built into the plugin.",
     	errInvalidModel: "The model selection is invalid. Pick a provider and model from the catalog.",
+    	errInvalidAgentPreset: "The mode is invalid. Pick a mode from the list.",
+    	errUnknownAgentPreset: "That mode is not available in this composition.",
     	workflowStatusActive: "Available",
     	workflowStatusRetired: "Disabled",
     	workflowStatusDraft: "Draft",
@@ -10547,6 +10819,15 @@ window.__ModuleLoader__.load({
     	modelEmpty: "当前没有可用模型，请先在 DSH 的模型设置里配置提供方。",
     	modelSomeFailed: "部分提供方读取失败：",
     	modelUnavailable: "当前组合没有模型目录（ctx.llm 不可用），无法为智能体选择模型。",
+    	presetTitle: "模式",
+    	presetHint: "选择这个执行者新开会话时使用的执行者预设（模式）；任务类型可以单独覆盖。改动后自动保存，只影响之后新开的会话。",
+    	presetFollowWorkflow: "跟随工作流默认",
+    	presetFollowWorkflowHint: "新会话使用工作流插件配置的默认模式。",
+    	presetCurrent: "当前模式：",
+    	presetBroken: "这个模式无法启动会话：",
+    	presetSaveFailed: "保存模式失败：",
+    	presetLoadFailed: "读取模式失败：",
+    	presetUnavailable: "当前组合没有执行者预设服务（ctx.agentPresets 不可用），无法选择模式。",
     	created: "已创建执行者：",
     	createExisting: "执行者已存在：",
     	createFailed: "创建失败：",
@@ -10600,8 +10881,7 @@ window.__ModuleLoader__.load({
     	unmountedBadge: "未挂载",
     	driverAgent: "智能体",
     	driverRobot: "机器人",
-    	systemWorker: "系统",
-    	robotReadOnly: "内建机器人：只读，没有目录、会话与配置。",
+    	builtinWorker: "内置",
     	missingDir: "目录缺失",
     	missingDirHint: "这个执行者目录已经不存在了，可以删除记录后重新创建。",
     	missingDirDetail: "这个执行者目录已经不存在了，文件浏览与 skills 操作都会失败。",
@@ -10696,6 +10976,7 @@ window.__ModuleLoader__.load({
     	avatarPenguin: "企鹅",
     	avatarUnicorn: "独角兽",
     	avatarMushroom: "蘑菇",
+    	avatarRobot: "机器人",
     	errInvalidId: "标识符不合法：需匹配 ^[a-z][a-z0-9_-]{0,63}$（小写字母开头，可带小写字母、数字、_ 与 -），且创建后不可修改。",
     	errInvalidName: "名称不合法：需要不超过 64 个字符的单行文本。",
     	errInvalidAvatar: "这个头像不可用，请从列表里重新选一个。",
@@ -10711,6 +10992,8 @@ window.__ModuleLoader__.load({
     	errWorkspaceUnavailable: "工作区注册服务不可用，无法安全删除这个执行者；请刷新后重试。",
     	errInvalidDriver: "只能创建智能体；机器人由插件内建。",
     	errInvalidModel: "模型选择无效，请从模型目录里重新选择提供方与模型。",
+    	errInvalidAgentPreset: "模式无效，请从列表里重新选择。",
+    	errUnknownAgentPreset: "当前组合没有这个模式，请重新选择。",
     	workflowStatusActive: "可用",
     	workflowStatusRetired: "已停用",
     	workflowStatusDraft: "草稿",

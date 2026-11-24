@@ -19,9 +19,8 @@
  * 预设头像 id。顺序决定「新建时挑一个没被占用的头像」的优先顺位，也是标识符
  * 哈希的取模空间；只增不改，删除会让旧登记表里的 id 落回默认。
  *
- * 这里**没有** 🤖 执行者 emoji：那是历史遗留的「通用型执行者」专属头像，通用型
- * 执行者已移除，`worker` 这个 id 不再使用；旧登记表里残留的 `worker` id 会按
- * 标识符哈希落回其它预设。
+ * `robot`（🤖）是内建执行者 `engine` 的默认头像，按「只增不改」追加在末尾；
+ * 历史遗留的 `worker` id 仍在预设之外，会按标识符哈希落回其它预设。
  *
  */
 export const AVATAR_IDS = Object.freeze([
@@ -40,6 +39,7 @@ export const AVATAR_IDS = Object.freeze([
   'penguin',
   'unicorn',
   'mushroom',
+  'robot',
 ] as const)
 
 /** 没有任何可用 id 时的兜底头像。 */

@@ -24,6 +24,7 @@ import {
   ensureBuiltinWorkers,
   resolveWorkerRegistryFile,
   setWorkerModel,
+  setWorkerPreset,
 } from '../plugins/workflows/src/workers/worker-store.ts'
 
 test('workers service: summarizeWorker keeps orchestration fields and driver/program', () => {
@@ -411,6 +412,7 @@ function makePlanCommands({ available = true, kind = 'success' } = {}) {
 test('workers service: list returns summarized registry workers including built-in robots', async () => {
   const home = await makeWorkerHome()
   try {
+    await setWorkerPreset({ file: home.registryFile, id: 'writer', agentPreset: 'ptc' })
     const service = new WorkerSessionService({
       ctx: { workspaceRegistry: { list: () => [] } },
       workersDir: home.workersDir,
@@ -427,12 +429,15 @@ test('workers service: list returns summarized registry workers including built-
     assert.equal(writer.displayName, '写作助手')
     assert.equal(writer.driver, 'agent')
     assert.equal(writer.description, '')
+    // worker 的默认模式要透出给工作流引擎，派发新会话时才用得上。
+    assert.equal(writer.agentPreset, 'ptc')
     assert.ok(typeof writer.avatar === 'string' && writer.avatar !== '')
     assert.equal(writer.agents.exists, true)
     assert.equal('content' in writer.agents, false)
     const clock = listed.workers.find((worker) => worker.id === 'clock')
     assert.equal(clock.driver, 'robot')
     assert.equal(clock.program, 'clock')
+    assert.equal('agentPreset' in clock, false)
     assert.equal(clock.exists, false)
     assert.deepEqual(clock.skills, [])
   } finally {
@@ -447,12 +452,12 @@ test('workers service: avatarMap is a lightweight id -> avatar lookup with built
       workersDir: home.workersDir,
       registryFile: home.registryFile,
     })
-    // 新建的执行者一定有头像；内建 clock 按名字兜底。
+    // 新建的执行者一定有头像；内建 clock 按名字兜底，engine 用它的默认头像。
     const first = await service.avatarMap()
     assert.deepEqual(Object.keys(first), ['writer', 'clock', 'engine'])
     assert.ok(typeof first.writer === 'string' && first.writer !== '')
     assert.equal(first.clock, defaultAvatarFor('clock'))
-    assert.equal(first.engine, defaultAvatarFor('engine'))
+    assert.equal(first.engine, 'robot')
 
     // version 1 旧登记表：缺 avatar 的按名字兜底；显式设置过的用设置值。
     await fs.writeFile(
@@ -478,7 +483,7 @@ test('workers service: avatarMap is a lightweight id -> avatar lookup with built
       writer: 'panda',
       legacy: defaultAvatarFor('legacy'),
       clock: defaultAvatarFor('clock'),
-      engine: defaultAvatarFor('engine'),
+      engine: 'robot',
     })
 
     // 登记表损坏：返回空表，不抛错。

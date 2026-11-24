@@ -121,7 +121,14 @@ async function makeHarness() {
     get(name) {
       if (name === 'sessions') return { get: (id) => sessions.get(id) }
       if (name === 'agentPresets')
-        return { presetForSession: (session) => presets.get(session.id) ?? null }
+        return {
+          presetForSession: (session) => presets.get(session.id) ?? null,
+          list: async () => [
+            { id: 'workflow-orchestrator', name: 'Workflow', isDefault: true },
+            { id: 'ptc', name: 'PTC' },
+            { id: 'broken', name: 'Broken', broken: 'boom' },
+          ],
+        }
       return undefined
     },
     inject(deps, callback) {
@@ -436,6 +443,69 @@ test('POST /buka-workers/model：保存 / 清除智能体的模型，机器人�
     })
     const clock = await callRoute(harness.routes, '/buka-workers/model', {
       body: { id: 'clock', model: { provider: 'deepseek', model: 'deepseek-chat' } },
+    })
+    assert.equal(clock.status, 409)
+    assert.equal(clock.body.code, 'robot-worker')
+  } finally {
+    await harness.cleanup()
+  }
+})
+
+test('GET /buka-workers/presets：列出可用预设并保留 broken 原因', async () => {
+  const harness = await makeHarness()
+  try {
+    const result = await callRoute(harness.routes, '/buka-workers/presets', { method: 'GET' })
+    assert.equal(result.status, 200)
+    assert.equal(result.body.ok, true)
+    assert.equal(result.body.available, true)
+    assert.deepEqual(
+      result.body.presets.map((preset) => preset.id),
+      ['workflow-orchestrator', 'ptc', 'broken'],
+    )
+    assert.equal(result.body.presets[2].broken, 'boom')
+  } finally {
+    await harness.cleanup()
+  }
+})
+
+test('POST /buka-workers/preset：保存 / 清除默认预设并拒绝不存在的预设', async () => {
+  const harness = await makeHarness()
+  try {
+    const agent = { agent: { id: 'builder' } }
+    await harness.tool.execute({ id: 'writer' }, agent)
+
+    const saved = await callRoute(harness.routes, '/buka-workers/preset', {
+      body: { id: 'writer', agentPreset: 'ptc' },
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(saved.body.worker.agentPreset, 'ptc')
+    const registry = JSON.parse(await fs.readFile(harness.registryFile, 'utf8'))
+    assert.equal(registry.workers.find((worker) => worker.id === 'writer').agentPreset, 'ptc')
+
+    // null 表示跟随工作流默认，字段不再落盘。
+    const cleared = await callRoute(harness.routes, '/buka-workers/preset', {
+      body: { id: 'writer', agentPreset: null },
+    })
+    assert.equal(cleared.status, 200)
+    assert.equal('agentPreset' in cleared.body.worker, false)
+
+    // 目录里没有的预设 400。
+    const unknown = await callRoute(harness.routes, '/buka-workers/preset', {
+      body: { id: 'writer', agentPreset: 'nope' },
+    })
+    assert.equal(unknown.status, 400)
+    assert.equal(unknown.body.code, 'unknown-agent-preset')
+
+    // 形状写坏 400。
+    const invalid = await callRoute(harness.routes, '/buka-workers/preset', {
+      body: { id: 'writer', agentPreset: 42 },
+    })
+    assert.equal(invalid.status, 400)
+    assert.equal(invalid.body.code, 'invalid-agent-preset')
+
+    // 内建机器人只读。
+    const clock = await callRoute(harness.routes, '/buka-workers/preset', {
+      body: { id: 'clock', agentPreset: 'ptc' },
     })
     assert.equal(clock.status, 409)
     assert.equal(clock.body.code, 'robot-worker')

@@ -58,6 +58,7 @@ import {
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
+  setWorkerPreset,
   WORKER_DESCRIPTION_MAX_LENGTH,
   workerDirectory,
   writeAgentsFile,
@@ -605,6 +606,8 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     )
     assert.equal(empty.workers[0].driver, 'robot')
     assert.equal(empty.workers[0].program, 'clock')
+    assert.equal(empty.workers[0].builtin, true)
+    assert.equal(empty.workers[1].builtin, true)
     assert.equal(empty.workers[0].exists, false)
     assert.deepEqual(empty.workers[0].skills, [])
 
@@ -646,6 +649,7 @@ test('listWorkers：挂载 join、目录缺失、skills/agents 汇总与损坏�
     const byName = new Map(snapshot.workers.map((worker) => [worker.id, worker]))
 
     assert.equal(byName.get('writer').driver, 'agent')
+    assert.equal(byName.get('writer').builtin, undefined)
     assert.equal(byName.get('writer').exists, true)
     assert.equal(byName.get('writer').mounted, true)
     assert.equal(byName.get('writer').workspaceId, 'w-writer')
@@ -1379,7 +1383,7 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
         driver: 'robot',
         program: worker.program,
         createdAt: worker.createdAt,
-        avatar: defaultAvatarFor(worker.id),
+        avatar: resolveAvatar(worker.avatar, worker.id),
         description: worker.description,
       })),
     )
@@ -1418,6 +1422,45 @@ test('内建机器人 clock：启动补写、幂等、不可创建/删除/改名
     await writeFile(file, '{broken')
     assert.deepEqual(await ensureBuiltinWorkers({ file }), { added: [], corrupt: true })
     assert.equal(await fs.readFile(file, 'utf8'), '{broken')
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('内建执行者：登记表里旧的名字 / 头像 / 描述按 BUILTIN_WORKERS 展示', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
+    const workersDir = path.join(pluginDir, 'workers')
+    const file = path.join(pluginDir, 'workers.json')
+
+    // 旧版本写下的 engine 记录：名字、头像与描述都可能落后于插件常量。
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 4,
+        workers: [
+          {
+            id: 'engine',
+            name: '引擎',
+            driver: 'robot',
+            program: 'engine',
+            createdAt: '2026-11-01T00:00:00.000Z',
+            avatar: 'bee',
+            description: '旧描述',
+          },
+        ],
+      }),
+    )
+    const canonical = BUILTIN_WORKERS.find((worker) => worker.id === 'engine')
+    const engine = (await listWorkers({ file, workersDir })).workers.find(
+      (worker) => worker.id === 'engine',
+    )
+    assert.equal(engine.name, 'Workflow引擎')
+    assert.equal(engine.avatar, resolveAvatar(canonical.avatar, canonical.id))
+    assert.equal(engine.avatar, 'robot')
+    assert.equal(engine.description, canonical.description)
+    assert.equal(engine.createdAt, canonical.createdAt)
   } finally {
     await removeRoot(root)
   }
@@ -1736,6 +1779,48 @@ test('自定义 workersDir：同级 robots 目录与登记文件一起改名并�
     const raw = JSON.parse(await fs.readFile(path.join(custom, 'workers.json'), 'utf8'))
     assert.equal(raw.version, 4)
     assert.equal(raw.workers[0].path, path.join(workersDir, 'writer'))
+  } finally {
+    await removeRoot(root)
+  }
+})
+
+test('智能体预设：setWorkerPreset 保存 / 清除、形状校验与机器人只读', async () => {
+  const root = await makeRoot()
+  try {
+    const pluginDir = path.join(root, 'cache', 'dsh-plugin-workers')
+    const workersDir = path.join(pluginDir, 'workers')
+    const file = path.join(pluginDir, 'workers.json')
+    await addWorker({ workersDir, file, id: 'writer' })
+    await ensureBuiltinWorkers({ file })
+
+    const saved = await setWorkerPreset({ file, id: 'writer', agentPreset: 'ptc' })
+    assert.equal(saved.worker.agentPreset, 'ptc')
+    assert.equal((await readWorkerRegistry({ file })).workers[0].agentPreset, 'ptc')
+    // 机器人条目即使手写也不带该字段。
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'))
+    const clock = raw.workers.find((worker) => worker.id === 'clock')
+    assert.equal('agentPreset' in clock, false)
+
+    const cleared = await setWorkerPreset({ file, id: 'writer', agentPreset: null })
+    assert.equal('agentPreset' in cleared.worker, false)
+    assert.equal('agentPreset' in (await readWorkerRegistry({ file })).workers[0], false)
+
+    await assert.rejects(
+      () => setWorkerPreset({ file, id: 'writer', agentPreset: '   ' }),
+      (error) => error.code === 'invalid-agent-preset',
+    )
+    await assert.rejects(
+      () => setWorkerPreset({ file, id: 'writer', agentPreset: 42 }),
+      (error) => error.code === 'invalid-agent-preset',
+    )
+    await assert.rejects(
+      () => setWorkerPreset({ file, id: 'nobody', agentPreset: 'ptc' }),
+      (error) => error.code === 'unknown-worker',
+    )
+    await assert.rejects(
+      () => setWorkerPreset({ file, id: 'clock', agentPreset: 'ptc' }),
+      (error) => error.code === 'robot-worker',
+    )
   } finally {
     await removeRoot(root)
   }

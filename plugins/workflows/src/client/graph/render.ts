@@ -16,6 +16,7 @@ import {
   type GraphLayoutEdge,
   type GraphNodeInput,
   layoutGraph,
+  MAX_EDGE_LABEL_CHARS,
 } from './layout.ts'
 
 /** 渲染参数。 */
@@ -437,11 +438,8 @@ function round(value: number): number {
   return Math.round(value * 100) / 100
 }
 
-/** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断。 */
-const LABEL_MAX = 14
-
-/** 截断后的画布标签。 */
-function clipLabel(label: string, max = LABEL_MAX): string {
+/** 连线上的标签：主流程线常显，回向通道选中时也显示；过长时截断，截断上限与布局估宽共用。 */
+function clipLabel(label: string, max = MAX_EDGE_LABEL_CHARS): string {
   const chars = [...label]
   return chars.length <= max ? label : `${chars.slice(0, max - 1).join('')}…`
 }

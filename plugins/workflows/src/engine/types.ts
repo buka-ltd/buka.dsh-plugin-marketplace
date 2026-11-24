@@ -33,6 +33,8 @@ export interface WorkerHandleLike {
   send?(text: string, options?: unknown): unknown
   cancel?(reason?: string): unknown
   dispose?(): unknown
+  /** 等这一轮结束（不含等待用户继续的下一轮）；释放句柄前用来避免打断收尾。 */
+  whenIdle?(): unknown
   getPlanMode?(): unknown
   setPlanMode?(active: boolean): unknown
 }
@@ -43,6 +45,12 @@ export interface WorkersServiceLike {
   avatarMap?(): unknown
   dispatchSession?(request: Record<string, unknown>): unknown
   openSession?(request: Record<string, unknown>): unknown
+}
+
+/** `agentPresets` 服务里本插件用到的部分。 */
+export interface AgentPresetsServiceLike {
+  /** 当前声明的预设（含激活失败的 broken 行）；服务缺失时取不到。 */
+  list?(): Promise<unknown>
 }
 
 /** 读一次会话观测结果。 */

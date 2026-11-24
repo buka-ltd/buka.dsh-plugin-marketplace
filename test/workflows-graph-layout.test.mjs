@@ -2,6 +2,7 @@
  * @buka/dsh-plugin-workflows 流程图布局：回向通道与跨层前向通道的走线与防重叠约束。
  *
  * 这里直接跑浏览器侧的 `graph/layout.ts`，不启动 DSH、也不渲染 React：
+ * 回向通道固定走右侧、跨层前向通道固定走左侧，向上的线与向下的线不能共用车道；
  * 回向通道必须是水平/垂直线段，线之间不能有共线重叠，也不能穿过别的节点；
  * 跨层前向通道要绕过中间层，不能垂直贯穿中间层的节点。
  */
@@ -171,6 +172,54 @@ const BACK_BLOCKED = {
   ],
 }
 
+/** 两条回连打回同一个夹在中间的岗位：目标右侧被挡，只能都从底边折回。 */
+const BACK_FALLBACK = {
+  nodes: [
+    { id: 'start', label: '开始', kind: 'start' },
+    position('dev', '开发'),
+    position('qa', '测试'),
+    position('ops', '运维'),
+    position('accept', '验收'),
+    position('build', '构建'),
+    { id: 'end', label: '结束', kind: 'end' },
+  ],
+  edges: [
+    { id: 'start.dev', label: '受理', from: 'start', to: 'dev' },
+    { id: 'start.qa', label: '并行受理', from: 'start', to: 'qa' },
+    { id: 'start.ops', label: '并行受理', from: 'start', to: 'ops' },
+    { id: 'dev.accept', label: '开发完成', from: 'dev', to: 'accept' },
+    { id: 'qa.accept', label: '测试完成', from: 'qa', to: 'accept' },
+    { id: 'ops.accept', label: '部署完成', from: 'ops', to: 'accept' },
+    { id: 'accept.build', label: '提审', from: 'accept', to: 'build' },
+    { id: 'accept.dev.rework', label: '验收打回', from: 'accept', to: 'dev', back: true },
+    { id: 'build.dev.rework', label: '复审打回', from: 'build', to: 'dev', back: true },
+    { id: 'build.end', label: '交付', from: 'build', to: 'end' },
+  ],
+}
+
+/** 发布确认同时下发数据库 / 配置变更，另有一条跳层直连执行发布的长标签通道。 */
+const SKIP = {
+  nodes: [
+    { id: 'start', label: '开始', kind: 'start' },
+    position('dev', '开发'),
+    position('approve', '发布确认'),
+    position('db', '变更数据库'),
+    position('config', '变更配置'),
+    position('release', '执行发布'),
+    { id: 'end', label: '结束', kind: 'end' },
+  ],
+  edges: [
+    { id: 'start.dev', label: '受理', from: 'start', to: 'dev' },
+    { id: 'dev.approve', label: '提发布确认', from: 'dev', to: 'approve' },
+    { id: 'approve.db', label: '变更数据库', from: 'approve', to: 'db' },
+    { id: 'approve.config', label: '变更配置', from: 'approve', to: 'config' },
+    { id: 'approve.release', label: '跳过变更直接发布', from: 'approve', to: 'release' },
+    { id: 'db.release', label: '汇入发布', from: 'db', to: 'release' },
+    { id: 'config.release', label: '执行发布', from: 'config', to: 'release' },
+    { id: 'release.end', label: '交付报告', from: 'release', to: 'end' },
+  ],
+}
+
 test('回向通道只用直角折线，线之间不重叠', () => {
   const layout = layoutGraph(CHAIN.nodes, CHAIN.edges)
   const back = layout.edges.filter((edge) => edge.kind === 'back')
@@ -207,7 +256,7 @@ test('回向通道只用直角折线，线之间不重叠', () => {
   assert.notEqual(first.arrow.y, second.arrow.y, '同一目标的入线要在侧边上下错开')
 })
 
-test('回向通道按同排岗位分布选边，不穿过别的节点', () => {
+test('回向通道固定走右侧，目标侧被挡也不换到左侧', () => {
   const layout = layoutGraph(WIDE.nodes, WIDE.edges)
   const back = layout.edges.filter((edge) => edge.kind === 'back')
   assert.equal(back.length, 2)
@@ -215,30 +264,41 @@ test('回向通道按同排岗位分布选边，不穿过别的节点', () => {
     assert.equal(pathCrossesNode(edge, layout.nodes), null, `${edge.id} 不能穿过别的节点`)
   }
 
-  const nodeLeft = Math.min(...layout.nodes.map((node) => node.x - node.width / 2))
   const nodeRight = Math.max(...layout.nodes.map((node) => node.x + node.width / 2))
   const lanes = back.map((edge) => verticalLaneX(parsePath(edge.d)))
   assert.ok(
-    lanes.some((lane) => lane < nodeLeft),
-    '退回左侧岗位的回连应走左侧车道',
-  )
-  assert.ok(
-    lanes.some((lane) => lane > nodeRight),
-    '退回右侧岗位的回连应走右侧车道',
+    lanes.every((lane) => lane > nodeRight),
+    '回连一律走右侧车道：目标右边被同排岗位挡住时退回层间空隙，不换到左侧',
   )
 })
 
-test('同层回向通道绕到行外，仍然只用直角折线', () => {
+test('同层回向通道源侧被挡时从行外折回，仍然只用直角折线', () => {
   const layout = layoutGraph(SAME_LAYER.nodes, SAME_LAYER.edges)
   const edge = layout.edges.find((item) => item.id === 'dev.qa.rework')
   assert.ok(edge !== undefined)
   const points = parsePath(edge.d)
-  assert.equal(points.length, 5, '同层回连要走：出线、绕行、进节点')
+  assert.equal(points.length, 4, '源侧被挡时直接下到行间轨道：出线、绕行、进节点')
   for (const segment of segmentsOf(points)) {
     assert.ok(isOrthogonal(segment), '同层回连的每一段也必须是水平或垂直的')
   }
-  assert.ok((points[1]?.x ?? 0) < (points[0]?.x ?? 0), '回连从左边出线，不能先穿过右边的岗位')
+  assert.ok((points[0]?.y ?? 0) < (points[1]?.y ?? 0), '回连从源节点底边出线，不能先穿过右边的岗位')
   assert.equal(pathCrossesNode(edge, layout.nodes), null, '同层回连不能穿过别的节点')
+})
+
+test('同层回向通道源侧没被挡时走右侧车道', () => {
+  const edges = SAME_LAYER.edges.map((edge) =>
+    edge.id === 'dev.qa.rework' ? { ...edge, id: 'qa.dev.rework', from: 'qa', to: 'dev' } : edge,
+  )
+  const layout = layoutGraph(SAME_LAYER.nodes, edges)
+  const edge = layout.edges.find((item) => item.id === 'qa.dev.rework')
+  assert.ok(edge !== undefined)
+  const points = parsePath(edge.d)
+  assert.equal(points.length, 5, '源侧没被挡时走外侧车道：出线、绕行、进节点')
+  for (const segment of segmentsOf(points)) assert.ok(isOrthogonal(segment))
+  assert.equal(pathCrossesNode(edge, layout.nodes), null)
+
+  const nodeRight = Math.max(...layout.nodes.map((node) => node.x + node.width / 2))
+  assert.ok(verticalLaneX(points) > nodeRight, '同层回连也走右侧车道')
 })
 
 test('并行前向通道的名称沿曲线错开，避免同排压字', () => {
@@ -331,7 +391,7 @@ test('跨层通道与相邻通道的端点错开，不挤在同一节点口', ()
   )
 })
 
-test('侧边没被挡住时，跨层通道贴着节点外侧走，不横穿整行', () => {
+test('侧边没被挡住时，跨层通道贴着节点左侧走，不横穿整行', () => {
   const layout = layoutGraph(SPAN.nodes, SPAN.edges)
   const edge = layout.edges.find((item) => item.id === 'dev.accept')
   assert.ok(edge !== undefined)
@@ -344,28 +404,38 @@ test('侧边没被挡住时，跨层通道贴着节点外侧走，不横穿整�
   const startX = points[0]?.x ?? 0
   const endX = points.at(-1)?.x ?? 0
   assert.ok(
-    Math.abs(startX - (dev.x + dev.width / 2)) < 1,
-    '从源节点右侧边出线，不横穿源行的层间空隙',
+    Math.abs(startX - (dev.x - dev.width / 2)) < 1,
+    '从源节点左侧边出线，不横穿源行的层间空隙',
   )
   assert.ok(
-    Math.abs(endX - (accept.x + accept.width / 2)) < 1,
-    '从目标节点右侧边进线，不横穿目标行的层间空隙',
+    Math.abs(endX - (accept.x - accept.width / 2)) < 1,
+    '从目标节点左侧边进线，不横穿目标行的层间空隙',
   )
 })
 
-test('回向通道与跨层通道在同一侧边上的端口错开', () => {
+test('回向通道与跨层通道分居右侧 / 左侧，向上的线不与向下的线共用车道', () => {
   const layout = layoutGraph(LONG_SPAN.nodes, LONG_SPAN.edges)
   const rework = layout.edges.find((item) => item.id === 'accept.dev.rework')
   const straddle = layout.edges.find((item) => item.id === 'dev.build')
   assert.ok(rework !== undefined && straddle !== undefined)
-  assert.notEqual(
-    rework.arrow.y,
-    startPointOf(straddle.d).y,
-    '同一节点同侧的入线和出线不能在侧边中点叠在一起',
+
+  const nodeLeft = Math.min(...layout.nodes.map((node) => node.x - node.width / 2))
+  const nodeRight = Math.max(...layout.nodes.map((node) => node.x + node.width / 2))
+  const backLane = verticalLaneX(parsePath(rework.d))
+  const downLane = verticalLaneX(parsePath(straddle.d))
+  assert.ok(backLane > nodeRight, '回向通道绕右侧车道')
+  assert.ok(downLane < nodeLeft, '跨层前向通道绕左侧车道，不和回向通道共用')
+
+  const dev = layout.nodes.find((node) => node.id === 'dev')
+  assert.ok(dev !== undefined)
+  assert.ok(
+    startPointOf(straddle.d).x < dev.x,
+    '跨层通道从 dev 左侧出线，不会和回向通道在右侧抢端口',
   )
+  assert.ok(endPointOf(rework.d).x > dev.x, '回向通道从 dev 右侧进线，和跨层通道分居两侧')
 })
 
-test('侧边被同排兄弟挡住时，跨层通道退回层间空隙轨道', () => {
+test('跨层通道侧边被同排兄弟挡住时，仍走左侧并退回层间空隙轨道', () => {
   const layout = layoutGraph(BLOCKED.nodes, BLOCKED.edges)
   const edge = layout.edges.find((item) => item.id === 'dev.accept')
   assert.ok(edge !== undefined)
@@ -375,6 +445,9 @@ test('侧边被同排兄弟挡住时，跨层通道退回层间空隙轨道', ()
     assert.ok(isOrthogonal(segment), '退回轨道后仍然只能走水平 / 垂直线段')
   }
   assert.equal(pathCrossesNode(edge, layout.nodes), null, '退回轨道后也不能穿过别的节点')
+
+  const nodeLeft = Math.min(...layout.nodes.map((node) => node.x - node.width / 2))
+  assert.ok(verticalLaneX(points) < nodeLeft, '源侧被挡也不换到右侧，跨层通道固定走左侧')
 })
 
 test('回向通道目标侧被兄弟挡住时，从层间空隙折回目标底边', () => {
@@ -387,6 +460,72 @@ test('回向通道目标侧被兄弟挡住时，从层间空隙折回目标底�
   for (const segment of segments) assert.ok(isOrthogonal(segment))
   const last = segments.at(-1)
   assert.ok(last !== undefined && last.a.y > last.b.y, '底边入线应向上进入目标节点')
+})
+
+test('多条回连从同一个节点底边折回时，入口横向错开', () => {
+  const layout = layoutGraph(BACK_FALLBACK.nodes, BACK_FALLBACK.edges)
+  const back = layout.edges.filter((edge) => edge.kind === 'back')
+  assert.equal(back.length, 2)
+  for (const edge of back) {
+    assert.equal(pathCrossesNode(edge, layout.nodes), null, `${edge.id} 不能穿过别的节点`)
+  }
+
+  const ends = back.map((edge) => endPointOf(edge.d))
+  assert.ok(
+    Math.abs((ends[0]?.x ?? 0) - (ends[1]?.x ?? 0)) >= 1,
+    '两条回连不能在目标底边的同一个入口叠在一起',
+  )
+  for (let left = 0; left < back.length; left += 1) {
+    for (let right = left + 1; right < back.length; right += 1) {
+      const first = back[left]
+      const second = back[right]
+      if (first === undefined || second === undefined) continue
+      for (const a of segmentsOf(parsePath(first.d))) {
+        for (const b of segmentsOf(parsePath(second.d))) {
+          assert.ok(
+            collinearOverlap(a, b) < 0.01,
+            `${first.id} 与 ${second.id} 不能有共线重叠的线段`,
+          )
+        }
+      }
+    }
+  }
+})
+
+test('跨层通道的长标签压在绕行车道中间，不偏到节点那一侧', () => {
+  const layout = layoutGraph(SKIP.nodes, SKIP.edges)
+  const edge = layout.edges.find((item) => item.id === 'approve.release')
+  assert.ok(edge !== undefined)
+  assert.ok(edge.labelAt !== null, '跨层通道要给出标签落位')
+
+  const run = laneRunOf(edge.d)
+  assert.ok(run !== null, '跨层通道应有一条纵向车道')
+  assert.ok(Math.abs(edge.labelAt.x - run.x) < 0.01, '标签横向居中在车道上，不能偏到节点那一侧')
+  assert.ok(Math.abs(edge.labelAt.y - (run.top + run.bottom) / 2) < 0.01, '标签落在绕行段的中点')
+
+  // 长标签既不压住卡片，也不能被画布裁掉：车道与画布都为标签让过位。
+  const box = labelBoxOf(edge)
+  assert.ok(box.left >= 0, '标签不能越过画布左边界')
+  assert.ok(box.right <= layout.width, '标签不能越过画布右边界')
+  assert.ok(box.right <= run.x + 44 + 0.01, '标签的右半边不超过给自己的留白')
+  for (const node of layout.nodes) {
+    assert.equal(overlapsNode(box, node), false, `标签不能压在 ${node.id} 上`)
+  }
+})
+
+test('跨层通道的短标签同样压在自己的车道中间', () => {
+  const layout = layoutGraph(SPAN.nodes, SPAN.edges)
+  const edge = layout.edges.find((item) => item.id === 'dev.accept')
+  assert.ok(edge !== undefined)
+  assert.ok(edge.labelAt !== null)
+
+  const run = laneRunOf(edge.d)
+  assert.ok(run !== null)
+  assert.ok(Math.abs(edge.labelAt.x - run.x) < 0.01, '标签横向居中在车道上')
+  assert.ok(Math.abs(edge.labelAt.y - (run.top + run.bottom) / 2) < 0.01, '标签落在绕行段的中点')
+  for (const node of layout.nodes) {
+    assert.equal(overlapsNode(labelBoxOf(edge), node), false, `标签不能压在 ${node.id} 上`)
+  }
 })
 
 /** 解析 `M x y L x y ...` 形式的路径。 */
@@ -496,4 +635,40 @@ function verticalLaneX(points) {
     bestX = segment.a.x
   }
   return bestX
+}
+
+/** 路径里最长的一条垂直线段：车道的位置与纵向范围。 */
+function laneRunOf(d) {
+  let best = null
+  for (const segment of segmentsOf(parsePath(d))) {
+    if (Math.abs(segment.a.x - segment.b.x) >= 0.01) continue
+    const length = Math.abs(segment.a.y - segment.b.y)
+    if (best !== null && length <= best.length) continue
+    best = {
+      x: segment.a.x,
+      length,
+      top: Math.min(segment.a.y, segment.b.y),
+      bottom: Math.max(segment.a.y, segment.b.y),
+    }
+  }
+  return best
+}
+
+/** 标签的估算包围盒：与布局层一致，11px 字号、中文按一个字宽算。 */
+function labelBoxOf(edge) {
+  const chars = [...edge.label]
+  const width = Math.min(chars.length, 14) * 11
+  const x = edge.labelAt?.x ?? 0
+  const y = edge.labelAt?.y ?? 0
+  return { left: x - width / 2, right: x + width / 2, top: y - 6, bottom: y + 6 }
+}
+
+/** 标签包围盒是否与节点卡片重叠。 */
+function overlapsNode(box, node) {
+  return (
+    box.right > node.x - node.width / 2 &&
+    box.left < node.x + node.width / 2 &&
+    box.bottom > node.y - node.height / 2 &&
+    box.top < node.y + node.height / 2
+  )
 }

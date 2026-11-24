@@ -1,12 +1,16 @@
 /**
  * 流程图布局：岗位 / 内建开始结束节点按层从上到下排布，通道向下或从侧面绕行。
  *
- * 相邻层的通道用曲线直连；回向通道从节点侧边出线，沿所有节点外侧的纵向车道
- * 折回目标侧边；跨层前向通道（跳过中间层）从节点侧边或层间空隙走到外侧车道，
- * 绕过中间层后再折回目标，不会在中间层节点上垂直贯穿。
+ * 相邻层的通道用曲线直连；回向通道固定走右侧车道，跨层前向通道（跳过中间层）
+ * 固定走左侧车道：向上与向下的绕行分居两侧，不会在同一条车道或同一侧端口上
+ * 交叠。跨层前向通道绕过中间层后再折回目标，不会在中间层节点上垂直贯穿。
  *
  * 车道按纵向区间复用——互不重叠的绕行共用一条车道——同一节点的多个端口沿
  * 侧边 / 底边错开，层间横向轨道按带内数量均分，避免线与线、线与节点叠在一起。
+ *
+ * 通道名贴在各自连线的空白一侧：相邻层通道跟着曲线弧顶走，跨层前向通道压在
+ * 目标侧入线段上方、紧贴箭头；标注宽度按渲染层的截断上限估算，长标签朝目标
+ * 一侧收，不会飘到上一层的空隙里跟别的通道名挤在一起。
  *
  * 这里不依赖宿主一半的 `src/graph.ts`：坐标全部在浏览器侧按定义快照计算，
  * 服务端只给「岗位 + 通道 + 任务状态」。图不横向滚动，宽度超出时由外层整体缩放。
@@ -125,6 +129,19 @@ const LANE_STEP = 16
 const PARALLEL_LABEL_START = 0.26
 const PARALLEL_LABEL_SPREAD = 0.48
 
+/** 通道标签的字号，与样式表里 `.buka-workflows-edgeLabel` 保持一致。 */
+const EDGE_LABEL_FONT_SIZE = 11
+
+/** 标签里拉丁字符的估算字宽（中文按一个字号算）。 */
+const EDGE_LABEL_LATIN_WIDTH = 6.2
+
+/** 标签离画布边缘、离节点的最小留白。 */
+const EDGE_LABEL_MARGIN = 6
+const EDGE_LABEL_CLEARANCE = 4
+
+/** 渲染层保留的标签字符数（超出截断成省略号）；布局按同一上限估宽。 */
+export const MAX_EDGE_LABEL_CHARS = 14
+
 /** 回向通道绕行额外留白（单侧）。 */
 const BACK_EXTRA = 12
 
@@ -143,8 +160,17 @@ const PORT_INSET = 4
 /** 箭头离节点边缘的距离。 */
 const ARROW_INSET = 5
 
-/** 回向通道走哪一侧。 */
+/** 通道绕行时走哪一侧。 */
 type Side = 'left' | 'right'
+
+/**
+ * 回向通道固定走右侧：向上的回边和向下的跨层通道分居两侧，避免两条线在
+ * 同一条车道上重叠或交错。
+ */
+const BACK_SIDE: Side = 'right'
+
+/** 跨层前向通道固定走左侧，与回向通道分居两侧。 */
+const STRADDLE_SIDE: Side = 'left'
 
 /** 一条回向通道的走线计划；坐标在布局完成后补进来。 */
 interface BackEdgePlan {
@@ -173,6 +199,10 @@ interface BackEdgePlan {
   /** 出线 / 入线在节点侧边的纵向偏移。 */
   sourceOffset: number
   targetOffset: number
+  /** 底边 / 顶边出线时相对节点中心的横向偏移，同一节点的多个绕行错开。 */
+  sourceFallbackOffset: number
+  /** 底边 / 顶边进线时相对节点中心的横向偏移。 */
+  targetFallbackOffset: number
   /** 同层回绕进入目标底边 / 顶边时的横向偏移，避开中间的箭头。 */
   entryOffset: number
 }
@@ -377,10 +407,32 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
   let maxLaneLeft = -1
   let maxLaneRight = -1
   for (const plan of detours) {
+    if (!usesOuterLane(plan)) continue
     if (plan.side === 'left') maxLaneLeft = Math.max(maxLaneLeft, plan.lane)
     else maxLaneRight = Math.max(maxLaneRight, plan.lane)
   }
-  const padLeft = maxLaneLeft < 0 ? 0 : BACK_OFFSET + maxLaneLeft * BACK_STEP + BACK_EXTRA
+  // 跨层通道的名字压在自己的车道中间，所以车道与节点列之间要留出半个标签，画布
+  // 左侧还要留出另外半个：按最宽的那条标签算，一次留够。
+  let labelHalfLeft = 0
+  for (const plan of straddlePlans.values()) {
+    if (plan.side !== 'left') continue
+    const labelled = edges[plan.index]
+    if (labelled === undefined) continue
+    const text = typeof labelled.label === 'string' ? labelled.label : ''
+    labelHalfLeft = Math.max(labelHalfLeft, edgeLabelWidth(text) / 2)
+  }
+  const straddleInset = labelHalfLeft === 0 ? 0 : labelHalfLeft + EDGE_LABEL_CLEARANCE
+  const padLeftLane = maxLaneLeft < 0 ? 0 : BACK_OFFSET + maxLaneLeft * BACK_STEP + BACK_EXTRA
+  const padLeftLabel =
+    labelHalfLeft === 0
+      ? 0
+      : BACK_OFFSET +
+        Math.max(0, maxLaneLeft) * BACK_STEP +
+        straddleInset +
+        labelHalfLeft +
+        EDGE_LABEL_MARGIN -
+        SIDE_PAD
+  const padLeft = Math.max(padLeftLane, padLeftLabel)
   const padRight = maxLaneRight < 0 ? 0 : BACK_OFFSET + maxLaneRight * BACK_STEP + BACK_EXTRA
   const width = width0 + padLeft + padRight
   const dx = SIDE_PAD + padLeft - nodeLeft
@@ -412,7 +464,10 @@ export function layoutGraph(nodes: GraphNodeInput[], rawEdges: GraphEdgeInput[])
         ? 0
         : lanePlan.side === 'right'
           ? curveRight + BACK_OFFSET + lanePlan.lane * BACK_STEP
-          : curveLeft - BACK_OFFSET - lanePlan.lane * BACK_STEP
+          : curveLeft -
+            BACK_OFFSET -
+            lanePlan.lane * BACK_STEP -
+            (lanePlan === straddle ? straddleInset : 0)
     const source = ports.source[index] ?? 0
     const target = ports.target[index] ?? 0
     const geometry =
@@ -519,7 +574,10 @@ function assignLayers(nodes: GraphNodeInput[], edges: GraphEdgeInput[]): Map<str
 }
 
 /**
- * 给回向通道选边、分端口。全部用节点中心坐标判断，结果与横向平移无关。
+ * 给回向通道排车道、分端口。全部用节点中心坐标判断，结果与横向平移无关。
+ *
+ * 回向通道固定走右侧车道；某一端的右侧被同排兄弟挡住时，这一端改从底边 /
+ * 顶边经层间空隙的横向轨道接入，不会为了绕开兄弟而换到左侧和向下的线抢道。
  *
  * @param edges
  * @param layers
@@ -545,16 +603,11 @@ function planBackEdges(
     const from = byId.get(edge.from)
     const to = byId.get(edge.to)
     if (from === undefined || to === undefined) continue
-    // 同层回连从目标底边 / 顶边进入，目标那一侧的兄弟节点不影响选边。
-    const sameLayer = from.layer === to.layer
-    const left = blockerCount(from, 'left', rows) + (sameLayer ? 0 : blockerCount(to, 'left', rows))
-    const right =
-      blockerCount(from, 'right', rows) + (sameLayer ? 0 : blockerCount(to, 'right', rows))
     plans.push({
       index,
       from,
       to,
-      side: left < right ? 'left' : 'right',
+      side: BACK_SIDE,
       lane: 0,
       yLow: Math.min(from.y, to.y),
       yHigh: Math.max(from.y, to.y),
@@ -566,14 +619,16 @@ function planBackEdges(
       targetTrackY: 0,
       sourceOffset: 0,
       targetOffset: 0,
+      sourceFallbackOffset: 0,
+      targetFallbackOffset: 0,
       entryOffset: 0,
     })
   }
 
   for (const plan of plans) {
-    if (plan.from.layer === plan.to.layer) continue
-    // 侧边被同排兄弟挡住时，从底边绕到层间空隙再进外侧车道，避免横穿兄弟节点。
+    // 侧边被同排兄弟挡住时改从底边进出，避免横穿兄弟节点；同层回绕只看源节点。
     plan.sourceSide = blockerCount(plan.from, plan.side, rows) === 0
+    if (plan.from.layer === plan.to.layer) continue
     plan.targetSide = blockerCount(plan.to, plan.side, rows) === 0
     if (!plan.sourceSide) {
       slotOf(rowOf.get(plan.from.layer) ?? 0, (y) => {
@@ -600,6 +655,7 @@ function planBackEdges(
   }
 
   assignSameLayerEntries(plans)
+  assignBackFallbackPorts(plans)
 
   const byIndex = new Map<number, BackEdgePlan>()
   for (const plan of plans) byIndex.set(plan.index, plan)
@@ -609,9 +665,9 @@ function planBackEdges(
 /**
  * 跨层前向通道：跳过中间层的边不能垂直穿过中间层的节点。
  *
- * 优先从源节点侧边出线（该侧没有同排节点遮挡时），沿所有节点外侧的纵向车道
- * 绕过中间层，再从目标侧边进线；侧边被挡住时退回层间空隙的横向轨道。
- * 车道与回向通道共用，按 y 区间复用。
+ * 固定从左侧车道绕行：两侧都能从侧边进出时贴左侧走，某一端被同排兄弟挡住时
+ * 这一端退回层间空隙的横向轨道。左侧车道不给回向通道使用，向上的线不会和
+ * 向下的线叠在同一条车道上。
  *
  * @param edges
  * @param layers
@@ -636,29 +692,16 @@ function planStraddleEdges(
     const to = byId.get(edge.to)
     if (from === undefined || to === undefined) continue
 
-    let innerLeft = Number.POSITIVE_INFINITY
-    let innerRight = Number.NEGATIVE_INFINITY
-    for (const [layer, group] of rows) {
-      if (layer <= from.layer || layer >= to.layer) continue
-      for (const node of group) {
-        innerLeft = Math.min(innerLeft, node.x - node.width / 2)
-        innerRight = Math.max(innerRight, node.x + node.width / 2)
-      }
-    }
-    const leftCost = Math.abs(from.x - innerLeft) + Math.abs(to.x - innerLeft)
-    const rightCost = Math.abs(innerRight - from.x) + Math.abs(innerRight - to.x)
-    const side: Side = leftCost < rightCost ? 'left' : 'right'
-
     const plan: StraddlePlan = {
       index,
       from,
       to,
-      side,
+      side: STRADDLE_SIDE,
       lane: 0,
       yLow: from.y,
       yHigh: to.y,
-      sourceSide: blockerCount(from, side, rows) === 0,
-      targetSide: blockerCount(to, side, rows) === 0,
+      sourceSide: blockerCount(from, STRADDLE_SIDE, rows) === 0,
+      targetSide: blockerCount(to, STRADDLE_SIDE, rows) === 0,
       sourceTrackY: 0,
       targetTrackY: 0,
       sourceOffset: 0,
@@ -682,6 +725,28 @@ function planStraddleEdges(
   const byIndex = new Map<number, StraddlePlan>()
   for (const plan of plans) byIndex.set(plan.index, plan)
   return byIndex
+}
+
+/**
+ * 估算通道标签的宽度：渲染层会把超长标签截断成省略号，估宽按截断后的字符算，
+ * 免得一条很长但没有展示完的标签把落位推到别处。
+ *
+ * @param label 标签原文
+ * @returns 估算宽度
+ */
+function edgeLabelWidth(label: string): number {
+  const chars = [...label]
+  const shown =
+    chars.length <= MAX_EDGE_LABEL_CHARS
+      ? chars
+      : [...chars.slice(0, MAX_EDGE_LABEL_CHARS - 1), '…']
+  let width = 0
+  for (const char of shown) {
+    if (char === '…') width += EDGE_LABEL_LATIN_WIDTH * 1.6
+    else if ((char.codePointAt(0) ?? 0) >= 0x2e80) width += EDGE_LABEL_FONT_SIZE
+    else width += EDGE_LABEL_LATIN_WIDTH
+  }
+  return Math.round(width)
 }
 
 /**
@@ -723,11 +788,9 @@ function straddleEdgeGeometry(
         angle: side === 'right' ? 180 : 0,
       }
     : { x: tx, y: ty - ARROW_INSET, angle: 90 }
-  // 标签贴在目标一侧的空白上：顶边入线放在上方轨道，侧边入线放在目标顶边外侧，
-  // 靠近目标，也不压住节点。
-  const labelAt = plan.targetSide
-    ? { x: (tx + laneX) / 2, y: ty - to.height / 2 - 7 }
-    : { x: tx + (laneX - tx) * 0.55, y: plan.targetTrackY }
+  // 名字压在绕行车道自己的中间：横向居中于线，纵向落在绕行段的中点，和回向
+  // 通道的标签同一套规则；车道外的留白已按标签宽度留够，不会压住节点。
+  const labelAt = { x: laneX, y: (sy + ty) / 2 }
   return { d, hit: d, arrow, labelAt }
 }
 
@@ -848,13 +911,25 @@ function blockerCount(
 }
 
 /**
+ * 绕行是否占用节点外侧的纵向车道：同层回绕在源侧被挡住时直接从行下方折回，
+ * 只走层间空隙，不需要外侧车道。
+ *
+ * @param plan
+ * @returns
+ */
+function usesOuterLane(plan: DetourPlan): boolean {
+  if (!('trackY' in plan)) return true
+  return !(plan.from.layer === plan.to.layer && !plan.sourceSide)
+}
+
+/**
  * 按纵向区间分配车道：短绕行先占内圈，长绕行套在外圈；区间不重叠的绕行复用同一条。
  *
  * @param plans 回向通道与跨层前向通道
  */
 function assignDetourLanes(plans: DetourPlan[]): void {
   for (const side of ['left', 'right'] as const) {
-    const list = plans.filter((plan) => plan.side === side)
+    const list = plans.filter((plan) => plan.side === side && usesOuterLane(plan))
     list.sort(
       (left, right) =>
         left.yHigh - left.yLow - (right.yHigh - right.yLow) ||
@@ -1002,6 +1077,48 @@ function assignSameLayerEntries(plans: BackEdgePlan[]): void {
 }
 
 /**
+ * 底边 / 顶边进出的回向通道在节点边缘上的横向端口：同一节点的多个绕行入口
+ * 沿胶囊直边错开，避免几条线在同一位置纵向重叠。
+ *
+ * @param plans
+ */
+function assignBackFallbackPorts(plans: BackEdgePlan[]): void {
+  const sources = new Map<string, BackEdgePlan[]>()
+  const targets = new Map<string, BackEdgePlan[]>()
+  for (const plan of plans) {
+    if (!plan.sourceSide) {
+      const list = sources.get(plan.from.id)
+      if (list === undefined) sources.set(plan.from.id, [plan])
+      else list.push(plan)
+    }
+    // 同层回绕的入口已经按 entryOffset 在目标边缘上错开。
+    if (!plan.targetSide && plan.from.layer !== plan.to.layer) {
+      const list = targets.get(plan.to.id)
+      if (list === undefined) targets.set(plan.to.id, [plan])
+      else list.push(plan)
+    }
+  }
+  for (const list of sources.values()) {
+    const node = list[0]?.from
+    if (node === undefined) continue
+    list.sort((left, right) => left.index - right.index)
+    const offsets = portOffsets(list.length, node)
+    list.forEach((plan, slot) => {
+      plan.sourceFallbackOffset = offsets[slot] ?? 0
+    })
+  }
+  for (const list of targets.values()) {
+    const node = list[0]?.to
+    if (node === undefined) continue
+    list.sort((left, right) => left.index - right.index)
+    const offsets = portOffsets(list.length, node)
+    list.forEach((plan, slot) => {
+      plan.targetFallbackOffset = offsets[slot] ?? 0
+    })
+  }
+}
+
+/**
  * 回向通道：从侧边出线，沿节点外侧的车道折回目标侧边。全程只有水平/垂直线段。
  *
  * @param plan
@@ -1013,11 +1130,19 @@ function backEdgeGeometry(
   laneX: number,
 ): Pick<GraphLayoutEdge, 'd' | 'hit' | 'arrow' | 'labelAt'> {
   const { from, to, side } = plan
-  const sx = plan.sourceSide ? sidePortX(from, side, plan.sourceOffset) : from.x
-  const sy = plan.sourceSide ? from.y + plan.sourceOffset : from.y + from.height / 2
-  if (from.layer === to.layer) return sameLayerBackGeometry(plan, laneX, sx, sy)
+  const sameLayer = from.layer === to.layer
+  const sx = plan.sourceSide
+    ? sidePortX(from, side, plan.sourceOffset)
+    : from.x + plan.sourceFallbackOffset
+  // 同层回绕在最后一行时轨道在行上方，被挡住的源节点要从顶边出线，不能纵向穿过自己。
+  const sy = plan.sourceSide
+    ? from.y + plan.sourceOffset
+    : from.y + (sameLayer && !plan.trackBelow ? -from.height / 2 : from.height / 2)
+  if (sameLayer) return sameLayerBackGeometry(plan, laneX, sx, sy)
 
-  const tx = plan.targetSide ? sidePortX(to, side, plan.targetOffset) : to.x
+  const tx = plan.targetSide
+    ? sidePortX(to, side, plan.targetOffset)
+    : to.x + plan.targetFallbackOffset
   const ty = plan.targetSide ? to.y + plan.targetOffset : to.y + to.height / 2
 
   const points: Array<[number, number]> = [[sx, sy]]
@@ -1067,7 +1192,11 @@ function sameLayerBackGeometry(
   const cap = Math.max(0, Math.abs(plan.entryOffset) - straight)
   const reach = Math.sqrt(Math.max(0, radius * radius - cap * cap))
   const edgeY = plan.trackBelow ? to.y + reach : to.y - reach
-  const d = `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`
+  // 源节点右侧被同排兄弟挡住时，直接从底边 / 顶边进入层间空隙的轨道，不在
+  // 节点边缘横向穿过整行，也不占用外侧车道。
+  const d = plan.sourceSide
+    ? `M ${fmt(sx)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(sy)} L ${fmt(laneX)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`
+    : `M ${fmt(sx)} ${fmt(sy)} L ${fmt(sx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(plan.trackY)} L ${fmt(tx)} ${fmt(edgeY)}`
   return {
     d,
     hit: d,
@@ -1076,7 +1205,7 @@ function sameLayerBackGeometry(
       y: plan.trackBelow ? edgeY + ARROW_INSET : edgeY - ARROW_INSET,
       angle: plan.trackBelow ? -90 : 90,
     },
-    labelAt: { x: (laneX + tx) / 2, y: plan.trackY },
+    labelAt: { x: ((plan.sourceSide ? laneX : sx) + tx) / 2, y: plan.trackY },
   }
 }
 

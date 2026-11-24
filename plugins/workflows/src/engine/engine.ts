@@ -4,8 +4,8 @@
  * 设计要点（ADR 0006-0015）：
  *
  * - 任务是唯一执行单元；任务依赖纯显式，依赖图无环；
- * - 一个智能体岗位一次只跑一条任务（FIFO），机器人直接完成，
- *   人任务由被点名的助理承办或停在「待认领」；
+ * - 并发度属于任务类型（同一作业内按类型计数，默认 1），岗位只是定义的书写
+ *   载体；人任务不占引擎额度，助理仍一次一条；机器人直接完成；
  * - 记状态变更全部串行化到 per-job 队列；长等待的会话 / 定时器在队列外执行，
  *   完成时再回队列提交状态；
  * - 一个任务一条新会话，不复用、不压缩；重启时只续接同一条会话。
@@ -14,6 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
 import {
   clipUtf8,
   ingestAttachments,
@@ -44,6 +45,7 @@ import type {
   AttemptRecord,
   Claimant,
   CreationDefinition,
+  DefinitionIssue,
   DeliveryRule,
   JobRecord,
   JobRestartMode,
@@ -91,7 +93,13 @@ import {
   renderCreation,
   resolveTargetTaskType,
 } from './tasks.ts'
-import type { EngineDeps, TurnSnapshot, WorkerHandleLike, WorkersServiceLike } from './types.ts'
+import type {
+  AgentPresetsServiceLike,
+  EngineDeps,
+  TurnSnapshot,
+  WorkerHandleLike,
+  WorkersServiceLike,
+} from './types.ts'
 import { describeError, WorkflowError } from './types.ts'
 import { worktreeToolAvailable } from './worktree.ts'
 
@@ -100,6 +108,15 @@ const RESULT_PREVIEW_BYTES = 4096
 
 /** 执行者登记表缓存时间。 */
 const WORKER_CACHE_MS = 5000
+
+/**
+ * 任务完成后再等多久释放会话句柄。
+ *
+ * `buka_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
+ * 的收尾回复不会生成。任务结果已经记好，所以先等这一轮落定再释放；等待本身
+ * 有上限，避免一直挂在会话上。
+ */
+const RETIRE_GRACE_MS = 30_000
 
 /**
  * 作业快照仍可读的版本范围。
@@ -138,6 +155,8 @@ type Launch =
        */
       readonly userPrompt: string | null
       readonly planMode: boolean
+      /** 任务类型指定的执行者预设；null 表示跟随执行者默认 / 插件选项。 */
+      readonly agentPreset: string | null
     }
   | {
       readonly kind: 'program'
@@ -156,6 +175,11 @@ type Launch =
 
 /** 引擎构造参数。 */
 export interface WorkflowEngineOptions extends EngineDeps {}
+
+/** 保存工作流的结果：工作流记录 + 本次校验的提示（不落盘）。 */
+export type SavedWorkflow = WorkflowRecord & {
+  readonly warnings: readonly DefinitionIssue[]
+}
 
 /** 重启一个失败作业的结果。 */
 export interface JobRestartOutcome {
@@ -203,6 +227,9 @@ function parseWorkerCatalog(raw: unknown): Map<string, WorkerInfo> {
       ...(typeof record.description === 'string' ? { description: record.description } : {}),
       ...(typeof record.avatar === 'string' ? { avatar: record.avatar } : {}),
       ...(typeof record.path === 'string' && record.path !== '' ? { path: record.path } : {}),
+      ...(driver === 'agent' && typeof record.agentPreset === 'string' && record.agentPreset !== ''
+        ? { agentPreset: record.agentPreset }
+        : {}),
     })
   }
   return catalog
@@ -221,6 +248,7 @@ function summarizeInput(input: JsonValue): string {
 
 /** 引擎。 */
 export class WorkflowEngine {
+  private readonly ctx: Context
   private readonly store: WorkflowStore
   private readonly options: ResolvedOptions
   private readonly logger: LoggerLike | undefined
@@ -228,6 +256,8 @@ export class WorkflowEngine {
   private readonly delivery: EngineDeps['delivery']
   private readonly worktreeAvailableOf: () => boolean
   private readonly active = new Map<string, ActiveExecution>()
+  /** 任务已完成、等当前轮落定后再释放的句柄。 */
+  private readonly retiring = new Set<WorkerHandleLike>()
   private readonly sessionTasks = new Map<string, { jobId: string; taskId: string }>()
   private readonly busyAssistants = new Set<string>()
   private readonly deliveryBlocked = new Set<string>()
@@ -237,6 +267,7 @@ export class WorkflowEngine {
   private disposed = false
 
   constructor(deps: EngineDeps) {
+    this.ctx = deps.ctx
     this.store = deps.store
     this.options = deps.options
     this.logger = deps.logger
@@ -275,7 +306,36 @@ export class WorkflowEngine {
       this.disposeHandle(execution.handle)
     }
     this.active.clear()
+    for (const handle of this.retiring) this.disposeHandle(handle)
+    this.retiring.clear()
     this.sessionTasks.clear()
+  }
+
+  /**
+   * 任务完成后的延迟释放：先等当前轮落定，再释放会话句柄。
+   *
+   * 等待有上限（`RETIRE_GRACE_MS`）；引擎停用 / 宿主退出时 `dispose()` 会立即
+   * 释放仍在等待的句柄。
+   *
+   */
+  private retireHandle(handle: WorkerHandleLike): void {
+    this.retiring.add(handle)
+    const settle =
+      typeof handle.whenIdle === 'function'
+        ? Promise.resolve().then(() => handle.whenIdle?.())
+        : Promise.resolve()
+    let timer: NodeJS.Timeout | undefined
+    const grace = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, RETIRE_GRACE_MS)
+      timer.unref?.()
+    })
+    void Promise.race([settle, grace])
+      .catch(() => undefined)
+      .finally(() => {
+        if (timer !== undefined) clearTimeout(timer)
+        this.retiring.delete(handle)
+        this.disposeHandle(handle)
+      })
   }
 
   /** 释放一个 workers 句柄。 */
@@ -352,9 +412,10 @@ export class WorkflowEngine {
   async saveWorkflow(input: {
     readonly definition: unknown
     readonly workflowId?: string | undefined
-  }): Promise<WorkflowRecord> {
+  }): Promise<SavedWorkflow> {
     const workers = await this.workers()
-    const validated = validateWorkflowDefinition(input.definition, { workers })
+    const presets = await this.availablePresetIds()
+    const validated = validateWorkflowDefinition(input.definition, { workers, presets })
     if (!validated.ok) {
       throw new WorkflowError(
         'invalid-definition',
@@ -362,19 +423,61 @@ export class WorkflowEngine {
       )
     }
     const definition = validated.definition
-    if (input.workflowId !== undefined && input.workflowId !== '') {
-      const existing = this.store.getWorkflow(input.workflowId)
-      if (existing === undefined) {
-        throw new WorkflowError('not-found', `workflow not found: ${input.workflowId}`)
-      }
-      return await this.store.saveWorkflowVersion(input.workflowId, definition)
+    const saved =
+      input.workflowId !== undefined && input.workflowId !== ''
+        ? await this.saveExistingVersion(input.workflowId, definition)
+        : await this.store.createWorkflow({
+            name: definition.name,
+            description: definition.description ?? '',
+            definition,
+            status: 'active',
+          })
+    // 提示不落盘：它只属于这一次保存，用来告诉编排者哪些并行任务没有目录隔离。
+    return { ...saved, warnings: validated.warnings }
+  }
+
+  /** 追加一个工作流版本；工作流不存在时报错。 */
+  private async saveExistingVersion(
+    workflowId: string,
+    definition: WorkflowDefinition,
+  ): Promise<WorkflowRecord> {
+    const existing = this.store.getWorkflow(workflowId)
+    if (existing === undefined) {
+      throw new WorkflowError('not-found', `workflow not found: ${workflowId}`)
     }
-    return await this.store.createWorkflow({
-      name: definition.name,
-      description: definition.description ?? '',
-      definition,
-      status: 'active',
-    })
+    return await this.store.saveWorkflowVersion(workflowId, definition)
+  }
+
+  /**
+   * 当前可用的执行者预设 id；composition 里没有 `agentPresets` 服务时返回
+   * `undefined`（无法判定，保存时只校验字段形状）。
+   */
+  private async availablePresetIds(): Promise<ReadonlySet<string> | undefined> {
+    let service: AgentPresetsServiceLike | undefined
+    try {
+      service = this.ctx?.get?.('agentPresets') as AgentPresetsServiceLike | undefined
+    } catch {
+      service = undefined
+    }
+    if (service === null || service === undefined || typeof service.list !== 'function') {
+      return undefined
+    }
+    try {
+      const rows = await service.list()
+      if (!Array.isArray(rows)) return undefined
+      const ids: string[] = []
+      for (const row of rows) {
+        if (row === null || typeof row !== 'object') continue
+        const id = (row as { id?: unknown }).id
+        if (typeof id === 'string' && id.trim() !== '') ids.push(id.trim())
+      }
+      return new Set(ids)
+    } catch (error) {
+      this.logger?.warn?.(
+        `buka-workflows: could not read the agent preset roster: ${describeError(error)}`,
+      )
+      return undefined
+    }
   }
 
   /**
@@ -2138,9 +2241,20 @@ export class WorkflowEngine {
     // 而不是等到开会话时才报一个笼统的「unknown worker」。
     const workers = await this.refreshWorkers()
     const launches: Launch[] = []
-    const busyPositions = new Set<string>()
+    // 并发度按任务类型计数（ADR 0031）：岗位只是定义的书写载体，不再当互斥资源。
+    // 人任务不占引擎额度；结束任务天然只有一条。
+    const runningByType = new Map<string, number>()
     for (const task of tasks) {
-      if (task.status === 'running') busyPositions.add(task.position)
+      if (task.status === 'running') {
+        runningByType.set(task.type, (runningByType.get(task.type) ?? 0) + 1)
+      }
+    }
+    const concurrencyOf = (task: TaskRecord): number =>
+      task.type === 'end' ? 1 : (findTaskType(job.definition, task.type)?.concurrency ?? 1)
+    const hasCapacity = (task: TaskRecord): boolean =>
+      (runningByType.get(task.type) ?? 0) < concurrencyOf(task)
+    const takeCapacity = (task: TaskRecord): void => {
+      runningByType.set(task.type, (runningByType.get(task.type) ?? 0) + 1)
     }
     const sorted = [...ready].sort((left, right) =>
       left.createdAt === right.createdAt
@@ -2159,7 +2273,7 @@ export class WorkflowEngine {
           continue
         }
         // 交给助理：按普通智能体任务派发，由它代收。
-        if (busyPositions.has('end')) continue
+        if (!hasCapacity(task)) continue
         const missing = this.missingWorkerOf(task, workers)
         if (missing !== null) {
           await this.failMissingWorkerTask(job, task, missing)
@@ -2167,7 +2281,7 @@ export class WorkflowEngine {
         }
         const launch = await this.claimAgentTask(job, task, tasks)
         if (launch !== null) {
-          busyPositions.add('end')
+          takeCapacity(task)
           launches.push(launch)
         }
         continue
@@ -2189,9 +2303,13 @@ export class WorkflowEngine {
       }
       if (executor.kind !== 'worker') continue
       if (executor.driver === 'robot') {
+        if (!hasCapacity(task)) continue
         const programId = executor.program ?? ''
         const launch = await this.claimProgramTask(job, task, programId)
-        if (launch !== null) launches.push(launch)
+        if (launch !== null) {
+          takeCapacity(task)
+          launches.push(launch)
+        }
         continue
       }
       const missing = this.missingWorkerOf(task, workers)
@@ -2199,10 +2317,10 @@ export class WorkflowEngine {
         await this.failMissingWorkerTask(job, task, missing)
         continue
       }
-      if (busyPositions.has(task.position)) continue
+      if (!hasCapacity(task)) continue
       const launch = await this.claimAgentTask(job, task, tasks)
       if (launch !== null) {
-        busyPositions.add(task.position)
+        takeCapacity(task)
         launches.push(launch)
       }
     }
@@ -2337,7 +2455,11 @@ export class WorkflowEngine {
       )
       return null
     }
-    const planMode = taskType.mode === 'plan'
+    const planMode = taskType.plan === true
+    const agentPreset =
+      typeof taskType.agentPreset === 'string' && taskType.agentPreset !== ''
+        ? taskType.agentPreset
+        : null
     // `create` 只在宿主真的有工作树能力时生效；能力缺失时降级为 `guard`。
     // `guard` 是显式选择，不依赖插件；`none` / 省略不注入任何工作树提示词。
     const worktree =
@@ -2377,6 +2499,7 @@ export class WorkflowEngine {
       // plan 模式的投递保持原样：完整提示词一条 followup，不拆用户消息。
       userPrompt: planMode ? null : sections.userPrompt,
       planMode,
+      agentPreset,
     }
   }
 
@@ -2412,6 +2535,8 @@ export class WorkflowEngine {
       // 助理任务保持原样：一条完整提示词，不拆用户消息。
       userPrompt: null,
       planMode: false,
+      // 任务类型的 agentPreset 不参与助理会话：助理用自己的默认预设。
+      agentPreset: null,
     }
   }
 
@@ -2486,6 +2611,19 @@ export class WorkflowEngine {
     }
     const task = this.store.getTask(launch.taskId)
     if (task === undefined || task.status !== 'running') return
+    // 先绑定会话 → 任务，再投递提示词：dispatchSession 返回前就已经在会话里开了
+    // 第一轮，首步组装工具清单时按 taskForSession() 计算（buka_task_complete 等）。
+    // 会话 id 由调用方先生成并交给 workers 服务，所以绑定与投递看到的是同一条会话。
+    const newSessionId = randomUUID()
+    this.sessionTasks.set(newSessionId, { jobId: launch.jobId, taskId: launch.taskId })
+    // 优先级：任务类型 > 执行者登记的默认 > 插件选项。任务类型的值随定义快照
+    // 钉住；执行者的值在派发时从刚刷新的登记表读（与 model 一致）。
+    const workerPreset = this.catalog.get(launch.worker)?.agentPreset
+    const agentPreset =
+      launch.agentPreset ??
+      (typeof workerPreset === 'string' && workerPreset !== ''
+        ? workerPreset
+        : this.options.workerPreset)
     let handle: WorkerHandleLike
     try {
       handle = (await workers.dispatchSession({
@@ -2494,12 +2632,13 @@ export class WorkflowEngine {
         // 定义以用户身份投递；没有定义时省略，workers 退化成单条 followup。
         ...(launch.userPrompt === null ? {} : { userPrompt: launch.userPrompt }),
         title: `工作流任务 ${task.id}`,
-        agentPreset: this.options.workerPreset,
+        agentPreset,
         approval: 'ask',
         planMode: launch.planMode,
-        newSessionId: randomUUID(),
+        newSessionId,
       })) as WorkerHandleLike
     } catch (error) {
+      this.unbindSessionTask(newSessionId, launch.taskId)
       await this.failOutside(
         launch.jobId,
         launch.taskId,
@@ -2512,6 +2651,8 @@ export class WorkflowEngine {
     await this.store.runExclusive(launch.jobId, async () => {
       const current = this.store.getTask(launch.taskId)
       if (current === undefined || current.status !== 'running') {
+        this.unbindSessionTask(newSessionId, launch.taskId)
+        if (sessionId !== null) this.unbindSessionTask(sessionId, launch.taskId)
         this.disposeHandle(handle)
         return
       }
@@ -2521,12 +2662,19 @@ export class WorkflowEngine {
         startSeq,
       }))
       if (sessionId !== null) {
-        this.sessionTasks.set(sessionId, { jobId: launch.jobId, taskId: launch.taskId })
+        // 宿主允许观察者预先生成会话 id；句柄回报的 id 与它不一致时（旧版服务 /
+        // 嵌入方），把绑定挪到真实 id 上，避免留下指向不存在会话的条目。
+        if (sessionId !== newSessionId) {
+          this.unbindSessionTask(newSessionId, launch.taskId)
+          this.sessionTasks.set(sessionId, { jobId: launch.jobId, taskId: launch.taskId })
+        }
         await this.store.updateTask(launch.taskId, (record) => ({
           ...record,
           claimant: record.claimant === null ? record.claimant : { ...record.claimant, sessionId },
           updatedAt: nowIso(),
         }))
+      } else {
+        this.unbindSessionTask(newSessionId, launch.taskId)
       }
     })
     this.trackExecution({
@@ -2564,18 +2712,19 @@ export class WorkflowEngine {
       controller,
       timeout: null,
     }
-    const finish = () => {
+    const finish = (status: TaskStatus | undefined) => {
       execution.stopPoll?.()
       if (execution.timeout !== null) clearTimeout(execution.timeout)
       this.active.delete(input.taskId)
-      this.disposeHandle(input.handle)
+      if (status === 'completed') this.retireHandle(input.handle)
+      else this.disposeHandle(input.handle)
       if (input.sessionId !== null) this.unbindSessionTask(input.sessionId, input.taskId)
     }
     let waiting = false
     execution.stopPoll = poll(this.options.pollIntervalMs, async () => {
       const task = this.store.getTask(input.taskId)
       if (task === undefined || task.status !== 'running') {
-        finish()
+        finish(task?.status)
         return true
       }
       const snapshot = readHandleResult(input.handle, input.startSeq)
@@ -2593,7 +2742,7 @@ export class WorkflowEngine {
         }
         return false
       }
-      finish()
+      finish(task.status)
       if (input.kind === 'assistant') {
         await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker)
       } else {

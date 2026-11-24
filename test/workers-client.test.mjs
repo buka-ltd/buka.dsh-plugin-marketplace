@@ -419,8 +419,7 @@ const zh = {
   openDetail: '打开详情',
   driverAgent: '智能体',
   driverRobot: '机器人',
-  systemWorker: '系统',
-  robotReadOnly: '机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。',
+  builtinWorker: '内置',
   descriptionLabel: '职责',
   descriptionPlaceholder: '例如：负责把会议记录整理成三点结论',
   descriptionHint:
@@ -442,6 +441,16 @@ const zh = {
   modelEmpty: '当前没有可用模型，请先在 DSH 的模型设置里配置提供方。',
   modelSomeFailed: '部分提供方读取失败：',
   modelUnavailable: '当前组合没有模型目录（ctx.llm 不可用），无法为智能体选择模型。',
+  presetTitle: '模式',
+  presetHint:
+    '选择这个执行者新开会话时使用的执行者预设；任务类型可以单独覆盖。改动后自动保存，只影响之后新开的会话。',
+  presetFollowWorkflow: '跟随工作流默认',
+  presetFollowWorkflowHint: '新会话使用工作流插件配置的默认模式。',
+  presetCurrent: '当前模式：',
+  presetBroken: '这个模式无法启动会话：',
+  presetSaveFailed: '保存模式失败：',
+  presetLoadFailed: '读取模式失败：',
+  presetUnavailable: '当前组合没有执行者预设服务（ctx.agentPresets 不可用），无法选择模式。',
   errInvalidModel: '模型选择不合法，请选择提供方与模型。',
   loading: '正在读取…',
   descriptionSaved: '职责已保存。',
@@ -641,6 +650,10 @@ function states({
   modelDraft = null,
   modelSaving = false,
   modelError = null,
+  agentPresetCatalog = { status: 'idle', data: null, error: null },
+  agentPresetDraft = null,
+  agentPresetSaving = false,
+  agentPresetError = null,
   tab = 'settings',
   files = emptyFiles(),
   deleteDialog = { target: null, impact: null, loading: false, error: null, saving: false },
@@ -680,6 +693,10 @@ function states({
     modelDraft, // modelDraft
     modelSaving, // modelSaving
     modelError, // modelError
+    agentPresetCatalog, // agentPresetCatalog
+    agentPresetDraft, // agentPresetDraft
+    agentPresetSaving, // agentPresetSaving
+    agentPresetError, // agentPresetError
     selectedId, // selectedId
     tab, // tab
     files, // files
@@ -1207,11 +1224,10 @@ test('执行者页：机器人只读，没有新会话 / 挂载 / 删除 / 助�
   const tree = client.render(states({ data }))
   const list = collect(tree)
 
-  // 驱动与职责展示；明确说明只读。
+  // 驱动、内建标记与职责展示。
   assert.ok(list.texts.includes('机器人'))
-  assert.ok(list.texts.includes('系统'), 'built-in robots carry the system badge')
+  assert.ok(list.texts.includes('内置'), 'built-in robots carry the built-in badge')
   assert.ok(list.texts.includes('到点完成任务的定时执行者'))
-  assert.ok(list.texts.includes('机器人由插件驱动：没有目录，不能开会话、编辑或安装 skills。'))
   // 没有新会话 / 挂载 / 删除 / 助理入口，也不显示目录缺失警告。
   assert.equal(list.texts.includes('新会话'), false)
   assert.equal(list.texts.includes('删除'), false)
@@ -1330,7 +1346,11 @@ test('执行者页：设置页签跟随默认模型时只渲染提供方选择',
         },
       }),
     ),
-  ).nodes.filter((node) => node.type === 'select')
+  ).nodes.filter(
+    (node) =>
+      node.type === 'select' &&
+      (node.props?.['aria-label'] === '提供方' || node.props?.['aria-label'] === '模型'),
+  )
   assert.equal(selects.length, 1, '跟随默认模型时只显示提供方选择')
 })
 
@@ -1351,6 +1371,59 @@ test('执行者页：设置页签的模型目录不可用时说明原因', async
     ),
   )
   assert.ok(view.texts.includes('当前组合没有模型目录（ctx.llm 不可用），无法为智能体选择模型。'))
+})
+
+test('执行者页：设置页签可选模式，broken 预设标灰、服务不可用时禁用', async () => {
+  const client = await loadClient()
+  const catalog = {
+    status: 'ready',
+    data: {
+      available: true,
+      presets: [
+        { id: 'ptc', name: 'PTC', description: '', broken: null, isDefault: false },
+        { id: 'broken', name: 'Broken', description: '', broken: '插件缺失', isDefault: false },
+      ],
+    },
+    error: null,
+  }
+  const tree = client.render(
+    states({
+      data: listData(),
+      selectedId: 'writer',
+      tab: 'settings',
+      agentPresetCatalog: catalog,
+      agentPresetDraft: 'ptc',
+    }),
+  )
+  const view = collect(tree)
+  assert.ok(view.texts.includes('模式'))
+  assert.ok(view.texts.includes('当前模式： PTC'))
+  const select = findNode(tree, (node) => node.props?.['aria-label'] === '模式')
+  assert.equal(select?.type, 'select')
+  assert.equal(select?.props?.value, 'ptc')
+  assert.equal(select?.props?.disabled, false)
+  const broken = findNode(tree, (node) => node.type === 'option' && node.props?.value === 'broken')
+  assert.equal(broken?.props?.disabled, true, 'a broken preset cannot be chosen')
+
+  const unavailable = collect(
+    client.render(
+      states({
+        data: listData(),
+        selectedId: 'writer',
+        tab: 'settings',
+        agentPresetCatalog: {
+          status: 'ready',
+          data: { available: false, presets: [] },
+          error: null,
+        },
+      }),
+    ),
+  )
+  assert.ok(
+    unavailable.texts.includes(
+      '当前组合没有执行者预设服务（ctx.agentPresets 不可用），无法选择模式。',
+    ),
+  )
 })
 
 test('删除弹窗：列出影响面、硬删说明，被 running 作业阻塞时禁用确认', async () => {

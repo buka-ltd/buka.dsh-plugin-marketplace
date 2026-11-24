@@ -47,6 +47,8 @@ export interface WorkerRecord {
   description: string
   /** 智能体新会话使用的模型；没有配置时跟随宿主默认模型。机器人没有。 */
   model?: WorkerModelSelection | undefined
+  /** 智能体新会话的默认执行者预设；没有配置时跟随工作流插件的 `workerPreset`。 */
+  agentPreset?: string | undefined
 }
 
 /**
@@ -62,6 +64,7 @@ export interface WorkerRecordInput {
   avatar?: string | undefined
   description?: string | undefined
   model?: WorkerModelSelection | null | undefined
+  agentPreset?: string | null | undefined
 }
 
 /**
@@ -93,6 +96,8 @@ export interface ClaudeLinkInfo {
 
 /** 列表里的一行执行者：登记表信息 + 磁盘 / 挂载状态。 */
 export interface WorkerListEntry extends WorkerRecord {
+  /** 内建执行者（clock / engine）：只读、带「内置」标记。 */
+  builtin?: boolean
   exists: boolean
   mounted: boolean
   workspaceId: string | null

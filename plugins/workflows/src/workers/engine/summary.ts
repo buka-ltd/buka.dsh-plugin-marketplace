@@ -33,6 +33,9 @@ export function summarizeWorker(worker: WorkerListEntry): Record<string, unknown
     createdAt: worker?.createdAt ?? null,
     avatar: resolveAvatar(worker?.avatar, worker?.id),
     description: typeof worker?.description === 'string' ? worker.description : '',
+    ...(typeof worker?.agentPreset === 'string' && worker.agentPreset !== ''
+      ? { agentPreset: worker.agentPreset }
+      : {}),
     exists: worker?.exists === true,
     mounted: worker?.mounted === true,
     workspaceId: worker?.workspaceId ?? null,

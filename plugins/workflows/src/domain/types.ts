@@ -59,8 +59,10 @@ export interface WorkerInfo {
   readonly program?: string | undefined
   readonly description?: string | undefined
   readonly avatar?: string | undefined
-  /** 智能体的工作目录（附件相对路径的根）。 */
+  /** 执行者的工作目录（附件相对路径的根）。 */
   readonly path?: string | undefined
+  /** 智能体新会话的默认执行者预设；机器人没有会话，字段不出现。 */
+  readonly agentPreset?: string | undefined
 }
 
 /** workers 服务里本插件用到的部分。 */
@@ -190,8 +192,22 @@ export interface TaskTypeDefinition {
    * 被点名的智能体没交出结果时整个作业失败（不做自动换人或人兜底）。
    */
   readonly assistant?: string | null | undefined
-  /** `plan`：进入执行前对目标 agent 执行 `/plan`。 */
-  readonly mode?: 'plan' | null | undefined
+  /** `plan: true`：进入执行前对目标 agent 执行 `/plan`。 */
+  readonly plan?: boolean | undefined
+  /**
+   * 仅智能体岗位：执行这一任务类型的会话使用的执行者预设 id。
+   *
+   * 优先级：任务类型 > 执行者登记的默认 > 插件选项 `workerPreset`。任务类型的值
+   * 随定义快照钉住；执行者的默认在派发时现读。
+   */
+  readonly agentPreset?: string | undefined
+  /**
+   * 同一作业内这类任务最多同时进行几条；省略等同 1。
+   *
+   * 只对智能体 / 机器人任务类型有意义：人任务不占引擎的并发额度。按作业内计数、
+   * 按任务类型计数，跨作业互不影响；就绪任务按创建顺序拿名额。
+   */
+  readonly concurrency?: number | undefined
   /**
    * 仅智能体岗位的工作树模式。
    *

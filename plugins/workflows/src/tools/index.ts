@@ -108,7 +108,9 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
             { "channel": "<channel id from this position>", "type": "<task type id>",
               "content": { "field": "{{content.until}}" } }
           ],
-          "assistant": "<assistant worker identifier>" | null, "mode": "plan" | null,
+          "assistant": "<assistant worker identifier>" | null, "plan": true,
+          "agentPreset": "<agent preset id>",   // agent positions only
+          "concurrency": 2,                     // agent / robot positions only, default 1
           "worktree": "none" | "guard" | "create",   // agent positions only
           "actions": [   // human positions only
             { "id": "pass", "label": "通过",
@@ -125,7 +127,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "mode" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`
+The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "plan", "agentPreset", "concurrency" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". An agent task type may set "plan": true to start the session in DSH plan mode, and "agentPreset" to the id of the agent preset its session starts with (the task type overrides the worker default, which overrides the plugin option; plan mode and the preset are independent). An agent or robot task type may set "concurrency" to a positive integer: the maximum number of tasks of that type running at once inside one job (default 1, waiting tasks start FIFO). Concurrency is per task type, not per position, and human tasks do not use the engine quota. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). A placeholder path ending in "?" renders an empty string when the value is missing, for optional form fields; a path without "?" is strict and fails when missing. The referenced path must exist in the schema either way. Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`
 
 /**
  * 注册全部工作流工具。
@@ -165,12 +167,24 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
             version: { type: 'number', required: true },
             name: { type: 'string', required: true },
             status: { type: 'string', required: true },
+            warnings: { type: 'json', required: true },
           },
         },
-        render: (_args, value) =>
-          text(
+        render: (_args, value) => {
+          const warnings = Array.isArray(value.warnings)
+            ? (value.warnings as Array<{ path?: unknown; message?: unknown }>)
+            : []
+          const lines = [
             `已保存工作流「${String(value.name)}」（${String(value.workflowId)}，版本 ${String(value.version)}，状态 ${String(value.status)}）。`,
-          ),
+          ]
+          if (warnings.length > 0) {
+            lines.push('提示（不拦截保存）：')
+            for (const warning of warnings) {
+              lines.push(`- ${String(warning.path ?? '')}: ${String(warning.message ?? '')}`)
+            }
+          }
+          return text(lines.join('\n'))
+        },
       },
       async execute(args, exec) {
         assertOrchestrator(exec.agent)
@@ -186,6 +200,10 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
           version: workflow.latestVersion,
           name: workflow.name,
           status: workflow.status,
+          warnings: workflow.warnings.map((warning) => ({
+            path: warning.path,
+            message: warning.message,
+          })),
         }
       },
     }),

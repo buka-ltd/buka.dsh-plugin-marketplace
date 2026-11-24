@@ -14,7 +14,7 @@
 import path from 'node:path'
 import { resolveAvatar } from '../avatar.ts'
 import { emptyAgentsFile, ensureClaudeLink, readAgentsFile, readClaudeLink } from './agents.ts'
-import { withBuiltinWorkers } from './builtin.ts'
+import { isBuiltinWorkerId, withBuiltinWorkers } from './builtin.ts'
 import { ensureWorkerGitRepo } from './git.ts'
 import { isDirectory, realpathOr, realpathOrNull, requireRegistryFile } from './paths.ts'
 import { scanProjectSkills } from './project-skills.ts'
@@ -78,6 +78,7 @@ export async function listWorkers({
 function programEntry(entry: WorkerRecord): WorkerListEntry {
   return {
     ...entry,
+    builtin: isBuiltinWorkerId(entry.id),
     avatar: resolveAvatar(entry.avatar, entry.id),
     exists: false,
     mounted: false,

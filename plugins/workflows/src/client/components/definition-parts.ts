@@ -44,7 +44,13 @@ export function renderTaskTypeCard(
               `${t('taskTypeAssistant')} · ${renderAssistant(page, type.assistant)}`,
             )
           : null,
-        type.mode === 'plan' ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
+        type.plan === true ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
+        typeof type.agentPreset === 'string' && type.agentPreset !== ''
+          ? h(Tag, { tone: 'neutral' }, `${t('taskTypePreset')} · ${type.agentPreset}`)
+          : null,
+        typeof type.concurrency === 'number' && type.concurrency > 1
+          ? h(Tag, { tone: 'neutral' }, `${t('taskTypeConcurrency')} · ${String(type.concurrency)}`)
+          : null,
         type.worktree === 'guard'
           ? h(Tag, { tone: 'info' }, t('taskTypeWorktreeGuard'))
           : type.worktree === 'create'

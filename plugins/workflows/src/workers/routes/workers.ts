@@ -14,6 +14,7 @@
 
 import type { ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import type { AgentPresetsServiceLike } from '../../engine/types.ts'
 import { syncWorkerTitle } from '../builder.ts'
 import { optionalService } from '../engine/session-runtime.ts'
 import { buildWorkerModelCatalog } from '../model-catalog.ts'
@@ -31,6 +32,7 @@ import {
   setWorkerAvatar,
   setWorkerDescription,
   setWorkerModel,
+  setWorkerPreset,
   WORKER_DESCRIPTION_MAX_LENGTH,
   workerDisplayName,
 } from '../worker-store.ts'
@@ -63,6 +65,12 @@ const MODELS_ROUTE = '/buka-workers/models'
 
 /** 页面给智能体设置新会话模型用的路由。 */
 const MODEL_ROUTE = '/buka-workers/model'
+
+/** 页面读取可用执行者预设（界面写作「模式」）列表用的路由。 */
+const PRESETS_ROUTE = '/buka-workers/presets'
+
+/** 页面给智能体设置默认执行者预设用的路由。 */
+const PRESET_ROUTE = '/buka-workers/preset'
 
 /** 页面改执行者展示名（不移动目录）用的路由。 */
 const RENAME_ROUTE = '/buka-workers/rename'
@@ -109,6 +117,40 @@ interface WorkerUsageView {
 /** 工作流一半只读服务的收窄形状；按可选服务处理。 */
 interface WorkflowUsageService {
   workerUsage?(id: string): Promise<unknown>
+}
+
+/** 页面展示用的一条执行者预设。 */
+interface AgentPresetRowView {
+  id: string
+  name: string
+  description: string
+  broken: string | null
+}
+
+/**
+ * 把 `agentPresets.list()` 的返回值收窄成页面稳定使用的形状。
+ *
+ * 服务不可用 / 返回值坏掉时按空列表处理；激活失败（broken）的预设保留，页面
+ * 把它标灰并显示原因。
+ */
+function normalizeAgentPresets(raw: unknown): AgentPresetRowView[] {
+  if (!Array.isArray(raw)) return []
+  const rows: AgentPresetRowView[] = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    rows.push({
+      id,
+      name: typeof record.name === 'string' ? record.name : '',
+      description: typeof record.description === 'string' ? record.description : '',
+      broken: typeof record.broken === 'string' ? record.broken : null,
+    })
+  }
+  return rows
 }
 
 /** 把服务返回值收窄成稳定形状：缺字段按空值处理，不让页面拿到坏结构。 */
@@ -519,6 +561,115 @@ export function registerWorkerRoutes(
         },
       }),
     `buka-workers: POST ${MODEL_ROUTE}`,
+  )
+
+  /** 读一次 `agentPresets` 服务声明的预设；服务缺失时返回 `null`。 */
+  async function listAgentPresets(): Promise<AgentPresetRowView[] | null> {
+    const service = optionalService<AgentPresetsServiceLike>(ctx, 'agentPresets')
+    if (service === null || service === undefined || typeof service.list !== 'function') {
+      return null
+    }
+    return normalizeAgentPresets(await service.list())
+  }
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: PRESETS_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'GET') {
+            sendMethodNotAllowed(res, 'GET')
+            return
+          }
+          try {
+            const presets = await listAgentPresets()
+            // 服务缺失时页面把选择器置灰并提示；空列表与「不可用」是两回事。
+            sendJson(res, 200, {
+              ok: true,
+              available: presets !== null,
+              presets: presets ?? [],
+            })
+          } catch (error) {
+            webCtx.logger?.warn?.('buka-workers: 读取执行者预设失败：%s', describeError(error))
+            sendError(res, 500, 'presets-failed', `读取执行者预设失败：${describeError(error)}`)
+          }
+        },
+      }),
+    `buka-workers: GET ${PRESETS_ROUTE}`,
+  )
+
+  webCtx.effect(
+    () =>
+      webCtx.webServer.register({
+        kind: 'exact',
+        path: PRESET_ROUTE,
+        handler: async (req, res) => {
+          if (rejected(webCtx, req, res)) return
+          if (req.method !== 'POST') {
+            sendMethodNotAllowed(res, 'POST')
+            return
+          }
+          const body = await readJsonBody(req, res)
+          if (body === undefined) return
+
+          const id = typeof body?.id === 'string' ? body.id.trim() : ''
+          if (!isResolvableWorkerId(id)) {
+            sendError(res, 400, 'invalid-id', `执行者标识符不合法：${String(body?.id)}`)
+            return
+          }
+          const agentPreset = body?.agentPreset
+          if (
+            agentPreset !== null &&
+            agentPreset !== undefined &&
+            typeof agentPreset !== 'string'
+          ) {
+            sendError(res, 400, 'invalid-agent-preset', 'agentPreset 必须是字符串或 null')
+            return
+          }
+          const nextPreset =
+            agentPreset === null || agentPreset === undefined ? null : agentPreset.trim()
+
+          try {
+            // 预设存在性在能读到目录时校验；服务缺失时只校验形状，派发时挂载失败
+            // 按任务失败处理（ADR 0032）。
+            if (nextPreset !== null && nextPreset !== '') {
+              const presets = await listAgentPresets()
+              if (presets !== null && !presets.some((preset) => preset.id === nextPreset)) {
+                sendError(res, 400, 'unknown-agent-preset', `执行者预设不存在：${nextPreset}`)
+                return
+              }
+            }
+            const result = await serializeRegistry(() =>
+              setWorkerPreset({ file: registryFile, id, agentPreset: nextPreset }),
+            )
+            webCtx.logger?.info?.('buka-workers: 智能体 %s 的执行者预设已更新', id)
+            sendJson(res, 200, { ok: true, worker: result.worker })
+          } catch (error) {
+            const code = errorCode(error)
+            if (
+              code === 'invalid-agent-preset' ||
+              code === 'invalid-id' ||
+              code === 'unknown-agent-preset'
+            ) {
+              sendError(res, 400, code, describeError(error))
+              return
+            }
+            if (code === 'unknown-worker') {
+              sendError(res, 404, 'unknown-worker', describeError(error))
+              return
+            }
+            if (code === 'robot-worker' || code === 'registry-unreadable') {
+              sendError(res, 409, code, describeError(error))
+              return
+            }
+            webCtx.logger?.warn?.('buka-workers: 更新执行者预设失败：%s', describeError(error))
+            sendError(res, 500, 'preset-failed', `更新执行者预设失败：${describeError(error)}`)
+          }
+        },
+      }),
+    `buka-workers: POST ${PRESET_ROUTE}`,
   )
 
   webCtx.effect(

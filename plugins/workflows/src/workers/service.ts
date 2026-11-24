@@ -75,7 +75,7 @@ export const SERVICE_NAME = 'bukaWorkers'
 
 /** plan 模式入口不可用时给用户看的错误文案。 */
 const PLAN_MODE_UNAVAILABLE =
-  'plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a worker node with mode "plan"'
+  'plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a worker task type with "plan": true'
 
 /**
  * 命令是否解析并成功执行：没解析到（undefined）或结果是成功以外的 kind 都算
@@ -680,6 +680,19 @@ export class WorkerSessionService {
         agent.followup(followupMessage(text))
         observer.startSeq = next
         return next
+      },
+      /**
+       * 等当前轮落定：工作流在任务完成后用它避免立刻释放句柄、打断模型收尾。
+       *
+       */
+      async whenIdle(): Promise<unknown> {
+        try {
+          return await agent.whenIdle()
+        } catch (error) {
+          service.ctx?.logger?.warn?.(
+            `buka-workers: could not wait for worker session "${observer.sessionId}" to settle: ${describeError(error)}`,
+          )
+        }
       },
       /**
        * 读当前 live agent 的 plan 模式状态：从会话日志的 `plan/mode` 事件折叠，

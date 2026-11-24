@@ -564,10 +564,10 @@ export function FilesSection({
 }
 
 /**
- * 「设置」页签：把名称、职责与模型收在同一个页面里。
+ * 「设置」页签：把名称、职责、执行者预设与模型收在同一个页面里。
  *
- * 三块都没有保存按钮：名称与职责写登记表，模型写新会话的模型选择；都按改动
- * 自动保存，失败的提示留在各自的区块里；进入页签时会预读模型目录。
+ * 四块都没有保存按钮：名称与职责写登记表，预设与模型决定新会话怎么开；都按
+ * 改动自动保存，失败的提示留在各自的区块里；进入页签时会预读预设与模型目录。
  *
  */
 export function SettingsSection({
@@ -586,7 +586,152 @@ export function SettingsSection({
     { className: 'buka-workers-settings' },
     h(NameSection, { t, worker, state, detailActions }),
     h(DescriptionSection, { t, worker, state, detailActions }),
+    h(PresetSection, { t, worker, state, detailActions }),
     h(ModelSection, { t, worker, state, detailActions }),
+  )
+}
+
+/**
+ * 「执行者预设」区块：给智能体选新会话默认使用的模式（DSH 的 agent preset）。
+ *
+ * 空选项表示跟随工作流插件的 `workerPreset`；`agentPresets` 服务不可用时选择器
+ * 禁用并提示；激活失败（broken）的预设标灰。只影响之后新开的会话。
+ */
+export function PresetSection({
+  t,
+  worker,
+  state,
+  detailActions,
+}: {
+  t: Translate
+  worker: Worker
+  state: WorkersPageState
+  detailActions: DetailActions
+}): ReactElement {
+  const {
+    agentPresetCatalog,
+    agentPresetDraft,
+    setAgentPresetDraft,
+    agentPresetSaving,
+    agentPresetError,
+    setAgentPresetError,
+  } = state
+  const { saveWorkerPreset } = detailActions
+  const catalog = agentPresetCatalog.data
+  const available = catalog?.available === true
+  const presets = catalog?.presets ?? []
+  const saved =
+    typeof worker.agentPreset === 'string' && worker.agentPreset !== '' ? worker.agentPreset : null
+  const dirty = agentPresetDraft !== saved
+  const current = presets.find((preset) => preset.id === agentPresetDraft)
+
+  const pendingSave = React.useRef({ dirty: false, save: saveWorkerPreset })
+  React.useEffect(() => {
+    // 失败后不再自动重试：错误留在区块里，用户重新选择（清掉错误）才再保存。
+    const pending = dirty && agentPresetError === null
+    pendingSave.current = { dirty: pending, save: saveWorkerPreset }
+    if (!pending || agentPresetSaving) return undefined
+    const timer = setTimeout(() => void saveWorkerPreset(), 250)
+    return () => clearTimeout(timer)
+  }, [agentPresetDraft, dirty, agentPresetError, agentPresetSaving])
+  React.useEffect(
+    () => () => {
+      if (pendingSave.current.dirty) void pendingSave.current.save()
+    },
+    [],
+  )
+
+  const options = [
+    h('option', { key: 'follow', value: '' }, t('presetFollowWorkflow')),
+    ...presets.map((preset) =>
+      h(
+        'option',
+        {
+          key: preset.id,
+          value: preset.id,
+          disabled: preset.broken !== null,
+          ...(preset.broken === null ? {} : { title: preset.broken }),
+        },
+        preset.name !== '' ? preset.name : preset.id,
+      ),
+    ),
+  ]
+  // 保存的预设已不在目录里（被卸载 / 改名）时仍然展示它，避免静默改成「跟随默认」。
+  if (agentPresetDraft !== null && current === undefined) {
+    options.push(
+      h('option', { key: `saved:${agentPresetDraft}`, value: agentPresetDraft }, agentPresetDraft),
+    )
+  }
+
+  function pickPreset(value: string) {
+    setAgentPresetError(null)
+    setAgentPresetDraft(value === '' ? null : value)
+  }
+
+  const currentLabel =
+    current === undefined
+      ? (agentPresetDraft ?? '')
+      : current.name !== ''
+        ? current.name
+        : current.id
+  const currentHint =
+    agentPresetDraft === null
+      ? h('p', { className: 'buka-workers-fieldHint' }, t('presetFollowWorkflowHint'))
+      : current !== undefined && current.broken !== null
+        ? h(
+            'p',
+            { className: 'buka-workers-formError', role: 'alert' },
+            `${t('presetBroken')} ${current.broken}`,
+          )
+        : h('p', { className: 'buka-workers-fieldHint' }, `${t('presetCurrent')} ${currentLabel}`)
+
+  return h(
+    'section',
+    { className: 'buka-workers-modelSection' },
+    h(
+      'div',
+      { className: 'buka-workers-sectionHead' },
+      h('h2', { className: 'buka-workers-sectionTitle' }, t('presetTitle')),
+      h(
+        'span',
+        { className: 'buka-workers-autosave', role: 'status', 'aria-live': 'polite' },
+        agentPresetSaving ? t('saving') : dirty ? t('autosavePending') : null,
+      ),
+    ),
+    h('p', { className: 'buka-workers-fieldHint' }, t('presetHint')),
+    agentPresetCatalog.status === 'loading' && catalog === null
+      ? h('p', { className: 'buka-workers-fieldHint', role: 'status' }, t('loading'))
+      : null,
+    agentPresetCatalog.status === 'error'
+      ? h(
+          'p',
+          { className: 'buka-workers-formError', role: 'alert' },
+          `${t('presetLoadFailed')} ${agentPresetCatalog.error ?? ''}`,
+        )
+      : null,
+    catalog !== null && !available
+      ? h('p', { className: 'buka-workers-notice', role: 'status' }, t('presetUnavailable'))
+      : null,
+    h(
+      'label',
+      { className: 'buka-workers-field' },
+      h('span', { className: 'buka-workers-fieldLabel' }, t('presetTitle')),
+      h(
+        'select',
+        {
+          className: 'buka-workers-select',
+          value: agentPresetDraft ?? '',
+          'aria-label': t('presetTitle'),
+          disabled: !available,
+          onChange: (event: { target: { value: string } }) => pickPreset(event.target.value),
+        },
+        ...options,
+      ),
+    ),
+    currentHint,
+    agentPresetError === null
+      ? null
+      : h('p', { className: 'buka-workers-formError', role: 'alert' }, agentPresetError),
   )
 }
 

@@ -92,6 +92,10 @@ export function failureText(t: Translate, failure: unknown): string {
       return t('errWorkspaceUnavailable')
     case 'invalid-model':
       return t('errInvalidModel')
+    case 'invalid-agent-preset':
+      return t('errInvalidAgentPreset')
+    case 'unknown-agent-preset':
+      return t('errUnknownAgentPreset')
     case 'invalid-driver':
       return t('errInvalidDriver')
     case 'too-large':

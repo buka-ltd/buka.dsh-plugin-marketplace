@@ -73,6 +73,13 @@ export interface WorkerSessionObserver {
   readResult(options?: { sinceSeq?: number }): Record<string, unknown>
   /** 在同一会话里再发一条消息（恢复续跑用），返回新的起点 seq。 */
   send(text: string): Promise<number>
+  /**
+   * 等当前轮落定；工作流在任务完成后用它避免立刻释放句柄、打断模型收尾。
+   *
+   * 会话因为等待用户下一步而空闲时也会返回：这里只保证「当前这一轮结束」，不
+   * 保证会话不会再开下一轮。
+   */
+  whenIdle(): Promise<unknown>
   cancel(reason?: string): Promise<Record<string, unknown>>
   dispose(): Promise<void>
   getPlanMode(): { active: boolean } | null

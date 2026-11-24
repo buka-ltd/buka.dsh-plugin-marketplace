@@ -9,8 +9,10 @@
  * - `{{nodes.<id>.data.<path>}}`：执行者通过 `structured_output` 回报的结构化结果；
  * - 需要时也可以引用 `{{nodes.<id>.worker}}`、`{{nodes.<id>.sessionId}}`。
  *
- * 路径不存在时抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
- * 不会把空提示词交给执行者。
+ * 路径不存在时默认抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
+ * 不会把空提示词交给执行者。确实允许运行时缺失的路径（表单非必填字段）要在末尾
+ * 加 `?` 显式声明：`{{input.remark?}}` 取不到值时渲染成空串。`?` 不进入路径本身，
+ * 保存校验看到的仍是 `input.remark`，写错路径照样被拒。
  *
  * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
  * `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。
@@ -26,7 +28,12 @@ const PATH_PATTERN = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u
 
 /** 单个占位符的解析结果：要么有路径，要么有错误。 */
 type PlaceholderParse =
-  | { readonly path: string; readonly error?: undefined }
+  | {
+      readonly path: string
+      /** 路径末尾带 `?`：取不到值时渲染成空串。 */
+      readonly optional: boolean
+      readonly error?: undefined
+    }
   | { readonly path?: undefined; readonly error: string }
 
 /** 模板错误：带出错路径，便于定位是哪个占位符。 */
@@ -44,14 +51,19 @@ export class TemplateError extends Error {
 /**
  * 解析一个占位符里的路径（不含花括号）。
  *
+ * 末尾的 `?` 表示可选路径：解析结果里 `path` 不含 `?`，由 `optional` 单独表示。
+ *
  * @param raw 占位符原文
- * @returns 合法时带 `path`，非法时带 `error`
+ * @returns 合法时带 `path` 与 `optional`，非法时带 `error`
  */
 export function parsePlaceholder(raw: unknown): PlaceholderParse {
-  const path = String(raw).trim()
-  if (path === '') return { error: 'empty template placeholder' }
-  if (!PATH_PATTERN.test(path)) return { error: `invalid template path "${path}"` }
-  return { path }
+  const text = String(raw).trim()
+  if (text === '') return { error: 'empty template placeholder' }
+  const optional = text.endsWith('?')
+  const path = optional ? text.slice(0, -1).trim() : text
+  if (path === '') return { error: `invalid template path "${text}"` }
+  if (!PATH_PATTERN.test(path)) return { error: `invalid template path "${text}"` }
+  return { path, optional }
 }
 
 /**
@@ -94,7 +106,11 @@ export function renderTemplate(template: string, context: Record<string, unknown
     const path = parsed.path
     const value = getPath(context, path)
     if (value === undefined) {
-      throw new TemplateError(`template path "${path}" is not available yet`, path)
+      if (parsed.optional) return ''
+      throw new TemplateError(
+        `template path "${path}" is not available yet; add "?" to the path to render an empty string when it is missing`,
+        path,
+      )
     }
     return formatValue(value)
   })

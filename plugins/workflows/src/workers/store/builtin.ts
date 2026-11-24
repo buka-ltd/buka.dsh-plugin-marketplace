@@ -6,7 +6,8 @@
  * 登记在 workers 插件里、在页面上只读展示，用户不能创建或删除。内建机器人的
  * 标识符固定；展示名可以是标识符，也可以是一个可读的名字。
  *
- * `engine` 是工作流引擎自己：它只处理内建开始节点，岗位不能引用它。
+ * `engine` 是工作流引擎自己：它只处理内建开始节点，岗位不能引用它。展示名是
+ * `Workflow引擎`，默认头像 🤖（预设 id `robot`）。
  *
  * 本模块只依赖类型与常量，可被 `node --test` 直接 import。
  *
@@ -39,16 +40,17 @@ export const BUILTIN_WORKERS: ReadonlyArray<WorkerRecord> = Object.freeze([
     program: CLOCK_WORKER_ID,
     createdAt: '2026-11-12T00:00:00.000Z',
     avatar: '',
-    description: '到点完成任务的定时执行者：任务内容带 until，到点后自动完成。',
+    description:
+      '到点完成任务的定时执行者：任务内容带 until，到点后自动完成。等待彼此独立，建议把该任务类型的 concurrency 设为 10，避免多个等待互相排队。',
   },
   {
     id: ENGINE_WORKER_ID,
-    name: '引擎',
+    name: 'Workflow引擎',
     driver: 'robot',
     path: '',
     program: ENGINE_PROGRAM_ID,
     createdAt: '2026-11-20T00:00:00.000Z',
-    avatar: '',
+    avatar: 'robot',
     description: '工作流引擎：接受开始任务类型，校验作业输入并创建初始任务；只处理内建开始节点。',
   },
 ])
@@ -76,14 +78,16 @@ export function isSystemOnlyWorkerId(id: unknown): boolean {
 }
 
 /**
- * 把登记表里缺的内建执行者补到末尾。
+ * 把内建执行者的记录换成清单里的规范记录，并把清单里缺的补到末尾。
  *
- * 只影响内存里的视图：页面与 `list()` 用它保证内建执行者总是可见；写回由
- * `ensureBuiltinWorkers` 负责。
+ * 内建执行者的名称、头像与描述由 `BUILTIN_WORKERS` 决定：登记表里可能还留着
+ * 旧版本写下的值，视图只以清单为准。只影响内存里的视图：页面与 `list()` 用它
+ * 保证内建执行者总是可见且展示一致；写回由 `ensureBuiltinWorkers` 负责。
  */
 export function withBuiltinWorkers(workers: readonly WorkerRecord[]): WorkerRecord[] {
   const ids = new Set(workers.map((worker) => worker.id))
-  return [...workers, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))]
+  const canonical = workers.map((worker) => builtinWorker(worker.id) ?? worker)
+  return [...canonical, ...BUILTIN_WORKERS.filter((worker) => !ids.has(worker.id))]
 }
 
 /** 生成「内建执行者不可改动」错误。 */
