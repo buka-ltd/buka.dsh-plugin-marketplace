@@ -2311,7 +2311,7 @@ function requestedSkillPaths(value) {
 * - `GET /buka-skills/list` 列出全局 skills；
 * - `POST /buka-skills/uninstall` 卸载一个；
 * - `GET /buka-skills/check` 检查全局 skill 的更新；
-* - `POST /buka-skills/update` 应用可用的更新；
+* - `POST /buka-skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
 * - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
 *   （`ctx.workspaceRegistry`）；
 * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
@@ -2516,8 +2516,12 @@ function registerRoutes(ctx, deps) {
 					sendMethodNotAllowed(res, "POST");
 					return;
 				}
+				const body = await readJsonBody(req, res);
+				if (body === void 0) return;
+				const fields = body;
+				const skills = Array.isArray(fields?.skills) ? fields.skills.filter((name) => typeof name === "string") : void 0;
 				try {
-					const result = await catalog.updateSkills({});
+					const result = await catalog.updateSkills(skills === void 0 ? {} : { skills });
 					if (result.ok) webCtx.logger?.info?.("buka-skills: 更新完成（%d 个成功，%d 个失败）", result.updated.length, result.failed.length);
 					sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result);
 				} catch (error) {
@@ -5104,7 +5108,8 @@ function registerTools(ctx, deps) {
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
 *   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
 *   `GET /buka-skills/icon` 返回缓存的 GitHub owner 头像（过期后台静默更新），
-*   `GET /buka-skills/check` 供页面自动检查更新，`POST /buka-skills/update` 应用更新，
+*   `GET /buka-skills/check` 供页面自动检查更新，`POST /buka-skills/update` 应用更新
+*   （请求体带 `skills` 时只处理这些名字），
 *   `GET /buka-skills/targets` 列出可安装的执行者（可选的 `ctx.bukaWorkers`）与
 *   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
 *   里的一个 skill 安装到全局、某个执行者目录或某个工作区目录；

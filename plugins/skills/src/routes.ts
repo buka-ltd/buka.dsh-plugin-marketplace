@@ -6,7 +6,7 @@
  * - `GET /buka-skills/list` 列出全局 skills；
  * - `POST /buka-skills/uninstall` 卸载一个；
  * - `GET /buka-skills/check` 检查全局 skill 的更新；
- * - `POST /buka-skills/update` 应用可用的更新；
+ * - `POST /buka-skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
  * - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
  *   （`ctx.workspaceRegistry`）；
  * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
@@ -79,6 +79,8 @@ interface RequestBody {
   /** 执行者目标的标识符；旧版 workers 没有 `id` 时是它的名字。 */
   worker?: unknown
   workspace?: unknown
+  /** 更新路由：只更新这些 skill（按名字）；省略表示全部候选。 */
+  skills?: unknown
 }
 
 /** 路由需要的共享依赖：都由入口装配好后传进来。 */
@@ -310,9 +312,17 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
               sendMethodNotAllowed(res, 'POST')
               return
             }
+            const body = await readJsonBody(req, res)
+            if (body === undefined) return
+            const fields = body as RequestBody | null
+            // 页面上的行内「更新」只传这一行 skill 的名字；不传时与以前一样更新
+            // 全部候选（其他插件通过 `ctx.bukaSkills.updateSkills()` 调用）。
+            const skills = Array.isArray(fields?.skills)
+              ? fields.skills.filter((name): name is string => typeof name === 'string')
+              : undefined
             try {
               const result: SkillUpdateResult | { ok: false; code: string; message: string } =
-                await catalog.updateSkills({})
+                await catalog.updateSkills(skills === undefined ? {} : { skills })
               if (result.ok) {
                 webCtx.logger?.info?.(
                   'buka-skills: 更新完成（%d 个成功，%d 个失败）',

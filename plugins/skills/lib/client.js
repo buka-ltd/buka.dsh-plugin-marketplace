@@ -132,6 +132,12 @@ window.__ModuleLoader__.load({
     		emoji: "🍄",
     		color: "#EB5757",
     		labelKey: "avatarMushroom"
+    	},
+    	{
+    		id: "robot",
+    		emoji: "🤖",
+    		color: "#2F80ED",
+    		labelKey: "avatarRobot"
     	}
     ];
     AVATARS.map((preset) => preset.id);
@@ -328,6 +334,97 @@ window.__ModuleLoader__.load({
     function errorCode(failure) {
     	const code = failure?.code;
     	return typeof code === "string" ? code : void 0;
+    }
+    // .build/skills/client/check-cache.js
+    /**
+    * 全局技能检查结果的本地缓存：上一次检查出的「有更新 / 已是最新 / ...」按行存
+    * 下来，页面重新打开时先按这份结果渲染，再在后台静默重查。
+    *
+    * 检查是静默的：页面上没有「检查中…」一类的进度提示，所以状态标记必须能先
+    * 从缓存里恢复出来，否则每次重开都要等 Host 跑完 `skills check` 才看得到。
+    * 缓存放在浏览器 localStorage 里（和 DSH 自己的 `dsh.sessions.current` 等页面
+    * 状态同一个 origin），键名沿用 `dsh.` 前缀并带版本号。
+    *
+    * 缓存是纯页面状态、可重建：所有 localStorage 访问都有兜底（隐私模式 / 配额
+    * 满不能让页面挂掉），形状不对就当没有缓存；每次检查 / 更新后写回最新结果。
+    *
+    * @module @buka/dsh-plugin-skills/client/check-cache
+    */
+    /** 检查结果缓存的键。 */
+    const CHECK_CACHE_KEY = "dsh.buka-skills.checks.v1";
+    /** 缓存格式版本；版本不符就当没有缓存，不做迁移。 */
+    const CHECK_CACHE_VERSION = 1;
+    /** 检查结果只有一个已知字段需要校验：状态字符串。 */
+    function isCheckEntry(value) {
+    	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    	return typeof value.status === "string";
+    }
+    /**
+    * 取 localStorage；隐私模式、没有 window 或 storage 被禁用时返回 null。
+    * 缓存是可重建的页面状态，任何访问失败都不该让页面挂掉。
+    */
+    function checkStorage() {
+    	try {
+    		if (typeof window === "undefined") return null;
+    		return window.localStorage ?? null;
+    	} catch {
+    		return null;
+    	}
+    }
+    /**
+    * 读上一次的检查结果；没有缓存、版本不符或结构不对时返回 null。
+    *
+    * 只保留形状合法的条目：状态标签的渲染本来就容忍缺字段（来源、说明都可选），
+    * 但一条没有 `status` 的记录没有任何用处。
+    */
+    function readCheckCache() {
+    	const storage = checkStorage();
+    	if (storage === null) return null;
+    	let raw;
+    	try {
+    		raw = storage.getItem(CHECK_CACHE_KEY);
+    	} catch {
+    		return null;
+    	}
+    	if (raw === null) return null;
+    	let parsed;
+    	try {
+    		parsed = JSON.parse(raw);
+    	} catch {
+    		return null;
+    	}
+    	if (parsed === null || typeof parsed !== "object") return null;
+    	const record = parsed;
+    	if (record.version !== CHECK_CACHE_VERSION) return null;
+    	if (record.results === null || typeof record.results !== "object" || Array.isArray(record.results)) return null;
+    	const results = {};
+    	for (const [key, value] of Object.entries(record.results)) if (key !== "" && isCheckEntry(value)) results[key] = value;
+    	return results;
+    }
+    /**
+    * 写回检查结果；结果为空时删掉缓存，避免留下一份过期的空记录。
+    *
+    * 配额写不下时直接丢掉整份缓存——下次打开只是先没有状态标记，不影响功能。
+    */
+    function writeCheckCache(results) {
+    	const storage = checkStorage();
+    	if (storage === null) return;
+    	if (Object.keys(results).length === 0) {
+    		try {
+    			storage.removeItem(CHECK_CACHE_KEY);
+    		} catch {}
+    		return;
+    	}
+    	try {
+    		storage.setItem(CHECK_CACHE_KEY, JSON.stringify({
+    			version: CHECK_CACHE_VERSION,
+    			results
+    		}));
+    	} catch {
+    		try {
+    			storage.removeItem(CHECK_CACHE_KEY);
+    		} catch {}
+    	}
     }
     // .build/skills/client/keys.js
     /**
@@ -727,8 +824,8 @@ window.__ModuleLoader__.load({
     	const [notice, setNotice] = react.default.useState(null);
     	const [busy, setBusy] = react.default.useState(null);
     	const [checking, setChecking] = react.default.useState(false);
-    	const [updating, setUpdating] = react.default.useState(false);
-    	const [checkResults, setCheckResults] = react.default.useState({});
+    	const [updating, setUpdating] = react.default.useState(null);
+    	const [checkResults, setCheckResults] = react.default.useState(() => readCheckCache() ?? {});
     	const [checkMessage, setCheckMessage] = react.default.useState(null);
     	const [confirming, setConfirming] = react.default.useState(null);
     	const [source, setSource] = react.default.useState("");
@@ -753,6 +850,9 @@ window.__ModuleLoader__.load({
     	const [trees, setTrees] = react.default.useState(restored?.trees ?? {});
     	const [collapsedDirs, setCollapsedDirs] = react.default.useState(restored?.collapsedDirs ?? {});
     	const [probes, setProbes] = react.default.useState({});
+    	react.default.useEffect(() => {
+    		writeCheckCache(checkResults);
+    	}, [checkResults]);
     	react.default.useEffect(() => {
     		let cancelled = false;
     		pendingCheckRef.current = true;
@@ -802,11 +902,10 @@ window.__ModuleLoader__.load({
     	const repos = Array.isArray(savedData?.repos) ? savedData.repos : [];
     	const storeCorrupt = savedData !== null && savedData.corrupt === true;
     	const loading = tab === "installed" ? installed.loading : saved.loading;
-    	const hasUpdates = Object.values(checkResults).some((entry) => entry.status === "update");
     	react.default.useEffect(() => {
     		if (installed.loading || installedData === null) return;
     		if (!pendingCheckRef.current) return;
-    		if (checking || updating) return;
+    		if (checking || updating !== null) return;
     		pendingCheckRef.current = false;
     		if (skills.length === 0) return;
     		checkUpdates();
@@ -1066,7 +1165,7 @@ window.__ModuleLoader__.load({
     	* 面板的状态标记与提示。
     	*/
     	async function checkUpdates() {
-    		if (checking || updating) return;
+    		if (checking || updating !== null) return;
     		setChecking(true);
     		setCheckMessage(null);
     		try {
@@ -1080,14 +1179,22 @@ window.__ModuleLoader__.load({
     		}
     	}
     	/**
-    	* 应用可用的更新：Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+    	* 应用一条 skill 的更新：只把这一条的名字交给 Host，其余行不受影响。
+    	* Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+    	*
+    	* @param entry 一条 skill
     	*/
-    	async function updateSkills() {
-    		if (checking || updating) return;
-    		setUpdating(true);
+    	async function updateSkill(entry) {
+    		if (updating !== null) return;
+    		if (entry.managedByNpx !== true) return;
+    		const key = entryKey(entry);
+    		setUpdating(key);
     		setCheckMessage(null);
     		try {
-    			const body = await requestJson(UPDATE_ROUTE, { method: "POST" });
+    			const body = await requestJson(UPDATE_ROUTE, {
+    				method: "POST",
+    				body: JSON.stringify({ skills: [entry.name] })
+    			});
     			const failed = Array.isArray(body.failed) ? body.failed.length : 0;
     			const message = typeof body.message === "string" && body.message !== "" ? body.message : failed > 0 ? t("updateFailed") : t("statusUpToDate");
     			flash(failed > 0 ? "error" : "success", message);
@@ -1098,7 +1205,7 @@ window.__ModuleLoader__.load({
     		} catch (failure) {
     			flash("error", `${t("updateFailed")} ${messageOf(failure)}`);
     		} finally {
-    			setUpdating(false);
+    			setUpdating(null);
     		}
     	}
     	/**
@@ -1396,12 +1503,10 @@ window.__ModuleLoader__.load({
     		notice,
     		setNotice,
     		busy,
-    		checking,
     		updating,
     		checkResults,
     		checkMessage,
-    		hasUpdates,
-    		updateSkills,
+    		updateSkill,
     		confirming,
     		setConfirming,
     		source,
@@ -1490,12 +1595,14 @@ window.__ModuleLoader__.load({
     }
     // .build/skills/client/components/installed-panel.js
     /**
-    * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与更新入口、
-    * lockfile 提示与卸载按钮。
+    * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与行内更新
+    * 入口、lockfile 提示与卸载按钮。
     *
-    * 检查由页面在列表落地后自动发起，结果按 `update` / `modified` / `up-to-date` /
-    * `unsupported-source` / `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用
-    * 按钮。数据与动作由页面状态（`useSkillsPageState`）提供。
+    * 检查由页面在列表落地后静默发起（页面上没有「检查中…」），结果按 `update` /
+    * `modified` / `up-to-date` / `unsupported-source` / `failed` 在每行标题旁标出；
+    * 上一次的结果会先从本地缓存恢复，重开页面不用等重查。只有有更新的行才有
+    * 「更新」按钮，更新进行中统一禁用按钮。数据与动作由页面状态
+    * （`useSkillsPageState`）提供。
     *
     * @module @buka/dsh-plugin-skills/client/components/installed-panel
     */
@@ -1549,6 +1656,35 @@ window.__ModuleLoader__.load({
     	}
     }
     /**
+    * 行内「更新」按钮：只有检查结果是 `update` 的行才渲染。
+    *
+    * Host 的更新只应用 `update` 状态，其它状态（本地已修改、来源不可用、手工安装）
+    * 即使给出按钮也只会被跳过，所以这里不渲染，避免让用户以为点了会覆盖本地改动。
+    * 正在更新这一行时，按钮原地换成进度文字。
+    *
+    * @param entry 一条 skill
+    * @param result 这一行的检查结果
+    * @param state 行操作状态
+    */
+    function updateAction(entry, result, state) {
+    	if (result?.status !== "update") return null;
+    	if (state.updating === entryKey(entry)) return h("span", {
+    		className: "buka-skills-statusWithDot",
+    		role: "status"
+    	}, h(StateDot, {
+    		state: "ongoing",
+    		size: 13
+    	}), state.t("updatingSkills"));
+    	return h(Button, {
+    		variant: "outline",
+    		size: "sm",
+    		icon: h(IconRefreshOutlineRegular, { size: 13 }),
+    		"aria-label": `${state.t("updateSkills")} ${entry.name}`,
+    		onClick: state.onUpdate,
+    		disabled: state.confirming !== null || state.updating !== null || state.busy !== null
+    	}, state.t("updateSkills"));
+    }
+    /**
     * 一行右侧的操作区：卸载 / 二次确认 / 进行中。
     * 按钮样式与 Plugins 页面的卸载按钮一致（outline + 危险色）。
     *
@@ -1556,7 +1692,7 @@ window.__ModuleLoader__.load({
     */
     function rowActions(entry, state) {
     	const { busy, confirming, t } = state;
-    	const anyBusy = busy !== null;
+    	const anyBusy = busy !== null || state.updating !== null;
     	if (busy === entryKey(entry)) return h("span", { className: "buka-skills-statusWithDot" }, h(StateDot, { state: "ongoing" }), t("uninstalling"));
     	if (confirming === entryKey(entry)) return [h(Button, {
     		key: "confirm",
@@ -1589,11 +1725,21 @@ window.__ModuleLoader__.load({
     * @param state 页面状态与动作
     */
     function renderInstalled(state) {
-    	const { t, skills, busy, checking, updating, checkResults, checkMessage, hasUpdates, updateSkills, confirming, setConfirming, uninstall, installed, installedData } = state;
-    	const anyCheckBusy = checking || updating;
+    	const { t, skills, busy, updating, checkResults, checkMessage, updateSkill, confirming, setConfirming, uninstall, installed, installedData } = state;
     	const rows = skills.map((entry) => {
     		const source = sourceTagOf(entry, t);
-    		const status = statusTagOf(checkResults[entryKey(entry)], t);
+    		const result = checkResults[entryKey(entry)];
+    		const status = statusTagOf(result, t);
+    		const actions = {
+    			busy,
+    			updating,
+    			confirming,
+    			t,
+    			onAsk: () => setConfirming(entryKey(entry)),
+    			onCancel: () => setConfirming(null),
+    			onConfirm: () => void uninstall(entry),
+    			onUpdate: () => void updateSkill(entry)
+    		};
     		return h("li", {
     			className: "buka-skills-card",
     			key: `${entry.scope}:${entry.id}`
@@ -1607,14 +1753,7 @@ window.__ModuleLoader__.load({
     		})), h("div", { className: "buka-skills-cardMain" }, h("div", { className: "buka-skills-titleRow" }, h("div", { className: "buka-skills-titleCluster" }, h("span", {
     			className: "buka-skills-cardTitle",
     			title: entry.name
-    		}, entry.name), status === null ? null : h(Tag, { tone: status.tone }, status.text), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text)), h("div", { className: "buka-skills-titleActions" }, rowActions(entry, {
-    			busy,
-    			confirming,
-    			t,
-    			onAsk: () => setConfirming(entryKey(entry)),
-    			onCancel: () => setConfirming(null),
-    			onConfirm: () => uninstall(entry)
-    		}))), typeof entry.description === "string" && entry.description !== "" ? h("div", {
+    		}, entry.name), status === null ? null : h(Tag, { tone: status.tone }, status.text), h(Tag, { tone: "neutral" }, entry.scope), h(Tag, { tone: source.tone }, source.text)), h("div", { className: "buka-skills-titleActions" }, updateAction(entry, result, actions), rowActions(entry, actions))), typeof entry.description === "string" && entry.description !== "" ? h("div", {
     			className: "buka-skills-cardDesc",
     			title: entry.description
     		}, entry.description) : null, confirming === entryKey(entry) ? h("p", { className: "buka-skills-hint" }, entry.managedByNpx === true ? t("confirmNpx") : t("confirmLocal")) : null)));
@@ -1624,25 +1763,10 @@ window.__ModuleLoader__.load({
     		className: "buka-skills-emptyIcon",
     		"aria-hidden": true
     	}, h(IconSkillOutlineRegular, { size: 28 })), h("p", { className: "buka-skills-emptyTitle" }, t("empty")), h("p", { className: "buka-skills-emptyHint" }, t("emptyHint")), rootsTip);
-    	return h("div", { className: "buka-skills-panel" }, h("div", { className: "buka-skills-panelActions" }, checking ? h("p", {
-    		className: "buka-skills-statusWithDot",
-    		role: "status"
-    	}, h(StateDot, {
-    		state: "ongoing",
-    		size: 13
-    	}), t("checkingUpdates")) : checkMessage === null ? null : h("p", {
+    	return h("div", { className: "buka-skills-panel" }, checkMessage === null ? null : h("div", { className: "buka-skills-panelActions" }, h("p", {
     		className: "buka-skills-meta",
     		role: "status"
-    	}, checkMessage), h(Button, {
-    		variant: "primary",
-    		size: "sm",
-    		icon: updating ? h(StateDot, {
-    			state: "ongoing",
-    			size: 13
-    		}) : void 0,
-    		disabled: anyCheckBusy || !hasUpdates,
-    		onClick: () => void updateSkills()
-    	}, updating ? t("updatingSkills") : t("updateSkills"))), installed.error === null ? null : h("p", {
+    	}, checkMessage)), installed.error === null ? null : h("p", {
     		className: "buka-skills-failure",
     		role: "alert"
     	}, h(StateDot, { state: "error" }), `${t("loadFailed")} ${installed.error}`), installed.loading && installedData === null ? h("p", {
@@ -2104,7 +2228,10 @@ window.__ModuleLoader__.load({
     }
     // .build/skills/client/components/skills-page.js
     /**
-    * 侧边栏「Skills」页面：标题行、工具栏、两个 Tab 与页脚的 Toast / 对话框。
+    * 侧边栏「Skills」页面：Tab 行、工具栏与页脚的 Toast / 对话框。
+    *
+    * 标题由侧边栏的选中项承担，页面里不再重复渲染页标题：Tab 占原来标题的位置，
+    * 「刷新」「收藏」靠右对齐。
     *
     * 页面本身只做装配：状态与请求在 `state.ts`，两个面板分别在
     * `components/installed-panel.ts` 与 `components/saved-panel.ts`，
@@ -2123,7 +2250,24 @@ window.__ModuleLoader__.load({
     	const state = useSkillsPageState(t);
     	const { tab, storeCorrupt, loading, notice, setNotice, dialogOpen, adding, source, setSource, note, setNote, addError, targetDialog, targets, targetChoice, targetInstalling, targetError, reload, openSaveDialog, closeSaveDialog, addRepo, switchTab, closeTargetDialog, setTargetChoice, reloadTargets, installToTarget } = state;
     	const activeTab = TABS.find((one) => one.value === tab) ?? TABS[0];
-    	return h("div", { className: "buka-skills-page" }, h("div", { className: "buka-skills-head" }, h("div", { className: "buka-skills-headInner" }, h("div", { className: "buka-skills-heading" }, h("h1", { className: "buka-skills-title" }, t("title")), h("p", { className: "buka-skills-subtitle" }, t("subtitle"))), h("div", { className: "buka-skills-toolbar" }, h(Tooltip, {
+    	return h("div", { className: "buka-skills-page" }, h("div", { className: "buka-skills-head" }, h("div", { className: "buka-skills-headInner" }, h("div", { className: "buka-skills-tabs" }, h(SegmentedTabs, {
+    		size: "sm",
+    		className: "buka-skills-tabList",
+    		label: t("tabsLabel"),
+    		value: tab,
+    		onChange: (value) => switchTab(value),
+    		items: [{
+    			value: TABS[0].value,
+    			label: t(TABS[0].labelKey),
+    			id: TABS[0].id,
+    			panelId: TABS[0].panelId
+    		}, {
+    			value: TABS[1].value,
+    			label: t(TABS[1].labelKey),
+    			id: TABS[1].id,
+    			panelId: TABS[1].panelId
+    		}]
+    	})), h("div", { className: "buka-skills-toolbar" }, h(Tooltip, {
     		label: t("refresh"),
     		side: "bottom",
     		delayMs: 500,
@@ -2149,24 +2293,7 @@ window.__ModuleLoader__.load({
     		"aria-label": t("add"),
     		disabled: storeCorrupt,
     		onClick: openSaveDialog
-    	}, t("add"))), h("div", { className: "buka-skills-tabs" }, h(SegmentedTabs, {
-    		size: "sm",
-    		className: "buka-skills-tabList",
-    		label: t("tabsLabel"),
-    		value: tab,
-    		onChange: (value) => switchTab(value),
-    		items: [{
-    			value: TABS[0].value,
-    			label: t(TABS[0].labelKey),
-    			id: TABS[0].id,
-    			panelId: TABS[0].panelId
-    		}, {
-    			value: TABS[1].value,
-    			label: t(TABS[1].labelKey),
-    			id: TABS[1].id,
-    			panelId: TABS[1].panelId
-    		}]
-    	})))), h("div", { className: "buka-skills-body" }, h("div", {
+    	}, t("add"))))), h("div", { className: "buka-skills-body" }, h("div", {
     		role: "tabpanel",
     		id: activeTab.panelId,
     		"aria-labelledby": activeTab.id
@@ -2215,8 +2342,6 @@ window.__ModuleLoader__.load({
     /** 英文文案。 */
     const en = {
     	panel: "Skills",
-    	title: "Skills",
-    	subtitle: "Manage the global skills shared by every session, and save the sources you install from.",
     	tabsLabel: "Skill sections",
     	tabInstalled: "Global skills",
     	tabRepos: "Skill repositories",
@@ -2301,7 +2426,6 @@ window.__ModuleLoader__.load({
     	treeRefreshWarning: "Could not refresh the local clone; showing the cached copy:",
     	kindNpx: "npx skills",
     	kindUnavailable: "unavailable",
-    	checkingUpdates: "Checking…",
     	updateSkills: "Update",
     	updatingSkills: "Updating…",
     	statusUpdate: "update available",
@@ -2316,8 +2440,6 @@ window.__ModuleLoader__.load({
     /** 简体中文文案。 */
     const zh = {
     	panel: "Skills",
-    	title: "Skills",
-    	subtitle: "管理对所有会话生效的全局 skills，并收藏常用的来源。",
     	tabsLabel: "Skills 页面分区",
     	tabInstalled: "全局技能",
     	tabRepos: "技能仓库",
@@ -2402,7 +2524,6 @@ window.__ModuleLoader__.load({
     	treeRefreshWarning: "刷新本地克隆失败，当前显示的是缓存副本：",
     	kindNpx: "npx skills",
     	kindUnavailable: "不可用",
-    	checkingUpdates: "检查中…",
     	updateSkills: "更新",
     	updatingSkills: "更新中…",
     	statusUpdate: "有更新",
@@ -2418,9 +2539,12 @@ window.__ModuleLoader__.load({
     /**
     * 页面的 CSS 常量。
     *
-    * 视觉基准是 Plugins 页面（`dsh-client-ui-plugin-manager`）：标题行 + 工具栏
-    * + Tab 行、960px 内容区、卡片列表、40px 图标块、行内标签。颜色与尺寸只用
+    * 视觉基准是 Plugins 页面（`dsh-client-ui-plugin-manager`）：Tab 行 + 工具栏、
+    * 960px 内容区、卡片列表、40px 图标块、行内标签。颜色与尺寸只用
     * 主题 token 和 DSH 的圆角/焦点 token，不写死色值。
+    *
+    * 页面不再渲染自己的标题（侧边栏选中项已经说明这是哪一页）：第一个 Tab 直接
+    * 占原来标题的位置，「刷新」「收藏」在右侧，两者在同一行。
     *
     * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
     * 「全局技能」比视口高、出现滚动条，「技能仓库」没有；滚动条一出现/一消失，
@@ -2438,12 +2562,9 @@ window.__ModuleLoader__.load({
     .buka-skills-page{--buka-skills-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-skills-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden auto;scrollbar-gutter:stable;overscroll-behavior:contain}
     @media (width<=767px){.buka-skills-page{--buka-skills-inset:20px}}
     .buka-skills-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-skills-inset));max-width:none;margin-inline:calc(-1 * var(--buka-skills-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-skills-inset) 8px;background:var(--dsw-alias-bg-base);border-bottom:0.5px solid var(--dsw-alias-border-l1);z-index:1;position:sticky;top:0}
-    .buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:16px}
-    .buka-skills-heading{order:1;min-width:0;max-width:100%}
-    .buka-skills-title{margin:0;font-size:20px;font-weight:500;line-height:28px}
-    .buka-skills-subtitle{margin:2px 0 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;text-wrap:pretty}
+    .buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px}
     .buka-skills-toolbar{order:2;display:flex;align-items:center;gap:8px}
-    .buka-skills-tabs{flex:100%;order:3;display:flex}
+    .buka-skills-tabs{order:1;display:flex;min-width:0}
     .buka-skills-tabList{width:fit-content;min-width:240px}
     @media (width<=372px){.buka-skills-tabList{min-width:0}}
     .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:24px 0 48px}
@@ -2537,7 +2658,8 @@ window.__ModuleLoader__.load({
     *   图标只拿 `{ size, active }`；
     * - `main` 里以同一个 id 为 key 的页面组件：侧边栏点选时布局挂载它。
     *
-    * 页面顶部只有两个 Tab，不放说明文字：
+    * 页面顶部只有两个 Tab，不放页标题或说明文字；Tab 直接占原来标题的位置，
+    * 「刷新」「收藏」在同一行靠右对齐。两个 Tab 分别是：
     *
     * - 「技能仓库」（默认选中）：用户自己记下的 skill 来源（`owner/repo`、
     *   GitHub/GitLab 等 git 地址、本地绝对路径或包名），用于以后安装时随手
@@ -2552,18 +2674,20 @@ window.__ModuleLoader__.load({
     *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个
     *   skill 交给 Host 逐个安装，已装过的跳过。
     * - 「全局技能」：两个全局 skills 根目录下现有的 skill，标注哪些由 skills 库
-    *   管理，并提供按来源选择的卸载入口。列表落地后自动检查更新，结果按
-    *   `update` / `modified` / `up-to-date` / `unsupported-source` / `failed`
-    *   在行内标出；有更新时页面提供「更新」按钮。
+    *   管理，并提供按来源选择的卸载入口。列表落地后在后台静默检查更新（页面上
+    *   没有「检查中…」），结果按 `update` / `modified` / `up-to-date` /
+    *   `unsupported-source` / `failed` 在行内标出，并写回 localStorage；重开页面
+    *   先按上次结果渲染。有更新的 skill 在自己的行内获得「更新」按钮，页面不再
+    *   有整体更新按钮。
     *
-    * 新增收藏不再是页面里的常驻输入行：标题行右侧「刷新」旁边的「收藏」按钮
+    * 新增收藏不再是页面里的常驻输入行：页头右侧「刷新」旁边的「收藏」按钮
     * 打开一个对话框，填「仓库」与「备注」后提交；两个按钮尺寸一致。
     *
     * 视觉与交互直接复用 DSH 的基座模块 `@deepseek-ai/dsh-client-ui-primitives`
     * （模块表里的静态项，不需要声明 external）：`Button` / `Input` /
     * `SegmentedTabs` / `Tag` / `Tooltip` / `Toast` / `StateDot` 与图标；页面
     * 布局、卡片与状态文字沿用 Plugins 页面（`dsh-client-ui-plugin-manager`）的
-    * 结构：标题行 + 工具栏 + Tab 行，内容区 960px 宽、卡片列表、48px 图标块。
+    * 结构：Tab 行 + 工具栏，内容区 960px 宽、卡片列表、48px 图标块。
     * 这样两个页面共享同一套尺寸、圆角、颜色 token 与控件手感。
     *
     * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内

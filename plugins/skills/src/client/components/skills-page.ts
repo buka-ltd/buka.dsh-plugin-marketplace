@@ -1,5 +1,8 @@
 /**
- * 侧边栏「Skills」页面：标题行、工具栏、两个 Tab 与页脚的 Toast / 对话框。
+ * 侧边栏「Skills」页面：Tab 行、工具栏与页脚的 Toast / 对话框。
+ *
+ * 标题由侧边栏的选中项承担，页面里不再重复渲染页标题：Tab 占原来标题的位置，
+ * 「刷新」「收藏」靠右对齐。
  *
  * 页面本身只做装配：状态与请求在 `state.ts`，两个面板分别在
  * `components/installed-panel.ts` 与 `components/saved-panel.ts`，
@@ -80,9 +83,30 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
         { className: 'buka-skills-headInner' },
         h(
           'div',
-          { className: 'buka-skills-heading' },
-          h('h1', { className: 'buka-skills-title' }, t('title')),
-          h('p', { className: 'buka-skills-subtitle' }, t('subtitle')),
+          { className: 'buka-skills-tabs' },
+          h(SegmentedTabs, {
+            size: 'sm',
+            className: 'buka-skills-tabList',
+            label: t('tabsLabel'),
+            value: tab,
+            // SegmentedTabs 是泛型组件，createElement 推断不出 Value，退化成
+            // `string`；它只会回传 items 里的值，这里按页面 Tab 收窄。
+            onChange: (value: string) => switchTab(value as PageTab),
+            items: [
+              {
+                value: TABS[0].value,
+                label: t(TABS[0].labelKey),
+                id: TABS[0].id,
+                panelId: TABS[0].panelId,
+              },
+              {
+                value: TABS[1].value,
+                label: t(TABS[1].labelKey),
+                id: TABS[1].id,
+                panelId: TABS[1].panelId,
+              },
+            ] satisfies readonly [TabItem, ...TabItem[]],
+          }),
         ),
         h(
           'div',
@@ -109,7 +133,7 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
               t('refresh'),
             ),
           }),
-          // 「收藏」按钮常驻标题行（两个 Tab 都能用）：紧挨「刷新」，两者同一尺寸。
+          // 「收藏」按钮常驻页头（两个 Tab 都能用）：紧挨「刷新」，两者同一尺寸。
           h(
             Button,
             {
@@ -123,33 +147,6 @@ function SkillsPage(props: { readonly t: Translate }): ReactElement {
             },
             t('add'),
           ),
-        ),
-        h(
-          'div',
-          { className: 'buka-skills-tabs' },
-          h(SegmentedTabs, {
-            size: 'sm',
-            className: 'buka-skills-tabList',
-            label: t('tabsLabel'),
-            value: tab,
-            // SegmentedTabs 是泛型组件，createElement 推断不出 Value，退化成
-            // `string`；它只会回传 items 里的值，这里按页面 Tab 收窄。
-            onChange: (value: string) => switchTab(value as PageTab),
-            items: [
-              {
-                value: TABS[0].value,
-                label: t(TABS[0].labelKey),
-                id: TABS[0].id,
-                panelId: TABS[0].panelId,
-              },
-              {
-                value: TABS[1].value,
-                label: t(TABS[1].labelKey),
-                id: TABS[1].id,
-                panelId: TABS[1].panelId,
-              },
-            ] satisfies readonly [TabItem, ...TabItem[]],
-          }),
         ),
       ),
     ),

@@ -3,7 +3,7 @@
 在**侧边栏**新增一个「Skills」页面，顶部两个 Tab：
 
 - **技能仓库**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个执行者或某个已注册工作区；
-- **全局技能**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；列表加载后自动检查更新，有更新时可一键应用，并按来源决定卸载方式。
+- **全局技能**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；列表加载后自动检查更新，有更新的 skill 在行内单独更新，并按来源决定卸载方式。
 
 页面之外，插件把收藏、仓库内容与按目录检查 / 更新的能力开放成 Host Service `ctx.bukaSkills`，见下方[对外服务](#对外服务host-service)。
 
@@ -35,7 +35,7 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 
 `skills` 的全局 lockfile 记录安装来源：默认 `~/.agents/.skill-lock.json`，设置了 `XDG_STATE_HOME` 时是 `$XDG_STATE_HOME/skills/.skill-lock.json`（版本 3）。判定一个 skill 由库管理需要两条同时成立：位于 `~/.agents/skills` 下，**且**名字出现在 lockfile 里。`~/.dsh/skills` 下的 skill 永远按手工安装处理。
 
-页面在列表加载后自动检查（页面打开、点「刷新」各触发一次），按 skill 返回五种状态：
+页面在列表加载后静默检查（页面打开、点「刷新」各触发一次，不显示「检查中…」之类的进度），按 skill 返回五种状态：
 
 | 状态                 | 含义                                                                         |
 | -------------------- | ---------------------------------------------------------------------------- |
@@ -45,7 +45,9 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 | `unsupported-source` | 来源里已经没有可再解析的 skill（典型是旧 Claude Code marketplace 安装）      |
 | `failed`             | 检查失败，带原因                                                             |
 
-「更新」只应用 `update`：`modified` 默认跳过并在结果里说明，不覆盖本地修改；`unsupported-source` 与 `failed` 同样跳过。每个失败项带命令输出；没有可更新项时明确返回「已是最新」。手工安装的条目不在候选里，不参与检查 / 更新。
+检查结果缓存在浏览器 localStorage（`dsh.buka-skills.checks.v1`）：重开页面先按上次结果渲染行内标记，再在后台静默重查；缓存可重建，localStorage 不可用时页面照常工作。
+
+页面上没有整体更新按钮：每个有更新的 skill 在自己的行内获得「更新」按钮，点了只更新这一条。更新只应用 `update`：`modified` 默认跳过并在结果里说明，不覆盖本地修改；`unsupported-source` 与 `failed` 同样跳过，这些状态不显示「更新」按钮。每个失败项带命令输出；没有可更新项时明确返回「已是最新」。手工安装的条目不在候选里，不参与检查 / 更新。
 
 项目级 skill 的本地修改判定由 `src/skill-hash.ts` 按 `skills` 包 README 的内容哈希规则计算，与 CLI 的 `computedHash` 一致。
 

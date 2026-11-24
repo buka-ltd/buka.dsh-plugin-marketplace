@@ -16,9 +16,6 @@ type Translate = (key: string) => string
 /** 英文文案。 */
 const en = {
   panel: 'Skills',
-  title: 'Skills',
-  subtitle:
-    'Manage the global skills shared by every session, and save the sources you install from.',
   tabsLabel: 'Skill sections',
   tabInstalled: 'Global skills',
   tabRepos: 'Skill repositories',
@@ -112,7 +109,6 @@ const en = {
   treeRefreshWarning: 'Could not refresh the local clone; showing the cached copy:',
   kindNpx: 'npx skills',
   kindUnavailable: 'unavailable',
-  checkingUpdates: 'Checking…',
   updateSkills: 'Update',
   updatingSkills: 'Updating…',
   statusUpdate: 'update available',
@@ -128,8 +124,6 @@ const en = {
 /** 简体中文文案。 */
 const zh: Record<keyof typeof en, string> = {
   panel: 'Skills',
-  title: 'Skills',
-  subtitle: '管理对所有会话生效的全局 skills，并收藏常用的来源。',
   tabsLabel: 'Skills 页面分区',
   tabInstalled: '全局技能',
   tabRepos: '技能仓库',
@@ -217,7 +211,6 @@ const zh: Record<keyof typeof en, string> = {
   treeRefreshWarning: '刷新本地克隆失败，当前显示的是缓存副本：',
   kindNpx: 'npx skills',
   kindUnavailable: '不可用',
-  checkingUpdates: '检查中…',
   updateSkills: '更新',
   updatingSkills: '更新中…',
   statusUpdate: '有更新',

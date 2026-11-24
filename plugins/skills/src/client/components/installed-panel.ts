@@ -1,10 +1,12 @@
 /**
- * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与更新入口、
- * lockfile 提示与卸载按钮。
+ * 「全局技能」面板：两个全局根下的 skill 卡片、自动检查后的状态与行内更新
+ * 入口、lockfile 提示与卸载按钮。
  *
- * 检查由页面在列表落地后自动发起，结果按 `update` / `modified` / `up-to-date` /
- * `unsupported-source` / `failed` 在每行标题旁标出；检查 / 更新进行中统一禁用
- * 按钮。数据与动作由页面状态（`useSkillsPageState`）提供。
+ * 检查由页面在列表落地后静默发起（页面上没有「检查中…」），结果按 `update` /
+ * `modified` / `up-to-date` / `unsupported-source` / `failed` 在每行标题旁标出；
+ * 上一次的结果会先从本地缓存恢复，重开页面不用等重查。只有有更新的行才有
+ * 「更新」按钮，更新进行中统一禁用按钮。数据与动作由页面状态
+ * （`useSkillsPageState`）提供。
  *
  * @module @buka/dsh-plugin-skills/client/components/installed-panel
  */
@@ -16,6 +18,7 @@ import { entryKey } from '../keys.ts'
 import {
   Button,
   h,
+  IconRefreshOutlineRegular,
   IconSkillOutlineRegular,
   IconTrashOutlineRegular,
   IconWarningOutlineRegular,
@@ -29,11 +32,13 @@ import { RepoAvatar } from './repo-avatar.ts'
 /** 一行右侧操作区的入参。 */
 interface RowActionsState {
   readonly busy: string | null
+  readonly updating: string | null
   readonly confirming: string | null
   readonly t: Translate
   readonly onAsk: () => void
   readonly onCancel: () => void
   readonly onConfirm: () => void
+  readonly onUpdate: () => void
 }
 
 /**
@@ -79,6 +84,45 @@ function statusTagOf(
 }
 
 /**
+ * 行内「更新」按钮：只有检查结果是 `update` 的行才渲染。
+ *
+ * Host 的更新只应用 `update` 状态，其它状态（本地已修改、来源不可用、手工安装）
+ * 即使给出按钮也只会被跳过，所以这里不渲染，避免让用户以为点了会覆盖本地改动。
+ * 正在更新这一行时，按钮原地换成进度文字。
+ *
+ * @param entry 一条 skill
+ * @param result 这一行的检查结果
+ * @param state 行操作状态
+ */
+function updateAction(
+  entry: InstalledSkill,
+  result: SkillCheckEntry | undefined,
+  state: RowActionsState,
+): ReactElement | null {
+  if (result?.status !== 'update') return null
+  if (state.updating === entryKey(entry)) {
+    return h(
+      'span',
+      { className: 'buka-skills-statusWithDot', role: 'status' },
+      h(StateDot, { state: 'ongoing', size: 13 }),
+      state.t('updatingSkills'),
+    )
+  }
+  return h(
+    Button,
+    {
+      variant: 'outline',
+      size: 'sm',
+      icon: h(IconRefreshOutlineRegular, { size: 13 }),
+      'aria-label': `${state.t('updateSkills')} ${entry.name}`,
+      onClick: state.onUpdate,
+      disabled: state.confirming !== null || state.updating !== null || state.busy !== null,
+    },
+    state.t('updateSkills'),
+  )
+}
+
+/**
  * 一行右侧的操作区：卸载 / 二次确认 / 进行中。
  * 按钮样式与 Plugins 页面的卸载按钮一致（outline + 危险色）。
  *
@@ -86,7 +130,7 @@ function statusTagOf(
  */
 function rowActions(entry: InstalledSkill, state: RowActionsState): ReactElement | ReactElement[] {
   const { busy, confirming, t } = state
-  const anyBusy = busy !== null
+  const anyBusy = busy !== null || state.updating !== null
   if (busy === entryKey(entry)) {
     return h(
       'span',
@@ -148,22 +192,30 @@ function renderInstalled(state: SkillsPageState): ReactElement {
     t,
     skills,
     busy,
-    checking,
     updating,
     checkResults,
     checkMessage,
-    hasUpdates,
-    updateSkills,
+    updateSkill,
     confirming,
     setConfirming,
     uninstall,
     installed,
     installedData,
   } = state
-  const anyCheckBusy = checking || updating
   const rows = skills.map((entry) => {
     const source = sourceTagOf(entry, t)
-    const status = statusTagOf(checkResults[entryKey(entry)], t)
+    const result = checkResults[entryKey(entry)]
+    const status = statusTagOf(result, t)
+    const actions: RowActionsState = {
+      busy,
+      updating,
+      confirming,
+      t,
+      onAsk: () => setConfirming(entryKey(entry)),
+      onCancel: () => setConfirming(null),
+      onConfirm: () => void uninstall(entry),
+      onUpdate: () => void updateSkill(entry),
+    }
     return h(
       'li',
       { className: 'buka-skills-card', key: `${entry.scope}:${entry.id}` },
@@ -200,14 +252,8 @@ function renderInstalled(state: SkillsPageState): ReactElement {
             h(
               'div',
               { className: 'buka-skills-titleActions' },
-              rowActions(entry, {
-                busy,
-                confirming,
-                t,
-                onAsk: () => setConfirming(entryKey(entry)),
-                onCancel: () => setConfirming(null),
-                onConfirm: () => uninstall(entry),
-              }),
+              updateAction(entry, result, actions),
+              rowActions(entry, actions),
             ),
           ),
           typeof entry.description === 'string' && entry.description !== ''
@@ -254,31 +300,15 @@ function renderInstalled(state: SkillsPageState): ReactElement {
   return h(
     'div',
     { className: 'buka-skills-panel' },
-    h(
-      'div',
-      { className: 'buka-skills-panelActions' },
-      checking
-        ? h(
-            'p',
-            { className: 'buka-skills-statusWithDot', role: 'status' },
-            h(StateDot, { state: 'ongoing', size: 13 }),
-            t('checkingUpdates'),
-          )
-        : checkMessage === null
-          ? null
-          : h('p', { className: 'buka-skills-meta', role: 'status' }, checkMessage),
-      h(
-        Button,
-        {
-          variant: 'primary',
-          size: 'sm',
-          icon: updating ? h(StateDot, { state: 'ongoing', size: 13 }) : undefined,
-          disabled: anyCheckBusy || !hasUpdates,
-          onClick: () => void updateSkills(),
-        },
-        updating ? t('updatingSkills') : t('updateSkills'),
-      ),
-    ),
+    // 检查是静默的：页面上没有「检查中…」。这里只展示检查本身的说明（例如
+    // 没有可检查的 skill），更新结果由 Toast 提示。
+    checkMessage === null
+      ? null
+      : h(
+          'div',
+          { className: 'buka-skills-panelActions' },
+          h('p', { className: 'buka-skills-meta', role: 'status' }, checkMessage),
+        ),
     installed.error === null
       ? null
       : h(

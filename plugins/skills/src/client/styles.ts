@@ -1,9 +1,12 @@
 /**
  * 页面的 CSS 常量。
  *
- * 视觉基准是 Plugins 页面（`dsh-client-ui-plugin-manager`）：标题行 + 工具栏
- * + Tab 行、960px 内容区、卡片列表、40px 图标块、行内标签。颜色与尺寸只用
+ * 视觉基准是 Plugins 页面（`dsh-client-ui-plugin-manager`）：Tab 行 + 工具栏、
+ * 960px 内容区、卡片列表、40px 图标块、行内标签。颜色与尺寸只用
  * 主题 token 和 DSH 的圆角/焦点 token，不写死色值。
+ *
+ * 页面不再渲染自己的标题（侧边栏选中项已经说明这是哪一页）：第一个 Tab 直接
+ * 占原来标题的位置，「刷新」「收藏」在右侧，两者在同一行。
  *
  * `.buka-skills-page` 自己就是滚动容器。DSH 的滚动条是**占位**的经典滚动条：
  * 「全局技能」比视口高、出现滚动条，「技能仓库」没有；滚动条一出现/一消失，
@@ -22,12 +25,9 @@ const CSS = `
 .buka-skills-page{--buka-skills-inset:clamp(24px,4vw,48px);box-sizing:border-box;height:100%;min-height:0;padding:0 var(--buka-skills-inset);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;align-items:center;overflow:hidden auto;scrollbar-gutter:stable;overscroll-behavior:contain}
 @media (width<=767px){.buka-skills-page{--buka-skills-inset:20px}}
 .buka-skills-head{box-sizing:border-box;width:calc(100% + 2 * var(--buka-skills-inset));max-width:none;margin-inline:calc(-1 * var(--buka-skills-inset));flex:none;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) var(--buka-skills-inset) 8px;background:var(--dsw-alias-bg-base);border-bottom:0.5px solid var(--dsw-alias-border-l1);z-index:1;position:sticky;top:0}
-.buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:16px}
-.buka-skills-heading{order:1;min-width:0;max-width:100%}
-.buka-skills-title{margin:0;font-size:20px;font-weight:500;line-height:28px}
-.buka-skills-subtitle{margin:2px 0 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;text-wrap:pretty}
+.buka-skills-headInner{width:100%;max-width:960px;margin-inline:auto;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px}
 .buka-skills-toolbar{order:2;display:flex;align-items:center;gap:8px}
-.buka-skills-tabs{flex:100%;order:3;display:flex}
+.buka-skills-tabs{order:1;display:flex;min-width:0}
 .buka-skills-tabList{width:fit-content;min-width:240px}
 @media (width<=372px){.buka-skills-tabList{min-width:0}}
 .buka-skills-body{box-sizing:border-box;width:100%;max-width:960px;flex:none;display:flex;flex-direction:column;padding:24px 0 48px}

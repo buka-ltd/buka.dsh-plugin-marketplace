@@ -222,18 +222,14 @@ export interface SkillsPageState {
   readonly setNotice: Dispatch<SetStateAction<Notice | null>>
   /** 正在卸载的 skill 行键。 */
   readonly busy: string | null
-  /** 是否正在检查更新。 */
-  readonly checking: boolean
-  /** 是否正在更新。 */
-  readonly updating: boolean
+  /** 正在更新的 skill 行键；`null` 表示没有更新在进行。 */
+  readonly updating: string | null
   /** 已安装行键 → 检查状态。 */
   readonly checkResults: Record<string, SkillCheckEntry>
-  /** 检查 / 更新的整体说明（「已是最新」等）。 */
+  /** 检查本身的整体说明（例如没有可检查的 skill）。 */
   readonly checkMessage: string | null
-  /** 是否有可更新的 skill。 */
-  readonly hasUpdates: boolean
-  /** 应用可用的更新。 */
-  readonly updateSkills: () => Promise<void>
+  /** 更新一条有更新的 skill。 */
+  readonly updateSkill: (entry: InstalledSkill) => Promise<void>
   /** 正在二次确认的 skill 行键。 */
   readonly confirming: string | null
   /** 设置二次确认的行。 */

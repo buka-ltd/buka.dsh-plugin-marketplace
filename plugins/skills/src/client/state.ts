@@ -28,6 +28,7 @@ import {
   UNINSTALL_ROUTE,
   UPDATE_ROUTE,
 } from './api.ts'
+import { readCheckCache, writeCheckCache } from './check-cache.ts'
 import type { PageTab } from './constants.ts'
 import type { Translate } from './dictionary.ts'
 import {
@@ -91,8 +92,13 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const [busy, setBusy] = React.useState<string | null>(null)
   // 检查 / 更新的状态：结果按已安装行的键（scope:id）存，行内直接显示状态标记。
   const [checking, setChecking] = React.useState(false)
-  const [updating, setUpdating] = React.useState(false)
-  const [checkResults, setCheckResults] = React.useState<Record<string, SkillCheckEntry>>({})
+  // 正在更新的 skill 行键；一次只处理一行，按钮在别的行也统一禁用。
+  const [updating, setUpdating] = React.useState<string | null>(null)
+  // 检查是静默的：先按上一次落盘的结果渲染行内标记，再由列表落地后的自动
+  // 检查在后台校正；没有进度提示，所以重开页面也不会先闪一段空白。
+  const [checkResults, setCheckResults] = React.useState<Record<string, SkillCheckEntry>>(
+    () => readCheckCache() ?? {},
+  )
   const [checkMessage, setCheckMessage] = React.useState<string | null>(null)
   const [confirming, setConfirming] = React.useState<string | null>(null)
   const [source, setSource] = React.useState('')
@@ -134,6 +140,12 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   // 重开 DSH 重新探测一次即可。删除收藏时由下面的 prune 一起清掉。
   const [probes, setProbes] = React.useState<Record<string, ProbeState>>({})
 
+  // 检查 / 更新拿到新结果后写回 localStorage：下次打开先按这份结果渲染，
+  // 再在后台静默重查。
+  React.useEffect(() => {
+    writeCheckCache(checkResults)
+  }, [checkResults])
+
   // 每次刷新（或首次挂载）重新读一次 Host 的扫描结果与收藏；两个 Tab 的
   // 数据一起刷新，切 Tab 时不再发请求。
   React.useEffect(() => {
@@ -170,14 +182,14 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   const repos: SavedRepo[] = Array.isArray(savedData?.repos) ? savedData.repos : []
   const storeCorrupt = savedData !== null && savedData.corrupt === true
   const loading = tab === 'installed' ? installed.loading : saved.loading
-  const hasUpdates = Object.values(checkResults).some((entry) => entry.status === 'update')
 
-  // 列表落地后自动检查更新：页面打开、点「刷新」都会走到这里。检查是只读的，
-  // 结果只更新行内状态标记；安装 / 更新后的局部列表重读不会再次触发。
+  // 列表落地后自动静默检查更新：页面打开、点「刷新」都会走到这里。检查是
+  // 只读的，结果只更新行内状态标记并写回本地缓存，页面上不显示进度；
+  // 安装 / 更新后的局部列表重读不会再次触发。
   React.useEffect(() => {
     if (installed.loading || installedData === null) return
     if (!pendingCheckRef.current) return
-    if (checking || updating) return
+    if (checking || updating !== null) return
     pendingCheckRef.current = false
     if (skills.length === 0) return
     void checkUpdates()
@@ -418,7 +430,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
    * 面板的状态标记与提示。
    */
   async function checkUpdates(): Promise<void> {
-    if (checking || updating) return
+    if (checking || updating !== null) return
     setChecking(true)
     setCheckMessage(null)
     try {
@@ -433,14 +445,22 @@ function useSkillsPageState(t: Translate): SkillsPageState {
   }
 
   /**
-   * 应用可用的更新：Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+   * 应用一条 skill 的更新：只把这一条的名字交给 Host，其余行不受影响。
+   * Host 只处理 `update` 状态，`modified` 会跳过并在结果里说明。
+   *
+   * @param entry 一条 skill
    */
-  async function updateSkills(): Promise<void> {
-    if (checking || updating) return
-    setUpdating(true)
+  async function updateSkill(entry: InstalledSkill): Promise<void> {
+    if (updating !== null) return
+    if (entry.managedByNpx !== true) return
+    const key = entryKey(entry)
+    setUpdating(key)
     setCheckMessage(null)
     try {
-      const body = await requestJson<SkillUpdateSnapshot>(UPDATE_ROUTE, { method: 'POST' })
+      const body = await requestJson<SkillUpdateSnapshot>(UPDATE_ROUTE, {
+        method: 'POST',
+        body: JSON.stringify({ skills: [entry.name] }),
+      })
       const failed = Array.isArray(body.failed) ? body.failed.length : 0
       const message =
         typeof body.message === 'string' && body.message !== ''
@@ -457,7 +477,7 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     } catch (failure) {
       flash('error', `${t('updateFailed')} ${messageOf(failure)}`)
     } finally {
-      setUpdating(false)
+      setUpdating(null)
     }
   }
 
@@ -770,12 +790,11 @@ function useSkillsPageState(t: Translate): SkillsPageState {
     notice,
     setNotice,
     busy,
-    checking,
     updating,
     checkResults,
     checkMessage,
-    hasUpdates,
-    updateSkills,
+    // 更新是按行触发的：面板拿到正在更新的行键，只在那一行显示进度。
+    updateSkill,
     confirming,
     setConfirming,
     source,
