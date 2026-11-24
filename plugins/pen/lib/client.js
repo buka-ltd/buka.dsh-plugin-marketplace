@@ -30,15 +30,18 @@ window.__ModuleLoader__.load({
     let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
     // .build/pen/client/dictionary.js
     /**
-    * 勾选框的文案与标记。
+    * 勾选框与会话标题标记的文案。
     *
-    * 勾选框的可见文字固定为「Pen」，前面是 Pen 的 logo（见 `logo.ts`）；这是
-    * 品牌名，不做翻译。tooltip 的说明随 DSH 的界面语言切换。
+    * 两处可见文字都是品牌名，不做翻译：勾选框是「Pen」（前面是 Pen 的 logo，见
+    * `logo.ts`），会话标题旁是「Pen MCP」。只有 tooltip 的说明随 DSH 的界面
+    * 语言切换。
     *
     * @module @buka/dsh-plugin-pen/client/dictionary
     */
     /** 界面文案的命名空间；插槽的 `locale` 与 `ctx.locale.bind` 共用它。 */
     const NS = "buka-pen";
+    /** 会话标题旁标记的文字：同样是不翻译的品牌名。 */
+    const MARK_LABEL = "Pen MCP";
     /** 中文文案。 */
     const zh = {
     	hint: "勾选后，这个会话会加载 Pen（pen.dev）的 MCP 工具；不勾选则完全不启动 Pen MCP。",
@@ -55,28 +58,6 @@ window.__ModuleLoader__.load({
     	hintReady: "This session has the Pen MCP tools (mcp__pencil__*).",
     	hintFailed: "Could not connect to Pen MCP: "
     };
-    // .build/pen/client/styles.js
-    /**
-    * 勾选框的样式。
-    *
-    * 尺寸、颜色与 hover / focus 行为照抄 DSH 新会话行的官方 worktree 勾选框
-    * （13px / 28px 高、14px 复选框、`--dsw-*` 主题变量），保证两种配色下都跟
-    * 旁边的控件对齐。
-    *
-    * @module @buka/dsh-plugin-pen/client/styles
-    */
-    /** 注入到 `document.head` 的样式表。 */
-    const CSS = `.buka-pen-root{flex:none;align-items:center;gap:2px;min-width:0;display:inline-flex}
-    .buka-pen-toggle{border-radius:var(--dsw-radius-sm);min-width:0;height:28px;color:var(--dsw-alias-label-secondary);white-space:nowrap;cursor:pointer;background:0 0;border:none;align-items:center;gap:6px;padding:0 8px;font-size:13px;font-weight:500;line-height:20px;display:inline-flex}
-    @media (hover:hover){.buka-pen-toggle:hover:not([data-disabled]){background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-pen-toggle[data-disabled]{color:var(--dsw-alias-label-dimmed);cursor:default}
-    .buka-pen-brand{align-items:center;gap:4px;min-width:0;display:inline-flex}
-    .buka-pen-logo{width:12px;height:auto;flex:none;display:block;object-fit:contain}
-    .buka-pen-toggle:has(.buka-pen-checkbox:focus-visible){outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
-    .buka-pen-checkbox{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:inherit;flex:none;margin:0}
-    .buka-pen-checkbox:focus-visible{outline:none}
-    .buka-pen-warning{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:700;line-height:1}
-    `;
     // packages/plugin-ui/lib/avatars.js
     /**
     * 预设头像：id → emoji / 底色 / 词典 key。
@@ -182,6 +163,12 @@ window.__ModuleLoader__.load({
     		emoji: "🍄",
     		color: "#EB5757",
     		labelKey: "avatarMushroom"
+    	},
+    	{
+    		id: "robot",
+    		emoji: "🤖",
+    		color: "#2F80ED",
+    		labelKey: "avatarRobot"
     	}
     ];
     AVATARS.map((preset) => preset.id);
@@ -295,6 +282,76 @@ window.__ModuleLoader__.load({
     		})
     	}));
     }
+    // .build/pen/client/mark.js
+    /**
+    * 会话标题右侧的「Pen MCP」标记：标识这条会话已开启 Pen。
+    *
+    * 插槽 `conversation.session.header.actions` 紧挨在标题之后、官方工具按钮之前，
+    * 是「标题右侧」这个位置。标记只在**该会话**勾选过 Pen 时出现；插件没启用时
+    * 浏览器一半根本不会加载，所以「插件开着」这条不需要额外判断。
+    *
+    * 显示成一行普通文字（官方描边图标 + 品牌名），不做胶囊、不加悬浮提示：它只
+    * 回答「这条会话开没开 Pen」。勾选只发生在空会话，会话开始后勾选框不再出现，
+    * 所以状态不会在标记挂载后再变，读一次 Host 状态就够了。
+    *
+    * @module @buka/dsh-plugin-pen/client/mark
+    */
+    /** 图标边长（像素），与 12px 文字放在一行里。 */
+    const ICON_SIZE = 14;
+    /**
+    * 渲染标题旁的 Pen MCP 标记；会话没开启 Pen 时不占位置。
+    *
+    * @param props 会话 id
+    * @returns 标记，或 null
+    */
+    function PenMark({ sessionId }) {
+    	const [snapshot, setSnapshot] = (0, react.useState)(null);
+    	(0, react.useEffect)(() => {
+    		if (sessionId === void 0) {
+    			setSnapshot(null);
+    			return;
+    		}
+    		let live = true;
+    		readPenState(sessionId).then((next) => {
+    			if (live) setSnapshot(next);
+    		}).catch(() => {
+    			if (live) setSnapshot(null);
+    		});
+    		return () => {
+    			live = false;
+    		};
+    	}, [sessionId]);
+    	if (sessionId === void 0 || snapshot?.enabled !== true) return null;
+    	return h("span", { className: "buka-pen-mark" }, h(_deepseek_ai_dsh_client_ui_primitives.IconListPenOutlineRegular, {
+    		size: ICON_SIZE,
+    		className: "buka-pen-mark-icon"
+    	}), MARK_LABEL);
+    }
+    // .build/pen/client/styles.js
+    /**
+    * 勾选框与标题标记的样式。
+    *
+    * 勾选框的尺寸、颜色与 hover / focus 行为照抄 DSH 新会话行的官方 worktree
+    * 勾选框（13px / 28px 高、14px 复选框、`--dsw-*` 主题变量），保证两种配色下
+    * 都跟旁边的控件对齐。标题标记照抄会话标题行里的次级信息（12px、第三级文字
+    * 颜色、4px 图标间距），和标题、官方动作按钮排在同一行。
+    *
+    * @module @buka/dsh-plugin-pen/client/styles
+    */
+    /** 注入到 `document.head` 的样式表。 */
+    const CSS = `.buka-pen-root{flex:none;align-items:center;gap:2px;min-width:0;display:inline-flex}
+    .buka-pen-toggle{border-radius:var(--dsw-radius-sm);min-width:0;height:28px;color:var(--dsw-alias-label-secondary);white-space:nowrap;cursor:pointer;background:0 0;border:none;align-items:center;gap:6px;padding:0 8px;font-size:13px;font-weight:500;line-height:20px;display:inline-flex}
+    @media (hover:hover){.buka-pen-toggle:hover:not([data-disabled]){background:var(--dsw-alias-interactive-bg-hover)}}
+    .buka-pen-toggle[data-disabled]{color:var(--dsw-alias-label-dimmed);cursor:default}
+    .buka-pen-brand{align-items:center;gap:4px;min-width:0;display:inline-flex}
+    .buka-pen-logo{width:12px;height:auto;flex:none;display:block;object-fit:contain}
+    .buka-pen-toggle:has(.buka-pen-checkbox:focus-visible){outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+    .buka-pen-checkbox{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:inherit;flex:none;margin:0}
+    .buka-pen-checkbox:focus-visible{outline:none}
+    .buka-pen-warning{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:700;line-height:1}
+    .buka-pen-mark{flex:none;align-items:center;gap:4px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-size:12px;font-weight:500;line-height:18px;display:inline-flex}
+    .buka-pen-mark-icon{flex:none;display:block}
+    `;
     // .build/pen/client/logo.js
     /**
     * Pen 标记：透明背景的银色笔尖，显示在勾选框文字前。
@@ -404,11 +461,19 @@ window.__ModuleLoader__.load({
     }
     // .build/pen/client/index.js
     /**
-    * `@buka/dsh-plugin-pen` 的浏览器一半：把「Pen」勾选框放进新会话行。
+    * `@buka/dsh-plugin-pen` 的浏览器一半：新会话行里的「Pen」勾选框，以及会话
+    * 标题右侧的「Pen MCP」标记。
     *
-    * 只注册一个插槽 `conversation.hero.options`——官方 worktree 勾选框就在
-    * 这里，位置在新会话框右上角、工作区与预设控件之后。勾选框本身在
-    * `toggle.ts`，请求在 `api.ts`，文案在 `dictionary.ts`，样式在 `styles.ts`。
+    * 注册两个插槽：
+    *
+    * - `conversation.hero.options`——官方 worktree 勾选框就在这里，位置在新会话框
+    *   右上角、工作区与预设控件之后；只在空会话（新会话）阶段出现。
+    * - `conversation.session.header.actions`——紧挨会话标题的右侧、官方工具按钮
+    *   之前；标记只在这一会话勾选过 Pen 时显示，补上「会话开始后看不到勾选框」
+    *   的信息缺口。
+    *
+    * 勾选框在 `toggle.ts`，标题标记在 `mark.ts`，请求在 `api.ts`，文案在
+    * `dictionary.ts`，样式在 `styles.ts`。
     *
     * 本文件只导出 `inject` 与 `apply`；`window.__ModuleLoader__.load(...)` 外壳
     * 由构建脚本生成。
@@ -418,7 +483,7 @@ window.__ModuleLoader__.load({
     /** 浏览器一半依赖的客户端服务。 */
     const inject = ["slots", "locale"];
     /**
-    * 注册词典、样式与勾选框。
+    * 注册词典、样式、勾选框与标题标记。
     *
     * @param ctx 浏览器插件上下文
     */
@@ -441,6 +506,12 @@ window.__ModuleLoader__.load({
     		label: () => "Pen",
     		locale: NS
     	}, PenToggle));
+    	ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
+    		name: "conversation.session.header.actions",
+    		id: "buka-pen-mark",
+    		order: 10,
+    		label: () => MARK_LABEL
+    	}, PenMark));
     }
     exports.apply = apply;
     exports.inject = inject;

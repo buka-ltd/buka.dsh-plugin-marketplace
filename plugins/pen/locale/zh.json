@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Pen 设计工具",
-    "description": "在新会话框右上角放一个「Pen」勾选框（前面带 Pen 图标）：勾上，这个会话就注入 Pen（pen.dev）的 MCP 工具；不勾，全局不再常驻 Pen MCP 服务。",
+    "description": "在新会话框右上角放一个「Pen」勾选框（前面带 Pen 图标）：勾上，这个会话就注入 Pen（pen.dev）的 MCP 工具，会话标题旁还会显示「Pen MCP」标记；不勾，全局不再常驻 Pen MCP 服务。",
     "detail": "docs/DETAIL.zh.md"
   }
 }

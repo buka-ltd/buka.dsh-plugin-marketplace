@@ -1,8 +1,9 @@
 /**
- * 勾选框的文案与标记。
+ * 勾选框与会话标题标记的文案。
  *
- * 勾选框的可见文字固定为「Pen」，前面是 Pen 的 logo（见 `logo.ts`）；这是
- * 品牌名，不做翻译。tooltip 的说明随 DSH 的界面语言切换。
+ * 两处可见文字都是品牌名，不做翻译：勾选框是「Pen」（前面是 Pen 的 logo，见
+ * `logo.ts`），会话标题旁是「Pen MCP」。只有 tooltip 的说明随 DSH 的界面
+ * 语言切换。
  *
  * @module @buka/dsh-plugin-pen/client/dictionary
  */
@@ -12,6 +13,9 @@ export const NS = 'buka-pen'
 
 /** 勾选框文字：品牌名，不随界面语言变化。 */
 export const LABEL = 'Pen'
+
+/** 会话标题旁标记的文字：同样是不翻译的品牌名。 */
+export const MARK_LABEL = 'Pen MCP'
 
 /** 中文文案。 */
 export const zh = {

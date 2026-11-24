@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-pen",
-  "version": "0.1.0",
-  "description": "新建会话时勾选「Pen」（带 Pen 图标），这个会话就注入 Pen（pen.dev）的 MCP 工具。",
+  "version": "0.2.0",
+  "description": "新建会话时勾选「Pen」（带 Pen 图标），这个会话就注入 Pen（pen.dev）的 MCP 工具；会话标题旁显示「Pen MCP」标记。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

@@ -1,9 +1,10 @@
 /**
- * 勾选框的样式。
+ * 勾选框与标题标记的样式。
  *
- * 尺寸、颜色与 hover / focus 行为照抄 DSH 新会话行的官方 worktree 勾选框
- * （13px / 28px 高、14px 复选框、`--dsw-*` 主题变量），保证两种配色下都跟
- * 旁边的控件对齐。
+ * 勾选框的尺寸、颜色与 hover / focus 行为照抄 DSH 新会话行的官方 worktree
+ * 勾选框（13px / 28px 高、14px 复选框、`--dsw-*` 主题变量），保证两种配色下
+ * 都跟旁边的控件对齐。标题标记照抄会话标题行里的次级信息（12px、第三级文字
+ * 颜色、4px 图标间距），和标题、官方动作按钮排在同一行。
  *
  * @module @buka/dsh-plugin-pen/client/styles
  */
@@ -19,4 +20,6 @@ export const CSS = `.buka-pen-root{flex:none;align-items:center;gap:2px;min-widt
 .buka-pen-checkbox{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:inherit;flex:none;margin:0}
 .buka-pen-checkbox:focus-visible{outline:none}
 .buka-pen-warning{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:700;line-height:1}
+.buka-pen-mark{flex:none;align-items:center;gap:4px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-size:12px;font-weight:500;line-height:18px;display:inline-flex}
+.buka-pen-mark-icon{flex:none;display:block}
 `

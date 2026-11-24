@@ -1,14 +1,17 @@
 # Pen design tools
 
 Turns the always-on pen (pencil) MCP configuration into a checkbox that only
-exists on a new session.
+exists on a new session, and labels started sessions with a “Pen MCP” mark
+beside the conversation title.
 
 The usual way to mount an MCP server in DSH is a row in the profile's
 `cordis.patch.yml` (`@deepseek-ai/dsh-mcp-client`). It starts with DSH, every
 session sees `mcp__pencil__*`, and a Pen process stays alive all the time. This
 plugin moves the decision to the **session**: when you create a new session and
 tick “Pen” (the checkbox shows the Pen logo before its label), that session gets the Pen tools; unticked sessions never see
-them and never spawn Pen.
+them and never spawn Pen. Once the session starts the checkbox is gone and a
+plain “Pen MCP” label with an outline icon appears beside the title, confirming
+that the session has Pen enabled.
 
 ## Install
 
@@ -45,6 +48,10 @@ them and never spawn Pen.
   the connection and tool list, up to 20 s by default).
 - Unticking disconnects immediately and unregisters the tools. Agent disposal
   disconnects too.
+- Once the session starts, a plain “Pen MCP” label (outline icon plus the brand
+  name) sits beside the title, between the title and the official action
+  buttons. It only states that the session has Pen enabled: it has no hover
+  explanation and no way to switch Pen off.
 - A failed connection (for example Pen.app is not at the default path) never
   blocks the session: the error is logged and the session simply has no Pen
   tools. The tooltip shows the reason.
@@ -75,7 +82,8 @@ executable when Pen lives elsewhere or you are not on macOS arm64.
 - One ticked session owns one Pen MCP child process; several ticked sessions
   start several processes in parallel.
 - The checkbox only appears in the New Session row, next to the official
-  worktree checkbox; it disappears once the session starts.
+  worktree checkbox; it disappears once the session starts, and the “Pen MCP”
+  label beside the title then shows that the session has Pen enabled.
 - The tools are registered in the session's Agent scope only, so they never
   appear in other sessions' tool lists.
 
