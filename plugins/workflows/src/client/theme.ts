@@ -48,7 +48,7 @@ export const THEME = `
 --buka-overlay:rgb(17 20 28 / 24%);
 }
 /* 交互面一律带过渡：悬停 / 按下只改变背景或颜色，不做位移，避免抖动。 */
-.buka-workflows-card,.buka-workflows-filter,.buka-workflows-back,.buka-workflows-taskCard,.buka-workflows-node,.buka-workflows-drawerClose,.buka-workflows-foldSummary,.buka-workers-card,.buka-workers-iconButton,.buka-workers-avatarOption,.buka-workers-workspace,.buka-workers-candidate{transition:background-color var(--buka-motion-fast) var(--buka-ease),border-color var(--buka-motion-fast) var(--buka-ease),color var(--buka-motion-fast) var(--buka-ease),box-shadow var(--buka-motion-fast) var(--buka-ease),opacity var(--buka-motion-fast) var(--buka-ease)}
+.buka-workflows-card,.buka-workflows-filter,.buka-workflows-back,.buka-workflows-taskCard,.buka-workflows-node,.buka-workflows-typesItem,.buka-workflows-drawerClose,.buka-workflows-foldSummary,.buka-workers-card,.buka-workers-iconButton,.buka-workers-avatarOption,.buka-workers-workspace,.buka-workers-candidate{transition:background-color var(--buka-motion-fast) var(--buka-ease),border-color var(--buka-motion-fast) var(--buka-ease),color var(--buka-motion-fast) var(--buka-ease),box-shadow var(--buka-motion-fast) var(--buka-ease),opacity var(--buka-motion-fast) var(--buka-ease)}
 /* 进入动画只做透明度：内容区在滚动容器里，任何 transform 都会临时撑大
    scrollable overflow，滚动条会跟着闪一条 5px 竖条。 */
 @keyframes buka-enter{from{opacity:0}to{opacity:1}}

@@ -25,6 +25,7 @@ export function createInitialState(): PageState {
     finalTask: { status: 'idle', data: null, error: null },
     jobFilter: 'all',
     definitionSelection: null,
+    taskTypeSelection: null,
     nodeTasks: null,
     attachments: { status: 'idle', data: null, error: null },
     taskId: null,

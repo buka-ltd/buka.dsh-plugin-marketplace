@@ -382,7 +382,6 @@ window.__ModuleLoader__.load({
     	enableWorkflow: "Enable workflow",
     	disableWorkflow: "Disable",
     	workflowTabsAria: "Workflow views",
-    	workflowVersionName: "Version",
     	statusRunning: "Running",
     	statusCompleted: "Completed",
     	statusFailed: "Failed",
@@ -420,18 +419,19 @@ window.__ModuleLoader__.load({
     	jobTaskProgress: "{done}/{total} done",
     	jobSeq: "Job #{seq}",
     	jobErrorTitle: "Error",
-    	definitionInfo: "Definition info",
+    	taskTypesTab: "Task types",
+    	taskTypesListAria: "Task types",
+    	taskTypesEmptyWorkflow: "This workflow declares no task types.",
+    	taskTypePosition: "Position",
+    	taskTypeDefinition: "Task type definition",
+    	taskTypeActionForm: "Form",
+    	taskTypeActionCreates: "Creates",
     	definitionHint: "Select a node or a connection to inspect it.",
     	definitionHandler: "Handler",
     	endHandlerHint: "Starter (or the delivery assistant chosen for the job)",
-    	definitionPositions: "Positions",
     	definitionInitialTasks: "Initial tasks",
     	definitionInitialEmpty: "No tasks are created when the start task finishes.",
     	definitionTabsAria: "Definition sections",
-    	infoFlowTitle: "Task flow",
-    	infoDetailHint: "Task content, actions and the final report live in Structure — select a node there.",
-    	positionsEmpty: "This definition has no positions.",
-    	channelsEmpty: "This definition has no channels.",
     	builtinTypeTag: "Built-in task type",
     	builtinTypeHint: "Id, label and switches are fixed; actions, assistant, plan, preset, concurrency and worktree are unavailable.",
     	positionTaskTypes: "Task types it handles",
@@ -467,10 +467,6 @@ window.__ModuleLoader__.load({
     	startPayloadHint: "What the person starting the job fills in.",
     	endContentTitle: "Final report",
     	endPayloadHint: "The final report the starter agrees to receive.",
-    	budgetMaxTasks: "Max tasks",
-    	budgetMaxDuration: "Max duration",
-    	budgetHours: "hours",
-    	budgetUnset: "Not set",
     	graphStart: "Start",
     	graphEnd: "End",
     	graphWorker: "Worker position",
@@ -686,7 +682,6 @@ window.__ModuleLoader__.load({
     	enableWorkflow: "重新启用",
     	disableWorkflow: "停用",
     	workflowTabsAria: "工作流视图",
-    	workflowVersionName: "版本",
     	statusRunning: "进行中",
     	statusCompleted: "已完成",
     	statusFailed: "失败",
@@ -724,18 +719,19 @@ window.__ModuleLoader__.load({
     	jobTaskProgress: "已完成 {done}/{total}",
     	jobSeq: "作业 #{seq}",
     	jobErrorTitle: "错误",
-    	definitionInfo: "定义信息",
+    	taskTypesTab: "任务类型",
+    	taskTypesListAria: "任务类型",
+    	taskTypesEmptyWorkflow: "这个工作流没有声明任务类型。",
+    	taskTypePosition: "所属岗位",
+    	taskTypeDefinition: "任务类型的定义",
+    	taskTypeActionForm: "表单",
+    	taskTypeActionCreates: "创建任务",
     	definitionHint: "点节点或通道查看详情。",
     	definitionHandler: "处理人",
     	endHandlerHint: "发起人（或作业指定的交付助理）",
-    	definitionPositions: "岗位",
     	definitionInitialTasks: "初始任务",
     	definitionInitialEmpty: "没有定义完成后创建的任务。",
     	definitionTabsAria: "定义分区",
-    	infoFlowTitle: "任务流转",
-    	infoDetailHint: "任务内容、动作与最终报告等细节在「结构图」里点节点查看。",
-    	positionsEmpty: "这个定义没有岗位。",
-    	channelsEmpty: "这个定义没有通道。",
     	builtinTypeTag: "内建任务类型",
     	builtinTypeHint: "id、展示名与动作 / 助理 / 计划 / 预设 / 并发 / 工作树等开关固定，不可在定义里配置。",
     	positionTaskTypes: "可处理的任务类型",
@@ -771,10 +767,6 @@ window.__ModuleLoader__.load({
     	startPayloadHint: "启动作业的人填写的内容。",
     	endContentTitle: "最终报告",
     	endPayloadHint: "发起人会收到的最终报告。",
-    	budgetMaxTasks: "任务上限",
-    	budgetMaxDuration: "最长时长",
-    	budgetHours: "小时",
-    	budgetUnset: "未设置",
     	graphStart: "开始",
     	graphEnd: "结束",
     	graphWorker: "执行者岗位",
@@ -970,7 +962,7 @@ window.__ModuleLoader__.load({
     const WORKFLOW_TABS = [
     	"jobs",
     	"definition",
-    	"info"
+    	"types"
     ];
     /**
     * 把地址里的 hash 解析成路由；认不出来时回工作流列表。
@@ -2286,13 +2278,6 @@ window.__ModuleLoader__.load({
     		onChange: (value) => setActive(value)
     	})), h("div", { className: "buka-workflows-drawerTabPanel" }, current?.content ?? null));
     }
-    /** 一行指标条：值在上、标签在下。 */
-    function renderStatStrip(rows) {
-    	return h("div", { className: "buka-workflows-statStrip" }, ...rows.map(([label, value]) => h("div", {
-    		key: label,
-    		className: "buka-workflows-stat"
-    	}, h("span", { className: "buka-workflows-statValue" }, value), h("span", { className: "buka-workflows-statLabel" }, label))));
-    }
     /**
     * 契约字段的紧凑展示：字段名、类型与说明收在同一个可换行的小标签里。
     *
@@ -2659,8 +2644,8 @@ window.__ModuleLoader__.load({
     * 结构图抽屉里的任务类型卡片。
     *
     * 一张卡片 = 展示名 + id + 能力标签（助理 / 计划 / 工作树）+ 说明 + 任务内容契约
-    * + 动作 / 完成后创建。开始 / 结束是内建任务类型，用同一套卡片。定义信息页只做
-    * 摘要，不铺这些细节，细节留在抽屉里。
+    * + 动作 / 完成后创建。开始 / 结束是内建任务类型，用同一套卡片。「任务类型」
+    * 页复用这些片段铺开完整详情，抽屉里保持同样的卡片。
     */
     /** 一个任务类型：一张卡片，标题 + 说明 + 输入 / 产出两行契约。 */
     function renderTaskTypeCard(page, type, definition, labels) {
@@ -2671,7 +2656,7 @@ window.__ModuleLoader__.load({
     	return h("article", {
     		key: id === "" ? type.label ?? "type" : id,
     		className: "buka-workflows-typeCard"
-    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.plan === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null, typeof type.agentPreset === "string" && type.agentPreset !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypePreset")} · ${type.agentPreset}`) : null, typeof type.concurrency === "number" && type.concurrency > 1 ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeConcurrency")} · ${String(type.concurrency)}`) : null, type.worktree === "guard" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktreeGuard")) : type.worktree === "create" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktree")) : null)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
+    	}, h("div", { className: "buka-workflows-typeRowHead" }, h("span", { className: "buka-workflows-typeName" }, type.label ?? id), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id), renderTaskTypeTags(page, type)), typeof type.definition === "string" && type.definition !== "" ? h(ClampedText, {
     		text: type.definition,
     		className: "buka-workflows-typeDesc",
     		expandLabel: t("expandText"),
@@ -2679,7 +2664,32 @@ window.__ModuleLoader__.load({
     	}) : null, h("div", { className: "buka-workflows-contractStack is-tight" }, renderContractLine(t("taskTypeContent"), renderContractOrDash(page, type.content))), actions.length === 0 ? null : renderContractLine(t("taskTypeActions"), h("div", { className: "buka-workflows-tagRow" }, ...actions.map((action) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
     		key: String(action.id ?? action.label),
     		tone: "neutral"
-    	}, action.label ?? String(action.id ?? ""))))), creates.length === 0 ? null : renderContractLine(t("taskTypeCreates"), h("div", { className: "buka-workflows-tagRow" }, ...creates.map((creation, index) => {
+    	}, action.label ?? String(action.id ?? ""))))), creates.length === 0 ? null : renderContractLine(t("taskTypeCreates"), renderCreationTags(page, creates, definition, labels)));
+    }
+    /**
+    * 任务类型的能力标签：助理、计划模式、执行者预设、并发度与工作树。
+    *
+    * @param page 页面上下文
+    * @param type 任务类型定义
+    * @returns 标签容器；没有可展示项时是空容器
+    */
+    function renderTaskTypeTags(page, type) {
+    	const { t } = page;
+    	return h("span", { className: "buka-workflows-typeTags" }, typeof type.assistant === "string" && type.assistant !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeAssistant")} · ${renderAssistant(page, type.assistant)}`) : null, type.plan === true ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeModePlan")) : null, typeof type.agentPreset === "string" && type.agentPreset !== "" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypePreset")} · ${type.agentPreset}`) : null, typeof type.concurrency === "number" && type.concurrency > 1 ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, `${t("taskTypeConcurrency")} · ${String(type.concurrency)}`) : null, type.worktree === "guard" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktreeGuard")) : type.worktree === "create" ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("taskTypeWorktree")) : null);
+    }
+    /**
+    * 「完成后创建」的标签行：目标任务类型 + 通道。
+    *
+    * @param page 页面上下文
+    * @param creations 创建声明
+    * @param definition 定义快照
+    * @param labels 任务类型 id → 展示名
+    * @returns 标签行；没有创建声明时 null
+    */
+    function renderCreationTags(page, creations, definition, labels) {
+    	const { t } = page;
+    	if (creations.length === 0) return null;
+    	return h("div", { className: "buka-workflows-tagRow" }, ...creations.map((creation, index) => {
     		const typeId = typeof creation.type === "string" ? creation.type : "";
     		const target = typeId === "" || typeId === "end" ? t("endTaskTitle") : labels.get(typeId) ?? typeId;
     		const channel = channelOf(definition, creation.channel ?? "");
@@ -2687,7 +2697,7 @@ window.__ModuleLoader__.load({
     			key: `${creation.channel ?? ""}-${typeId}-${index}`,
     			tone: "neutral"
     		}, channel === null ? target : `${target} · ${channel.label}`);
-    	}))));
+    	}));
     }
     /**
     * 内建任务类型卡片：开始（作业输入 + 完成后创建）或结束（最终报告）。
@@ -2734,7 +2744,7 @@ window.__ModuleLoader__.load({
     * 抽屉只回答一个问题：所选节点 / 通道在定义里是什么。身份放在头部，正文按
     * 页签分区：岗位看可处理的任务类型（卡片），开始看作业输入与初始任务，结束看
     * 最终报告，通道看发送方、接收方与允许的任务类型。整个定义的概览在页面的
-    * 「定义信息」Tab 里，不占抽屉。
+    * 「任务类型」Tab 里，不占抽屉。
     */
     /** 定义抽屉。 */
     function renderDefinitionDrawer(page) {
@@ -5102,88 +5112,6 @@ window.__ModuleLoader__.load({
     		}
     	}));
     }
-    // .build/workflows/client/components/workflow-info.js
-    /**
-    * 工作流页的「定义信息」Tab：只保留需要一眼确认的内容。
-    *
-    * 概览（描述、版本、规模与预算）→ 岗位（执行者、职责与可处理的任务类型）
-    * → 任务流转（通道的收发方与类型限制）。任务内容、动作、最终报告等契约细节
-    * 属于「结构图」节点抽屉，这一页不重复，避免把定义文档整份铺开。
-    */
-    /** 预算：任务上限。 */
-    function budgetTasks(page, definition) {
-    	const value = definition.budgets?.maxTasks;
-    	return typeof value === "number" ? String(value) : page.t("budgetUnset");
-    }
-    /** 预算：最长时长。 */
-    function budgetDuration(page, definition) {
-    	const value = definition.budgets?.maxDurationHours;
-    	return typeof value === "number" ? `${value} ${page.t("budgetHours")}` : page.t("budgetUnset");
-    }
-    /** 一个岗位：名称、执行者、可处理的任务类型与职责。 */
-    function renderPositionRow(page, position) {
-    	const { t } = page;
-    	const types = position.taskTypes.map((type, index) => {
-    		const label = typeof type.label === "string" && type.label !== "" ? type.label : typeof type.id === "string" ? type.id : "";
-    		return label === "" ? null : h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
-    			key: type.id ?? `${position.id}-${index}`,
-    			tone: "neutral"
-    		}, label);
-    	}).filter((chip) => chip !== null);
-    	return h("div", {
-    		key: position.id,
-    		className: "buka-workflows-infoPosition"
-    	}, h("span", { className: "buka-workflows-infoPositionName" }, position.label), h("div", { className: "buka-workflows-infoPositionBody" }, h("div", { className: "buka-workflows-infoPositionHead" }, h("span", { className: "buka-workflows-infoPositionMeta" }, renderExecutor(page, position.executor)), types.length === 0 ? null : h("span", { className: "buka-workflows-infoTypes" }, ...types)), position.note === "" ? null : h(ClampedText, {
-    		text: position.note,
-    		className: "buka-workflows-infoNote",
-    		expandLabel: t("expandText"),
-    		collapseLabel: t("collapseText")
-    	})));
-    }
-    /** 一条通道：流向、名称与类型限制。 */
-    function renderChannelRow(page, channel, definition, labels, builtin) {
-    	const { t } = page;
-    	const types = channel.types.map((type) => labels.get(type) ?? type);
-    	return h("div", {
-    		key: channel.id,
-    		className: "buka-workflows-infoFlowRow"
-    	}, h("span", { className: "buka-workflows-infoFlowRoute" }, h("span", null, positionLabel(definition, channel.from, builtin)), h("span", {
-    		className: "buka-workflows-infoFlowArrow",
-    		"aria-hidden": true
-    	}, "→"), h("span", null, positionLabel(definition, channel.to, builtin))), h("span", { className: "buka-workflows-infoFlowChannel" }, channel.label, channel.back ? h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "neutral" }, t("channelBack")) : null), types.length === 0 ? null : h("span", { className: "buka-workflows-infoFlowTypes" }, ...types.map((type) => h(_deepseek_ai_dsh_client_ui_primitives.Tag, {
-    		key: type,
-    		tone: "neutral"
-    	}, type))));
-    }
-    /** 定义信息视图。 */
-    function renderWorkflowInfo(page) {
-    	const { t, state, actions } = page;
-    	const loaded = state.workflow;
-    	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
-    	if (loaded.data === null) return renderLoading(page);
-    	const definition = currentDefinition(state);
-    	if (definition === null) return renderEmpty(t("definitionMissing"));
-    	const workflow = loaded.data.workflow;
-    	const positions = positionsOf(definition);
-    	const channels = channelsOf(definition);
-    	const labels = taskTypeLabels(definition);
-    	const builtin = {
-    		start: t("graphStart"),
-    		end: t("graphEnd")
-    	};
-    	const description = typeof workflow?.description === "string" ? workflow.description.trim() : "";
-    	return h("div", { className: "buka-workflows-info" }, h("div", { className: "buka-workflows-infoSummary" }, description === "" ? null : h(ClampedText, {
-    		text: description,
-    		className: "buka-workflows-infoLead",
-    		expandLabel: t("expandText"),
-    		collapseLabel: t("collapseText")
-    	}), renderStatStrip([
-    		[t("workflowVersionName"), `v${workflow?.version ?? 0}`],
-    		[t("definitionPositions"), String(positions.length)],
-    		[t("budgetMaxTasks"), budgetTasks(page, definition)],
-    		[t("budgetMaxDuration"), budgetDuration(page, definition)]
-    	])), renderSection(t("definitionPositions"), positions.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("positionsEmpty")) : h("div", { className: "buka-workflows-infoPositions" }, ...positions.map((position) => renderPositionRow(page, position)))), renderSection(t("infoFlowTitle"), channels.length === 0 ? h("p", { className: "buka-workflows-hint" }, t("channelsEmpty")) : h("div", { className: "buka-workflows-infoFlow" }, ...channels.map((channel) => renderChannelRow(page, channel, definition, labels, builtin)))), h("p", { className: "buka-workflows-infoHint" }, t("infoDetailHint")));
-    }
     // .build/workflows/client/components/workflow-jobs.js
     /**
     * 工作流页的「作业」Tab：筛选、作业列表与新建作业入口。
@@ -5320,6 +5248,120 @@ window.__ModuleLoader__.load({
     		unavailable ? missing.map((entry) => describeMissingWorker(t, entry)).join("; ") : ""
     	].filter((part) => part !== "").join(" · "))));
     }
+    // .build/workflows/client/components/workflow-types.js
+    /**
+    * 工作流页的「任务类型」Tab：左侧逐个列出定义里的全部任务类型，右侧展示
+    * 所选类型的完整信息。
+    *
+    * 开始 / 结束是内建任务类型，与岗位任务类型混在同一个列表里，用 id 区分，
+    * 不再额外分类。左侧只负责选，右侧回答一个问题：这个任务类型是什么、收
+    * 什么、交什么、由谁处理。
+    */
+    /**
+    * 把定义展开成左侧的平铺列表。
+    *
+    * @param page 页面上下文
+    * @param definition 定义快照
+    * @returns 内建开始 / 结束在前，岗位任务类型按定义顺序在后
+    */
+    function taskTypes(page, definition) {
+    	const entries = [{
+    		key: "start",
+    		id: "start",
+    		label: page.t("startTaskTitle"),
+    		kind: "start",
+    		position: null,
+    		type: null
+    	}, {
+    		key: "end",
+    		id: "end",
+    		label: page.t("endTaskTitle"),
+    		kind: "end",
+    		position: null,
+    		type: null
+    	}];
+    	for (const position of positionsOf(definition)) for (const type of position.taskTypes) {
+    		const id = typeof type.id === "string" ? type.id : "";
+    		if (id === "") continue;
+    		entries.push({
+    			key: `${position.id}/${id}`,
+    			id,
+    			label: typeof type.label === "string" && type.label !== "" ? type.label : id,
+    			kind: "position",
+    			position,
+    			type
+    		});
+    	}
+    	return entries;
+    }
+    /** 详情头部：展示名 + id + 能力标签。 */
+    function renderHead(entry, tags) {
+    	return h("header", { className: "buka-workflows-typesHead" }, h("div", { className: "buka-workflows-typesTitleRow" }, h("h2", { className: "buka-workflows-typesTitle" }, entry.label), h("code", { className: "buka-workflows-inlineCode" }, entry.id)), tags);
+    }
+    /** 内建任务类型的详情：固定说明、处理人与契约。 */
+    function renderBuiltinDetail(page, entry, definition, labels, builtin) {
+    	const { t } = page;
+    	const isStart = entry.kind === "start";
+    	return h("div", { className: "buka-workflows-typesBody" }, renderHead(entry, h("span", { className: "buka-workflows-typeTags" }, h(_deepseek_ai_dsh_client_ui_primitives.Tag, { tone: "info" }, t("builtinTypeTag")))), h("p", { className: "buka-workflows-typeDesc" }, t("builtinTypeHint")), h("p", { className: "buka-workflows-sectionHint" }, isStart ? t("startContractHint") : t("endContractHint")), renderKv([[t("definitionHandler"), isStart ? t("boardEngine") : t("endHandlerHint")]]), renderSection(isStart ? t("startContentTitle") : t("endContentTitle"), renderContractOrDash(page, isStart ? definition.start?.content : definition.end?.content)), isStart ? renderSection(t("definitionInitialTasks"), renderInitialTasks(page, definition, labels, builtin)) : null);
+    }
+    /** 一条人任务动作：名称、id、表单与创建声明。 */
+    function renderAction(page, action, index, definition, labels) {
+    	const { t } = page;
+    	const id = typeof action.id === "string" ? action.id : "";
+    	const label = typeof action.label === "string" && action.label !== "" ? action.label : id === "" ? t("taskTypeUnset") : id;
+    	const input = action.input ?? null;
+    	const creates = Array.isArray(action.creates) ? action.creates : [];
+    	return h("div", {
+    		key: id === "" ? `action-${index}` : id,
+    		className: "buka-workflows-actionDef"
+    	}, h("div", { className: "buka-workflows-actionHead" }, h("span", { className: "buka-workflows-typeName" }, label), id === "" ? null : h("code", { className: "buka-workflows-inlineCode" }, id)), input === null ? null : h("div", { className: "buka-workflows-actionPart" }, h("span", { className: "buka-workflows-subLabel" }, t("taskTypeActionForm")), renderContractOrDash(page, input)), creates.length === 0 ? null : h("div", { className: "buka-workflows-actionPart" }, h("span", { className: "buka-workflows-subLabel" }, t("taskTypeActionCreates")), renderCreationTags(page, creates, definition, labels)));
+    }
+    /** 岗位任务类型的详情：所属岗位、定义模板与完整契约。 */
+    function renderPositionDetail(page, entry, definition, labels) {
+    	const { t } = page;
+    	const type = entry.type;
+    	const position = entry.position;
+    	if (type === null || position === null) return null;
+    	const actions = Array.isArray(type.actions) ? type.actions : [];
+    	const creates = Array.isArray(type.creates) ? type.creates : [];
+    	return h("div", { className: "buka-workflows-typesBody" }, renderHead(entry, renderTaskTypeTags(page, type)), renderKv([[t("taskTypePosition"), h("span", { className: "buka-workflows-inlineGroup" }, h("span", null, position.label), h("span", { className: "buka-workflows-hint" }, renderExecutor(page, position.executor)))]]), typeof type.definition === "string" && type.definition !== "" ? renderSection(t("taskTypeDefinition"), h(ClampedText, {
+    		text: type.definition,
+    		className: "buka-workflows-drawerText",
+    		expandLabel: t("expandText"),
+    		collapseLabel: t("collapseText")
+    	})) : null, renderSection(t("taskTypeContent"), renderContractOrDash(page, type.content)), actions.length === 0 ? null : renderSection(t("taskTypeActions"), h("div", { className: "buka-workflows-actionList" }, ...actions.map((action, index) => renderAction(page, action, index, definition, labels)))), creates.length === 0 ? null : renderSection(t("taskTypeCreates"), renderCreationTags(page, creates, definition, labels)));
+    }
+    /** 任务类型视图。 */
+    function renderWorkflowTypes(page) {
+    	const { t, state, actions } = page;
+    	const loaded = state.workflow;
+    	if (loaded.error !== null && loaded.data === null) return renderFailure(page, loaded.error, actions.refresh);
+    	if (loaded.data === null) return renderLoading(page);
+    	const definition = currentDefinition(state);
+    	if (definition === null) return renderEmpty(t("definitionMissing"));
+    	const entries = taskTypes(page, definition);
+    	const selected = entries.find((entry) => entry.key === state.taskTypeSelection) ?? entries[0];
+    	if (selected === void 0) return renderEmpty(t("taskTypesEmptyWorkflow"));
+    	const labels = taskTypeLabels(definition);
+    	const builtin = {
+    		start: t("graphStart"),
+    		end: t("graphEnd")
+    	};
+    	return h("div", { className: "buka-workflows-types" }, h("nav", {
+    		className: "buka-workflows-typesList",
+    		"aria-label": t("taskTypesListAria")
+    	}, ...entries.map((entry) => h("button", {
+    		key: entry.key,
+    		type: "button",
+    		className: entry.key === selected.key ? "buka-workflows-typesItem is-selected" : "buka-workflows-typesItem",
+    		...entry.key === selected.key ? { "aria-current": "true" } : {},
+    		onClick: () => actions.selectTaskType(entry.key)
+    	}, h("span", { className: "buka-workflows-typesItemLabel" }, entry.label), h("code", { className: "buka-workflows-typesItemId" }, entry.id)))), h("article", {
+    		key: selected.key,
+    		className: "buka-workflows-typesDetail",
+    		"aria-label": selected.label
+    	}, selected.kind === "position" ? renderPositionDetail(page, selected, definition, labels) : renderBuiltinDetail(page, selected, definition, labels, builtin)));
+    }
     // .build/workflows/client/components/page-shell.js
     /**
     * 页面外壳：返回、标题、状态、工具栏、页签、内容区、Toast 与抽屉 / 对话框。
@@ -5376,10 +5418,10 @@ window.__ModuleLoader__.load({
     			panelId: "buka-workflows-panel-definition"
     		},
     		{
-    			value: "info",
-    			label: t("definitionInfo"),
-    			id: "buka-workflows-tab-info",
-    			panelId: "buka-workflows-panel-info"
+    			value: "types",
+    			label: t("taskTypesTab"),
+    			id: "buka-workflows-tab-types",
+    			panelId: "buka-workflows-panel-types"
     		}
     	] : route.kind === "job" ? [
     		{
@@ -5410,6 +5452,8 @@ window.__ModuleLoader__.load({
     	const activeTab = route.kind === "workflow" ? route.tab : route.kind === "job" ? route.view : "";
     	/** 结构图与实时流程是整块画布：画布撑满正文，图例固定在底部。 */
     	const graphView = route.kind === "workflow" && route.tab === "definition" || route.kind === "job" && route.view === "flow";
+    	/** 任务类型页是左右两栏：列表与详情各自滚动，不让整页跟着滚。 */
+    	const typesView = route.kind === "workflow" && route.tab === "types";
     	const toolbar = [];
     	if (route.kind === "workflow") {
     		if (retired) toolbar.push(h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -5454,7 +5498,7 @@ window.__ModuleLoader__.load({
     		onClick: () => void actions.setWorkflowEnabled(false),
     		disabled: state.busy === "workflow-status"
     	}, t("disableWorkflow")));
-    	const body = route.kind === "workflows" ? renderWorkflowList(page) : route.kind === "workflow" ? route.tab === "definition" ? renderWorkflowDefinition(page) : route.tab === "info" ? renderWorkflowInfo(page) : renderWorkflowJobs(page) : renderJobDetail(page);
+    	const body = route.kind === "workflows" ? renderWorkflowList(page) : route.kind === "workflow" ? route.tab === "definition" ? renderWorkflowDefinition(page) : route.tab === "types" ? renderWorkflowTypes(page) : renderWorkflowJobs(page) : renderJobDetail(page);
     	const toolbarNode = h("div", { className: "buka-workflows-toolbar" }, ...toolbar);
     	const titleGroup = h("div", { className: "buka-workflows-titleGroup" }, h("button", {
     		type: "button",
@@ -5472,9 +5516,9 @@ window.__ModuleLoader__.load({
     		},
     		items: tabs
     	});
-    	return h("div", { className: `buka-workflows-page${graphView ? " is-graph" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, route.kind === "workflows" ? h("div", { className: "buka-workflows-bar" }, h("div", { className: "buka-workflows-barTabs" }, page.topTabs), toolbarNode) : h("div", { className: "buka-workflows-titleRow" }, titleGroup, toolbarNode), tabsNode)), h("div", {
+    	return h("div", { className: `buka-workflows-page${graphView ? " is-graph" : ""}${typesView ? " is-types" : ""}` }, h("header", { className: "buka-workflows-head" }, h("div", { className: "buka-workflows-headInner" }, route.kind === "workflows" ? h("div", { className: "buka-workflows-bar" }, h("div", { className: "buka-workflows-barTabs" }, page.topTabs), toolbarNode) : h("div", { className: "buka-workflows-titleRow" }, titleGroup, toolbarNode), tabsNode)), h("div", {
     		key: routeHash(route),
-    		className: `buka-workflows-body${graphView ? " is-graph" : ""}`
+    		className: `buka-workflows-body${graphView ? " is-graph" : ""}${typesView ? " is-types" : ""}`
     	}, renderAvailabilityNotice(page, availability), body), renderNewJobDialog(page), renderRestartDialog(page), renderDefinitionDrawer(page), renderNodeTasksDrawer(page), renderTaskDrawer(page), renderAttachmentDrawer(page), state.notice === null ? null : h(_deepseek_ai_dsh_client_ui_primitives.Toast, {
     		key: state.notice.seq,
     		text: state.notice.text,
@@ -5565,6 +5609,7 @@ window.__ModuleLoader__.load({
     					finalTask: idle$1(),
     					attachments: idle$1(),
     					definitionSelection: null,
+    					taskTypeSelection: null,
     					nodeTasks: null,
     					taskId: null,
     					task: idle$1(),
@@ -5584,6 +5629,7 @@ window.__ModuleLoader__.load({
     				finalTask: idle$1(),
     				attachments: idle$1(),
     				definitionSelection: null,
+    				taskTypeSelection: null,
     				nodeTasks: null,
     				taskId: null,
     				task: idle$1(),
@@ -5601,7 +5647,8 @@ window.__ModuleLoader__.load({
     			setState((current) => ({
     				...current,
     				route,
-    				...tab === "definition" ? {} : { definitionSelection: null }
+    				...tab === "definition" ? {} : { definitionSelection: null },
+    				...tab === "types" ? {} : { taskTypeSelection: null }
     			}));
     		},
     		openJob(workflowId, jobId) {
@@ -5623,6 +5670,7 @@ window.__ModuleLoader__.load({
     				finalTask: idle$1(),
     				attachments: idle$1(),
     				definitionSelection: null,
+    				taskTypeSelection: null,
     				nodeTasks: null,
     				taskId: null,
     				task: idle$1(),
@@ -5642,6 +5690,8 @@ window.__ModuleLoader__.load({
     					job: idle$1(),
     					finalTask: idle$1(),
     					attachments: idle$1(),
+    					definitionSelection: null,
+    					taskTypeSelection: null,
     					taskId: null,
     					task: idle$1(),
     					attachment: null
@@ -5660,6 +5710,8 @@ window.__ModuleLoader__.load({
     				job: idle$1(),
     				finalTask: idle$1(),
     				attachments: idle$1(),
+    				definitionSelection: null,
+    				taskTypeSelection: null,
     				nodeTasks: null,
     				taskId: null,
     				task: idle$1(),
@@ -5690,6 +5742,12 @@ window.__ModuleLoader__.load({
     			setState((current) => ({
     				...current,
     				definitionSelection: selection
+    			}));
+    		},
+    		selectTaskType(selection) {
+    			setState((current) => ({
+    				...current,
+    				taskTypeSelection: selection
     			}));
     		},
     		openPositionTasks(positionId, label) {
@@ -6326,13 +6384,17 @@ window.__ModuleLoader__.load({
     	if (sameRoutePage(current.route, next)) return {
     		...current,
     		route: next,
-    		...next.kind === "workflow" && current.route.kind === "workflow" && next.tab !== "definition" ? { definitionSelection: null } : {},
+    		...next.kind === "workflow" && current.route.kind === "workflow" ? {
+    			...next.tab !== "definition" ? { definitionSelection: null } : {},
+    			...next.tab !== "types" ? { taskTypeSelection: null } : {}
+    		} : {},
     		...next.kind === "job" && current.route.kind === "job" && next.view !== "flow" ? { nodeTasks: null } : {}
     	};
     	const base = {
     		...current,
     		route: next,
     		definitionSelection: null,
+    		taskTypeSelection: null,
     		nodeTasks: null,
     		taskId: null,
     		task: idle(),
@@ -6717,6 +6779,7 @@ window.__ModuleLoader__.load({
     		},
     		jobFilter: "all",
     		definitionSelection: null,
+    		taskTypeSelection: null,
     		nodeTasks: null,
     		attachments: {
     			status: "idle",
@@ -6806,8 +6869,8 @@ window.__ModuleLoader__.load({
     * 「工作流」页签（首页 Workflow Tab 的内容）：装配状态、数据 effect 与动作，
     * 渲染只做分发。
     *
-    * 导航只有一条链：工作流列表 → 工作流（作业 / 结构图）→ 作业（概览 /
-    * 实时流程 / 看板 / 资产）。不存在跨工作流的作业列表。
+    * 导航只有一条链：工作流列表 → 工作流（作业 / 结构图 / 任务类型）→ 作业
+    * （概览 / 实时流程 / 看板 / 资产）。不存在跨工作流的作业列表。
     */
     /** 组合里没有会话状态钩子时使用：始终返回空快照，功能静默降级。 */
     const useEmptySessionStatus = (selector) => selector(EMPTY_SESSION_STATUS);
@@ -10177,7 +10240,7 @@ window.__ModuleLoader__.load({
     --buka-overlay:rgb(17 20 28 / 24%);
     }
     /* 交互面一律带过渡：悬停 / 按下只改变背景或颜色，不做位移，避免抖动。 */
-    .buka-workflows-card,.buka-workflows-filter,.buka-workflows-back,.buka-workflows-taskCard,.buka-workflows-node,.buka-workflows-drawerClose,.buka-workflows-foldSummary,.buka-workers-card,.buka-workers-iconButton,.buka-workers-avatarOption,.buka-workers-workspace,.buka-workers-candidate{transition:background-color var(--buka-motion-fast) var(--buka-ease),border-color var(--buka-motion-fast) var(--buka-ease),color var(--buka-motion-fast) var(--buka-ease),box-shadow var(--buka-motion-fast) var(--buka-ease),opacity var(--buka-motion-fast) var(--buka-ease)}
+    .buka-workflows-card,.buka-workflows-filter,.buka-workflows-back,.buka-workflows-taskCard,.buka-workflows-node,.buka-workflows-typesItem,.buka-workflows-drawerClose,.buka-workflows-foldSummary,.buka-workers-card,.buka-workers-iconButton,.buka-workers-avatarOption,.buka-workers-workspace,.buka-workers-candidate{transition:background-color var(--buka-motion-fast) var(--buka-ease),border-color var(--buka-motion-fast) var(--buka-ease),color var(--buka-motion-fast) var(--buka-ease),box-shadow var(--buka-motion-fast) var(--buka-ease),opacity var(--buka-motion-fast) var(--buka-ease)}
     /* 进入动画只做透明度：内容区在滚动容器里，任何 transform 都会临时撑大
        scrollable overflow，滚动条会跟着闪一条 5px 竖条。 */
     @keyframes buka-enter{from{opacity:0}to{opacity:1}}
@@ -10215,6 +10278,8 @@ window.__ModuleLoader__.load({
     .buka-workflows-body{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:var(--buka-space-5, 24px) 0 var(--buka-space-7, 48px);animation:buka-enter var(--buka-motion, 160ms) var(--buka-ease, cubic-bezier(.2,0,0,1))}
     .buka-workflows-body.is-graph{overflow:hidden;padding-bottom:0}
     .buka-workflows-body.is-graph .buka-workflows-detail,.buka-workflows-body.is-graph .buka-workflows-definitionPane,.buka-workflows-body.is-graph .buka-workflows-graphPane{flex:1 1 auto;min-height:0}
+    .buka-workflows-page.is-types{overflow:hidden}
+    .buka-workflows-body.is-types{overflow:hidden;padding-bottom:0}
     .buka-workflows-statusWithDot{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);margin:0}
     .buka-workflows-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px)}
     .buka-workflows-emptyBox{display:flex;flex-direction:column;align-items:flex-start;gap:var(--buka-space-2, 8px);padding:var(--buka-space-2, 8px) 0}
@@ -10274,29 +10339,6 @@ window.__ModuleLoader__.load({
     .buka-workflows-valueKey{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-tertiary);flex:0 0 96px;min-width:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px)}
     .buka-workflows-valueValue{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;white-space:pre-wrap}
     .buka-workflows-definitionPane{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0;min-height:0}
-    .buka-workflows-info{display:flex;flex-direction:column;gap:var(--buka-space-6, 32px);max-width:900px;min-width:0}
-    .buka-workflows-infoSummary{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-width:0}
-    .buka-workflows-infoLead{margin:0;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-22, 22px);overflow-wrap:anywhere}
-    .buka-workflows-infoPositions{display:flex;flex-direction:column;min-width:0}
-    .buka-workflows-infoPosition{display:grid;grid-template-columns:104px minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-4, 16px);padding:var(--buka-space-3, 12px) 0;min-width:0}
-    .buka-workflows-infoPosition:first-child{padding-top:0}
-    .buka-workflows-infoPosition:last-child{padding-bottom:0}
-    .buka-workflows-infoPosition + .buka-workflows-infoPosition{border-top:0.5px solid var(--dsw-alias-border-l1)}
-    .buka-workflows-infoPositionName{font-size:var(--buka-text-body, 13px);font-weight:600;line-height:var(--buka-line-20, 20px);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}
-    .buka-workflows-infoPositionBody{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
-    .buka-workflows-infoPositionHead{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0}
-    .buka-workflows-infoPositionMeta{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
-    .buka-workflows-infoTypes{display:inline-flex;align-items:center;gap:var(--buka-space-1, 4px);flex-wrap:wrap;min-width:0}
-    .buka-workflows-infoNote{margin:0;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
-    .buka-workflows-infoFlow{display:flex;flex-direction:column;min-width:0}
-    .buka-workflows-infoFlowRow{display:flex;align-items:center;flex-wrap:wrap;gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);padding:var(--buka-space-2, 8px) 0;border-top:0.5px solid var(--dsw-alias-border-l1);min-width:0}
-    .buka-workflows-infoFlowRow:first-child{border-top:0;padding-top:0}
-    .buka-workflows-infoFlowRow:last-child{padding-bottom:0}
-    .buka-workflows-infoFlowRoute{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);flex:0 0 180px;color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);min-width:0}
-    .buka-workflows-infoFlowArrow{color:var(--dsw-alias-label-tertiary)}
-    .buka-workflows-infoFlowChannel{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);min-width:0}
-    .buka-workflows-infoFlowTypes{display:inline-flex;align-items:center;gap:var(--buka-space-1, 4px);flex-wrap:wrap;min-width:0}
-    .buka-workflows-infoHint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
     .buka-workflows-graphPane{display:flex;flex-direction:column;min-width:0;min-height:0}
     .buka-workflows-graphViewport{display:flex;align-items:flex-start;justify-content:center;width:100%;flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
     .buka-workflows-graphScaleBox{position:relative;flex:none;margin:auto}
@@ -10452,6 +10494,23 @@ window.__ModuleLoader__.load({
     .buka-workflows-typeName{font-size:var(--buka-text-body, 13px);font-weight:600;line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
     .buka-workflows-typeTags{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;margin-left:auto}
     .buka-workflows-typeDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
+    .buka-workflows-types{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(176px, 236px) minmax(0,1fr);gap:var(--buka-space-5, 24px);min-width:0}
+    .buka-workflows-typesList{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:var(--buka-space-1, 4px);scrollbar-gutter:stable}
+    .buka-workflows-typesItem{display:flex;flex-direction:column;align-items:flex-start;gap:2px;box-sizing:border-box;width:100%;margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border:0;border-radius:var(--dsw-radius-md);background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;text-align:left;cursor:pointer;min-width:0}
+    @media (hover:hover){.buka-workflows-typesItem:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}}
+    .buka-workflows-typesItem.is-selected{background:var(--dsw-alias-button-ghost-active-fill);box-shadow:inset 0 0 0 1px var(--dsw-alias-button-ghost-active-border);color:var(--dsw-alias-label-primary)}
+    .buka-workflows-typesItem:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
+    .buka-workflows-typesItemLabel{font-size:var(--buka-text-body, 13px);font-weight:500;line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
+    .buka-workflows-typesItemId{font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;word-break:break-all}
+    .buka-workflows-typesDetail{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-height:0;min-width:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--buka-space-4, 16px);border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);scrollbar-gutter:stable}
+    .buka-workflows-typesHead{display:flex;align-items:flex-start;flex-wrap:wrap;gap:var(--buka-space-2, 8px);min-width:0}
+    .buka-workflows-typesTitleRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0;flex:1 1 auto}
+    .buka-workflows-typesTitle{font-size:var(--buka-text-section, 15px);font-weight:600;line-height:var(--buka-line-22, 22px);margin:0;overflow-wrap:anywhere}
+    .buka-workflows-typesBody{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-width:0}
+    .buka-workflows-actionList{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);min-width:0}
+    .buka-workflows-actionDef{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);min-width:0}
+    .buka-workflows-actionHead{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0}
+    .buka-workflows-actionPart{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
     .buka-workflows-contractStack{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0}
     .buka-workflows-contractStack.is-tight{gap:var(--buka-space-1, 4px)}
     .buka-workflows-contractLine{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);align-items:start;min-width:0}
@@ -10462,10 +10521,6 @@ window.__ModuleLoader__.load({
     .buka-workflows-contractField .buka-workflows-inlineCode{flex:none;background:0;padding:0;font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px)}
     .buka-workflows-contractType{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);flex:none}
     .buka-workflows-contractDesc{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
-    .buka-workflows-statStrip{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:1px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-border-l1);overflow:hidden}
-    .buka-workflows-stat{display:flex;flex-direction:column;gap:1px;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);background:var(--dsw-alias-bg-layer-1);min-width:0}
-    .buka-workflows-statValue{font-size:var(--buka-text-title, 14px);font-weight:600;line-height:var(--buka-line-20, 20px);color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-    .buka-workflows-statLabel{font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);color:var(--dsw-alias-label-tertiary)}
     .buka-workflows-resultText{margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);white-space:pre-wrap;overflow-wrap:anywhere}
     .buka-workflows-resultBlock{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
     .buka-workflows-subLabel{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);font-weight:500;line-height:var(--buka-line-16, 16px)}
@@ -10525,12 +10580,10 @@ window.__ModuleLoader__.load({
     .buka-workflows-graphFooter{gap:var(--buka-space-2, 8px);padding-bottom:var(--buka-space-2, 8px)}
     .buka-workflows-legend{justify-content:flex-start;width:100%}
     .buka-workflows-sectionTitle{font-size:var(--buka-text-title, 14px)}
+    .buka-workflows-types{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:var(--buka-space-3, 12px)}
+    .buka-workflows-typesList{max-height:30vh}
     .buka-workflows-overviewCard{padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px)}
     .buka-workflows-valueRow{flex-direction:column;gap:2px}
-    .buka-workflows-info{gap:var(--buka-space-5, 24px)}
-    .buka-workflows-info .buka-workflows-statStrip{grid-template-columns:repeat(2,minmax(0,1fr))}
-    .buka-workflows-infoPosition{grid-template-columns:minmax(0,1fr);gap:var(--buka-space-1, 4px)}
-    .buka-workflows-infoFlowRoute{flex-basis:100%}
     }
     .buka-workflows-unavailableNotice{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);margin:0 0 var(--buka-space-3, 12px);padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-warning);background:var(--dsw-alias-fill-warning);color:var(--dsw-alias-label-primary)}
     .buka-workflows-unavailableTitle{font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-18, 18px)}
@@ -11208,7 +11261,7 @@ window.__ModuleLoader__.load({
     *   打开会话都走 DSH 的 Client Service（`workspaces.*`、`uiWorkspace.*`），
     *   磁盘内容由 Host 的 `/buka-workers/*` 路由处理。
     * - 「工作流」页（本目录其余模块）只做一条链：工作流列表 → 工作流
-    *   （作业 / 结构图）→ 作业（概览 / 实时流程 / 看板 / 资产），数据与动作来自
+    *   （作业 / 结构图 / 任务类型）→ 作业（概览 / 实时流程 / 看板 / 资产），数据与动作来自
     *   Host 的 `/buka-workflows/*` 路由。
     *
     * 两个页签由 `home.ts` 的 `HomePage` 装配：页签由 hash 驱动（`#/workers`

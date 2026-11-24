@@ -3,7 +3,7 @@
  *
  * 页面源码是 TypeScript（Node 24 默认做类型剥离），这里用 `module.registerHooks`
  * 把 `react` 与 DSH 的界面基座替换成最小桩，再直接调用注册到 `main` 的页面
- * 组件：工作流列表 / 工作流页（作业 / 定义）/ 作业四视图 / 任务抽屉 / 新建作业
+ * 组件：工作流列表 / 工作流页（作业 / 结构图 / 任务类型）/ 作业四视图 / 任务抽屉 / 新建作业
  * 对话框 / 资产池都会被渲染一遍，能在不启动 DSH、也不先构建 `lib/` 的情况下
  * 抓到渲染函数里的运行时错误与 props 形状错误。
  *
@@ -701,7 +701,7 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
     return values !== null && values.join(',') === 'workflow,worker'
   }
 
-  // 工作流详情：标题 + 操作一行，页内「作业 / 结构图 / 定义信息」页签单独一行。
+  // 工作流详情：标题 + 操作一行，页内「作业 / 结构图 / 任务类型」页签单独一行。
   const workflowPage = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
@@ -709,7 +709,7 @@ test('详情页独立页头：不再渲染首页顶部的「工作流 / 执行�
   assert.equal(findBy(workflowPage.tree, homeTabs), null, '工作流详情不显示首页页签')
   const workflowTabs = findBy(
     workflowPage.tree,
-    (node) => (tabValues(node) ?? []).join(',') === 'jobs,definition,info',
+    (node) => (tabValues(node) ?? []).join(',') === 'jobs,definition,types',
   )
   assert.ok(workflowTabs !== null, '工作流详情保留页内页签')
   assert.ok(workflowPage.texts.includes('研发交付'), '详情标题仍在')
@@ -804,7 +804,7 @@ test('详情页页内页签：工作流与作业都沿用执行者详情的下�
   const workflowTabs = roleTabs(workflowPage.tree)
   assert.deepEqual(
     workflowTabs.map((node) => textOf(node)),
-    ['作业', '结构图', '定义信息'],
+    ['作业', '结构图', '任务类型'],
   )
   assert.ok(workflowTabs.every(underline), '工作流详情用下划线页签，而不是胶囊分段控件')
   assert.deepEqual(
@@ -832,96 +832,116 @@ test('详情页页内页签：工作流与作业都沿用执行者详情的下�
   assert.equal(jobTabs[0].props?.['aria-selected'], true)
 })
 
-test('定义信息：只留概览、岗位与流转，细节交给结构图', async () => {
+test('任务类型：左列表右详情，展示全部任务类型与契约', async () => {
   const client = await loadClient()
 
-  // 从作业页签点「定义信息」：路由切到 info，页面按普通滚动页渲染。
+  // 从作业页签点「任务类型」：路由切到 types。
   const jobs = render(client, {
     route: { kind: 'workflow', workflowId: 'wf-1', tab: 'jobs' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
   })
-  const infoTab = findBy(
+  const typesTab = findBy(
     jobs.tree,
-    (node) => node.props?.role === 'tab' && textOf(node) === '定义信息',
+    (node) => node.props?.role === 'tab' && textOf(node) === '任务类型',
   )
-  assert.ok(infoTab !== null, '定义信息 是页内页签')
-  infoTab.props.onClick()
+  assert.ok(typesTab !== null, '任务类型 是页内页签')
+  typesTab.props.onClick()
   assert.equal(harness.updates.length, 1)
-  assert.equal(harness.updates[0].route.tab, 'info')
+  assert.equal(harness.updates[0].route.tab, 'types')
 
-  const info = render(client, {
-    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'info' },
+  const base = {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'types' },
     workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
-  })
-  const text = info.texts.join(' ')
-  // 概览只留版本、岗位数与预算。
-  for (const label of ['v3', '版本', '岗位', '任务上限', '最长时长']) {
-    assert.match(text, new RegExp(label, 'u'), `overview keeps ${label}`)
   }
-  assert.match(text, /需求 → 研发/u, 'the definition description is the lead')
-  // 正文只留岗位与任务流转。
-  assert.match(text, /任务流转/u)
-  assert.ok(!text.includes('开始与结束'), 'built-in cards are gone')
-  for (const label of ['研发', '测试', '发布审批']) {
-    assert.match(text, new RegExp(label, 'u'), `position ${label}`)
-  }
-  assert.match(text, /负责实现与返工/u, 'the position note is shown')
-  assert.match(text, /执行者 · 软件工程师/u, 'the worker executor is shown')
-  assert.match(text, /工作人员/u, 'the human executor is shown')
-  for (const label of ['开发', '返工', '验证', '批准发布']) {
-    assert.match(text, new RegExp(label, 'u'), `task type ${label}`)
-  }
-  // 任务流转：只看方向、名称、类型限制与回向。
-  for (const route of [
-    '开始 → 研发',
-    '研发 → 测试',
-    '测试 → 研发',
-    '测试 → 发布审批',
-    '发布审批 → 结束',
-  ]) {
-    assert.ok(text.includes(route), `flow route ${route}`)
-  }
-  for (const label of ['提测', '回向通道']) {
-    assert.match(text, new RegExp(label, 'u'), `channel ${label}`)
-  }
-  assert.match(text, /点节点查看/u, 'a footnote points at Structure for details')
-
-  // 技术细节不铺在摘要页上：id、任务类型说明、契约、助理 / 动作 / 内建卡片。
-  for (const noise of [
-    'dev.implement',
-    'qa.verify',
-    'approve.release',
-    'start.dev',
-    'dev.qa',
-    'qa.approve',
-    'approve.end',
-    '按需求实现功能',
-    'requirement',
-    '内建任务类型',
-    '开始任务',
-    '助理 · 沟通助理',
-    '全部任务类型',
-  ]) {
-    assert.ok(!text.includes(noise), `summary page drops ${noise}`)
-  }
-
-  const nodes = collect(info.tree).nodes
-  const countClass = (name) =>
-    nodes.filter((node) =>
+  const types = render(client, { ...base, taskTypeSelection: null })
+  const text = types.texts.join(' ')
+  const classCount = (name) =>
+    collect(types.tree).nodes.filter((node) =>
       String(node.props?.className ?? '')
         .split(/\s+/)
         .includes(name),
     ).length
-  assert.equal(countClass('buka-workflows-infoPosition'), 3, 'one row per position')
-  assert.equal(
-    countClass('buka-workflows-infoFlowRow'),
-    DEFINITION.channels.length,
-    'one row per channel',
+  const items = collect(types.tree).nodes.filter(
+    (node) =>
+      node.type === 'button' &&
+      String(node.props?.className ?? '')
+        .split(/\s+/)
+        .includes('buka-workflows-typesItem'),
   )
-  assert.equal(countClass('buka-workflows-typeCard'), 0, 'no task type cards on the summary page')
-  assert.deepEqual(info.paths, [], 'the info tab draws no graph')
-  assert.ok(!info.classes.includes('is-graph'), 'the info tab scrolls like a normal page')
-  assert.equal(drawerOf(info.tree), null, 'the info tab opens no drawer')
+
+  // 左侧：内建开始 / 结束 + 每个岗位声明的任务类型。
+  assert.equal(items.length, 5, 'one list item per task type')
+  for (const label of ['开始任务', '结束任务', '开发', '验证', '批准发布']) {
+    assert.ok(
+      items.some((item) => textOf(item).includes(label)),
+      `list has ${label}`,
+    )
+  }
+  assert.equal(classCount('buka-workflows-typesGroupLabel'), 0, 'the list is not split into groups')
+  const selected = items.filter((item) =>
+    String(item.props?.className ?? '')
+      .split(/\s+/)
+      .includes('is-selected'),
+  )
+  assert.equal(selected.length, 1, 'exactly one task type is selected')
+  assert.ok(textOf(selected[0]).includes('开始任务'), 'the first item is selected by default')
+  assert.equal(selected[0].props?.['aria-current'], 'true', 'the selected item is announced')
+
+  // 默认选中开始任务：右侧展示作业输入契约与初始任务。
+  assert.match(text, /作业输入/u)
+  assert.match(text, /需求说明/u, 'start content schema fields are shown')
+  assert.match(text, /初始任务/u)
+  assert.match(text, /创建带任务内容的任务/u)
+  assert.match(text, /引擎/u, 'the engine handles the start task')
+
+  // 列表是两栏视图，不画图、不弹抽屉，也不再有旧的「定义信息」摘要。
+  assert.ok(types.classes.includes('is-types'), 'the types tab uses the two-pane layout')
+  assert.ok(!types.classes.includes('is-graph'), 'the types tab is not a graph view')
+  assert.deepEqual(types.paths, [], 'the types tab draws no graph')
+  assert.equal(drawerOf(types.tree), null, 'the types tab opens no drawer')
+  assert.equal(classCount('buka-workflows-infoPosition'), 0, 'the definition-info summary is gone')
+  assert.equal(classCount('buka-workflows-typeCard'), 0, 'the list is not made of cards')
+
+  // 点「开发」：选中项写回页面状态，右侧换成该任务类型的详情。
+  const devItem = items.find((item) => textOf(item).includes('开发'))
+  assert.ok(devItem !== undefined, 'the dev task type is selectable')
+  devItem.props.onClick()
+  assert.equal(harness.updates[0].taskTypeSelection, 'dev/dev.implement')
+
+  const dev = render(client, { ...base, taskTypeSelection: 'dev/dev.implement' })
+  const devText = dev.texts.join(' ')
+  const devSelected = collect(dev.tree).nodes.filter((node) =>
+    String(node.props?.className ?? '')
+      .split(/\s+/)
+      .includes('is-selected'),
+  )
+  assert.equal(devSelected.length, 1, 'the selected task type stays highlighted')
+  assert.ok(textOf(devSelected[0]).includes('开发'), 'the dev item is highlighted')
+  assert.match(devText, /所属岗位/u)
+  assert.match(devText, /研发/u)
+  assert.match(devText, /执行者 · 软件工程师/u)
+  assert.match(devText, /定义/u)
+  assert.match(devText, /实现功能/u, 'the task type definition template is shown')
+  assert.match(devText, /requirement/u, 'the content schema is shown')
+  assert.ok(!devText.includes('表单'), 'the dev task type declares no actions')
+
+  // 人任务类型：动作、表单与完成后创建都要在详情里展开。
+  const approve = render(client, { ...base, taskTypeSelection: 'approve/approve.release' })
+  const approveText = approve.texts.join(' ')
+  assert.match(approveText, /助理 · 沟通助理/u)
+  assert.match(approveText, /动作/u)
+  assert.match(approveText, /批准/u)
+  assert.match(approveText, /表单/u)
+  assert.match(approveText, /approved/u, 'the action form schema is shown')
+  assert.match(approveText, /创建任务/u)
+  assert.match(approveText, /结束任务 · 交付/u)
+
+  // 结束任务是内建类型：详情给最终报告契约与处理人。
+  const end = render(client, { ...base, taskTypeSelection: 'end' })
+  const endText = end.texts.join(' ')
+  assert.match(endText, /最终报告/u)
+  assert.match(endText, /发起人（或作业指定的交付助理）/u)
+  assert.match(endText, /summary/u, 'the final report schema is shown')
 })
 
 test('工作流列表：停用的工作流灰显并排在后面', async () => {
@@ -1025,7 +1045,7 @@ test('结构图：画通道、点节点打开抽屉、点通道记录选中', as
       node.props.className.split(/\s+/).includes('buka-workflows-definitionPane'),
   )
   assert.ok(graphPane !== null, 'the structure view renders')
-  assert.doesNotMatch(textOf(graphPane), /定义信息/u, '定义信息是页面页签，不再占结构图顶部')
+  assert.doesNotMatch(textOf(graphPane), /任务类型/u, '任务类型是页面页签，不再占结构图顶部')
   assert.match(text, /点节点或通道查看详情/u)
 
   clickButton(tree, '研发')

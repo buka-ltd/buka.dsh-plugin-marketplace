@@ -2,8 +2,8 @@
  * 结构图抽屉里的任务类型卡片。
  *
  * 一张卡片 = 展示名 + id + 能力标签（助理 / 计划 / 工作树）+ 说明 + 任务内容契约
- * + 动作 / 完成后创建。开始 / 结束是内建任务类型，用同一套卡片。定义信息页只做
- * 摘要，不铺这些细节，细节留在抽屉里。
+ * + 动作 / 完成后创建。开始 / 结束是内建任务类型，用同一套卡片。「任务类型」
+ * 页复用这些片段铺开完整详情，抽屉里保持同样的卡片。
  */
 
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -12,7 +12,12 @@ import type React from 'react'
 import { h } from '../element.ts'
 import { channelOf, positionLabel } from '../model.ts'
 import type { AppContext } from '../page-context.ts'
-import type { JsonSchema, TaskTypeDefinition, WorkflowDefinition } from '../types.ts'
+import type {
+  CreationDefinition,
+  JsonSchema,
+  TaskTypeDefinition,
+  WorkflowDefinition,
+} from '../types.ts'
 import { ClampedText, renderAssistant, renderContractFields } from './parts.ts'
 
 /** 一个任务类型：一张卡片，标题 + 说明 + 输入 / 产出两行契约。 */
@@ -34,29 +39,7 @@ export function renderTaskTypeCard(
       { className: 'buka-workflows-typeRowHead' },
       h('span', { className: 'buka-workflows-typeName' }, type.label ?? id),
       id === '' ? null : h('code', { className: 'buka-workflows-inlineCode' }, id),
-      h(
-        'span',
-        { className: 'buka-workflows-typeTags' },
-        typeof type.assistant === 'string' && type.assistant !== ''
-          ? h(
-              Tag,
-              { tone: 'neutral' },
-              `${t('taskTypeAssistant')} · ${renderAssistant(page, type.assistant)}`,
-            )
-          : null,
-        type.plan === true ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
-        typeof type.agentPreset === 'string' && type.agentPreset !== ''
-          ? h(Tag, { tone: 'neutral' }, `${t('taskTypePreset')} · ${type.agentPreset}`)
-          : null,
-        typeof type.concurrency === 'number' && type.concurrency > 1
-          ? h(Tag, { tone: 'neutral' }, `${t('taskTypeConcurrency')} · ${String(type.concurrency)}`)
-          : null,
-        type.worktree === 'guard'
-          ? h(Tag, { tone: 'info' }, t('taskTypeWorktreeGuard'))
-          : type.worktree === 'create'
-            ? h(Tag, { tone: 'info' }, t('taskTypeWorktree'))
-            : null,
-      ),
+      renderTaskTypeTags(page, type),
     ),
     typeof type.definition === 'string' && type.definition !== ''
       ? h(ClampedText, {
@@ -91,24 +74,76 @@ export function renderTaskTypeCard(
       ? null
       : renderContractLine(
           t('taskTypeCreates'),
-          h(
-            'div',
-            { className: 'buka-workflows-tagRow' },
-            ...creates.map((creation, index) => {
-              const typeId = typeof creation.type === 'string' ? creation.type : ''
-              const target =
-                typeId === '' || typeId === 'end'
-                  ? t('endTaskTitle')
-                  : (labels.get(typeId) ?? typeId)
-              const channel = channelOf(definition, creation.channel ?? '')
-              return h(
-                Tag,
-                { key: `${creation.channel ?? ''}-${typeId}-${index}`, tone: 'neutral' },
-                channel === null ? target : `${target} · ${channel.label}`,
-              )
-            }),
-          ),
+          renderCreationTags(page, creates, definition, labels),
         ),
+  )
+}
+
+/**
+ * 任务类型的能力标签：助理、计划模式、执行者预设、并发度与工作树。
+ *
+ * @param page 页面上下文
+ * @param type 任务类型定义
+ * @returns 标签容器；没有可展示项时是空容器
+ */
+export function renderTaskTypeTags(page: AppContext, type: TaskTypeDefinition): React.ReactNode {
+  const { t } = page
+  return h(
+    'span',
+    { className: 'buka-workflows-typeTags' },
+    typeof type.assistant === 'string' && type.assistant !== ''
+      ? h(
+          Tag,
+          { tone: 'neutral' },
+          `${t('taskTypeAssistant')} · ${renderAssistant(page, type.assistant)}`,
+        )
+      : null,
+    type.plan === true ? h(Tag, { tone: 'info' }, t('taskTypeModePlan')) : null,
+    typeof type.agentPreset === 'string' && type.agentPreset !== ''
+      ? h(Tag, { tone: 'neutral' }, `${t('taskTypePreset')} · ${type.agentPreset}`)
+      : null,
+    typeof type.concurrency === 'number' && type.concurrency > 1
+      ? h(Tag, { tone: 'neutral' }, `${t('taskTypeConcurrency')} · ${String(type.concurrency)}`)
+      : null,
+    type.worktree === 'guard'
+      ? h(Tag, { tone: 'info' }, t('taskTypeWorktreeGuard'))
+      : type.worktree === 'create'
+        ? h(Tag, { tone: 'info' }, t('taskTypeWorktree'))
+        : null,
+  )
+}
+
+/**
+ * 「完成后创建」的标签行：目标任务类型 + 通道。
+ *
+ * @param page 页面上下文
+ * @param creations 创建声明
+ * @param definition 定义快照
+ * @param labels 任务类型 id → 展示名
+ * @returns 标签行；没有创建声明时 null
+ */
+export function renderCreationTags(
+  page: AppContext,
+  creations: CreationDefinition[],
+  definition: WorkflowDefinition,
+  labels: Map<string, string>,
+): React.ReactNode {
+  const { t } = page
+  if (creations.length === 0) return null
+  return h(
+    'div',
+    { className: 'buka-workflows-tagRow' },
+    ...creations.map((creation, index) => {
+      const typeId = typeof creation.type === 'string' ? creation.type : ''
+      const target =
+        typeId === '' || typeId === 'end' ? t('endTaskTitle') : (labels.get(typeId) ?? typeId)
+      const channel = channelOf(definition, creation.channel ?? '')
+      return h(
+        Tag,
+        { key: `${creation.channel ?? ''}-${typeId}-${index}`, tone: 'neutral' },
+        channel === null ? target : `${target} · ${channel.label}`,
+      )
+    }),
   )
 }
 
@@ -166,7 +201,7 @@ export function renderBuiltinTaskCard(
 }
 
 /** 初始任务列表。 */
-function renderInitialTasks(
+export function renderInitialTasks(
   page: AppContext,
   definition: WorkflowDefinition,
   labels: Map<string, string>,
@@ -226,7 +261,7 @@ function renderContractLine(label: string, content: React.ReactNode): React.Reac
 }
 
 /** 有契约就渲染字段，没有契约给一个短横线占位。 */
-function renderContractOrDash(
+export function renderContractOrDash(
   page: AppContext,
   schema: JsonSchema | null | undefined,
 ): React.ReactNode {

@@ -420,7 +420,7 @@ export type JobRestartMode = 'failed' | 'scratch'
 export type JobView = 'overview' | 'flow' | 'board' | 'outputs'
 
 /** 工作流页签。 */
-export type WorkflowTab = 'jobs' | 'definition' | 'info'
+export type WorkflowTab = 'jobs' | 'definition' | 'types'
 
 /** 作业列表筛选。 */
 export type JobFilter = 'all' | 'running' | 'completed' | 'problem'
@@ -529,6 +529,8 @@ export interface PageState {
   jobFilter: JobFilter
   /** 结构图画布的选中项。 */
   definitionSelection: DefinitionSelection
+  /** 任务类型页选中的条目；null 表示落在列表第一项。 */
+  taskTypeSelection: string | null
   /** 实时流程里打开的节点任务列表。 */
   nodeTasks: NodeTasksSelection | null
   /** 作业附件库；进入产出视图时读取。 */

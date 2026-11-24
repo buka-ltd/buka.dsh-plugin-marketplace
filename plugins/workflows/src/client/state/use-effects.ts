@@ -69,8 +69,11 @@ function applyHashRoute(current: PageState, next: Route): PageState {
     return {
       ...current,
       route: next,
-      ...(next.kind === 'workflow' && current.route.kind === 'workflow' && next.tab !== 'definition'
-        ? { definitionSelection: null }
+      ...(next.kind === 'workflow' && current.route.kind === 'workflow'
+        ? {
+            ...(next.tab !== 'definition' ? { definitionSelection: null } : {}),
+            ...(next.tab !== 'types' ? { taskTypeSelection: null } : {}),
+          }
         : {}),
       ...(next.kind === 'job' && current.route.kind === 'job' && next.view !== 'flow'
         ? { nodeTasks: null }
@@ -82,6 +85,7 @@ function applyHashRoute(current: PageState, next: Route): PageState {
     ...current,
     route: next,
     definitionSelection: null,
+    taskTypeSelection: null,
     nodeTasks: null,
     taskId: null,
     task: idle<TaskDetail>(),

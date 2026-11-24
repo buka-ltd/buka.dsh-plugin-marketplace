@@ -292,22 +292,6 @@ export function DrawerTabs(props: {
   )
 }
 
-/** 一行指标条：值在上、标签在下。 */
-export function renderStatStrip(rows: Array<[string, string]>): React.ReactElement {
-  return h(
-    'div',
-    { className: 'buka-workflows-statStrip' },
-    ...rows.map(([label, value]) =>
-      h(
-        'div',
-        { key: label, className: 'buka-workflows-stat' },
-        h('span', { className: 'buka-workflows-statValue' }, value),
-        h('span', { className: 'buka-workflows-statLabel' }, label),
-      ),
-    ),
-  )
-}
-
 /**
  * 契约字段的紧凑展示：字段名、类型与说明收在同一个可换行的小标签里。
  *

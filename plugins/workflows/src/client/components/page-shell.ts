@@ -27,9 +27,9 @@ import { ConfirmButton, renderAvailabilityNotice, renderStatusTag } from './part
 import { renderRestartDialog } from './restart-dialog.ts'
 import { renderTaskDrawer } from './task-drawer.ts'
 import { renderWorkflowDefinition } from './workflow-definition.ts'
-import { renderWorkflowInfo } from './workflow-info.ts'
 import { renderWorkflowJobs } from './workflow-jobs.ts'
 import { renderWorkflowList } from './workflow-list.ts'
+import { renderWorkflowTypes } from './workflow-types.ts'
 
 /** 页面标题与副标题。 */
 function pageHeading(page: AppContext): { title: string; subtitle: string } {
@@ -87,10 +87,10 @@ export function renderPage(page: AppContext): React.ReactElement {
             panelId: 'buka-workflows-panel-definition',
           },
           {
-            value: 'info',
-            label: t('definitionInfo'),
-            id: 'buka-workflows-tab-info',
-            panelId: 'buka-workflows-panel-info',
+            value: 'types',
+            label: t('taskTypesTab'),
+            id: 'buka-workflows-tab-types',
+            panelId: 'buka-workflows-panel-types',
           },
         ]
       : route.kind === 'job'
@@ -126,6 +126,8 @@ export function renderPage(page: AppContext): React.ReactElement {
   const graphView =
     (route.kind === 'workflow' && route.tab === 'definition') ||
     (route.kind === 'job' && route.view === 'flow')
+  /** 任务类型页是左右两栏：列表与详情各自滚动，不让整页跟着滚。 */
+  const typesView = route.kind === 'workflow' && route.tab === 'types'
 
   const toolbar: React.ReactNode[] = []
   if (route.kind === 'workflow') {
@@ -211,8 +213,8 @@ export function renderPage(page: AppContext): React.ReactElement {
       : route.kind === 'workflow'
         ? route.tab === 'definition'
           ? renderWorkflowDefinition(page)
-          : route.tab === 'info'
-            ? renderWorkflowInfo(page)
+          : route.tab === 'types'
+            ? renderWorkflowTypes(page)
             : renderWorkflowJobs(page)
         : renderJobDetail(page)
 
@@ -273,7 +275,7 @@ export function renderPage(page: AppContext): React.ReactElement {
   return h(
     'div',
     {
-      className: `buka-workflows-page${graphView ? ' is-graph' : ''}`,
+      className: `buka-workflows-page${graphView ? ' is-graph' : ''}${typesView ? ' is-types' : ''}`,
     },
     h(
       'header',
@@ -299,7 +301,7 @@ export function renderPage(page: AppContext): React.ReactElement {
       'div',
       {
         key: routeHash(route),
-        className: `buka-workflows-body${graphView ? ' is-graph' : ''}`,
+        className: `buka-workflows-body${graphView ? ' is-graph' : ''}${typesView ? ' is-types' : ''}`,
       },
       renderAvailabilityNotice(page, availability),
       body,

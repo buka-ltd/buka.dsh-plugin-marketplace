@@ -43,6 +43,8 @@ ${THEME}
 .buka-workflows-body{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:var(--buka-space-5, 24px) 0 var(--buka-space-7, 48px);animation:buka-enter var(--buka-motion, 160ms) var(--buka-ease, cubic-bezier(.2,0,0,1))}
 .buka-workflows-body.is-graph{overflow:hidden;padding-bottom:0}
 .buka-workflows-body.is-graph .buka-workflows-detail,.buka-workflows-body.is-graph .buka-workflows-definitionPane,.buka-workflows-body.is-graph .buka-workflows-graphPane{flex:1 1 auto;min-height:0}
+.buka-workflows-page.is-types{overflow:hidden}
+.buka-workflows-body.is-types{overflow:hidden;padding-bottom:0}
 .buka-workflows-statusWithDot{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);margin:0}
 .buka-workflows-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px)}
 .buka-workflows-emptyBox{display:flex;flex-direction:column;align-items:flex-start;gap:var(--buka-space-2, 8px);padding:var(--buka-space-2, 8px) 0}
@@ -102,29 +104,6 @@ ${THEME}
 .buka-workflows-valueKey{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-tertiary);flex:0 0 96px;min-width:0;font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px)}
 .buka-workflows-valueValue{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;white-space:pre-wrap}
 .buka-workflows-definitionPane{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0;min-height:0}
-.buka-workflows-info{display:flex;flex-direction:column;gap:var(--buka-space-6, 32px);max-width:900px;min-width:0}
-.buka-workflows-infoSummary{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-width:0}
-.buka-workflows-infoLead{margin:0;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-title, 14px);line-height:var(--buka-line-22, 22px);overflow-wrap:anywhere}
-.buka-workflows-infoPositions{display:flex;flex-direction:column;min-width:0}
-.buka-workflows-infoPosition{display:grid;grid-template-columns:104px minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-4, 16px);padding:var(--buka-space-3, 12px) 0;min-width:0}
-.buka-workflows-infoPosition:first-child{padding-top:0}
-.buka-workflows-infoPosition:last-child{padding-bottom:0}
-.buka-workflows-infoPosition + .buka-workflows-infoPosition{border-top:0.5px solid var(--dsw-alias-border-l1)}
-.buka-workflows-infoPositionName{font-size:var(--buka-text-body, 13px);font-weight:600;line-height:var(--buka-line-20, 20px);color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}
-.buka-workflows-infoPositionBody{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
-.buka-workflows-infoPositionHead{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0}
-.buka-workflows-infoPositionMeta{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
-.buka-workflows-infoTypes{display:inline-flex;align-items:center;gap:var(--buka-space-1, 4px);flex-wrap:wrap;min-width:0}
-.buka-workflows-infoNote{margin:0;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
-.buka-workflows-infoFlow{display:flex;flex-direction:column;min-width:0}
-.buka-workflows-infoFlowRow{display:flex;align-items:center;flex-wrap:wrap;gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);padding:var(--buka-space-2, 8px) 0;border-top:0.5px solid var(--dsw-alias-border-l1);min-width:0}
-.buka-workflows-infoFlowRow:first-child{border-top:0;padding-top:0}
-.buka-workflows-infoFlowRow:last-child{padding-bottom:0}
-.buka-workflows-infoFlowRoute{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);flex:0 0 180px;color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);min-width:0}
-.buka-workflows-infoFlowArrow{color:var(--dsw-alias-label-tertiary)}
-.buka-workflows-infoFlowChannel{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);min-width:0}
-.buka-workflows-infoFlowTypes{display:inline-flex;align-items:center;gap:var(--buka-space-1, 4px);flex-wrap:wrap;min-width:0}
-.buka-workflows-infoHint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
 .buka-workflows-graphPane{display:flex;flex-direction:column;min-width:0;min-height:0}
 .buka-workflows-graphViewport{display:flex;align-items:flex-start;justify-content:center;width:100%;flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
 .buka-workflows-graphScaleBox{position:relative;flex:none;margin:auto}
@@ -280,6 +259,23 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-typeName{font-size:var(--buka-text-body, 13px);font-weight:600;line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
 .buka-workflows-typeTags{display:inline-flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;margin-left:auto}
 .buka-workflows-typeDesc{margin:0;color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
+.buka-workflows-types{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(176px, 236px) minmax(0,1fr);gap:var(--buka-space-5, 24px);min-width:0}
+.buka-workflows-typesList{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:var(--buka-space-1, 4px);scrollbar-gutter:stable}
+.buka-workflows-typesItem{display:flex;flex-direction:column;align-items:flex-start;gap:2px;box-sizing:border-box;width:100%;margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border:0;border-radius:var(--dsw-radius-md);background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;text-align:left;cursor:pointer;min-width:0}
+@media (hover:hover){.buka-workflows-typesItem:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}}
+.buka-workflows-typesItem.is-selected{background:var(--dsw-alias-button-ghost-active-fill);box-shadow:inset 0 0 0 1px var(--dsw-alias-button-ghost-active-border);color:var(--dsw-alias-label-primary)}
+.buka-workflows-typesItem:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:1px}
+.buka-workflows-typesItemLabel{font-size:var(--buka-text-body, 13px);font-weight:500;line-height:var(--buka-line-20, 20px);overflow-wrap:anywhere}
+.buka-workflows-typesItemId{font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;word-break:break-all}
+.buka-workflows-typesDetail{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-height:0;min-width:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--buka-space-4, 16px);border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);scrollbar-gutter:stable}
+.buka-workflows-typesHead{display:flex;align-items:flex-start;flex-wrap:wrap;gap:var(--buka-space-2, 8px);min-width:0}
+.buka-workflows-typesTitleRow{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0;flex:1 1 auto}
+.buka-workflows-typesTitle{font-size:var(--buka-text-section, 15px);font-weight:600;line-height:var(--buka-line-22, 22px);margin:0;overflow-wrap:anywhere}
+.buka-workflows-typesBody{display:flex;flex-direction:column;gap:var(--buka-space-4, 16px);min-width:0}
+.buka-workflows-actionList{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);min-width:0}
+.buka-workflows-actionDef{display:flex;flex-direction:column;gap:var(--buka-space-2, 8px);padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);min-width:0}
+.buka-workflows-actionHead{display:flex;align-items:center;gap:var(--buka-space-2, 8px);flex-wrap:wrap;min-width:0}
+.buka-workflows-actionPart{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
 .buka-workflows-contractStack{display:flex;flex-direction:column;gap:var(--buka-space-3, 12px);min-width:0}
 .buka-workflows-contractStack.is-tight{gap:var(--buka-space-1, 4px)}
 .buka-workflows-contractLine{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--buka-space-1, 4px) var(--buka-space-3, 12px);align-items:start;min-width:0}
@@ -290,10 +286,6 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-contractField .buka-workflows-inlineCode{flex:none;background:0;padding:0;font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px)}
 .buka-workflows-contractType{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);flex:none}
 .buka-workflows-contractDesc{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);overflow-wrap:anywhere}
-.buka-workflows-statStrip{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:1px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-border-l1);overflow:hidden}
-.buka-workflows-stat{display:flex;flex-direction:column;gap:1px;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);background:var(--dsw-alias-bg-layer-1);min-width:0}
-.buka-workflows-statValue{font-size:var(--buka-text-title, 14px);font-weight:600;line-height:var(--buka-line-20, 20px);color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.buka-workflows-statLabel{font-size:var(--buka-text-code, 11px);line-height:var(--buka-line-16, 16px);color:var(--dsw-alias-label-tertiary)}
 .buka-workflows-resultText{margin:0;padding:var(--buka-space-2, 8px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-20, 20px);white-space:pre-wrap;overflow-wrap:anywhere}
 .buka-workflows-resultBlock{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);min-width:0}
 .buka-workflows-subLabel{color:var(--dsw-alias-label-tertiary);font-size:var(--buka-text-code, 11px);font-weight:500;line-height:var(--buka-line-16, 16px)}
@@ -353,12 +345,10 @@ button.buka-workflows-node:focus-visible{outline:var(--dsw-focus-ring-width) sol
 .buka-workflows-graphFooter{gap:var(--buka-space-2, 8px);padding-bottom:var(--buka-space-2, 8px)}
 .buka-workflows-legend{justify-content:flex-start;width:100%}
 .buka-workflows-sectionTitle{font-size:var(--buka-text-title, 14px)}
+.buka-workflows-types{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:var(--buka-space-3, 12px)}
+.buka-workflows-typesList{max-height:30vh}
 .buka-workflows-overviewCard{padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px)}
 .buka-workflows-valueRow{flex-direction:column;gap:2px}
-.buka-workflows-info{gap:var(--buka-space-5, 24px)}
-.buka-workflows-info .buka-workflows-statStrip{grid-template-columns:repeat(2,minmax(0,1fr))}
-.buka-workflows-infoPosition{grid-template-columns:minmax(0,1fr);gap:var(--buka-space-1, 4px)}
-.buka-workflows-infoFlowRoute{flex-basis:100%}
 }
 .buka-workflows-unavailableNotice{display:flex;flex-direction:column;gap:var(--buka-space-1, 4px);margin:0 0 var(--buka-space-3, 12px);padding:var(--buka-space-3, 12px) var(--buka-space-3, 12px);border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-warning);background:var(--dsw-alias-fill-warning);color:var(--dsw-alias-label-primary)}
 .buka-workflows-unavailableTitle{font-size:var(--buka-text-body, 13px);line-height:var(--buka-line-18, 18px)}

@@ -1,6 +1,6 @@
 {
   "name": "@buka/dsh-plugin-workflows",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "执行者 + 工作流 + 作业看板：管理有明确职责的执行者（智能体 / 机器人），用持久岗位图驱动任务流转，看板按任务分发与认领。",
   "type": "module",
   "main": "lib/index.js",

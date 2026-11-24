@@ -63,6 +63,7 @@ export interface AppActions extends ActionDeps {
   setJobView: (view: JobView) => void
   setJobFilter: (filter: JobFilter) => void
   selectDefinition: (selection: DefinitionSelection) => void
+  selectTaskType: (selection: string | null) => void
   openPositionTasks: (positionId: string, label: string) => void
   closeNodeTasks: () => void
   refresh: () => void
@@ -151,6 +152,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
           finalTask: idle<TaskDetail>(),
           attachments: idle<AttachmentMeta[]>(),
           definitionSelection: null,
+          taskTypeSelection: null,
           nodeTasks: null,
           taskId: null,
           task: idle<TaskDetail>(),
@@ -171,6 +173,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         finalTask: idle<TaskDetail>(),
         attachments: idle<AttachmentMeta[]>(),
         definitionSelection: null,
+        taskTypeSelection: null,
         nodeTasks: null,
         taskId: null,
         task: idle<TaskDetail>(),
@@ -187,6 +190,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         ...current,
         route,
         ...(tab === 'definition' ? {} : { definitionSelection: null }),
+        ...(tab === 'types' ? {} : { taskTypeSelection: null }),
       }))
     },
 
@@ -200,6 +204,7 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         finalTask: idle<TaskDetail>(),
         attachments: idle<AttachmentMeta[]>(),
         definitionSelection: null,
+        taskTypeSelection: null,
         nodeTasks: null,
         taskId: null,
         task: idle<TaskDetail>(),
@@ -220,6 +225,8 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
           job: idle<JobDetail>(),
           finalTask: idle<TaskDetail>(),
           attachments: idle<AttachmentMeta[]>(),
+          definitionSelection: null,
+          taskTypeSelection: null,
           taskId: null,
           task: idle<TaskDetail>(),
           attachment: null,
@@ -234,6 +241,8 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
         job: idle<JobDetail>(),
         finalTask: idle<TaskDetail>(),
         attachments: idle<AttachmentMeta[]>(),
+        definitionSelection: null,
+        taskTypeSelection: null,
         nodeTasks: null,
         taskId: null,
         task: idle<TaskDetail>(),
@@ -255,6 +264,10 @@ export function createActions(store: PageStore, deps: ActionDeps): AppActions {
 
     selectDefinition(selection) {
       setState((current) => ({ ...current, definitionSelection: selection }))
+    },
+
+    selectTaskType(selection) {
+      setState((current) => ({ ...current, taskTypeSelection: selection }))
     },
 
     openPositionTasks(positionId, label) {
