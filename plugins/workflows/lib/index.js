@@ -4131,9 +4131,10 @@ const WORKER_CACHE_MS = 5e3;
 *
 * `buka_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
 * 的收尾回复不会生成。任务结果已经记好，所以先等这一轮落定再释放；等待本身
-* 有上限，避免一直挂在会话上。
+* 有上限，避免一直挂在会话上。正常模型的收尾回复远短于 5 分钟，这个上限只兜底
+* 「turn 永不结束」。
 */
-const RETIRE_GRACE_MS = 3e4;
+const RETIRE_GRACE_MS = 3e5;
 /**
 * 作业快照仍可读的版本范围。
 *
@@ -4185,6 +4186,8 @@ var WorkflowEngine = class {
 	workersOf;
 	delivery;
 	worktreeAvailableOf;
+	/** 任务完成后等当前轮落定的最长时长；见 `EngineDeps.retireGraceMs`。 */
+	retireGraceMs;
 	active = /* @__PURE__ */ new Map();
 	/** 任务已完成、等当前轮落定后再释放的句柄。 */
 	retiring = /* @__PURE__ */ new Set();
@@ -4203,6 +4206,7 @@ var WorkflowEngine = class {
 		this.workersOf = deps.workers;
 		this.delivery = deps.delivery;
 		this.worktreeAvailableOf = deps.worktreeAvailable ?? (() => worktreeToolAvailable(deps.ctx));
+		this.retireGraceMs = deps.retireGraceMs ?? RETIRE_GRACE_MS;
 	}
 	/** 启动引擎：刷新执行者登记表并恢复未完成的作业。 */
 	async start() {
@@ -4241,7 +4245,7 @@ var WorkflowEngine = class {
 		const settle = typeof handle.whenIdle === "function" ? Promise.resolve().then(() => handle.whenIdle?.()) : Promise.resolve();
 		let timer;
 		const grace = new Promise((resolve) => {
-			timer = setTimeout(resolve, RETIRE_GRACE_MS);
+			timer = setTimeout(resolve, this.retireGraceMs);
 			timer.unref?.();
 		});
 		Promise.race([settle, grace]).catch(() => void 0).finally(() => {

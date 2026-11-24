@@ -689,6 +689,7 @@ async function setup(definition, overrides = {}) {
     ...(overrides.worktreeAvailable === undefined
       ? {}
       : { worktreeAvailable: overrides.worktreeAvailable }),
+    ...(overrides.retireGraceMs === undefined ? {} : { retireGraceMs: overrides.retireGraceMs }),
   })
   await engine.start()
   const workflow = await engine.saveWorkflow({ definition })
@@ -1228,6 +1229,37 @@ test('engine: a completed task releases its session only after the turn settles'
     assert.equal(handle.state.disposed, false)
     releaseIdle()
     await waitFor(() => handle.state.disposed === true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a session that never settles is released once the retire grace expires', async () => {
+  const env = await setup(simpleDevDefinition(), { retireGraceMs: 30 })
+  try {
+    const handle = makeHandle('session-1')
+    // whenIdle 永不 resolve：模拟当前轮卡住，由上限兜底释放。
+    handle.whenIdle = () => new Promise(() => {})
+    env.workers.dispatchSession = async (request) => {
+      env.workers.dispatched.push({ request, sessionId: 'session-1', handle })
+      return handle
+    }
+    const job = await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dev = taskAt(env.store, job.id, 'dev')
+    await env.engine.completeTaskFromSession({
+      sessionId: 'session-1',
+      text: '页面已完成',
+      attachments: [],
+    })
+    // 还没到上限：句柄保留，等这一轮落定。
+    assert.equal(handle.state.disposed, false)
+    await waitFor(() => handle.state.disposed === true)
+    // 上限只影响释放时机，任务结果本身不受影响。
+    assert.equal(env.store.getTask(dev.id).status, 'completed')
   } finally {
     await env.cleanup()
   }

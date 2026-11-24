@@ -88,6 +88,12 @@ export interface EngineDeps {
    * 默认按 `ctx` 探测；测试或嵌入方可以覆盖。
    */
   readonly worktreeAvailable?: (() => boolean) | undefined
+  /**
+   * 任务完成后等当前轮落定的最长时长（毫秒），超过即强制释放句柄。
+   *
+   * 默认 5 分钟；测试可以传一个很短的值来验证兜底路径。
+   */
+  readonly retireGraceMs?: number | undefined
 }
 
 /** 引擎对外抛出的输入 / 状态错误。 */
