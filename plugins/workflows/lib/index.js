@@ -6,6 +6,7 @@ import { constants, createReadStream, promises } from "node:fs";
 import os from "node:os";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { createScope } from "@deepseek-ai/dsh-scope";
 import { execFile, spawn } from "node:child_process";
 // .build/workflows/access.js
 /**
@@ -1105,41 +1106,94 @@ function walkSchema(raw, path, depth, state, fail) {
 	return schema;
 }
 /**
-* 判断 prompt 里的路径是否真的在声明的 schema 里。
+* 沿声明的 schema 下钻一条路径，同时给出「是否存在」与「是否经过非必填字段」。
 *
 * 规则：
 * - 对象按 `properties` 下钻；未声明的字段直接报错（即使 additionalProperties
 *   允许，模板引用也必须是显式声明过的字段）；
 * - 数组只允许数字下标，并且必须声明了 `items` 才能继续下钻；
-* - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败。
+* - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败；只要有一个
+*   分支把该字段当作非必填，就按非必填处理。
 *
 * @param schema 声明的 schema
-* @param segments 路径段（不含 `start.output` 前缀）
+* @param segments 路径段（不含 `content.` / `input.` 前缀）
+* @returns 错误原因（存在时为 null）与是否经过非必填字段
+*/
+function inspectSchemaPath(schema, segments) {
+	let current = schema;
+	let optional = false;
+	for (let index = 0; index < segments.length; index += 1) {
+		const segment = segments[index];
+		if (!isPlainObject$1(current)) return {
+			reason: "points into a value that is not an object",
+			optional
+		};
+		if (Array.isArray(current.oneOf)) {
+			let branchOptional = optional;
+			for (const branch of current.oneOf) {
+				const step = inspectSchemaPath(branch, segments.slice(index));
+				if (step.reason !== null) return {
+					reason: "is not declared in every oneOf variant",
+					optional: true
+				};
+				if (step.optional) branchOptional = true;
+			}
+			return {
+				reason: null,
+				optional: branchOptional
+			};
+		}
+		if (current.type === "array") {
+			if (segment === void 0 || !/^\d+$/u.test(segment)) return {
+				reason: "uses a non-numeric segment on an array",
+				optional
+			};
+			if (!isPlainObject$1(current.items)) return {
+				reason: "descends into an array that does not declare \"items\"",
+				optional
+			};
+			current = current.items;
+			continue;
+		}
+		if (current.type !== "object") return {
+			reason: "points into a value that is not an object",
+			optional
+		};
+		const properties = isPlainObject$1(current.properties) ? current.properties : {};
+		if (segment === void 0 || !Object.hasOwn(properties, segment)) return {
+			reason: "is not declared",
+			optional
+		};
+		if (!(Array.isArray(current.required) ? current.required : []).includes(segment)) optional = true;
+		current = properties[segment];
+	}
+	return {
+		reason: null,
+		optional
+	};
+}
+/**
+* 判断 prompt 里的路径是否真的在声明的 schema 里。
+*
+* @param schema 声明的 schema
+* @param segments 路径段（不含 `content.` / `input.` 前缀）
 * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
 */
 function resolveSchemaPath(schema, segments) {
-	let current = schema;
-	const walked = [];
-	for (const segment of segments) {
-		if (!isPlainObject$1(current)) return "points into a value that is not an object";
-		if (Array.isArray(current.oneOf)) {
-			for (const branch of current.oneOf) if (resolveSchemaPath(branch, segments.slice(walked.length)) !== null) return "is not declared in every oneOf variant";
-			return null;
-		}
-		if (current.type === "array") {
-			if (!/^\d+$/u.test(segment)) return "uses a non-numeric segment on an array";
-			if (!isPlainObject$1(current.items)) return "descends into an array that does not declare \"items\"";
-			current = current.items;
-			walked.push(segment);
-			continue;
-		}
-		if (current.type !== "object") return "points into a value that is not an object";
-		const properties = isPlainObject$1(current.properties) ? current.properties : {};
-		if (!Object.hasOwn(properties, segment)) return "is not declared";
-		current = properties[segment];
-		walked.push(segment);
-	}
-	return null;
+	return inspectSchemaPath(schema, segments).reason;
+}
+/**
+* 判断一条模板路径是否经过非必填字段。
+*
+* 模板引用可选字段时必须在路径末尾写 `?`：取不到值时渲染成空串，而不是让任务
+* 在运行期失败。路径本身不存在时这个判断没有意义，调用方先用 `resolveSchemaPath`。
+*
+* @param schema 声明的 schema
+* @param segments 路径段（不含 `content.` 前缀）
+* @returns 经过任何非必填字段时为 true
+*/
+function schemaPathOptional(schema, segments) {
+	return inspectSchemaPath(schema, segments).optional;
 }
 /**
 * 按声明的 schema 校验一个值。
@@ -1405,6 +1459,168 @@ function programContentProblems(program, content) {
 	if (schema === void 0) return [];
 	return schemaProblems(schema, content, "content");
 }
+// .build/workflows/template.js
+/**
+* 任务内容与任务类型定义的模板渲染。
+*
+* 只支持 `{{path}}` 形式的简单取值，不做表达式求值——workflow 定义由 agent
+* 现场生成，必须保证这里不可能执行任意代码。当前模板上下文只有
+* `{{content}}` / `{{content.<path>}}`（正在完成的这张任务的任务内容）与
+* `{{input}}` / `{{input.<path>}}`（人任务动作表单，只用于创建声明）。
+*
+* 路径不存在时默认抛错（而不是静默变空串），这样定义写错时在对应任务立刻失败，
+* 不会把空提示交给执行者。确实允许运行时缺失的路径（表单非必填字段）要在末尾
+* 加 `?` 显式声明：`{{content.remark?}}` 取不到值时渲染成空串。`?` 不进入路径
+* 本身，保存校验看到的仍是 `content.remark`，写错路径照样被拒。
+*
+* 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按对应的 task content
+* schema 检查路径是否声明、是否经过非必填字段。
+*
+* 代入值可能来自上游 agent 或表单，不能让它借用户来源的消息触发宿主的
+* `/skill-name` 手势：`renderTemplate(..., { escape: true })` 会给代入文本里的
+* 手势插入零宽空格（见 `escapeSkillGestures`），模板原文不转义。
+*
+* @module @buka/dsh-plugin-workflows/template
+*/
+/** 模板占位符。 */
+const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/gu;
+/** 合法路径：点号分隔的简单标识符。 */
+const PATH_PATTERN = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u;
+/** 模板错误：带出错路径，便于定位是哪个占位符。 */
+var TemplateError = class extends Error {
+	/** 出错的模板路径；没有具体路径时是 `undefined`。 */
+	path;
+	constructor(message, path) {
+		super(message);
+		this.name = "TemplateError";
+		this.path = path;
+	}
+};
+/**
+* 解析一个占位符里的路径（不含花括号）。
+*
+* 末尾的 `?` 表示可选路径：解析结果里 `path` 不含 `?`，由 `optional` 单独表示。
+*
+* @param raw 占位符原文
+* @returns 合法时带 `path` 与 `optional`，非法时带 `error`
+*/
+function parsePlaceholder(raw) {
+	const text = String(raw).trim();
+	if (text === "") return { error: "empty template placeholder" };
+	const optional = text.endsWith("?");
+	const path = optional ? text.slice(0, -1).trim() : text;
+	if (path === "") return { error: `invalid template path "${text}"` };
+	if (!PATH_PATTERN.test(path)) return { error: `invalid template path "${text}"` };
+	return {
+		path,
+		optional
+	};
+}
+/**
+* 列出模板里出现的所有占位符路径，并收集语法错误；不求值。
+*
+* 定义校验用它检查模板路径是否落在声明的 schema 里；规则与运行时
+* `renderTemplate` 保持一致。
+*
+* @param template 模板原文
+* @returns 占位符路径、完整占位符信息与语法错误
+*/
+function inspectTemplate(template) {
+	if (typeof template !== "string") return {
+		paths: [],
+		placeholders: [],
+		errors: ["template must be a string"]
+	};
+	const paths = [];
+	const placeholders = [];
+	const errors = [];
+	template.replace(PLACEHOLDER, (_match, raw) => {
+		const parsed = parsePlaceholder(raw);
+		if (parsed.error !== void 0) {
+			errors.push(parsed.error);
+			return "";
+		}
+		paths.push(parsed.path);
+		placeholders.push({
+			path: parsed.path,
+			optional: parsed.optional
+		});
+		return "";
+	});
+	return {
+		paths,
+		placeholders,
+		errors
+	};
+}
+/**
+* 让代入文本里的 `/skill-name` 手势不再匹配宿主的 skill 正则。
+*
+* 宿主只在用户来源的消息里识别 `(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)`；
+* 在 `/` 后面插入零宽空格（U+200B）打断它，界面上看不出区别。只对代入值做，
+* 模板原文不转义——流程维护者写在定义里的手势本来就该生效。
+*
+* @param text 代入的文本
+* @returns 手势被转义后的文本
+*/
+function escapeSkillGestures(text) {
+	return text.replace(/(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/gu, (_match, lead, name) => `${lead}/\u200B${name}`);
+}
+/**
+* 渲染一个 prompt 模板。
+*
+* @param template 模板原文
+* @param context 例如 `{ content, goal, step }`
+* @param options 代入值是否转义 `/skill-name` 手势
+* @returns 渲染后的文本
+*/
+function renderTemplate(template, context, options = {}) {
+	if (typeof template !== "string") throw new TemplateError("template must be a string");
+	return template.replace(PLACEHOLDER, (_match, raw) => {
+		const parsed = parsePlaceholder(raw);
+		if (parsed.error !== void 0) throw new TemplateError(parsed.error, String(raw).trim());
+		const path = parsed.path;
+		const value = getPath(context, path);
+		if (value === void 0) {
+			if (parsed.optional) return "";
+			throw new TemplateError(`template path "${path}" is not available yet; add "?" to the path to render an empty string when it is missing`, path);
+		}
+		const rendered = formatValue(value);
+		return options.escape === true ? escapeSkillGestures(rendered) : rendered;
+	});
+}
+/**
+* 按点号路径取值；中途遇到 null / undefined 时返回 undefined。
+*
+* @param source 取值来源
+* @param path 点号路径
+* @returns 取到的值；路径不存在时是 `undefined`
+*/
+function getPath(source, path) {
+	let current = source;
+	for (const key of path.split(".")) {
+		if (current === null || current === void 0) return void 0;
+		if (typeof current !== "object") return void 0;
+		current = current[key];
+	}
+	return current;
+}
+/**
+* 把模板值转成文本：字符串原样，对象转 JSON，null 视作空串。
+*
+* 附件值可能带一个内部错误标记（例如二进制或超过内联上限），此时直接抛出
+* `TemplateError`，而不是把标记对象 JSON 化后塞进 prompt。
+*
+* @param value 模板值
+* @returns 文本
+*/
+function formatValue(value) {
+	if (typeof value === "string") return value;
+	if (value === null) return "";
+	if (typeof value === "object" && typeof value.__bukaTemplateError === "string") throw new TemplateError(value.__bukaTemplateError);
+	if (typeof value === "object") return JSON.stringify(value, null, 2);
+	return String(value);
+}
 // .build/workflows/workers/store/builtin.js
 /**
 * 内建机器人。
@@ -1486,145 +1702,6 @@ function withBuiltinWorkers(workers) {
 function builtinWorkerError(id) {
 	const error = /* @__PURE__ */ new Error(`内建执行者不可创建、修改或删除：${String(id)}`);
 	return Object.assign(error, { code: "builtin-worker" });
-}
-// .build/workflows/template.js
-/**
-* 节点 prompt 的模板渲染。
-*
-* 只支持 `{{path}}` 形式的简单取值，不做表达式求值——workflow 定义由 agent
-* 现场生成，必须保证这里不可能执行任意代码。可用路径：
-*
-* - `{{goal}}` / `{{runId}}` / `{{step}}`；
-* - `{{nodes.<id>.text}}`：该节点最近一次执行的最终文本；
-* - `{{nodes.<id>.data.<path>}}`：执行者通过 `structured_output` 回报的结构化结果；
-* - 需要时也可以引用 `{{nodes.<id>.worker}}`、`{{nodes.<id>.sessionId}}`。
-*
-* 路径不存在时默认抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
-* 不会把空提示词交给执行者。确实允许运行时缺失的路径（表单非必填字段）要在末尾
-* 加 `?` 显式声明：`{{input.remark?}}` 取不到值时渲染成空串。`?` 不进入路径本身，
-* 保存校验看到的仍是 `input.remark`，写错路径照样被拒。
-*
-* 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
-* `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。
-*
-* @module @buka/dsh-plugin-workflows/template
-*/
-/** 模板占位符。 */
-const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/gu;
-/** 合法路径：点号分隔的简单标识符。 */
-const PATH_PATTERN = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u;
-/** 模板错误：带出错路径，便于定位是哪个占位符。 */
-var TemplateError = class extends Error {
-	/** 出错的模板路径；没有具体路径时是 `undefined`。 */
-	path;
-	constructor(message, path) {
-		super(message);
-		this.name = "TemplateError";
-		this.path = path;
-	}
-};
-/**
-* 解析一个占位符里的路径（不含花括号）。
-*
-* 末尾的 `?` 表示可选路径：解析结果里 `path` 不含 `?`，由 `optional` 单独表示。
-*
-* @param raw 占位符原文
-* @returns 合法时带 `path` 与 `optional`，非法时带 `error`
-*/
-function parsePlaceholder(raw) {
-	const text = String(raw).trim();
-	if (text === "") return { error: "empty template placeholder" };
-	const optional = text.endsWith("?");
-	const path = optional ? text.slice(0, -1).trim() : text;
-	if (path === "") return { error: `invalid template path "${text}"` };
-	if (!PATH_PATTERN.test(path)) return { error: `invalid template path "${text}"` };
-	return {
-		path,
-		optional
-	};
-}
-/**
-* 列出模板里出现的所有占位符路径，并收集语法错误；不求值。
-*
-* 定义校验用它检查 `{{nodes.<id>.data.<path>}}` 是否落在目标节点声明的
-* `output` 里；规则与运行时 `renderTemplate` 保持一致。
-*
-* @param template 模板原文
-* @returns 占位符路径与语法错误
-*/
-function inspectTemplate(template) {
-	if (typeof template !== "string") return {
-		paths: [],
-		errors: ["template must be a string"]
-	};
-	const paths = [];
-	const errors = [];
-	template.replace(PLACEHOLDER, (_match, raw) => {
-		const parsed = parsePlaceholder(raw);
-		if (parsed.error !== void 0) {
-			errors.push(parsed.error);
-			return "";
-		}
-		paths.push(parsed.path);
-		return "";
-	});
-	return {
-		paths,
-		errors
-	};
-}
-/**
-* 渲染一个 prompt 模板。
-*
-* @param template 模板原文
-* @param context 例如 `{ goal, nodes, step, runId }`
-* @returns 渲染后的文本
-*/
-function renderTemplate(template, context) {
-	if (typeof template !== "string") throw new TemplateError("template must be a string");
-	return template.replace(PLACEHOLDER, (_match, raw) => {
-		const parsed = parsePlaceholder(raw);
-		if (parsed.error !== void 0) throw new TemplateError(parsed.error, String(raw).trim());
-		const path = parsed.path;
-		const value = getPath(context, path);
-		if (value === void 0) {
-			if (parsed.optional) return "";
-			throw new TemplateError(`template path "${path}" is not available yet; add "?" to the path to render an empty string when it is missing`, path);
-		}
-		return formatValue(value);
-	});
-}
-/**
-* 按点号路径取值；中途遇到 null / undefined 时返回 undefined。
-*
-* @param source 取值来源
-* @param path 点号路径
-* @returns 取到的值；路径不存在时是 `undefined`
-*/
-function getPath(source, path) {
-	let current = source;
-	for (const key of path.split(".")) {
-		if (current === null || current === void 0) return void 0;
-		if (typeof current !== "object") return void 0;
-		current = current[key];
-	}
-	return current;
-}
-/**
-* 把模板值转成文本：字符串原样，对象转 JSON，null 视作空串。
-*
-* 附件值可能带一个内部错误标记（例如二进制或超过内联上限），此时直接抛出
-* `TemplateError`，而不是把标记对象 JSON 化后塞进 prompt。
-*
-* @param value 模板值
-* @returns 文本
-*/
-function formatValue(value) {
-	if (typeof value === "string") return value;
-	if (value === null) return "";
-	if (typeof value === "object" && typeof value.__bukaTemplateError === "string") throw new TemplateError(value.__bukaTemplateError);
-	if (typeof value === "object") return JSON.stringify(value, null, 2);
-	return String(value);
 }
 // .build/workflows/definition/payload.js
 /**
@@ -1751,7 +1828,7 @@ function buildTemplateContext(input) {
 }
 // .build/workflows/definition/validate.js
 /**
-* 工作流 v8 定义校验。
+* 工作流 v9 定义校验。
 *
 * 纯函数：不读盘、不依赖 DSH。执行者存在性由调用方传入 `workers` 目录（按
 * 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
@@ -1805,7 +1882,7 @@ function checkUnknownKeys(raw, allowed, path, issues) {
 	}
 }
 /**
-* 校验一份工作流 v8 定义。
+* 校验一份工作流 v9 定义。
 *
 * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
 * @param options 执行者目录
@@ -1830,7 +1907,7 @@ function validateWorkflowDefinition(raw, options) {
 		"start",
 		"end"
 	], "", issues);
-	if (raw.version !== 8) issues.add("version", "must be 8");
+	if (raw.version !== 9) issues.add("version", "must be 9");
 	const name = readName(raw, "name", "", issues);
 	const description = readOptionalString(raw, "description", "description", issues) ?? "";
 	const budgets = readBudgets(raw.budgets, issues);
@@ -1861,7 +1938,7 @@ function validateWorkflowDefinition(raw, options) {
 	return {
 		ok: true,
 		definition: {
-			version: 8,
+			version: 9,
 			name,
 			...description === "" ? {} : { description },
 			budgets,
@@ -2064,6 +2141,7 @@ function readTaskType(entry, path, positionId, executor, workers, presets, seenT
 	const label = readName(entry, "label", path, issues);
 	const definition = readOptionalString(entry, "definition", `${path}.definition`, issues);
 	const content = readSchema(entry.content, `${path}.content`, issues, "value");
+	if (definition !== null && definition.trim() !== "") checkDefinitionTemplate(definition, content ?? void 0, `${path}.definition`, issues);
 	const human = executor?.kind === "human";
 	const actions = readActions(entry.actions, `${path}.actions`, human, issues);
 	const creates = readRobotCreates(entry.creates, `${path}.creates`, executor, workers, issues);
@@ -2579,6 +2657,42 @@ function checkCreation(creation, path, node, creatorContent, actionInput, endCon
 		return;
 	}
 	checkContent(creation.content, path, taskType.content, creatorContent, actionInput, issues);
+}
+/**
+* 校验任务类型的定义模板。
+*
+* v9 起定义是一段模板，只认 `{{content}}` 与 `{{content.<path>}}`：
+*
+* - 路径必须在本任务类型的 content schema 里声明；
+* - 经过非必填字段的路径必须写 `?`，否则值缺失时任务必然失败；
+* - `{{input.*}}` / `{{nodes.*}}` 是其它模板的语法，这里一律拒绝。
+*
+* @param template 定义原文
+* @param schema 本任务类型的 content schema；未声明时是 undefined
+* @param path 定位路径
+* @param issues 错误收集
+*/
+function checkDefinitionTemplate(template, schema, path, issues) {
+	const inspection = inspectTemplate(template);
+	for (const error of inspection.errors) issues.add(path, error);
+	for (const placeholder of inspection.placeholders) {
+		const parsed = parseTemplatePath(placeholder.path);
+		if (parsed === null || parsed.kind !== "content") {
+			issues.add(path, `template "{{${placeholder.path}}}" must reference content or content.<path>; input.* and nodes.* are not available in a task type definition`);
+			continue;
+		}
+		if (parsed.segments.length === 0) continue;
+		if (schema === void 0) {
+			issues.add(path, `template "{{${placeholder.path}}}" cannot be resolved: the task type declares no content schema`);
+			continue;
+		}
+		const reason = resolveSchemaPath(schema, parsed.segments);
+		if (reason !== null) {
+			issues.add(path, `template "{{${placeholder.path}}}" ${reason} in the task type content schema`);
+			continue;
+		}
+		if (!placeholder.optional && schemaPathOptional(schema, parsed.segments)) issues.add(path, `template "{{${placeholder.path}}}" passes through optional fields; write "{{${placeholder.path}?}}" so a missing value renders as an empty string`);
+	}
 }
 /**
 * 校验任务内容：模板引用 + 按目标 schema 的结构检查。
@@ -3158,25 +3272,26 @@ function assertJobTransition(jobId, from, to) {
 }
 // .build/workflows/engine/prompt.js
 /**
-* 任务执行上下文组装。
+* 任务执行提示组装。
 *
-* 一个任务 = 一条全新会话。执行提示词包含固定顺序的几段：
+* 一个任务 = 一条全新会话。v9 起的执行提示只有两段：
 *
-* 1. 工作流基准规则（引擎注入的能力说明：读写资产、创建后续任务、提交结果）；
-* 2. 工作树规则（仅任务类型的 `worktree` 不是 `none` 时出现：`create` 要求
-*    执行者自己按仓库调用 `create_worktree`，`guard` 只要求发现未提交修改时
-*    先停下来问用户）；
-* 3. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
-* 4. 任务内容：创建者这一次给出的东西。
+* 1. 上下文（非用户来源的 `inject`）：工作流规则（引擎注入的能力说明）与工作树
+*    规则（仅任务类型的 `worktree` 不是 `none` 时出现）；
+* 2. 用户消息（`followup`，来源是 `user`）：任务类型的定义按本任务的任务内容渲染
+*    后的文本。定义省略时，用户消息就是整份任务内容——它才是这一次的具体指令。
+*
+* 代入值（任务内容可能来自表单或上游 agent）要转义 `/skill-name` 手势：定义原文
+* 里的手势由流程维护者写，仍然生效；代入值里的不能借用户身份触发 skill
+* （ADR 0033 / ADR 0024 的取代关系）。
 *
 * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
-* 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
+* 提示，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
 *
-* 派发时拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
-* 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
-* prompt 文件仍保存完整文本。
+* v8 及更早的作业快照仍按旧语义组装（上下文 = 规则 + 内容，用户消息 = 定义原文），
+* 保证升级时运行中的作业照常跑完。
 *
-* 同时负责结束任务的投递文本。
+* 同时负责结束任务的投递文本与助理会话的固定提示。
 *
 * @module @buka/dsh-plugin-workflows/engine/prompt
 */
@@ -3185,21 +3300,13 @@ const BASELINE_RULES = [
 	"## 工作流规则",
 	"- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。",
 	"- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。",
-	"- 创建后续任务：`buka_task_targets` 列出当前可创建的任务，`buka_task_create` 按 `target` 和 `content` 创建（不传 `deps` 时默认依赖本任务）；是否需要创建、创建什么，见下面的任务类型的定义。",
+	"- 创建后续任务：`buka_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。",
 	"- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。"
 ].join("\n");
 /** 工作树生效时的规则：执行者自己按仓库调用 `create_worktree`，不要直接改原检出。 */
 const WORKTREE_RULES = ["## 工作树", "本任务需要改动代码时，不要直接修改原检出：先进入要修改的仓库目录，调用 `create_worktree` 新建并进入它的 Git 工作树，之后的读写和命令都在这个工作树里进行。任务涉及多个仓库时，对每个仓库分别创建 worktree；需要换仓库时先用 `working_directory` 切到那个仓库的目录。同一个仓库只创建一个工作树，任务结束前不要删除检出。"].join("\n");
 /** 保护检查规则：不创建 worktree，先看工作区有没有未提交的修改，有就停下来问。 */
 const WORKTREE_GUARD_RULES = ["## 工作区", "本任务不创建新的工作树。开始前先检查当前工作区以及任务要修改的每个仓库是否有未提交的修改；如果有，必须停下来询问用户，得到明确答复前不要开始改动。"].join("\n");
-/** 人任务助理的基准规则：代人处理，动作由人确认。 */
-const ASSISTANT_RULES = [
-	"## 工作流规则",
-	"- 你代表人与工作人员沟通，拿到人的决定后用 `buka_task_complete` 提交。",
-	"- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件。",
-	"- 写入资产：提交结果时用 `attachments` 归档产出文件（path 相对你的工作目录）。",
-	"- 需要创建后续任务时，用 `buka_task_actions` 看这个任务可选的动作，用 `buka_task_complete` 带上 `action` 与 `input`。"
-].join("\n");
 /**
 * 按任务类型取岗位（任务的岗位在定义里唯一）。
 *
@@ -3240,12 +3347,7 @@ function worktreeSection(mode) {
 	if (mode === "guard") return WORKTREE_GUARD_RULES;
 	return null;
 }
-/** 有内容时给出一段；空串 / 缺省时整段省略。 */
-function textSection(title, text) {
-	const trimmed = typeof text === "string" ? text.trim() : "";
-	return trimmed === "" ? null : `## ${title}\n${trimmed}`;
-}
-/** 任务内容段：字符串原样，其余按 JSON 展示。 */
+/** 任务内容段（v8 快照用）：字符串原样，其余按 JSON 展示。 */
 function contentSection(content) {
 	if (typeof content === "string") return ["## 任务内容", content].join("\n");
 	return [
@@ -3260,15 +3362,46 @@ function joinSections(sections) {
 	return sections.filter((section) => section !== null).join("\n\n");
 }
 /**
-* 按作者拆分执行提示。
+* 渲染一个任务的用户消息：定义是模板时就按任务内容渲染；定义省略时就是整份
+* 任务内容。返回的文本已经转义过 `/skill-name` 手势。
+*
+* 定义渲染成空白（例如只引用可选字段且值都缺失）时同样退回整份任务内容：用户
+* 消息永远非空，执行者不会收到一条空指令。
+*
+* @param taskType 任务类型（定义可能是模板）
+* @param content 任务内容
+* @returns 用户消息；任何情况下都不是空串
+*/
+function renderTaskTypeDefinition(taskType, content) {
+	const definition = typeof taskType.definition === "string" ? taskType.definition.trim() : "";
+	if (definition !== "") {
+		const rendered = renderTemplate(definition, { content: content ?? null }, { escape: true });
+		if (rendered.trim() !== "") return rendered;
+	}
+	const rendered = renderTemplate("{{content}}", { content: content ?? null }, { escape: true });
+	if (rendered.trim() !== "") return rendered;
+	return escapeSkillGestures(JSON.stringify(content ?? null));
+}
+/**
+* 按投递身份拆分执行提示。
 *
 * @param input 任务、岗位与任务类型
-* @returns 完整文本、上下文段与用户提示段
+* @returns 完整文本、上下文段与用户消息段
 */
 function buildExecutionPromptSections(input) {
-	const { taskType, task } = input;
-	const definition = typeof taskType.definition === "string" ? taskType.definition.trim() : "";
-	const content = contentSection(task.content);
+	if ((input.definitionVersion ?? 9) < 9) return legacyExecutionPromptSections(input);
+	const context = joinSections([BASELINE_RULES, worktreeSection(input.worktree)]);
+	const userPrompt = renderTaskTypeDefinition(input.taskType, input.task.content);
+	return {
+		context,
+		userPrompt,
+		prompt: joinSections([context, userPrompt])
+	};
+}
+/** v8 及更早快照的旧拆分：上下文 = 规则 + 内容，用户消息 = 定义原文。 */
+function legacyExecutionPromptSections(input) {
+	const definition = typeof input.taskType.definition === "string" ? input.taskType.definition.trim() : "";
+	const content = contentSection(input.task.content);
 	const worktree = worktreeSection(input.worktree);
 	return {
 		context: joinSections([
@@ -3293,6 +3426,13 @@ function buildExecutionPromptSections(input) {
 * @returns 投递文本
 */
 function buildEndDeliveryText(job, task) {
+	if (job.definition.version >= 9) return renderTemplate([
+		`工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
+		"",
+		"{{content}}",
+		"",
+		"如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。"
+	].join("\n"), { content: task.content ?? null }, { escape: true });
 	return [
 		`工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
 		"",
@@ -3302,18 +3442,16 @@ function buildEndDeliveryText(job, task) {
 	].join("\n");
 }
 /**
-* 助理承办人任务的 prompt。
+* 助理承办人任务的固定提示。
 *
-* @param input 任务、岗位与任务类型
-* @returns prompt 文本
+* 助理只负责对接处理人；任务内容用 `buka_task_get` 读，人任务的动作见
+* `buka_task_complete` 的工具说明（由宿主列出工具）。
+*
+* @param input 任务与任务类型
+* @returns 提示文本
 */
 function buildAssistantPrompt(input) {
-	const { taskType, task } = input;
-	return joinSections([
-		ASSISTANT_RULES,
-		textSection("任务类型的定义", taskType.definition),
-		contentSection(task.content)
-	]);
+	return `请你负责对接任务「${input.taskType.label}」（${input.task.id}）的处理人，并严格执行处理人对于该任务的决策。`;
 }
 // .build/workflows/engine/board.js
 /**
@@ -3997,7 +4135,7 @@ function resolveTargetTaskType(definition, position, type) {
 		return {
 			id: "end",
 			label: "结束任务",
-			definition: "把作业的最终报告交给发起人；发起人确认收到后完成。",
+			definition: definition.version >= 9 ? "把作业的最终报告交给发起人；发起人确认收到后完成。\n\n{{content}}" : "把作业的最终报告交给发起人；发起人确认收到后完成。",
 			...definition.end.content === void 0 ? {} : { content: definition.end.content }
 		};
 	}
@@ -4138,10 +4276,10 @@ const RETIRE_GRACE_MS = 3e5;
 /**
 * 作业快照仍可读的版本范围。
 *
-* v7 快照不迁移：主体 / 交回方式里的 `name` 按旧字段兜底；v8 是当前格式。
+* v7 快照不迁移：主体 / 交回方式里的 `name` 按旧字段兜底；v9 是当前格式。
 */
 function isSupportedJobDefinitionVersion(version) {
-	return version >= 7 && version <= 8;
+	return version >= 7 && version <= 9;
 }
 /** 从 workers 服务读登记表，转成本插件关心的形状。 */
 function parseWorkerCatalog(raw) {
@@ -4645,7 +4783,7 @@ var WorkflowEngine = class {
 		const found = this.store.readWorkflowVersion(workflowId);
 		if (found === null) throw new WorkflowError("not-found", `workflow not found: ${workflowId}`);
 		if (found.record.status !== "active") throw new WorkflowError("workflow-retired", `workflow "${found.record.name}" is not enabled; enable it before starting a job`);
-		if (found.versionRecord.definition.version !== 8) throw new WorkflowError("definition-outdated", `workflow "${found.record.name}" is not on the current definition version; ask the orchestrator to rewrite it before starting a job`);
+		if (found.versionRecord.definition.version !== 9) throw new WorkflowError("definition-outdated", `workflow "${found.record.name}" is not on the current definition version; ask the orchestrator to rewrite it before starting a job`);
 		return {
 			workflow: found.record,
 			definition: found.versionRecord.definition
@@ -4767,7 +4905,7 @@ var WorkflowEngine = class {
 		const found = this.store.readWorkflowVersion(job.workflowId);
 		if (found === null) return "workflow-not-found";
 		if (found.record.status !== "active") return "workflow-retired";
-		if (found.versionRecord.definition.version !== 8) return "definition-outdated";
+		if (found.versionRecord.definition.version !== 9) return "definition-outdated";
 		return null;
 	}
 	/**
@@ -5657,6 +5795,10 @@ var WorkflowEngine = class {
 	async resumeAgentAttempt(jobId, task, attempt, worker, sessionId) {
 		const workers = this.workersOf();
 		if (workers === null || typeof workers.openSession !== "function") return false;
+		this.sessionTasks.set(sessionId, {
+			jobId,
+			taskId: task.id
+		});
 		let handle;
 		try {
 			handle = await workers.openSession({
@@ -5664,6 +5806,7 @@ var WorkflowEngine = class {
 				sessionId
 			});
 		} catch (error) {
+			this.unbindSessionTask(sessionId, task.id);
 			this.logger?.warn?.(`buka-workflows: could not resume session ${sessionId}: ${describeError$4(error)}`);
 			return false;
 		}
@@ -5675,10 +5818,6 @@ var WorkflowEngine = class {
 			finishedAt: null,
 			startSeq
 		}));
-		this.sessionTasks.set(sessionId, {
-			jobId,
-			taskId: task.id
-		});
 		this.trackExecution({
 			jobId,
 			taskId: task.id,
@@ -5900,27 +6039,34 @@ var WorkflowEngine = class {
 		const planMode = taskType.plan === true;
 		const agentPreset = typeof taskType.agentPreset === "string" && taskType.agentPreset !== "" ? taskType.agentPreset : null;
 		const worktree = taskType.worktree === "create" ? this.worktreeAvailable() ? "create" : "guard" : taskType.worktree === "guard" ? "guard" : void 0;
-		const sections = buildExecutionPromptSections({
-			task,
-			taskType,
-			...worktree === void 0 ? {} : { worktree }
-		});
-		const prompt = sections.prompt;
 		const attempt = await this.createAttempt({
 			jobId: job.id,
 			taskId: task.id,
 			promptFile: null
 		});
-		const promptFile = await this.store.writeText(job.id, "prompts", attempt.id, prompt).catch(() => null);
-		if (promptFile !== null) await this.store.updateAttempt(attempt.id, (current) => ({
-			...current,
-			promptFile
-		}));
 		await this.claimTaskRecord(job, task, {
 			kind: "worker",
 			name: storedExecutorRef(task.assignee) ?? "",
 			sessionId: null
 		}, attempt.id);
+		let sections;
+		try {
+			sections = buildExecutionPromptSections({
+				task,
+				taskType,
+				...worktree === void 0 ? {} : { worktree },
+				definitionVersion: job.definition.version
+			});
+		} catch (error) {
+			await this.failTaskLocked(job.id, task.id, `could not render the task type definition: ${describeError$4(error)}`);
+			return null;
+		}
+		const prompt = sections.prompt;
+		const promptFile = await this.store.writeText(job.id, "prompts", attempt.id, prompt).catch(() => null);
+		if (promptFile !== null) await this.store.updateAttempt(attempt.id, (current) => ({
+			...current,
+			promptFile
+		}));
 		return {
 			kind: "agent",
 			jobId: job.id,
@@ -5928,7 +6074,7 @@ var WorkflowEngine = class {
 			attemptId: attempt.id,
 			worker: storedExecutorRef(task.assignee) ?? "",
 			prompt,
-			userPrompt: planMode ? null : sections.userPrompt,
+			userPrompt: job.definition.version < 9 && planMode ? null : sections.userPrompt,
 			planMode,
 			agentPreset
 		};
@@ -12564,6 +12710,65 @@ function openWorkflowStore(ctx, options) {
 		return store;
 	})();
 }
+// .build/workflows/tools/descriptions.js
+/**
+* 执行工具（`buka_task_create` / `buka_task_complete`）的说明文本。
+*
+* 同一条工具在两种会话里各注册一份：
+*
+* - 全局（其它会话）：通用说明，不列具体目标；
+* - 任务会话的 agent 作用域：说明里直接列出本任务可创建的目标 / 人任务的动作，
+*   遮蔽全局版本（见 `task-scope.ts`）。
+*
+* 两段共用的开头与结尾只写在这里，避免两处文案各写一遍。
+*
+* @module @buka/dsh-plugin-workflows/tools/descriptions
+*/
+/** 创建工具的开头：两版共用。 */
+const CREATE_HEAD = "Create a task in the current job (callable any number of times while executing a task).";
+/** 创建工具的结尾：两版共用。 */
+const CREATE_TAIL = "Dependencies default to the current task when omitted. The engine validates the content, dependencies (must exist in this job, no cycles) and the workflow budget.";
+/** 全局会话看到的创建工具说明（任务会话会被同名的 scoped 版本遮蔽）。 */
+const DEFAULT_TASK_CREATE_DESCRIPTION = `${CREATE_HEAD} In a task session this description lists the targets the task can create; when none are listed, the task cannot create follow-up tasks. ${CREATE_TAIL}`;
+/** 提交工具的开头：两版共用。 */
+const COMPLETE_HEAD = "Submit the result of the task this session is executing: a summary `text` plus optional attachments. There is no structured result schema.";
+/** 全局会话看到的提交工具说明（任务会话会被同名的 scoped 版本遮蔽）。 */
+const DEFAULT_TASK_COMPLETE_DESCRIPTION = `${COMPLETE_HEAD} Handling a human task also needs the chosen \`action\` id and its form values in \`input\`; a task session lists the available actions in this description.`;
+/**
+* 生成 `buka_task_create` 的说明：列出本任务可创建的 target、展示名与任务内容
+* schema。
+*
+* @param targets 可创建目标
+* @returns 工具说明
+*/
+function taskCreateDescription(targets) {
+	if (targets.length === 0) return `${CREATE_HEAD} This task cannot create follow-up tasks. ${CREATE_TAIL}`;
+	return [
+		`${CREATE_HEAD} Targets this task can create:`,
+		...targets.map((target) => {
+			const schema = target.content === void 0 ? "no content schema; pass {}" : `content schema: ${JSON.stringify(target.content)}`;
+			return `- ${target.target} (${target.label}) — ${schema}`;
+		}),
+		CREATE_TAIL
+	].join("\n");
+}
+/**
+* 生成 `buka_task_complete` 的说明：人任务列出动作 id、展示名与输入表单 schema。
+*
+* @param actions 人任务动作；非人任务为空
+* @returns 工具说明
+*/
+function taskCompleteDescription(actions) {
+	if (actions.length === 0) return COMPLETE_HEAD;
+	return [
+		COMPLETE_HEAD,
+		"Human-task actions (pass the chosen id as `action` and the form values as `input`):",
+		...actions.map((action) => {
+			const form = action.input === void 0 ? "no input form" : `input schema: ${JSON.stringify(action.input)}`;
+			return `- ${action.id} (${action.label}) — ${form}`;
+		})
+	].join("\n");
+}
 // .build/workflows/tools/index.js
 /**
 * 模型工具注册（ADR 0015）。
@@ -12620,9 +12825,9 @@ function sessionIdOf(context) {
 	return typeof context.agent?.id === "string" ? context.agent.id : "";
 }
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v9) JSON shape:
 {
-  "version": 8, "name": "...", "description": "...",
+  "version": 9, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
     "content": <JSON Schema object: what the starter fills in>,
@@ -12637,7 +12842,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
       "executor": { "kind": "worker", "id": "<worker identifier>" } | { "kind": "human" },
       "taskTypes": [
         { "id": "dev.implement", "label": "开发",
-          "definition": "<what this kind of task is and what to do; preset facts live here>",
+          "definition": "<what this kind of task is and what to do; a template over {{content.<path>}}>",
           "content": <JSON Schema object: the task content the creator must supply>,
           "creates": [   // robot positions only: tasks created when this task finishes
             { "channel": "<channel id from this position>", "type": "<task type id>",
@@ -12662,7 +12867,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "plan", "agentPreset", "concurrency" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". An agent task type may set "plan": true to start the session in DSH plan mode, and "agentPreset" to the id of the agent preset its session starts with (the task type overrides the worker default, which overrides the plugin option; plan mode and the preset are independent). An agent or robot task type may set "concurrency" to a positive integer: the maximum number of tasks of that type running at once inside one job (default 1, waiting tasks start FIFO). Concurrency is per task type, not per position, and human tasks do not use the engine quota. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). A placeholder path ending in "?" renders an empty string when the value is missing, for optional form fields; a path without "?" is strict and fails when missing. The referenced path must exist in the schema either way. Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
+The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "plan", "agentPreset", "concurrency" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service), written as a template over the task content: {{content}} / {{content.<path>}} render into the user message the executor receives, and the per-task "content" is what the creator supplies. Saving requires every referenced path to be declared in that task type's content schema, and a path passing through an optional field must end with "?"; {{input.*}} and {{nodes.*}} are rejected. Substituted values cannot trigger /skill gestures; gestures written in the definition itself still work. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". An agent task type may set "plan": true to start the session in DSH plan mode, and "agentPreset" to the id of the agent preset its session starts with (the task type overrides the worker default, which overrides the plugin option; plan mode and the preset are independent). An agent or robot task type may set "concurrency" to a positive integer: the maximum number of tasks of that type running at once inside one job (default 1, waiting tasks start FIFO). Concurrency is per task type, not per position, and human tasks do not use the engine quota. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). A placeholder path ending in "?" renders an empty string when the value is missing, for optional form fields; a path without "?" is strict and fails when missing. The referenced path must exist in the schema either way. Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`;
 /**
 * 注册全部工作流工具。
 *
@@ -12676,12 +12881,12 @@ function registerWorkflowTools(deps) {
 	};
 	register(defineTool({
 		name: "buka_workflow_save",
-		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v8 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v9 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
 		parameters: {
 			definition: {
 				type: "json",
 				required: true,
-				description: "The complete workflow v8 definition object."
+				description: "The complete workflow v9 definition object."
 			},
 			id: {
 				type: "string",
@@ -12873,8 +13078,6 @@ function registerWorkflowTools(deps) {
 	}));
 	register(defineJobStatusTool(ready), starterVisible);
 	register(defineJobCancelTool(ready), starterVisible);
-	register(defineTaskTargetsTool(ready), executionVisible);
-	register(defineTaskActionsTool(ready), executionVisible);
 	register(defineTaskCreateTool(ready), executionVisible);
 	register(defineTaskCompleteTool(ready), executionVisible);
 	register(defineBoardTool(ready), executionVisible);
@@ -12970,64 +13173,21 @@ function defineJobCancelTool(ready) {
 		}
 	});
 }
-/** 可创建目标工具。 */
-function defineTaskTargetsTool(ready) {
-	return defineTool({
-		name: "buka_task_targets",
-		description: "List the tasks this task can create next in the current job. Each target carries the content schema it expects. Call this before buka_task_create.",
-		parameters: {},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: { targets: {
-					type: "json",
-					required: true
-				} }
-			},
-			render: (_args, value) => text$1(JSON.stringify(value.targets, null, 2))
-		},
-		async execute(_args, exec) {
-			const sessionId = sessionIdOf(exec);
-			if (sessionId === "") throw new Error("buka_task_targets must be called from a task session");
-			return { targets: toolJson((await ready()).creatableTargetsForSession(sessionId)) };
-		}
-	});
-}
-/** 人任务动作工具。 */
-function defineTaskActionsTool(ready) {
-	return defineTool({
-		name: "buka_task_actions",
-		description: "List the actions the human task this session is handling can take: each action carries a label and, when it needs input, a form schema. Pick one, fill the form, then call buka_task_complete with `action` (and `input`).",
-		parameters: {},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: { actions: {
-					type: "json",
-					required: true
-				} }
-			},
-			render: (_args, value) => text$1(JSON.stringify(value.actions, null, 2))
-		},
-		async execute(_args, exec) {
-			const sessionId = sessionIdOf(exec);
-			if (sessionId === "") throw new Error("buka_task_actions must be called from a task session");
-			return { actions: toolJson((await ready()).taskActionsForSession(sessionId)) };
-		}
-	});
-}
-/** 派生任务工具。 */
-function defineTaskCreateTool(ready) {
+/**
+* 派生任务工具。
+*
+* @param ready 引擎 getter
+* @param description 工具说明；任务会话传入带本任务 targets 的版本
+*/
+function defineTaskCreateTool(ready, description = DEFAULT_TASK_CREATE_DESCRIPTION) {
 	return defineTool({
 		name: "buka_task_create",
-		description: "Create a task in the current job (callable any number of times while executing a task). Call buka_task_targets first to see the available targets and their content schema. Dependencies default to the current task when omitted. The engine validates the content, dependencies (must exist in this job, no cycles) and the workflow budget.",
+		description,
 		parameters: {
 			target: {
 				type: "string",
 				required: true,
-				description: "Target id from buka_task_targets (\"end\" for the final delivery task)."
+				description: "Target id from this description (\"end\" for the final delivery task)."
 			},
 			content: {
 				type: "json",
@@ -13061,7 +13221,7 @@ function defineTaskCreateTool(ready) {
 			const sessionId = sessionIdOf(exec);
 			if (sessionId === "") throw new Error("buka_task_create must be called from a task session");
 			const target = typeof args.target === "string" ? args.target.trim() : "";
-			if (target === "") throw new Error("buka_task_create requires a target from buka_task_targets");
+			if (target === "") throw new Error("buka_task_create requires a target listed in its description");
 			const task = await (await ready()).createTaskFromTarget({
 				sessionId,
 				target,
@@ -13075,11 +13235,16 @@ function defineTaskCreateTool(ready) {
 		}
 	});
 }
-/** 提交结果工具。 */
-function defineTaskCompleteTool(ready) {
+/**
+* 提交结果工具。
+*
+* @param ready 引擎 getter
+* @param description 工具说明；任务会话传入带本任务动作的版本
+*/
+function defineTaskCompleteTool(ready, description = DEFAULT_TASK_COMPLETE_DESCRIPTION) {
 	return defineTool({
 		name: "buka_task_complete",
-		description: "Submit the result of the task this session is executing: a summary `text` plus optional attachments. There is no structured result schema. Assistants of a human task also pass `action` (from buka_task_actions) and the action `input`.",
+		description,
 		parameters: {
 			text: {
 				type: "string",
@@ -13088,7 +13253,7 @@ function defineTaskCompleteTool(ready) {
 			},
 			action: {
 				type: "string",
-				description: "Human tasks only: the action id from buka_task_actions."
+				description: "Human tasks only: the action id listed in this description."
 			},
 			input: {
 				type: "json",
@@ -13261,6 +13426,73 @@ function defineAttachmentsTool(ready) {
 		}
 	});
 }
+// .build/workflows/tools/task-scope.js
+/**
+* 按任务注册的创建 / 完成工具说明。
+*
+* 任务能创建什么、人任务能点哪些动作，原先要靠 `buka_task_targets` /
+* `buka_task_actions` 再问一次；现在这两样直接写进工具自己的说明里：
+*
+* - 引擎在派发前就绑定「会话 → 任务」，host 的 `agent/created` 监听据此查出
+*   这张任务；
+* - 在 agent 作用域（`createScope(agent.ctx, agent)`）里各注册一份带本任务说明的
+*   `buka_task_create` / `buka_task_complete`，遮蔽同名全局工具；
+* - 会话释放或插件卸载时撤销。
+*
+* 作用域注册跟随 agent 的 fiber 释放；`agent/disposed` 再兜底一次。
+*
+* @module @buka/dsh-plugin-workflows/tools/task-scope
+*/
+/**
+* 监听 `agent/created`，给执行任务的会话注册带本任务说明的工具。
+*
+* @param deps 根上下文与引擎
+*/
+function installTaskScopedTools(deps) {
+	const scopes = /* @__PURE__ */ new Map();
+	/** 撤销一条会话的作用域注册。 */
+	const disposeScope = (sessionId) => {
+		const scope = scopes.get(sessionId);
+		if (scope === void 0) return;
+		scopes.delete(sessionId);
+		scope.dispose();
+	};
+	deps.ctx.effect(() => () => {
+		for (const sessionId of [...scopes.keys()]) disposeScope(sessionId);
+	}, "buka-workflows: dispose task tool scopes");
+	/** 会话开始执行任务时装配说明；`agent/created` 是串行事件，返回的 Promise 会被等待。 */
+	const mount = async (agent, sessionId) => {
+		const engine = await deps.ready().catch((error) => {
+			deps.ctx.logger?.warn?.(`buka-workflows: could not mount task tools for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+			return null;
+		});
+		if (engine === null || engine.taskForSession(sessionId) === null) return void 0;
+		const agentCtx = agent.ctx;
+		if (agentCtx === void 0) return void 0;
+		disposeScope(sessionId);
+		const scope = createScope(agentCtx, agent);
+		scopes.set(sessionId, scope);
+		const targets = engine.creatableTargetsForSession(sessionId);
+		const actions = engine.taskActionsForSession(sessionId);
+		await scope.ctx.plugin((scopedCtx) => {
+			scopedCtx.inject(["tools"], (toolCtx) => {
+				toolCtx.tools.register(defineTaskCreateTool(deps.ready, taskCreateDescription(targets)));
+				toolCtx.tools.register(defineTaskCompleteTool(deps.ready, taskCompleteDescription(actions)));
+			});
+		});
+	};
+	deps.ctx.on("agent/created", (payload) => {
+		const agent = payload?.agent;
+		if (agent === void 0) return;
+		const sessionId = typeof agent.id === "string" ? agent.id : "";
+		if (sessionId === "") return;
+		return mount(agent, sessionId);
+	});
+	deps.ctx.on("agent/disposed", (payload) => {
+		const agent = payload?.agent;
+		disposeScope(typeof agent?.id === "string" ? agent.id : "");
+	});
+}
 // .build/workflows/assembly.js
 /**
 * `@buka/dsh-plugin-workflows` 工作流一半的宿主装配。
@@ -13370,6 +13602,10 @@ function applyWorkflows(ctx, config) {
 			if (access.visible) return;
 			throw new Error(`workflow definition tools are only available to the ${options.orchestratorPresets.join(" / ")} preset or to sessions started in the configured orchestrator workspaces (reason: ${access.reason})`);
 		}
+	});
+	installTaskScopedTools({
+		ctx,
+		ready: ensureReady
 	});
 	if (!registerJobCommand({
 		ctx,

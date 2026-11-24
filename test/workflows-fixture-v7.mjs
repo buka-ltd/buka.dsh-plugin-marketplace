@@ -19,10 +19,10 @@ function swap(value) {
 }
 
 /**
- * 把 v6 定义折成 v8 / v7。
+ * 把 v6 定义折成 v9 / v8 / v7。
  *
  * @param {Record<string, unknown>} v6 v6 形状的定义
- * @param {7 | 8} version 目标定义版本
+ * @param {7 | 8 | 9} version 目标定义版本
  * @returns {Record<string, unknown>} 目标定义
  */
 function convert(v6, version) {
@@ -69,7 +69,17 @@ function convert(v6, version) {
 }
 
 /**
- * 把 v6 定义折成 v8。
+ * 把 v6 定义折成 v9（当前定义格式）。
+ *
+ * @param {Record<string, unknown>} v6 v6 形状的定义
+ * @returns {Record<string, unknown>} v9 定义
+ */
+export function toV9(v6) {
+  return convert(v6, 9)
+}
+
+/**
+ * 把 v6 定义折成 v8（只用于旧存储 / 旧作业快照兼容测试）。
  *
  * @param {Record<string, unknown>} v6 v6 形状的定义
  * @returns {Record<string, unknown>} v8 定义

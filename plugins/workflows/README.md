@@ -8,7 +8,8 @@
 - **任务**是最小工作单元，只能沿图上的通道派发；依赖显式声明，就绪即认领。每个任务类型声明**并发度**（`concurrency`，默认 1）：同一作业内这类任务最多同时进行几条，就绪任务按创建顺序拿名额；岗位只是书写载体，不同任务类型因此可以并行，人任务不占引擎额度。
 - **工作树**是智能体任务类型上的三态设置：`none`（不注入提示词，默认）、`guard`（只做保护检查，发现未提交修改先询问用户）、`create`（提示执行者自己按仓库调用 `create_worktree`，可同时改多个仓库）。`create` 依赖工作树能力，缺失时自动降级为 `guard`。
 - **唯一的 Workflow 预设**既能设计 / 保存工作流，也能创建 / 修改执行者。
-- **执行者预设（界面写作「模式」）**按层配置：任务类型的 `agentPreset` > 执行者登记的默认 > 插件选项 `workerPreset`；`plan: true` 让会话以计划模式起步，与执行者预设互不影响。人的工作流模板支持可选路径 `{{input.remark?}}`：字段缺失渲染空串，不带 `?` 仍然严格报错。
+- **执行者预设（界面写作「模式」）**按层配置：任务类型的 `agentPreset` > 执行者登记的默认 > 插件选项 `workerPreset`；`plan: true` 让会话以计划模式起步，与执行者预设互不影响。
+- **任务类型的定义是模板**（定义 v9）：`{{content}}` / `{{content.<path>}}` 引用这一张任务的任务内容，渲染后以用户身份投递；任务内容里的 `/skill` 手势会被转义，定义原文里的仍然生效。工作流模板支持可选路径 `{{content.remark?}}` / `{{input.remark?}}`：字段缺失渲染空串，不带 `?` 仍然严格报错。
 - **结构控制风险**（没有通道就不能派发），**并发度控制吞吐**（按任务类型计数）。
 
 ## 使用
@@ -23,21 +24,19 @@
 
 ## 工具与命令
 
-| 名称                                       | 面向                 | 作用                                                            |
-| ------------------------------------------ | -------------------- | --------------------------------------------------------------- |
-| `buka_workers`                             | Workflow 预设 / 页面 | 列出执行者（id、名称、driver、挂载、职责、skills、AGENTS.md）   |
-| `buka_worker_build`                        | Workflow 预设根会话  | 按批准过的 id / 名称 / 头像 / 描述 / AGENTS.md 创建或更新执行者 |
-| `/job`                                     | 普通会话             | 列可用工作流，或按输入启动作业（发起人 = 当前会话）             |
-| `buka_workflow_save`                       | Workflow 预设根会话  | 校验并保存工作流新版本（保存后即可用）                          |
-| `buka_workflow_list` / `buka_workflow_get` | Workflow 预设 / 页面 | 读工作流目录 / 全文                                             |
-| `buka_job_start`                           | `/job` / 页面        | 创建作业（作业输入 + 交回方式）                                 |
-| `buka_job_status` / `buka_job_cancel`      | 发起人 / 页面        | 读作业 / 取消作业                                               |
-| `buka_task_targets`                        | 执行中的任务         | 列出当前可创建的任务目标（含任务内容 schema）                   |
-| `buka_task_actions`                        | 执行中的任务         | 列出人任务可点的动作与表单 schema                               |
-| `buka_task_create`                         | 执行中的任务         | 按目标创建下游任务，可多次；通道由引擎解析                      |
-| `buka_task_complete`                       | 执行中的任务 / 助理  | 提交结果文本与附件；人任务可带动作与表单                        |
-| `buka_job_board` / `buka_task_get`         | 执行中的任务 / 助理  | 只读作业看板、任务与依赖结果                                    |
-| `buka_job_attachments`                     | 执行中的任务 / 助理  | 按可见范围检索 / 读取附件                                       |
+| 名称                                       | 面向                 | 作用                                                                                      |
+| ------------------------------------------ | -------------------- | ----------------------------------------------------------------------------------------- |
+| `buka_workers`                             | Workflow 预设 / 页面 | 列出执行者（id、名称、driver、挂载、职责、skills、AGENTS.md）                             |
+| `buka_worker_build`                        | Workflow 预设根会话  | 按批准过的 id / 名称 / 头像 / 描述 / AGENTS.md 创建或更新执行者                           |
+| `/job`                                     | 普通会话             | 列可用工作流，或按输入启动作业（发起人 = 当前会话）                                       |
+| `buka_workflow_save`                       | Workflow 预设根会话  | 校验并保存工作流新版本（保存后即可用）                                                    |
+| `buka_workflow_list` / `buka_workflow_get` | Workflow 预设 / 页面 | 读工作流目录 / 全文                                                                       |
+| `buka_job_start`                           | `/job` / 页面        | 创建作业（作业输入 + 交回方式）                                                           |
+| `buka_job_status` / `buka_job_cancel`      | 发起人 / 页面        | 读作业 / 取消作业                                                                         |
+| `buka_task_create`                         | 执行中的任务         | 按目标创建下游任务，可多次；通道由引擎解析，工具说明列出本任务的 target 与 content schema |
+| `buka_task_complete`                       | 执行中的任务 / 助理  | 提交结果文本与附件；人任务可带动作与表单，工具说明列出动作 id 与 input schema             |
+| `buka_job_board` / `buka_task_get`         | 执行中的任务 / 助理  | 只读作业看板、任务与依赖结果                                                              |
+| `buka_job_attachments`                     | 执行中的任务 / 助理  | 按可见范围检索 / 读取附件                                                                 |
 
 `buka_worker_build` 只对 `builderPresets` 点名的 preset 根会话可见；编辑工作流的工具只对 `orchestratorPresets` 点名的 preset 根会话、以及 `orchestratorWorkspaces` 点名目录里的会话可见——两个名单默认都指向随包发布的 `workflow-orchestrator`（显示名 `Workflow`）。执行工具只对任务会话、助理会话与发起人会话可见。
 
@@ -53,7 +52,7 @@
 - 执行者登记与任务会话由本插件自带（`ctx.bukaWorkers` 服务）；工作流元数据需要 DSH 组合里的 `ctx.storageDomain`（base 组合自带）。任务类型的 `worktree: "create"` 需要 DSH 组合同时提供工作树服务（`ctx.worktrees`）与 `create_worktree` 工具；未启用时定义照常保存，执行时自动降级为 `"guard"`。
 - 执行者页面的「安装 skills」读 Skills 插件的 `ctx.bukaSkills`：收藏列表来自「技能仓库」，候选清单来自 `listSkills()`；Skills 插件没装时弹窗给出安装提示，不提供手填来源。
 - 执行者数据在 `~/.cache/dsh-plugin-workers/`（`workers.json` + `workers/<id>/`）；每个执行者目录默认初始化为独立 git 仓库（`git init`，不自动提交），作为分享的基础；工作流 / 作业 / 任务 / 执行记录 / 附件元数据在 `buka_workflow` 域；大文本与附件在 `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`。
-- 定义格式当前版本是 v8；打开存储时把 v7 工作流定义迁移到 v8（幂等）。其它版本的工作流标记「待升级」，不能再启动作业；作业快照不迁移。
+- 定义格式当前版本是 v9（任务类型的定义是模板）；打开存储时把 v7 工作流定义迁移到 v8（幂等），v8 不会自动升级。v7 / v8 工作流标记「待升级」，不能再启动作业；作业快照不迁移，按旧语义跑完。
 
 ## 升级与迁移（从旧的两个插件）
 

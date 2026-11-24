@@ -44,6 +44,7 @@ import type {
   AttachmentRecord,
   AttemptRecord,
   Claimant,
+  CreatableTarget,
   CreationDefinition,
   DefinitionIssue,
   DeliveryRule,
@@ -51,6 +52,7 @@ import type {
   JobRestartMode,
   JsonValue,
   Starter,
+  TaskAction,
   TaskRecord,
   TaskResult,
   TaskStatus,
@@ -62,8 +64,8 @@ import type {
   WorkflowDefinition,
   WorkflowRecord,
 } from '../domain/types.ts'
-import { DEFINITION_VERSION } from '../domain/types.ts'
-import { type JsonSchema, schemaProblems } from '../json-schema.ts'
+import { DEFINITION_TEMPLATE_VERSION, DEFINITION_VERSION } from '../domain/types.ts'
+import { schemaProblems } from '../json-schema.ts'
 import type { ResolvedOptions } from '../options.ts'
 import { programDriver } from '../program/clock.ts'
 import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
@@ -122,7 +124,7 @@ const RETIRE_GRACE_MS = 5 * 60_000
 /**
  * 作业快照仍可读的版本范围。
  *
- * v7 快照不迁移：主体 / 交回方式里的 `name` 按旧字段兜底；v8 是当前格式。
+ * v7 快照不迁移：主体 / 交回方式里的 `name` 按旧字段兜底；v9 是当前格式。
  */
 function isSupportedJobDefinitionVersion(version: number): boolean {
   return version >= 7 && version <= DEFINITION_VERSION
@@ -1259,16 +1261,14 @@ export class WorkflowEngine {
    * @param sessionId 任务会话
    * @returns 目标列表；没有可创建目标时为空
    */
-  creatableTargetsForSession(
-    sessionId: string,
-  ): Array<{ target: string; label: string; content?: JsonSchema }> {
+  creatableTargetsForSession(sessionId: string): CreatableTarget[] {
     const reference = this.sessionTasks.get(sessionId)
     if (reference === undefined) return []
     const job = this.store.getJob(reference.jobId)
     const task = this.store.getTask(reference.taskId)
     if (job === undefined || task === undefined) return []
     const definition = job.definition
-    const targets = new Map<string, { target: string; label: string; content?: JsonSchema }>()
+    const targets = new Map<string, CreatableTarget>()
     for (const channel of definition.channels) {
       if (channel.from !== task.position) continue
       if (channel.to === 'end') {
@@ -1305,9 +1305,7 @@ export class WorkflowEngine {
    * @param sessionId 任务会话
    * @returns 动作列表与表单 schema；非人任务为空
    */
-  taskActionsForSession(
-    sessionId: string,
-  ): Array<{ id: string; label: string; input?: JsonSchema }> {
+  taskActionsForSession(sessionId: string): TaskAction[] {
     const reference = this.sessionTasks.get(sessionId)
     if (reference === undefined) return []
     const job = this.store.getJob(reference.jobId)
@@ -2144,10 +2142,14 @@ export class WorkflowEngine {
   ): Promise<boolean> {
     const workers = this.workersOf()
     if (workers === null || typeof workers.openSession !== 'function') return false
+    // 先绑定会话 → 任务，再 resume：host 的 `agent/created` 监听在这里按会话注册
+    // 带本任务说明的执行工具，第一轮组装工具清单时必须已经查得到任务。
+    this.sessionTasks.set(sessionId, { jobId, taskId: task.id })
     let handle: WorkerHandleLike
     try {
       handle = (await workers.openSession({ worker, sessionId })) as WorkerHandleLike
     } catch (error) {
+      this.unbindSessionTask(sessionId, task.id)
       this.logger?.warn?.(
         `buka-workflows: could not resume session ${sessionId}: ${describeError(error)}`,
       )
@@ -2161,7 +2163,6 @@ export class WorkflowEngine {
       finishedAt: null,
       startSeq,
     }))
-    this.sessionTasks.set(sessionId, { jobId, taskId: task.id })
     this.trackExecution({
       jobId,
       taskId: task.id,
@@ -2474,25 +2475,38 @@ export class WorkflowEngine {
         : taskType.worktree === 'guard'
           ? 'guard'
           : undefined
-    const sections = buildExecutionPromptSections({
-      task,
-      taskType,
-      ...(worktree === undefined ? {} : { worktree }),
-    })
-    const prompt = sections.prompt
     const attempt = await this.createAttempt({ jobId: job.id, taskId: task.id, promptFile: null })
-    const promptFile = await this.store
-      .writeText(job.id, 'prompts', attempt.id, prompt)
-      .catch(() => null)
-    if (promptFile !== null) {
-      await this.store.updateAttempt(attempt.id, (current) => ({ ...current, promptFile }))
-    }
     await this.claimTaskRecord(
       job,
       task,
       { kind: 'worker', name: storedExecutorRef(task.assignee) ?? '', sessionId: null },
       attempt.id,
     )
+    let sections: ReturnType<typeof buildExecutionPromptSections>
+    try {
+      sections = buildExecutionPromptSections({
+        task,
+        taskType,
+        ...(worktree === undefined ? {} : { worktree }),
+        definitionVersion: job.definition.version,
+      })
+    } catch (error) {
+      // 模板路径在保存时校验过；这里兜住存量数据或手改内容，按任务失败并写清路径。
+      // 先认领再渲染：状态机只允许 running → failed。
+      await this.failTaskLocked(
+        job.id,
+        task.id,
+        `could not render the task type definition: ${describeError(error)}`,
+      )
+      return null
+    }
+    const prompt = sections.prompt
+    const promptFile = await this.store
+      .writeText(job.id, 'prompts', attempt.id, prompt)
+      .catch(() => null)
+    if (promptFile !== null) {
+      await this.store.updateAttempt(attempt.id, (current) => ({ ...current, promptFile }))
+    }
     return {
       kind: 'agent',
       jobId: job.id,
@@ -2500,8 +2514,12 @@ export class WorkflowEngine {
       attemptId: attempt.id,
       worker: storedExecutorRef(task.assignee) ?? '',
       prompt,
-      // plan 模式的投递保持原样：完整提示词一条 followup，不拆用户消息。
-      userPrompt: planMode ? null : sections.userPrompt,
+      // v9 起定义（或整份任务内容）作为用户消息投递，plan 模式也只是会话模式。
+      // v8 及更早的 plan 快照沿用旧投递：完整提示词一条 followup，不拆用户消息。
+      userPrompt:
+        job.definition.version < DEFINITION_TEMPLATE_VERSION && planMode
+          ? null
+          : sections.userPrompt,
       planMode,
       agentPreset,
     }
@@ -2633,7 +2651,8 @@ export class WorkflowEngine {
       handle = (await workers.dispatchSession({
         worker: launch.worker,
         prompt: launch.prompt,
-        // 定义以用户身份投递；没有定义时省略，workers 退化成单条 followup。
+        // 用户消息（渲染后的定义或整份任务内容）；v8 快照没有定义时省略，
+        // workers 退化成单条 followup。
         ...(launch.userPrompt === null ? {} : { userPrompt: launch.userPrompt }),
         title: `工作流任务 ${task.id}`,
         agentPreset,

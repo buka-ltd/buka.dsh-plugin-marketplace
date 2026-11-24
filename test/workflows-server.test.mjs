@@ -22,7 +22,7 @@ import { START_TASK_ID, startTaskId } from '../plugins/workflows/src/domain/ids.
 import { WorkflowEngine } from '../plugins/workflows/src/engine/engine.ts'
 import { registerWorkflowRoutes } from '../plugins/workflows/src/routes/index.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
-import { toV8 } from './workflows-fixture-v7.mjs'
+import { toV9 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // 内存版 storageDomain
@@ -158,6 +158,8 @@ function makeWorkers(entries = WORKER_ENTRIES) {
     handles,
     /** 投递前的钩子；测试用它观察执行工具可见性依赖的会话绑定。 */
     beforeDispatch: null,
+    /** resume 前的钩子；恢复路径同样要在 openSession 之前绑定会话与任务。 */
+    beforeOpenSession: null,
     async list() {
       return { workers: entries, corrupt: false }
     },
@@ -170,6 +172,7 @@ function makeWorkers(entries = WORKER_ENTRIES) {
       return handle
     },
     async openSession(request) {
+      this.beforeOpenSession?.(request)
       const sessionId = typeof request?.sessionId === 'string' ? request.sessionId : ''
       const existing = handles.get(sessionId)
       if (existing !== undefined) return existing
@@ -237,7 +240,7 @@ function delay(ms) {
 
 /** 简单定义：start → dev(agent) → end。 */
 function simpleDevDefinition() {
-  return toV8({
+  return toV9({
     version: 6,
     name: '简单研发',
     budgets: { maxTasks: 20, maxDurationHours: 24 },
@@ -305,7 +308,7 @@ function simpleDevDefinition() {
 
 /** 研发 + 测试：dev → qa（验证）→ dev（返工，回边）→ end。 */
 function reviewDefinition() {
-  return toV8({
+  return toV9({
     version: 6,
     name: '研发与验证',
     budgets: { maxTasks: 40, maxDurationHours: 24 },
@@ -418,7 +421,7 @@ function reviewDefinition() {
 
 /** 人岗位 + 助理：start → approve(human) → end。 */
 function assistantDefinition() {
-  const definition = toV8({
+  const definition = toV9({
     version: 6,
     name: '发布审批',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
@@ -527,7 +530,7 @@ function assistantWithParallelDefinition() {
 
 /** clock 机器人：start → wait(clock) → end。 */
 function clockDefinition() {
-  return toV8({
+  return toV9({
     version: 6,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
@@ -591,7 +594,7 @@ function clockDefinition() {
 /** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
 function robotCreatesDefinition(change) {
   const definition = {
-    version: 8,
+    version: 9,
     name: '到点执行',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {
@@ -1073,6 +1076,13 @@ test('engine: a v7 job snapshot stays readable and keeps advancing with name fal
       '软件工程师',
       'the old assignee name resolves as the identifier',
     )
+    // 旧快照按旧语义投递：上下文带任务内容，用户消息是定义原文。
+    assert.match(workers.dispatched[0].request.prompt, /## 任务内容/u)
+    assert.equal(
+      workers.dispatched[0].request.userPrompt,
+      '实现需求，完成后创建交付任务。',
+      'the v8 snapshot keeps the definition text as the user prompt',
+    )
     const devSession = workers.dispatched[0].sessionId
 
     const detail = await engine.jobDetail(job.id)
@@ -1109,6 +1119,79 @@ test('engine: a v7 job snapshot stays readable and keeps advancing with name fal
   }
 })
 
+/** 直接写入一条运行中的作业与一张就绪任务：用于旧快照与手改数据。 */
+let injectedJobSeq = 0
+async function insertReadyJob(
+  store,
+  { definition, content = { requirement: '旧作业' }, taskContent = content },
+) {
+  const timestamp = new Date().toISOString()
+  injectedJobSeq += 1
+  const jobId = `job-injected-${injectedJobSeq}`
+  const job = {
+    id: jobId,
+    seq: 1,
+    workflowId: `wf-${jobId}`,
+    workflowVersion: 1,
+    workflowName: definition.name,
+    workflowDescription: '',
+    definition,
+    status: 'running',
+    starter: { kind: 'human' },
+    input: content,
+    delivery: { kind: 'starter' },
+    inputSummary: '旧作业',
+    error: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    finishedAt: null,
+  }
+  await store.ensureJobDirectories(job.id)
+  await store.insertJob(job)
+  await store.insertTask({
+    id: START_TASK_ID,
+    jobId: job.id,
+    position: 'start',
+    type: 'start',
+    channel: null,
+    content,
+    deps: [],
+    status: 'completed',
+    createdBy: null,
+    assignee: { kind: 'human' },
+    claimant: { kind: 'human', name: '本地用户', sessionId: null },
+    attemptIds: [],
+    result: { text: '', textBytes: 0, textFile: null, attachmentIds: [] },
+    error: null,
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    updatedAt: timestamp,
+  })
+  const task = {
+    id: `task-${jobId}-dev`,
+    jobId: job.id,
+    position: 'dev',
+    type: 'dev.implement',
+    channel: 'start.dev',
+    content: taskContent,
+    deps: [START_TASK_ID],
+    status: 'ready',
+    createdBy: { taskId: START_TASK_ID, position: 'start' },
+    assignee: { kind: 'worker', name: '软件工程师', driver: 'agent' },
+    claimant: null,
+    attemptIds: [],
+    result: null,
+    error: null,
+    createdAt: timestamp,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: timestamp,
+  }
+  await store.insertTask(task)
+  return { job, task }
+}
+
 test('engine: a human-started job completes the start task and dispatches the first task', async () => {
   const env = await setup(simpleDevDefinition())
   try {
@@ -1129,15 +1212,18 @@ test('engine: a human-started job completes the start task and dispatches the fi
     assert.deepEqual(dev.content, { requirement: '登录页需求' })
     const dispatch = env.workers.dispatched[0]
     assert.equal(dispatch.request.worker, '软件工程师')
+    // 上下文只剩规则；任务内容与定义一起走用户消息（v9）。
     assert.match(dispatch.request.prompt, /## 工作流规则/u)
-    assert.match(dispatch.request.prompt, /## 任务类型的定义/u)
-    assert.match(dispatch.request.prompt, /实现需求，完成后创建交付任务。/u)
-    assert.match(dispatch.request.prompt, /## 任务内容/u)
-    assert.match(dispatch.request.prompt, /登录页需求/u)
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务类型的定义/u)
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务内容/u)
+    assert.doesNotMatch(dispatch.request.prompt, /登录页需求/u)
     assert.doesNotMatch(dispatch.request.prompt, /结果结构|通道|岗位|作业 #/u)
-    // 定义是流程维护者写的，按用户身份单独投递；规则与任务内容不跟过去。
     assert.equal(dispatch.request.userPrompt, '实现需求，完成后创建交付任务。')
-    assert.doesNotMatch(dispatch.request.userPrompt, /## 工作流规则|## 任务内容|登录页需求/u)
+    assert.ok(
+      dispatch.request.prompt.endsWith('\n\n实现需求，完成后创建交付任务。'),
+      'the user message follows the context in the landed text',
+    )
+    assert.doesNotMatch(dispatch.request.userPrompt, /## 工作流规则|## 任务内容/u)
     assert.equal(env.engine.taskForSession(dispatch.sessionId)?.taskId, dev.id)
 
     await env.engine.completeTaskFromSession({
@@ -1265,9 +1351,10 @@ test('engine: a session that never settles is released once the retire grace exp
   }
 })
 
-test('engine: the task type definition is dispatched as the user prompt, the file keeps the full text', async () => {
+test('engine: the v9 definition template is rendered into the user prompt', async () => {
   const definition = simpleDevDefinition()
-  definition.positions[0].taskTypes[0].definition = '先读代码。\n\n/grill-with-docs'
+  definition.positions[0].taskTypes[0].definition =
+    '需求资料：\n{{content.requirement}}\n\n先读代码。\n\n/grill-with-docs'
   const env = await setup(definition)
   try {
     const job = await env.engine.createJobFromHuman({
@@ -1276,12 +1363,15 @@ test('engine: the task type definition is dispatched as the user prompt, the fil
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dispatch = env.workers.dispatched[0]
-    assert.equal(dispatch.request.userPrompt, '先读代码。\n\n/grill-with-docs')
+    assert.equal(
+      dispatch.request.userPrompt,
+      '需求资料：\n登录页需求\n\n先读代码。\n\n/grill-with-docs',
+    )
+    assert.ok(dispatch.request.prompt.endsWith(dispatch.request.userPrompt))
     assert.match(dispatch.request.prompt, /## 工作流规则/u)
-    assert.match(dispatch.request.prompt, /\/grill-with-docs/u)
-    assert.match(dispatch.request.prompt, /登录页需求/u)
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务内容/u)
 
-    // 落盘的 prompt 文件仍是完整文本，供排查使用。
+    // 落盘的 prompt 文件 = 上下文 + 用户消息，顺序与到达顺序一致。
     const dev = taskAt(env.store, job.id, 'dev')
     const attempt = env.store.listAttempts(dev.id)[0]
     assert.ok(attempt, 'the attempt is recorded')
@@ -1292,7 +1382,44 @@ test('engine: the task type definition is dispatched as the user prompt, the fil
   }
 })
 
-test('engine: a plan-mode task type keeps the single-message dispatch without a user prompt', async () => {
+test('engine: upstream content cannot spoof a /skill gesture through the template', async () => {
+  const definition = simpleDevDefinition()
+  definition.positions[0].taskTypes[0].definition = '需求资料：\n{{content.requirement}}'
+  const env = await setup(definition)
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '/disable-model-invocation' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const userPrompt = env.workers.dispatched[0].request.userPrompt
+    assert.match(userPrompt, /\/\u200bdisable-model-invocation/u)
+    assert.doesNotMatch(userPrompt, /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: an omitted definition delivers the whole task content', async () => {
+  const definition = simpleDevDefinition()
+  delete definition.positions[0].taskTypes[0].definition
+  const env = await setup(definition)
+  try {
+    await env.engine.createJobFromHuman({
+      workflowId: env.workflowId,
+      content: { requirement: '登录页需求' },
+    })
+    await waitFor(() => env.workers.dispatched.length === 1)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.userPrompt, '{\n  "requirement": "登录页需求"\n}')
+    assert.match(dispatch.request.prompt, /## 工作流规则/u)
+    assert.match(dispatch.request.prompt, /登录页需求/u)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('engine: a plan-mode task type is delivered like any other task', async () => {
   const definition = simpleDevDefinition()
   definition.positions[0].taskTypes[0].plan = true
   const env = await setup(definition)
@@ -1304,12 +1431,12 @@ test('engine: a plan-mode task type keeps the single-message dispatch without a 
     await waitFor(() => env.workers.dispatched.length === 1)
     const dispatch = env.workers.dispatched[0]
     assert.equal(dispatch.request.planMode, true)
-    // plan 模式投递保持原样：不拆用户消息，workers 只发一条 followup。
-    assert.equal('userPrompt' in dispatch.request, false, 'plan mode keeps a single followup')
+    // plan 模式只是会话模式：投递与普通任务相同（上下文 + 用户消息）。
+    assert.equal(dispatch.request.userPrompt, '实现需求，完成后创建交付任务。')
     assert.match(dispatch.request.prompt, /## 工作流规则/u)
-    assert.match(dispatch.request.prompt, /## 任务类型的定义/u)
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务类型的定义|## 任务内容/u)
     assert.match(dispatch.request.prompt, /实现需求，完成后创建交付任务。/u)
-    assert.match(dispatch.request.prompt, /登录页需求/u)
+    assert.doesNotMatch(dispatch.request.prompt, /登录页需求/u)
 
     // 落盘仍是完整文本，供排查使用。
     const dev = taskAt(env.store, job.id, 'dev')
@@ -1492,7 +1619,7 @@ test('engine: saving a definition validates agent presets against the roster', a
   }
 })
 
-test('engine: a task type without a definition is dispatched without a user prompt', async () => {
+test('engine: an omitted definition sends the whole task content as the user prompt', async () => {
   const definition = simpleDevDefinition()
   delete definition.positions[0].taskTypes[0].definition
   const env = await setup(definition)
@@ -1503,11 +1630,79 @@ test('engine: a task type without a definition is dispatched without a user prom
     })
     await waitFor(() => env.workers.dispatched.length === 1)
     const dispatch = env.workers.dispatched[0]
-    assert.equal('userPrompt' in dispatch.request, false, 'no empty user message is produced')
-    assert.doesNotMatch(dispatch.request.prompt, /## 任务类型的定义/u)
-    assert.match(dispatch.request.prompt, /## 任务内容/u)
+    assert.equal(dispatch.request.userPrompt, '{\n  "requirement": "登录页需求"\n}')
+    assert.doesNotMatch(dispatch.request.prompt, /## 任务类型的定义|## 任务内容/u)
+    assert.ok(dispatch.request.prompt.endsWith(dispatch.request.userPrompt))
   } finally {
     await env.cleanup()
+  }
+})
+
+test('engine: a v8 plan-mode snapshot keeps the old single-message delivery', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-legacy-plan-'))
+  const domain = new FakeDomain()
+  const store = new WorkflowStore({ domain, dataDir })
+  await store.init()
+  const workers = makeWorkers()
+  const engine = new WorkflowEngine({
+    ctx: {},
+    store,
+    options: makeOptions(dataDir),
+    logger: undefined,
+    workers: () => workers,
+    delivery: makeDelivery(),
+  })
+  try {
+    const definition = simpleDevDefinition()
+    definition.version = 8
+    definition.positions[0].taskTypes[0].plan = true
+    const { task } = await insertReadyJob(store, { definition })
+
+    await engine.start()
+    await waitFor(() => workers.dispatched.length === 1)
+    const request = workers.dispatched[0].request
+    assert.equal(request.planMode, true)
+    // 旧快照的 plan 模式保持旧投递：完整提示词一条 followup，不拆用户消息。
+    assert.equal('userPrompt' in request, false)
+    assert.match(request.prompt, /## 任务类型的定义/u)
+    assert.match(request.prompt, /## 任务内容/u)
+    assert.equal(store.getTask(task.id).status, 'running')
+  } finally {
+    engine.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('engine: a task whose definition path is missing at run time fails with the path', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-render-fail-'))
+  const domain = new FakeDomain()
+  const store = new WorkflowStore({ domain, dataDir })
+  await store.init()
+  const workers = makeWorkers()
+  const engine = new WorkflowEngine({
+    ctx: {},
+    store,
+    options: makeOptions(dataDir),
+    logger: undefined,
+    workers: () => workers,
+    delivery: makeDelivery(),
+  })
+  try {
+    const definition = simpleDevDefinition()
+    definition.positions[0].taskTypes[0].definition = '需求：{{content.requirement}}'
+    // 手改过的任务内容缺必填字段：保存校验拦不住，运行时按任务失败处理。
+    const { task } = await insertReadyJob(store, { definition, taskContent: {} })
+
+    await engine.start()
+    await waitFor(() => store.getTask(task.id).status === 'failed')
+    const failed = store.getTask(task.id)
+    assert.match(failed.error, /content\.requirement/u)
+    assert.equal(workers.dispatched.length, 0)
+    const attempt = store.listAttempts(task.id)[0]
+    assert.equal(attempt?.status, 'failed')
+  } finally {
+    engine.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true })
   }
 })
 
@@ -1674,7 +1869,13 @@ test('engine: a session-started job creates its first tasks immediately', async 
     assert.equal(start.status, 'completed')
     assert.deepEqual(env.store.getJob(job.id).input, { requirement: '注册页需求' })
     await waitFor(() => env.workers.dispatched.length === 1)
-    assert.match(env.workers.dispatched[0].request.prompt, /注册页需求/u)
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(dispatch.request.userPrompt, '实现需求，完成后创建交付任务。')
+    assert.doesNotMatch(
+      dispatch.request.prompt,
+      /注册页需求/u,
+      'content only enters through the template',
+    )
     assert.equal(env.delivery.messages.length, 0, 'nothing is pushed to the starter at job start')
   } finally {
     await env.cleanup()
@@ -1863,9 +2064,10 @@ test('engine: parallel channels with overlapping types are chosen explicitly', a
   }
 })
 
-test('engine: execution prompt is exactly the three model-facing sections', async () => {
+test('engine: execution prompt is exactly the rules plus one rendered user message', async () => {
   const definition = reviewDefinition()
-  definition.positions[0].taskTypes[0].definition = '任务类型的定义：先读依赖结果，再实现。'
+  definition.positions[0].taskTypes[0].definition =
+    '任务类型的定义：先读依赖结果，再实现。\n\n需求：{{content.requirement}}'
   const env = await setup(definition)
   try {
     await env.engine.createJobFromHuman({
@@ -1873,16 +2075,19 @@ test('engine: execution prompt is exactly the three model-facing sections', asyn
       content: { requirement: '登录页需求' },
     })
     await waitFor(() => env.workers.dispatched.length === 1)
-    const prompt = env.workers.dispatched[0].request.prompt
-    const headings = ['## 工作流规则', '## 任务类型的定义', '## 任务内容']
-    let cursor = -1
-    for (const heading of headings) {
-      const index = prompt.indexOf(heading)
-      assert.ok(index > cursor, `${heading} should appear in this order`)
-      cursor = index
-    }
-    assert.match(prompt, /任务类型的定义：先读依赖结果，再实现。/u)
-    assert.match(prompt, /"requirement": "登录页需求"/u, 'the rendered content is the last section')
+    const dispatch = env.workers.dispatched[0]
+    assert.equal(
+      dispatch.request.userPrompt,
+      '任务类型的定义：先读依赖结果，再实现。\n\n需求：登录页需求',
+    )
+    assert.equal(
+      dispatch.request.prompt,
+      `## 工作流规则\n${dispatch.request.prompt.slice('## 工作流规则\n'.length)}`,
+    )
+    const prompt = dispatch.request.prompt
+    assert.equal(prompt.match(/^## /gmu)?.length, 1, 'only the rules heading remains')
+    assert.match(prompt, /需求：登录页需求/u)
+    assert.ok(prompt.endsWith(dispatch.request.userPrompt))
     assert.doesNotMatch(prompt, /岗位|通道|作业 #/u, 'no authoring vocabulary')
     assert.doesNotMatch(prompt, /研发|测试|软件工程师|开始研发|提测/u, 'no labels or channel names')
   } finally {
@@ -1973,7 +2178,8 @@ test('engine: a task type may accept a string as its task content', async () => 
     await waitFor(() => env.workers.dispatched.length === 1)
     const dev = taskAt(env.store, job.id, 'dev')
     assert.equal(dev.content, '做登录页')
-    assert.match(env.workers.dispatched[0].request.prompt, /做登录页/u)
+    assert.equal(env.workers.dispatched[0].request.userPrompt, '实现需求，完成后创建交付任务。')
+    assert.doesNotMatch(env.workers.dispatched[0].request.prompt, /做登录页/u)
   } finally {
     await env.cleanup()
   }
@@ -1996,8 +2202,11 @@ test('engine: a named assistant takes a human task and completes it with an acti
     const approve = taskAt(env.store, job.id, 'approve')
     assert.equal(approve.status, 'running')
     assert.equal(approve.claimant.kind, 'assistant')
-    assert.match(dispatch.request.prompt, /buka_task_actions/u)
-    // 助理任务保持原样：一条完整提示词，不拆用户消息。
+    assert.equal(
+      dispatch.request.prompt,
+      `请你负责对接任务「批准发布」（${approve.id}）的处理人，并严格执行处理人对于该任务的决策。`,
+    )
+    // 助理任务只收这一条固定提示，不拆用户消息。
     assert.equal('userPrompt' in dispatch.request, false)
 
     const actions = env.engine.taskActionsForSession(dispatch.sessionId)
@@ -2785,8 +2994,15 @@ test('engine: restart resumes the same agent session for a running task', async 
       workers: () => workers,
       delivery,
     })
+    const boundAtResume = []
+    workers.beforeOpenSession = (request) => {
+      boundAtResume.push(second.taskForSession(request.sessionId))
+    }
     await second.start()
     await waitFor(() => store.getTask(dev.id).status === 'running')
+    // resume 之前已经绑定会话：host 的 agent/created 监听按会话注册执行工具。
+    assert.equal(boundAtResume.length, 1)
+    assert.equal(boundAtResume[0]?.taskId, dev.id)
     assert.equal(second.taskForSession(sessionId)?.taskId, dev.id)
     await second.completeTaskFromSession({ sessionId, text: '恢复后完成', attachments: [] })
     assert.equal(store.getTask(dev.id).status, 'completed')

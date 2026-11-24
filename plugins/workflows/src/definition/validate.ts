@@ -1,5 +1,5 @@
 /**
- * 工作流 v8 定义校验。
+ * 工作流 v9 定义校验。
  *
  * 纯函数：不读盘、不依赖 DSH。执行者存在性由调用方传入 `workers` 目录（按
  * 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
@@ -28,10 +28,16 @@ import type {
   WorkflowDefinition,
 } from '../domain/types.ts'
 import type { JsonSchema } from '../json-schema.ts'
-import { isPlainObject, parseJsonSchema, resolveSchemaPath } from '../json-schema.ts'
+import {
+  isPlainObject,
+  parseJsonSchema,
+  resolveSchemaPath,
+  schemaPathOptional,
+} from '../json-schema.ts'
 import { isKnownProgram, normalizeProgramId, programRequiredContent } from '../program/contracts.ts'
+import { inspectTemplate } from '../template.ts'
 import { isSystemOnlyWorkerId } from '../workers/store/builtin.ts'
-import { containsTemplate, inspectPayload } from './payload.ts'
+import { containsTemplate, inspectPayload, parseTemplatePath } from './payload.ts'
 
 /** 校验入参。 */
 export interface ValidateDefinitionOptions {
@@ -106,7 +112,7 @@ function checkUnknownKeys(
 }
 
 /**
- * 校验一份工作流 v8 定义。
+ * 校验一份工作流 v9 定义。
  *
  * @param raw 待校验的原始定义（来自工具参数或 storageDomain）
  * @param options 执行者目录
@@ -128,7 +134,7 @@ export function validateWorkflowDefinition(
     issues,
   )
 
-  if (raw.version !== 8) issues.add('version', 'must be 8')
+  if (raw.version !== 9) issues.add('version', 'must be 9')
   const name = readName(raw, 'name', '', issues)
   const description = readOptionalString(raw, 'description', 'description', issues) ?? ''
   const budgets = readBudgets(raw.budgets, issues)
@@ -162,7 +168,7 @@ export function validateWorkflowDefinition(
   return {
     ok: true,
     definition: {
-      version: 8,
+      version: 9,
       name,
       ...(description === '' ? {} : { description }),
       budgets,
@@ -442,6 +448,9 @@ function readTaskType(
   const label = readName(entry, 'label', path, issues)
   const definition = readOptionalString(entry, 'definition', `${path}.definition`, issues)
   const content = readSchema(entry.content, `${path}.content`, issues, 'value')
+  if (definition !== null && definition.trim() !== '') {
+    checkDefinitionTemplate(definition, content ?? undefined, `${path}.definition`, issues)
+  }
   const human = executor?.kind === 'human'
   const actions = readActions(entry.actions, `${path}.actions`, human, issues)
   const creates = readRobotCreates(entry.creates, `${path}.creates`, executor, workers, issues)
@@ -1167,6 +1176,62 @@ function checkCreation(
     return
   }
   checkContent(creation.content, path, taskType.content, creatorContent, actionInput, issues)
+}
+
+/**
+ * 校验任务类型的定义模板。
+ *
+ * v9 起定义是一段模板，只认 `{{content}}` 与 `{{content.<path>}}`：
+ *
+ * - 路径必须在本任务类型的 content schema 里声明；
+ * - 经过非必填字段的路径必须写 `?`，否则值缺失时任务必然失败；
+ * - `{{input.*}}` / `{{nodes.*}}` 是其它模板的语法，这里一律拒绝。
+ *
+ * @param template 定义原文
+ * @param schema 本任务类型的 content schema；未声明时是 undefined
+ * @param path 定位路径
+ * @param issues 错误收集
+ */
+function checkDefinitionTemplate(
+  template: string,
+  schema: JsonSchema | undefined,
+  path: string,
+  issues: Issues,
+): void {
+  const inspection = inspectTemplate(template)
+  for (const error of inspection.errors) issues.add(path, error)
+  for (const placeholder of inspection.placeholders) {
+    const parsed = parseTemplatePath(placeholder.path)
+    if (parsed === null || parsed.kind !== 'content') {
+      issues.add(
+        path,
+        `template "{{${placeholder.path}}}" must reference content or content.<path>; input.* and nodes.* are not available in a task type definition`,
+      )
+      continue
+    }
+    if (parsed.segments.length === 0) continue
+    if (schema === undefined) {
+      issues.add(
+        path,
+        `template "{{${placeholder.path}}}" cannot be resolved: the task type declares no content schema`,
+      )
+      continue
+    }
+    const reason = resolveSchemaPath(schema, parsed.segments)
+    if (reason !== null) {
+      issues.add(
+        path,
+        `template "{{${placeholder.path}}}" ${reason} in the task type content schema`,
+      )
+      continue
+    }
+    if (!placeholder.optional && schemaPathOptional(schema, parsed.segments)) {
+      issues.add(
+        path,
+        `template "{{${placeholder.path}}}" passes through optional fields; write "{{${placeholder.path}?}}" so a missing value renders as an empty string`,
+      )
+    }
+  }
 }
 
 /**

@@ -36,6 +36,8 @@ import type {
   WorkerInfo,
   WorkflowDefinition,
 } from '../domain/types.ts'
+
+import { DEFINITION_TEMPLATE_VERSION } from '../domain/types.ts'
 import { normalizeProgramId, programContentProblems } from '../program/contracts.ts'
 import { ENGINE_PROGRAM_ID, ENGINE_WORKER_ID } from '../workers/store/builtin.ts'
 import { WorkflowError } from './types.ts'
@@ -396,7 +398,12 @@ export function resolveTargetTaskType(
     return {
       id: 'end',
       label: '结束任务',
-      definition: '把作业的最终报告交给发起人；发起人确认收到后完成。',
+      // v9 起定义是模板：交给助理代收时，报告通过 `{{content}}` 进入用户消息；
+      // v8 快照仍按旧语义单独附上内容。
+      definition:
+        definition.version >= DEFINITION_TEMPLATE_VERSION
+          ? '把作业的最终报告交给发起人；发起人确认收到后完成。\n\n{{content}}'
+          : '把作业的最终报告交给发起人；发起人确认收到后完成。',
       ...(definition.end.content === undefined ? {} : { content: definition.end.content }),
     }
   }

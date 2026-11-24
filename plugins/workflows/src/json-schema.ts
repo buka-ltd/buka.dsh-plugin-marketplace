@@ -341,45 +341,88 @@ function walkSchema(
 }
 
 /**
- * 判断 prompt 里的路径是否真的在声明的 schema 里。
+ * 沿声明的 schema 下钻一条路径，同时给出「是否存在」与「是否经过非必填字段」。
  *
  * 规则：
  * - 对象按 `properties` 下钻；未声明的字段直接报错（即使 additionalProperties
  *   允许，模板引用也必须是显式声明过的字段）；
  * - 数组只允许数字下标，并且必须声明了 `items` 才能继续下钻；
- * - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败。
+ * - `oneOf` 的路径必须在所有分支里都存在，避免某一支运行到一半才失败；只要有一个
+ *   分支把该字段当作非必填，就按非必填处理。
  *
  * @param schema 声明的 schema
- * @param segments 路径段（不含 `start.output` 前缀）
+ * @param segments 路径段（不含 `content.` / `input.` 前缀）
+ * @returns 错误原因（存在时为 null）与是否经过非必填字段
+ */
+export function inspectSchemaPath(
+  schema: JsonSchema,
+  segments: readonly string[],
+): { readonly reason: string | null; readonly optional: boolean } {
+  let current: JsonSchema = schema
+  let optional = false
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]
+    if (!isPlainObject(current)) {
+      return { reason: 'points into a value that is not an object', optional }
+    }
+    if (Array.isArray(current.oneOf)) {
+      let branchOptional = optional
+      for (const branch of current.oneOf) {
+        const step = inspectSchemaPath(branch, segments.slice(index))
+        if (step.reason !== null) {
+          return { reason: 'is not declared in every oneOf variant', optional: true }
+        }
+        if (step.optional) branchOptional = true
+      }
+      return { reason: null, optional: branchOptional }
+    }
+    if (current.type === 'array') {
+      if (segment === undefined || !/^\d+$/u.test(segment)) {
+        return { reason: 'uses a non-numeric segment on an array', optional }
+      }
+      if (!isPlainObject(current.items)) {
+        return { reason: 'descends into an array that does not declare "items"', optional }
+      }
+      current = current.items as JsonSchema
+      continue
+    }
+    if (current.type !== 'object') {
+      return { reason: 'points into a value that is not an object', optional }
+    }
+    const properties = isPlainObject(current.properties) ? current.properties : {}
+    if (segment === undefined || !Object.hasOwn(properties, segment)) {
+      return { reason: 'is not declared', optional }
+    }
+    const required = Array.isArray(current.required) ? current.required : []
+    if (!required.includes(segment)) optional = true
+    current = properties[segment] as JsonSchema
+  }
+  return { reason: null, optional }
+}
+
+/**
+ * 判断 prompt 里的路径是否真的在声明的 schema 里。
+ *
+ * @param schema 声明的 schema
+ * @param segments 路径段（不含 `content.` / `input.` 前缀）
  * @returns 存在时是 `null`，否则是可以拼进错误信息的原因片段
  */
 export function resolveSchemaPath(schema: JsonSchema, segments: readonly string[]): string | null {
-  let current: JsonSchema = schema
-  const walked: string[] = []
-  for (const segment of segments) {
-    if (!isPlainObject(current)) return 'points into a value that is not an object'
-    if (Array.isArray(current.oneOf)) {
-      for (const branch of current.oneOf) {
-        const reason = resolveSchemaPath(branch, segments.slice(walked.length))
-        if (reason !== null) return 'is not declared in every oneOf variant'
-      }
-      return null
-    }
-    if (current.type === 'array') {
-      if (!/^\d+$/u.test(segment)) return 'uses a non-numeric segment on an array'
-      if (!isPlainObject(current.items))
-        return 'descends into an array that does not declare "items"'
-      current = current.items as JsonSchema
-      walked.push(segment)
-      continue
-    }
-    if (current.type !== 'object') return 'points into a value that is not an object'
-    const properties = isPlainObject(current.properties) ? current.properties : {}
-    if (!Object.hasOwn(properties, segment)) return 'is not declared'
-    current = properties[segment] as JsonSchema
-    walked.push(segment)
-  }
-  return null
+  return inspectSchemaPath(schema, segments).reason
+}
+
+/**
+ * 判断一条模板路径是否经过非必填字段。
+ *
+ * 模板引用可选字段时必须在路径末尾写 `?`：取不到值时渲染成空串，而不是让任务
+ * 在运行期失败。路径本身不存在时这个判断没有意义，调用方先用 `resolveSchemaPath`。
+ *
+ * @param schema 声明的 schema
+ * @param segments 路径段（不含 `content.` 前缀）
+ * @returns 经过任何非必填字段时为 true
+ */
+export function schemaPathOptional(schema: JsonSchema, segments: readonly string[]): boolean {
+  return inspectSchemaPath(schema, segments).optional
 }
 
 /**

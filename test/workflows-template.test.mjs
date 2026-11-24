@@ -66,6 +66,10 @@ test('template: parsing keeps the optional marker out of the path', () => {
   assert.deepEqual(parsePlaceholder('?'), { error: 'invalid template path "?"' })
   assert.deepEqual(inspectTemplate('{{input.a?}} {{input.b}}'), {
     paths: ['input.a', 'input.b'],
+    placeholders: [
+      { path: 'input.a', optional: true },
+      { path: 'input.b', optional: false },
+    ],
     errors: [],
   })
 })
@@ -82,7 +86,7 @@ test('template: optional paths are inspected without the marker', () => {
 /** 一个最小工作流：人岗位动作沿回向通道创建开发任务，内容模板可替换。 */
 function actionDefinition(template) {
   return {
-    version: 8,
+    version: 9,
     name: '可选路径',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
     start: { next: [{ channel: 'start.dev', type: 'dev.work' }] },

@@ -1,21 +1,22 @@
 /**
- * 节点 prompt 的模板渲染。
+ * 任务内容与任务类型定义的模板渲染。
  *
  * 只支持 `{{path}}` 形式的简单取值，不做表达式求值——workflow 定义由 agent
- * 现场生成，必须保证这里不可能执行任意代码。可用路径：
+ * 现场生成，必须保证这里不可能执行任意代码。当前模板上下文只有
+ * `{{content}}` / `{{content.<path>}}`（正在完成的这张任务的任务内容）与
+ * `{{input}}` / `{{input.<path>}}`（人任务动作表单，只用于创建声明）。
  *
- * - `{{goal}}` / `{{runId}}` / `{{step}}`；
- * - `{{nodes.<id>.text}}`：该节点最近一次执行的最终文本；
- * - `{{nodes.<id>.data.<path>}}`：执行者通过 `structured_output` 回报的结构化结果；
- * - 需要时也可以引用 `{{nodes.<id>.worker}}`、`{{nodes.<id>.sessionId}}`。
+ * 路径不存在时默认抛错（而不是静默变空串），这样定义写错时在对应任务立刻失败，
+ * 不会把空提示交给执行者。确实允许运行时缺失的路径（表单非必填字段）要在末尾
+ * 加 `?` 显式声明：`{{content.remark?}}` 取不到值时渲染成空串。`?` 不进入路径
+ * 本身，保存校验看到的仍是 `content.remark`，写错路径照样被拒。
  *
- * 路径不存在时默认抛错（而不是静默变空串），这样定义写错时在对应节点立刻失败，
- * 不会把空提示词交给执行者。确实允许运行时缺失的路径（表单非必填字段）要在末尾
- * 加 `?` 显式声明：`{{input.remark?}}` 取不到值时渲染成空串。`?` 不进入路径本身，
- * 保存校验看到的仍是 `input.remark`，写错路径照样被拒。
+ * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按对应的 task content
+ * schema 检查路径是否声明、是否经过非必填字段。
  *
- * 定义校验阶段用 `inspectTemplate` 只提取路径、不求值，再按目标节点声明的
- * `output` schema 检查 `{{nodes.<id>.data.<path>}}` 是否真的存在。
+ * 代入值可能来自上游 agent 或表单，不能让它借用户来源的消息触发宿主的
+ * `/skill-name` 手势：`renderTemplate(..., { escape: true })` 会给代入文本里的
+ * 手势插入零宽空格（见 `escapeSkillGestures`），模板原文不转义。
  *
  * @module @buka/dsh-plugin-workflows/template
  */
@@ -66,18 +67,37 @@ export function parsePlaceholder(raw: unknown): PlaceholderParse {
   return { path, optional }
 }
 
+/** 一个已解析的占位符：路径（不含 `?`）与它是否声明为可选。 */
+export interface InspectedPlaceholder {
+  readonly path: string
+  readonly optional: boolean
+}
+
+/** 模板检查结果。 */
+export interface TemplateInspection {
+  /** 出现的全部占位符路径（不含 `?`）。 */
+  readonly paths: string[]
+  /** 完整占位符信息；定义模板校验用它区分必填与可选路径。 */
+  readonly placeholders: InspectedPlaceholder[]
+  /** 语法错误（占位符写坏了）。 */
+  readonly errors: string[]
+}
+
 /**
  * 列出模板里出现的所有占位符路径，并收集语法错误；不求值。
  *
- * 定义校验用它检查 `{{nodes.<id>.data.<path>}}` 是否落在目标节点声明的
- * `output` 里；规则与运行时 `renderTemplate` 保持一致。
+ * 定义校验用它检查模板路径是否落在声明的 schema 里；规则与运行时
+ * `renderTemplate` 保持一致。
  *
  * @param template 模板原文
- * @returns 占位符路径与语法错误
+ * @returns 占位符路径、完整占位符信息与语法错误
  */
-export function inspectTemplate(template: unknown): { paths: string[]; errors: string[] } {
-  if (typeof template !== 'string') return { paths: [], errors: ['template must be a string'] }
+export function inspectTemplate(template: unknown): TemplateInspection {
+  if (typeof template !== 'string') {
+    return { paths: [], placeholders: [], errors: ['template must be a string'] }
+  }
   const paths: string[] = []
+  const placeholders: InspectedPlaceholder[] = []
   const errors: string[] = []
   template.replace(PLACEHOLDER, (_match, raw) => {
     const parsed = parsePlaceholder(raw)
@@ -86,19 +106,48 @@ export function inspectTemplate(template: unknown): { paths: string[]; errors: s
       return ''
     }
     paths.push(parsed.path)
+    placeholders.push({ path: parsed.path, optional: parsed.optional })
     return ''
   })
-  return { paths, errors }
+  return { paths, placeholders, errors }
+}
+
+/**
+ * 让代入文本里的 `/skill-name` 手势不再匹配宿主的 skill 正则。
+ *
+ * 宿主只在用户来源的消息里识别 `(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)`；
+ * 在 `/` 后面插入零宽空格（U+200B）打断它，界面上看不出区别。只对代入值做，
+ * 模板原文不转义——流程维护者写在定义里的手势本来就该生效。
+ *
+ * @param text 代入的文本
+ * @returns 手势被转义后的文本
+ */
+export function escapeSkillGestures(text: string): string {
+  return text.replace(
+    /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/gu,
+    (_match, lead: string, name: string) => `${lead}/\u200B${name}`,
+  )
+}
+
+/** `renderTemplate` 的选项。 */
+export interface RenderTemplateOptions {
+  /** 代入值是否转义 `/skill-name` 手势；模板原文不转义。默认不转义。 */
+  readonly escape?: boolean
 }
 
 /**
  * 渲染一个 prompt 模板。
  *
  * @param template 模板原文
- * @param context 例如 `{ goal, nodes, step, runId }`
+ * @param context 例如 `{ content, goal, step }`
+ * @param options 代入值是否转义 `/skill-name` 手势
  * @returns 渲染后的文本
  */
-export function renderTemplate(template: string, context: Record<string, unknown>): string {
+export function renderTemplate(
+  template: string,
+  context: Record<string, unknown>,
+  options: RenderTemplateOptions = {},
+): string {
   if (typeof template !== 'string') throw new TemplateError('template must be a string')
   return template.replace(PLACEHOLDER, (_match, raw) => {
     const parsed = parsePlaceholder(raw)
@@ -112,7 +161,8 @@ export function renderTemplate(template: string, context: Record<string, unknown
         path,
       )
     }
-    return formatValue(value)
+    const rendered = formatValue(value)
+    return options.escape === true ? escapeSkillGestures(rendered) : rendered
   })
 }
 

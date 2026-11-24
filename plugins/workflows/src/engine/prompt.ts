@@ -1,36 +1,40 @@
 /**
- * 任务执行上下文组装。
+ * 任务执行提示组装。
  *
- * 一个任务 = 一条全新会话。执行提示词包含固定顺序的几段：
+ * 一个任务 = 一条全新会话。v9 起的执行提示只有两段：
  *
- * 1. 工作流基准规则（引擎注入的能力说明：读写资产、创建后续任务、提交结果）；
- * 2. 工作树规则（仅任务类型的 `worktree` 不是 `none` 时出现：`create` 要求
- *    执行者自己按仓库调用 `create_worktree`，`guard` 只要求发现未提交修改时
- *    先停下来问用户）；
- * 3. 任务类型的定义：这个任务类型是谁、要做什么、有什么预设信息；
- * 4. 任务内容：创建者这一次给出的东西。
+ * 1. 上下文（非用户来源的 `inject`）：工作流规则（引擎注入的能力说明）与工作树
+ *    规则（仅任务类型的 `worktree` 不是 `none` 时出现）；
+ * 2. 用户消息（`followup`，来源是 `user`）：任务类型的定义按本任务的任务内容渲染
+ *    后的文本。定义省略时，用户消息就是整份任务内容——它才是这一次的具体指令。
+ *
+ * 代入值（任务内容可能来自表单或上游 agent）要转义 `/skill-name` 手势：定义原文
+ * 里的手势由流程维护者写，仍然生效；代入值里的不能借用户身份触发 skill
+ * （ADR 0033 / ADR 0024 的取代关系）。
  *
  * 岗位名、通道 id、作业编号、依赖清单等属于编排与页面层的信息，不进入执行
- * 提示词，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
+ * 提示，避免把「岗位 / 通道」这些构建工作流的概念暴露给执行者。
  *
- * 派发时拆成两条消息投递：规则 + 内容走非用户来源的上下文，只有任务类型
- * 的定义按用户身份投递（宿主只在这类消息里识别 `/skill-name` 手势）。落盘的
- * prompt 文件仍保存完整文本。
+ * v8 及更早的作业快照仍按旧语义组装（上下文 = 规则 + 内容，用户消息 = 定义原文），
+ * 保证升级时运行中的作业照常跑完。
  *
- * 同时负责结束任务的投递文本。
+ * 同时负责结束任务的投递文本与助理会话的固定提示。
  *
  * @module @buka/dsh-plugin-workflows/engine/prompt
  */
 
 import { findTaskType } from '../definition/validate.ts'
-import type {
-  JobRecord,
-  JsonValue,
-  PositionDefinition,
-  TaskRecord,
-  TaskTypeDefinition,
-  WorkflowDefinition,
+import {
+  DEFINITION_TEMPLATE_VERSION,
+  DEFINITION_VERSION,
+  type JobRecord,
+  type JsonValue,
+  type PositionDefinition,
+  type TaskRecord,
+  type TaskTypeDefinition,
+  type WorkflowDefinition,
 } from '../domain/types.ts'
+import { escapeSkillGestures, renderTemplate } from '../template.ts'
 
 /**
  * 任务类型配置了工作树模式时，执行提示词里的工作树段。
@@ -46,6 +50,8 @@ export interface ExecutionPromptInput {
   readonly taskType: TaskTypeDefinition
   /** 任务类型要求工作树时的实际形态；没有配置时不传。 */
   readonly worktree?: WorktreePromptMode | undefined
+  /** 作业快照的定义版本；省略按当前版本（v9）处理。 */
+  readonly definitionVersion?: number | undefined
 }
 
 /** 基准规则：能力说明，不暴露岗位 / 通道。 */
@@ -53,7 +59,7 @@ const BASELINE_RULES = [
   '## 工作流规则',
   '- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。',
   '- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。',
-  '- 创建后续任务：`buka_task_targets` 列出当前可创建的任务，`buka_task_create` 按 `target` 和 `content` 创建（不传 `deps` 时默认依赖本任务）；是否需要创建、创建什么，见下面的任务类型的定义。',
+  '- 创建后续任务：`buka_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。',
   '- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。',
 ].join('\n')
 
@@ -67,15 +73,6 @@ const WORKTREE_RULES = [
 const WORKTREE_GUARD_RULES = [
   '## 工作区',
   '本任务不创建新的工作树。开始前先检查当前工作区以及任务要修改的每个仓库是否有未提交的修改；如果有，必须停下来询问用户，得到明确答复前不要开始改动。',
-].join('\n')
-
-/** 人任务助理的基准规则：代人处理，动作由人确认。 */
-const ASSISTANT_RULES = [
-  '## 工作流规则',
-  '- 你代表人与工作人员沟通，拿到人的决定后用 `buka_task_complete` 提交。',
-  '- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件。',
-  '- 写入资产：提交结果时用 `attachments` 归档产出文件（path 相对你的工作目录）。',
-  '- 需要创建后续任务时，用 `buka_task_actions` 看这个任务可选的动作，用 `buka_task_complete` 带上 `action` 与 `input`。',
 ].join('\n')
 
 /**
@@ -125,13 +122,7 @@ function worktreeSection(mode: WorktreePromptMode | undefined): string | null {
   return null
 }
 
-/** 有内容时给出一段；空串 / 缺省时整段省略。 */
-function textSection(title: string, text: string | undefined): string | null {
-  const trimmed = typeof text === 'string' ? text.trim() : ''
-  return trimmed === '' ? null : `## ${title}\n${trimmed}`
-}
-
-/** 任务内容段：字符串原样，其余按 JSON 展示。 */
+/** 任务内容段（v8 快照用）：字符串原样，其余按 JSON 展示。 */
 function contentSection(content: JsonValue): string {
   if (typeof content === 'string') return ['## 任务内容', content].join('\n')
   return ['## 任务内容', '```json', JSON.stringify(content, null, 2), '```'].join('\n')
@@ -143,7 +134,47 @@ function joinSections(sections: ReadonlyArray<string | null>): string {
 }
 
 /**
- * 组装一个 agent 任务的完整 prompt。
+ * 渲染一个任务的用户消息：定义是模板时就按任务内容渲染；定义省略时就是整份
+ * 任务内容。返回的文本已经转义过 `/skill-name` 手势。
+ *
+ * 定义渲染成空白（例如只引用可选字段且值都缺失）时同样退回整份任务内容：用户
+ * 消息永远非空，执行者不会收到一条空指令。
+ *
+ * @param taskType 任务类型（定义可能是模板）
+ * @param content 任务内容
+ * @returns 用户消息；任何情况下都不是空串
+ */
+export function renderTaskTypeDefinition(
+  taskType: TaskTypeDefinition,
+  content: JsonValue | undefined,
+): string {
+  const definition = typeof taskType.definition === 'string' ? taskType.definition.trim() : ''
+  if (definition !== '') {
+    const rendered = renderTemplate(definition, { content: content ?? null }, { escape: true })
+    if (rendered.trim() !== '') return rendered
+  }
+  const rendered = renderTemplate('{{content}}', { content: content ?? null }, { escape: true })
+  if (rendered.trim() !== '') return rendered
+  // 空字符串内容也要有一条非空消息；JSON 字面量仍算「整份内容」。
+  return escapeSkillGestures(JSON.stringify(content ?? null))
+}
+
+/** 执行提示的拆分结果。 */
+export interface ExecutionPromptSections {
+  /** 规则（+ 工作树）：用 `inject` 投递，来源不是 `user`。 */
+  readonly context: string
+  /**
+   * 用户消息：定义渲染结果或整份任务内容，用 `followup` 以用户身份投递。
+   *
+   * v8 快照没有定义时是 null（旧行为：只发一条上下文消息）。
+   */
+  readonly userPrompt: string | null
+  /** 完整文本（上下文 + 用户消息）：落盘与排查用，顺序与到达顺序一致。 */
+  readonly prompt: string
+}
+
+/**
+ * 组装一个 agent 任务的完整 prompt（落盘文本）。
  *
  * @param input 任务、岗位与任务类型
  * @returns prompt 文本
@@ -153,31 +184,26 @@ export function buildExecutionPrompt(input: ExecutionPromptInput): string {
 }
 
 /**
- * 执行提示的拆分结果。
- *
- * 三段内容的作者不同，投递身份也不同：规则由插件生成、内容可能来自表单或上游
- * agent，两者都走非用户来源的上下文；只有流程维护者写的定义按用户身份投递，
- * 这样定义里的 `/skill-name` 才会被宿主识别。
- */
-export interface ExecutionPromptSections {
-  /** 规则 + 任务内容：用 `inject` 投递，来源不是 `user`。 */
-  readonly context: string
-  /** 任务类型的定义：用 `followup` 以用户身份投递；没有定义时是 null。 */
-  readonly userPrompt: string | null
-  /** 完整文本（规则 + 定义 + 内容）：落盘与排查用，顺序与旧版一致。 */
-  readonly prompt: string
-}
-
-/**
- * 按作者拆分执行提示。
+ * 按投递身份拆分执行提示。
  *
  * @param input 任务、岗位与任务类型
- * @returns 完整文本、上下文段与用户提示段
+ * @returns 完整文本、上下文段与用户消息段
  */
 export function buildExecutionPromptSections(input: ExecutionPromptInput): ExecutionPromptSections {
-  const { taskType, task } = input
-  const definition = typeof taskType.definition === 'string' ? taskType.definition.trim() : ''
-  const content = contentSection(task.content)
+  // v9 起定义是模板；更早的作业快照按旧语义组装。
+  if ((input.definitionVersion ?? DEFINITION_VERSION) < 9)
+    return legacyExecutionPromptSections(input)
+
+  const context = joinSections([BASELINE_RULES, worktreeSection(input.worktree)])
+  const userPrompt = renderTaskTypeDefinition(input.taskType, input.task.content)
+  return { context, userPrompt, prompt: joinSections([context, userPrompt]) }
+}
+
+/** v8 及更早快照的旧拆分：上下文 = 规则 + 内容，用户消息 = 定义原文。 */
+function legacyExecutionPromptSections(input: ExecutionPromptInput): ExecutionPromptSections {
+  const definition =
+    typeof input.taskType.definition === 'string' ? input.taskType.definition.trim() : ''
+  const content = contentSection(input.task.content)
   const worktree = worktreeSection(input.worktree)
   return {
     context: joinSections([BASELINE_RULES, worktree, content]),
@@ -199,6 +225,19 @@ export function buildExecutionPromptSections(input: ExecutionPromptInput): Execu
  * @returns 投递文本
  */
 export function buildEndDeliveryText(job: JobRecord, task: TaskRecord): string {
+  if (job.definition.version >= DEFINITION_TEMPLATE_VERSION) {
+    return renderTemplate(
+      [
+        `工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
+        '',
+        '{{content}}',
+        '',
+        '如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。',
+      ].join('\n'),
+      { content: task.content ?? null },
+      { escape: true },
+    )
+  }
   return [
     `工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
     '',
@@ -209,16 +248,14 @@ export function buildEndDeliveryText(job: JobRecord, task: TaskRecord): string {
 }
 
 /**
- * 助理承办人任务的 prompt。
+ * 助理承办人任务的固定提示。
  *
- * @param input 任务、岗位与任务类型
- * @returns prompt 文本
+ * 助理只负责对接处理人；任务内容用 `buka_task_get` 读，人任务的动作见
+ * `buka_task_complete` 的工具说明（由宿主列出工具）。
+ *
+ * @param input 任务与任务类型
+ * @returns 提示文本
  */
 export function buildAssistantPrompt(input: ExecutionPromptInput): string {
-  const { taskType, task } = input
-  return joinSections([
-    ASSISTANT_RULES,
-    textSection('任务类型的定义', taskType.definition),
-    contentSection(task.content),
-  ])
+  return `请你负责对接任务「${input.taskType.label}」（${input.task.id}）的处理人，并严格执行处理人对于该任务的决策。`
 }

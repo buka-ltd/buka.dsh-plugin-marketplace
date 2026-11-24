@@ -162,6 +162,28 @@ export interface ActionDefinition {
   readonly creates: readonly CreationDefinition[]
 }
 
+/**
+ * 一张任务可以创建的下游目标（给执行者看的投影）。
+ *
+ * 只给任务类型与任务内容格式，不带岗位 / 通道：通道由引擎解析。
+ */
+export interface CreatableTarget {
+  /** 创建时传给 `buka_task_create` 的 target。 */
+  readonly target: string
+  /** 任务类型展示名。 */
+  readonly label: string
+  /** 目标任务内容 schema；没有声明时不传。 */
+  readonly content?: JsonSchema | undefined
+}
+
+/** 人任务可点的一个动作（给执行者看的投影）：不带创建声明，创建由引擎执行。 */
+export interface TaskAction {
+  readonly id: string
+  readonly label: string
+  /** 动作表单 schema；没有表单时不传。 */
+  readonly input?: JsonSchema | undefined
+}
+
 /** 任务类型的工作树模式：不注入 / 保护检查 / 主动创建。 */
 export type WorktreeMode = 'none' | 'guard' | 'create'
 
@@ -172,7 +194,10 @@ export interface TaskTypeDefinition {
   /**
    * 这个任务类型是谁、要做什么、有什么预设信息；只给执行者看。
    *
-   * 编排者预先写死的事实放这里（例如外部系统的地址），创建者不用、也不该重复提供。
+   * v9 起它是一段模板：可以用 `{{content}}` / `{{content.<path>}}` 引用这一次的
+   * 任务内容，执行时渲染成以用户身份投递的那条消息。编排者预先写死的固定事实
+   * 仍然放这里（例如外部系统的地址）；代入值里的 `/skill` 手势会被转义，模板
+   * 原文里的仍然生效。
    */
   readonly definition?: string | undefined
   /** 任务内容的格式约束；创建者按它填写，引擎创建任务时校验。 */
@@ -263,9 +288,9 @@ export interface BudgetDefinition {
   readonly maxDurationHours: number
 }
 
-/** 工作流 v8 定义。 */
+/** 工作流定义（当前格式 v9；作业快照可能是旧版本）。 */
 export interface WorkflowDefinition {
-  readonly version: 8
+  readonly version: number
   readonly name: string
   /** 列表里的摘要；不是给执行者看的。 */
   readonly description?: string | undefined
@@ -277,7 +302,14 @@ export interface WorkflowDefinition {
 }
 
 /** 定义格式的当前版本；其它版本一律视为「待升级」。 */
-export const DEFINITION_VERSION = 8 as const
+export const DEFINITION_VERSION = 9 as const
+
+/**
+ * 任务类型的定义从这一版起是模板（`{{content}}` / `{{content.<path>}}`）。
+ *
+ * 更早的作业快照仍按旧语义组装执行提示：定义原文走用户消息、任务内容走上下文。
+ */
+export const DEFINITION_TEMPLATE_VERSION = 9
 
 /** 工作流定义的一个版本快照。 */
 export interface WorkflowVersionRecord {

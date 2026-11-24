@@ -17,6 +17,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { DeliveryRule, JsonValue } from '../domain/types.ts'
 import type { WorkflowEngine } from '../engine/engine.ts'
 import type { ResolvedOptions } from '../options.ts'
+import {
+  DEFAULT_TASK_COMPLETE_DESCRIPTION,
+  DEFAULT_TASK_CREATE_DESCRIPTION,
+} from './descriptions.ts'
 
 /** 工具注册依赖。 */
 export interface WorkflowToolDeps {
@@ -85,9 +89,9 @@ function sessionIdOf(context: { agent?: { id?: unknown } }): string {
 }
 
 /** 定义格式的简短帮助（给编排 agent）。 */
-const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
+const DEFINITION_HELP = `Workflow definition (v9) JSON shape:
 {
-  "version": 8, "name": "...", "description": "...",
+  "version": 9, "name": "...", "description": "...",
   "budgets": { "maxTasks": 200, "maxDurationHours": 72 },
   "start": {
     "content": <JSON Schema object: what the starter fills in>,
@@ -102,7 +106,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
       "executor": { "kind": "worker", "id": "<worker identifier>" } | { "kind": "human" },
       "taskTypes": [
         { "id": "dev.implement", "label": "开发",
-          "definition": "<what this kind of task is and what to do; preset facts live here>",
+          "definition": "<what this kind of task is and what to do; a template over {{content.<path>}}>",
           "content": <JSON Schema object: the task content the creator must supply>,
           "creates": [   // robot positions only: tasks created when this task finishes
             { "channel": "<channel id from this position>", "type": "<task type id>",
@@ -127,7 +131,7 @@ const DEFINITION_HELP = `Workflow definition (v8) JSON shape:
     { "id": "deploy.end", "label": "交付", "from": "deploy", "to": "end" }
   ]
 }
-The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "plan", "agentPreset", "concurrency" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service); the per-task "content" is what the creator supplies. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". An agent task type may set "plan": true to start the session in DSH plan mode, and "agentPreset" to the id of the agent preset its session starts with (the task type overrides the worker default, which overrides the plugin option; plan mode and the preset are independent). An agent or robot task type may set "concurrency" to a positive integer: the maximum number of tasks of that type running at once inside one job (default 1, waiting tasks start FIFO). Concurrency is per task type, not per position, and human tasks do not use the engine quota. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). A placeholder path ending in "?" renders an empty string when the value is missing, for optional form fields; a path without "?" is strict and fails when missing. The referenced path must exist in the schema either way. Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`
+The start and end nodes are two built-in task types, one declared per workflow: "start" accepts only "content" (the job input schema) and "next" (its creation declarations, at least one), "end" accepts only "content" (the final report schema). Their id, label and definition are fixed; "actions", "assistant", "plan", "agentPreset", "concurrency" and "worktree" are invalid there. Unknown fields are rejected everywhere in the definition. The start task is handled by the built-in "engine" worker; the end task is handled by the starter (or the delivery assistant chosen when the job starts). Rules: schemas use the restricted subset (type/description/properties/required/additionalProperties/items/enum/const/oneOf; top-level type must be "object"). A position whose executor is a robot (for example clock) must declare a content schema for every task type that covers the program's input contract: clock reads an object with required "until" (ISO 8601 timestamp), and saving the definition rejects task types that do not declare it. Robot task types may also declare "creates": when the robot finishes a task, the engine creates those tasks along the channels, and each created task depends on the finished task; their content templates may only use {{content.<path>}} (the robot's task content). A task type's "definition" is preset information the executor must know (for example the CI pipeline of each service), written as a template over the task content: {{content}} / {{content.<path>}} render into the user message the executor receives, and the per-task "content" is what the creator supplies. Saving requires every referenced path to be declared in that task type's content schema, and a path passing through an optional field must end with "?"; {{input.*}} and {{nodes.*}} are rejected. Substituted values cannot trigger /skill gestures; gestures written in the definition itself still work. An agent task type may set "worktree" to one of three values: "none" injects no worktree prompt (omitting it means none), "guard" only tells the executor to check that the workspace and every repository it will modify is clean and to stop and ask the user when there are uncommitted changes, and "create" tells the executor to create and enter new Git worktrees itself with create_worktree (one per repository it modifies, so a task may touch several repositories). "create" only takes effect when the user has enabled the worktree plugin; when it is not enabled it degrades to "guard". An agent task type may set "plan": true to start the session in DSH plan mode, and "agentPreset" to the id of the agent preset its session starts with (the task type overrides the worker default, which overrides the plugin option; plan mode and the preset are independent). An agent or robot task type may set "concurrency" to a positive integer: the maximum number of tasks of that type running at once inside one job (default 1, waiting tasks start FIFO). Concurrency is per task type, not per position, and human tasks do not use the engine quota. Prompt-like text must NOT mention positions, channels, workflows or graph structure — the executor only knows its own task, the tools and its content. A channel is a named dispatch route: "id" is a lowercase unique identifier, "label" is the human-readable name shown in the graph (the engine never reads it), "from"/"to" are node ids (a position, or the built-in "start"/"end"). Craft tasks by channel + type in declared creations; the runtime tools use task-type targets. Channels into "end" cannot whitelist types and need no "type". Every position must be reachable from start and able to reach end. A cycle needs at least one explicitly marked back channel; channels between the same ordered pair must agree on "back". Templates may only reference {{content.<path>}} (the content of the task being completed) and {{input.<path>}} (the action form). A placeholder path ending in "?" renders an empty string when the value is missing, for optional form fields; a path without "?" is strict and fails when missing. The referenced path must exist in the schema either way. Human task types carry "actions"; a submission may also create nothing. The end task is acknowledged by the starter, so its content is the final report.`
 
 /**
  * 注册全部工作流工具。
@@ -149,12 +153,12 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
   register(
     defineTool({
       name: 'buka_workflow_save',
-      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v8 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
+      description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v9 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
           type: 'json',
           required: true,
-          description: 'The complete workflow v8 definition object.',
+          description: 'The complete workflow v9 definition object.',
         },
         id: { type: 'string', description: 'Existing workflow id; omit to create a new workflow.' },
       },
@@ -336,8 +340,6 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(defineJobStatusTool(ready), starterVisible)
   register(defineJobCancelTool(ready), starterVisible)
-  register(defineTaskTargetsTool(ready), executionVisible)
-  register(defineTaskActionsTool(ready), executionVisible)
   register(defineTaskCreateTool(ready), executionVisible)
   register(defineTaskCompleteTool(ready), executionVisible)
   register(defineBoardTool(ready), executionVisible)
@@ -427,65 +429,24 @@ function defineJobCancelTool(ready: () => Promise<WorkflowEngine>) {
   })
 }
 
-/** 可创建目标工具。 */
-function defineTaskTargetsTool(ready: () => Promise<WorkflowEngine>) {
-  return defineTool({
-    name: 'buka_task_targets',
-    description:
-      'List the tasks this task can create next in the current job. Each target carries the content schema it expects. Call this before buka_task_create.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { targets: { type: 'json', required: true } },
-      },
-      render: (_args, value) => text(JSON.stringify(value.targets, null, 2)),
-    },
-    async execute(_args, exec) {
-      const sessionId = sessionIdOf(exec)
-      if (sessionId === '') throw new Error('buka_task_targets must be called from a task session')
-      const engine = await ready()
-      return { targets: toolJson(engine.creatableTargetsForSession(sessionId)) }
-    },
-  })
-}
-
-/** 人任务动作工具。 */
-function defineTaskActionsTool(ready: () => Promise<WorkflowEngine>) {
-  return defineTool({
-    name: 'buka_task_actions',
-    description:
-      'List the actions the human task this session is handling can take: each action carries a label and, when it needs input, a form schema. Pick one, fill the form, then call buka_task_complete with `action` (and `input`).',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { actions: { type: 'json', required: true } },
-      },
-      render: (_args, value) => text(JSON.stringify(value.actions, null, 2)),
-    },
-    async execute(_args, exec) {
-      const sessionId = sessionIdOf(exec)
-      if (sessionId === '') throw new Error('buka_task_actions must be called from a task session')
-      const engine = await ready()
-      return { actions: toolJson(engine.taskActionsForSession(sessionId)) }
-    },
-  })
-}
-
-/** 派生任务工具。 */
-function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
+/**
+ * 派生任务工具。
+ *
+ * @param ready 引擎 getter
+ * @param description 工具说明；任务会话传入带本任务 targets 的版本
+ */
+export function defineTaskCreateTool(
+  ready: () => Promise<WorkflowEngine>,
+  description: string = DEFAULT_TASK_CREATE_DESCRIPTION,
+) {
   return defineTool({
     name: 'buka_task_create',
-    description:
-      'Create a task in the current job (callable any number of times while executing a task). Call buka_task_targets first to see the available targets and their content schema. Dependencies default to the current task when omitted. The engine validates the content, dependencies (must exist in this job, no cycles) and the workflow budget.',
+    description,
     parameters: {
       target: {
         type: 'string',
         required: true,
-        description: 'Target id from buka_task_targets ("end" for the final delivery task).',
+        description: 'Target id from this description ("end" for the final delivery task).',
       },
       content: {
         type: 'json',
@@ -515,7 +476,7 @@ function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
       if (sessionId === '') throw new Error('buka_task_create must be called from a task session')
       const target = typeof args.target === 'string' ? args.target.trim() : ''
       if (target === '') {
-        throw new Error('buka_task_create requires a target from buka_task_targets')
+        throw new Error('buka_task_create requires a target listed in its description')
       }
       const engine = await ready()
       const task = await engine.createTaskFromTarget({
@@ -529,12 +490,19 @@ function defineTaskCreateTool(ready: () => Promise<WorkflowEngine>) {
   })
 }
 
-/** 提交结果工具。 */
-function defineTaskCompleteTool(ready: () => Promise<WorkflowEngine>) {
+/**
+ * 提交结果工具。
+ *
+ * @param ready 引擎 getter
+ * @param description 工具说明；任务会话传入带本任务动作的版本
+ */
+export function defineTaskCompleteTool(
+  ready: () => Promise<WorkflowEngine>,
+  description: string = DEFAULT_TASK_COMPLETE_DESCRIPTION,
+) {
   return defineTool({
     name: 'buka_task_complete',
-    description:
-      'Submit the result of the task this session is executing: a summary `text` plus optional attachments. There is no structured result schema. Assistants of a human task also pass `action` (from buka_task_actions) and the action `input`.',
+    description,
     parameters: {
       text: {
         type: 'string',
@@ -543,7 +511,7 @@ function defineTaskCompleteTool(ready: () => Promise<WorkflowEngine>) {
       },
       action: {
         type: 'string',
-        description: 'Human tasks only: the action id from buka_task_actions.',
+        description: 'Human tasks only: the action id listed in this description.',
       },
       input: {
         type: 'json',

@@ -35,7 +35,7 @@ import {
 import { assertRobotContent, buildInitialTasks } from '../plugins/workflows/src/engine/tasks.ts'
 import { worktreeToolAvailable } from '../plugins/workflows/src/engine/worktree.ts'
 import { WorkflowStore } from '../plugins/workflows/src/store/index.ts'
-import { toV7, toV8 } from './workflows-fixture-v7.mjs'
+import { toV7, toV9 } from './workflows-fixture-v7.mjs'
 
 // ---------------------------------------------------------------------------
 // fixture：spec §5.7 的「研发交付」工作流与 workers 登记
@@ -266,9 +266,9 @@ function sampleSource() {
   }
 }
 
-/** 研发交付 v8 定义。 */
+/** 研发交付 v9 定义（当前格式）。 */
 function sampleDefinition() {
-  return toV8(sampleSource())
+  return toV9(sampleSource())
 }
 
 /** 研发交付 v7 旧定义（作业快照兼容测试用）。 */
@@ -501,10 +501,10 @@ test('domain: terminal helpers', () => {
 // 定义校验
 // ---------------------------------------------------------------------------
 
-test('definition: accepts the v8 研发交付 reference workflow', () => {
+test('definition: accepts the v9 研发交付 reference workflow', () => {
   const result = validateWorkflowDefinition(sampleDefinition(), { workers: sampleWorkers() })
   const definition = expectOk(result)
-  assert.equal(definition.version, 8)
+  assert.equal(definition.version, 9)
   assert.equal(definition.name, '研发交付')
   assert.equal(definition.positions.length, 5)
   assert.equal(definition.channels.length, 9)
@@ -521,6 +521,133 @@ test('definition: accepts the v8 研发交付 reference workflow', () => {
   const approve = findPosition(definition, 'approve')
   assert.equal(approve?.executor.kind, 'human')
   assert.equal(approve?.taskTypes[0].assistant, '沟通助理')
+})
+
+test('definition: a v9 task type definition may reference declared task content', () => {
+  const result = validateWorkflowDefinition(
+    mutate((d) => {
+      const dev = d.positions.find((position) => position.id === 'dev')
+      dev.taskTypes[0].definition = '需求：{{content.requirement}}\n\n{{content}}'
+    }),
+    { workers: sampleWorkers() },
+  )
+  const definition = expectOk(result)
+  assert.equal(
+    findTaskType(definition, 'dev.implement')?.definition,
+    '需求：{{content.requirement}}\n\n{{content}}',
+  )
+})
+
+test('definition: optional paths must be marked with ?', () => {
+  const withOptional = (change) =>
+    mutate((d) => {
+      const dev = d.positions.find((position) => position.id === 'dev')
+      dev.taskTypes[0].content.properties.remark = { type: 'string' }
+      dev.taskTypes[0].content.properties.detail = {
+        type: 'object',
+        properties: { note: { type: 'string' } },
+      }
+      change(dev.taskTypes[0])
+    })
+  const workers = sampleWorkers()
+
+  expectOk(
+    validateWorkflowDefinition(
+      withOptional((taskType) => {
+        taskType.definition = '备注：{{content.remark?}}'
+      }),
+      { workers },
+    ),
+  )
+  expectOk(
+    validateWorkflowDefinition(
+      withOptional((taskType) => {
+        taskType.definition = '细节：{{content.detail.note?}}'
+      }),
+      { workers },
+    ),
+  )
+  // 必填路径写 ? 不报错：作者显式选择缺失时渲染空串。
+  expectOk(
+    validateWorkflowDefinition(
+      withOptional((taskType) => {
+        taskType.definition = '需求：{{content.requirement?}}'
+      }),
+      { workers },
+    ),
+  )
+
+  expectIssue(
+    validateWorkflowDefinition(
+      withOptional((taskType) => {
+        taskType.definition = '备注：{{content.remark}}'
+      }),
+      { workers },
+    ),
+    /positions\[1\]\.taskTypes\[0\]\.definition/u,
+    /passes through optional fields.*\{\{content\.remark\?\}\}/u,
+  )
+  expectIssue(
+    validateWorkflowDefinition(
+      withOptional((taskType) => {
+        taskType.definition = '细节：{{content.detail.note}}'
+      }),
+      { workers },
+    ),
+    /positions\[1\]\.taskTypes\[0\]\.definition/u,
+    /passes through optional fields.*\{\{content\.detail\.note\?\}\}/u,
+  )
+})
+
+test('definition: rejects undeclared and non-content template paths', () => {
+  const workers = sampleWorkers()
+  const withDefinition = (text) =>
+    mutate((d) => {
+      d.positions.find((position) => position.id === 'dev').taskTypes[0].definition = text
+    })
+
+  expectIssue(
+    validateWorkflowDefinition(withDefinition('{{content.nope}}'), { workers }),
+    /positions\[1\]\.taskTypes\[0\]\.definition/u,
+    /is not declared in the task type content schema/u,
+  )
+  for (const text of ['{{input.reason}}', '{{nodes.dev.text}}', '{{goal}}']) {
+    expectIssue(
+      validateWorkflowDefinition(withDefinition(text), { workers }),
+      /positions\[1\]\.taskTypes\[0\]\.definition/u,
+      /must reference content or content\.<path>/u,
+    )
+  }
+  expectIssue(
+    validateWorkflowDefinition(withDefinition('{{content.}}'), { workers }),
+    /positions\[1\]\.taskTypes\[0\]\.definition/u,
+    /invalid template path/u,
+  )
+})
+
+test('definition: a task type without a content schema cannot reference content fields', () => {
+  const result = validateWorkflowDefinition(
+    mutate((d) => {
+      const dev = d.positions.find((position) => position.id === 'dev')
+      delete dev.taskTypes[0].content
+      dev.taskTypes[0].definition = '{{content.requirement}}'
+    }),
+    { workers: sampleWorkers() },
+  )
+  expectIssue(result, /positions\[1\]\.taskTypes\[0\]\.definition/u, /declares no content schema/u)
+})
+
+test('definition: v8 is no longer accepted and is reported as outdated', () => {
+  expectIssue(
+    validateWorkflowDefinition(
+      mutate((d) => {
+        d.version = 8
+      }),
+      { workers: sampleWorkers() },
+    ),
+    /^version$/u,
+    /must be 9/u,
+  )
 })
 
 test('definition: allows parallel channels between the same pair and overlapping types', () => {
@@ -544,7 +671,7 @@ test('definition: allows parallel channels between the same pair and overlapping
 test('definition: rejects structural and identity errors', () => {
   const workers = sampleWorkers()
   const cases = [
-    [mutate((d) => (d.version = 7)), /^version$/, /must be 8/],
+    [mutate((d) => (d.version = 7)), /^version$/, /must be 9/],
     [mutate((d) => (d.positions = [])), /^positions$/, /non-empty array/],
     [
       mutate((d) => d.positions.push(clone(d.positions[0]))),
@@ -872,7 +999,7 @@ test('definition: rejects budget and end contract errors', () => {
 /** clock 机器人工作流：开始 → 等待（clock）→ 结束；任务内容带 `until`。 */
 function sampleClockDefinition() {
   return {
-    version: 8,
+    version: 9,
     name: '定时等待',
     budgets: { maxTasks: 10, maxDurationHours: 1 },
     start: {
@@ -914,7 +1041,7 @@ function sampleClockDefinition() {
 /** 机器人完成后创建：开始 → 等待（clock）→ 执行（人）→ 结束。 */
 function robotCreatesDefinition() {
   return {
-    version: 8,
+    version: 9,
     name: '到点执行',
     budgets: { maxTasks: 10, maxDurationHours: 24 },
     start: {

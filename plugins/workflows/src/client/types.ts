@@ -63,7 +63,7 @@ export const LIVE_REFRESH_MS = 1500
 export const REFRESH_MS = 5000
 
 /** 当前工作流定义格式；与宿主 `DEFINITION_VERSION` 保持一致。 */
-export const DEFINITION_VERSION = 8
+export const DEFINITION_VERSION = 9
 
 /** 一个会话在 DSH 客户端里的即时状态；只取本插件判定「是否在等人」要用的字段。 */
 export interface SessionStatusSummary {

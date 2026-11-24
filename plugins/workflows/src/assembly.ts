@@ -39,6 +39,7 @@ import { registerWorkflowRoutes } from './routes/index.ts'
 import { SERVICE_NAME, WorkflowQueryService } from './service.ts'
 import { openWorkflowStore } from './store/open.ts'
 import { registerWorkflowTools } from './tools/index.ts'
+import { installTaskScopedTools } from './tools/task-scope.ts'
 
 /**
  * 装配工作流一半。
@@ -142,6 +143,9 @@ export function applyWorkflows(ctx: Context, config: WorkflowsConfig): void {
       )
     },
   })
+
+  // 任务会话带本任务说明的创建 / 完成工具；会话释放或卸载时撤销。
+  installTaskScopedTools({ ctx, ready: ensureReady })
 
   const commandRegistered = registerJobCommand({ ctx, ready: ensureReady })
   if (!commandRegistered) {

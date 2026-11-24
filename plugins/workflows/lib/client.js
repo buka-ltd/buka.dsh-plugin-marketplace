@@ -5225,7 +5225,7 @@ window.__ModuleLoader__.load({
     		problem: jobs.filter((job) => job.status === "failed" || job.status === "cancelled").length
     	};
     	const visible = sortJobs(filterJobs(jobs, state.jobFilter));
-    	const outdated = typeof state.workflow.data?.workflow?.definition?.version === "number" && state.workflow.data?.workflow?.definition?.version !== 8;
+    	const outdated = typeof state.workflow.data?.workflow?.definition?.version === "number" && state.workflow.data?.workflow?.definition?.version !== 9;
     	const newJobAction = retired || outdated || unavailable || workflowId === "" ? null : h("button", {
     		key: "new-job-empty",
     		type: "button",
@@ -5253,7 +5253,7 @@ window.__ModuleLoader__.load({
     /** 一张作业卡片。 */
     function renderJobCard(page, workflowId, job) {
     	const { t, actions } = page;
-    	const oldVersion = typeof job.definitionVersion === "number" && job.definitionVersion !== 8;
+    	const oldVersion = typeof job.definitionVersion === "number" && job.definitionVersion !== 9;
     	const legacy = typeof job.definitionVersion === "number" && job.definitionVersion < 7;
     	const total = Object.values(job.taskCounts ?? {}).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0);
     	const unavailable = job.availability?.available === false;
@@ -5308,7 +5308,7 @@ window.__ModuleLoader__.load({
     	const retired = workflow.status === "retired";
     	const unavailable = workflow.availability?.available === false;
     	const missing = Array.isArray(workflow.availability?.missingWorkers) ? workflow.availability?.missingWorkers : [];
-    	const outdated = typeof workflow.definitionVersion === "number" && workflow.definitionVersion !== 8;
+    	const outdated = typeof workflow.definitionVersion === "number" && workflow.definitionVersion !== 9;
     	return h("li", { key: workflow.id }, h("button", {
     		type: "button",
     		className: `buka-workflows-card${retired ? " is-disabled" : ""}`,

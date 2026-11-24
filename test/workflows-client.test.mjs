@@ -16,7 +16,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-import { toV8 } from './workflows-fixture-v7.mjs'
+import { toV9 } from './workflows-fixture-v7.mjs'
 
 const CLIENT_DIR = path.resolve('plugins/workflows/src/client')
 
@@ -296,7 +296,7 @@ function render(client, patch, options = {}) {
 }
 
 /** 工作流定义。 */
-const DEFINITION = toV8({
+const DEFINITION = toV9({
   version: 6,
   name: '研发交付',
   description: '需求 → 研发 / 测试准备 → 验证 → 审批 → 发布',
@@ -963,7 +963,7 @@ test('工作流列表：停用的工作流灰显并排在后面', async () => {
   assert.match(text, /内容审核/u)
   assert.match(text, /已停用/u)
   assert.match(text, /12 个作业/u)
-  assert.match(text, /待升级/u, 'definition version 7 is not the current v8')
+  assert.match(text, /待升级/u, 'definition version 7 is not the current v9')
   assert.ok(classes.includes('is-disabled'), 'retired card is greyed out')
   assert.ok(
     text.indexOf('研发交付') < text.indexOf('内容审核'),
