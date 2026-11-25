@@ -4,5 +4,5 @@
 # 一半把 warn 色提示注册到新建会话输入框下方统计行的最右端（上下文用量圆环
 # 之后）。
 - insert:
-    - id: check-buka-skill-update
+    - id: check-skill-update
       name: '@buka/dsh-plugin-skill-update-check'

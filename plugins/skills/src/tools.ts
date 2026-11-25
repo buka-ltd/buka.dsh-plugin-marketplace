@@ -1,7 +1,7 @@
 /**
  * 模型工具：只读列举全局 skills。
  *
- * 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
+ * 一个只读工具 `skill_list`，让模型能回答「本机装了哪些全局 skill、它们
  * 是不是 npx skills 装的」。安装与卸载都是写操作，只留给页面上的用户按钮，
  * 不开放给模型。
  *
@@ -33,7 +33,7 @@ export function registerTools(ctx: Context, deps: ToolDeps): void {
   ctx.inject(['tools'], (toolCtx) => {
     toolCtx.tools.register(
       defineTool({
-        name: 'buka_skills',
+        name: 'skill_list',
         description:
           'List the skills installed globally for every DSH session (~/.agents/skills and ~/.dsh/skills) and mark the ones the npx skills CLI installed and manages. Use it when the user asks which global skills exist or how one of them got installed. Uninstalling is a user action on the Skills page in the DSH sidebar.',
         parameters: {},

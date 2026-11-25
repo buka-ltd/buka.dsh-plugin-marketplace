@@ -5,7 +5,7 @@
 - **技能仓库**：记下常用的 skills 来源（`owner/repo`、GitHub/GitLab 等链接、任意 git 地址、本地绝对路径、npm 包名），属于用户自己的书签；可列出的来源会自动判定为「标准 npx 仓库」或「不可用」，并展开成一棵带缓存的 skills 树；树里每个 skill 可以安装到全局、某个执行者或某个已注册工作区；
 - **全局技能**：列出本机**全局安装**的 skills（对所有会话生效），自动识别哪些由 [`skills`](https://github.com/vercel-labs/skills)（原 `npx skills`）安装和管理；列表加载后自动检查更新，有更新的 skill 在行内单独更新，并按来源决定卸载方式。
 
-页面之外，插件把收藏、仓库内容与按目录检查 / 更新的能力开放成 Host Service `ctx.bukaSkills`，见下方[对外服务](#对外服务host-service)。
+页面之外，插件把收藏、仓库内容与按目录检查 / 更新的能力开放成 Host Service `ctx.skillCatalog`，见下方[对外服务](#对外服务host-service)。
 
 ## 运行时依赖
 
@@ -89,7 +89,7 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 
 判定与树都会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/repo-skills.json`（version 7），TTL 30 分钟；探测只写轻量结论（不写整棵树），展开时补全；缓存写入串行化，探测不会覆盖完整树。页面「刷新」绕过缓存重新判定 / 重拉已展开仓库。刷新本地克隆失败时保留旧克隆继续展示，并在结果 `warning` 里报告原因。
 
-仓库卡片与来源标签的 GitHub owner 头像也会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/icons/`：页面请求 `GET /buka-skills/icon?owner=…`，Host 命中缓存时直接返回；缓存超过 30 分钟仍先回旧图，再在后台静默拉新图写回，不阻塞列表渲染。没有缓存时才同步拉一次。Host 路由不可用时（例如升级后还没重启 DSH，旧 Host 没有这条路由）页面退回直连 GitHub，两者都失败才显示内置图标。
+仓库卡片与来源标签的 GitHub owner 头像也会缓存到 `<DSH_HOME 或 ~/.dsh>/buka-skills/cache/icons/`：页面请求 `GET /skills/icon?owner=…`，Host 命中缓存时直接返回；缓存超过 30 分钟仍先回旧图，再在后台静默拉新图写回，不阻塞列表渲染。没有缓存时才同步拉一次。Host 路由不可用时（例如升级后还没重启 DSH，旧 Host 没有这条路由）页面退回直连 GitHub，两者都失败才显示内置图标。
 
 ## 一键安装
 
@@ -98,21 +98,21 @@ DSH 的 skill 提供方（`@deepseek-ai/dsh-skill-filesystem`）会扫描几个�
 | 入口         | 行为                                                                                          |
 | ------------ | --------------------------------------------------------------------------------------------- |
 | 全局安装     | 装到 `~/.agents/skills`；两个全局根里已有同名 skill 时变成禁用的「全局已安装」                |
-| 安装到执行者 | 选择框列出智能体（`ctx.bukaWorkers`），装进 `<执行者目录>/.agents/skills` 与 `.claude/skills` |
+| 安装到执行者 | 选择框列出智能体（`ctx.workflowWorkers`），装进 `<执行者目录>/.agents/skills` 与 `.claude/skills` |
 | 安装到工作区 | 选择框列出已注册工作区（`ctx.workspaceRegistry`），装进 `<工作区路径>/.agents/skills`         |
 
 Host 侧的约束：
 
 - 只允许安装**收藏过**的来源；浏览器只传来源与 skill 在仓库里的路径，名字与是否存在以 Host 读到的仓库列表为准；
 - 安装把**原始来源**交给 `installSkills`，lock 里保持上游身份（GitHub 简写 / git URL / 本地路径），不是本插件的克隆缓存路径；
-- 执行者只传标识符、工作区只传路径，Host 安装时按 `ctx.bukaWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录；
+- 执行者只传标识符、工作区只传路径，Host 安装时按 `ctx.workflowWorkers` / `ctx.workspaceRegistry` 重新解析成可信目录；
 - 安装目标库为 `scope: 'global'` + `agents: ['universal']`，项目级为 `scope: 'project'` + `cwd` + `agents`（执行者额外 `claude-code`）；
 - 所有安装 / 卸载 / 检查 / 更新共用一条串行队列，避免并发写 `skills-lock.json`；
 - 库报告成功但目标目录没有 `SKILL.md` 时按失败上报。
 
 ## 执行者页面
 
-workers 插件通过 `ctx.bukaSkills` 提供更新入口（目录由调用方解析后传入）：
+workers 插件通过 `ctx.skillCatalog` 提供更新入口（目录由调用方解析后传入）：
 
 - 进入单个执行者的「技能」页签时自动检查，有更新的 skill 在行内单独「更新」，没有全局更新按钮；
 - 列表页工具栏有「更新全部执行者」：只对智能体、目录存在且有 skill 的 worker 顺序执行，机器人 / 空 skill 的 worker 跳过；单个失败不中断，最后汇总每个 worker 的结果。
@@ -121,23 +121,23 @@ workers 插件通过 `ctx.bukaSkills` 提供更新入口（目录由调用方解
 
 侧边栏出现一个「Skills」图标。视觉与控件复用 DSH 的基座模块，布局照 Plugins 页面。页面只做展示与触发，数据都走 Host 路由：
 
-`GET /buka-skills/list`、`POST /buka-skills/uninstall`、`GET /buka-skills/check`、`POST /buka-skills/update`、`GET /buka-skills/targets`、`POST /buka-skills/install`、`GET|POST /buka-skills/repos`、`POST /buka-skills/repos/remove`、`GET /buka-skills/repo-skills?source=…[&refresh=1][&probe=1]`、`GET /buka-skills/icon?owner=…`。
+`GET /skills/list`、`POST /skills/uninstall`、`GET /skills/check`、`POST /skills/update`、`GET /skills/targets`、`POST /skills/install`、`GET|POST /skills/repos`、`POST /skills/repos/remove`、`GET /skills/repo-skills?source=…[&refresh=1][&probe=1]`、`GET /skills/icon?owner=…`。
 
 展开状态与上次拿到的树缓存在浏览器 localStorage（`dsh.buka-skills.view.v1`）。
 
 ## 模型工具
 
-`buka_skills`（只读）：返回全局 skills 的 `name` / `description` / `scope` / `managedByNpx` / `source`。安装、卸载、更新仍是用户在页面上的操作。
+`skill_list`（只读）：返回全局 skills 的 `name` / `description` / `scope` / `managedByNpx` / `source`。安装、卸载、更新仍是用户在页面上的操作。
 
 ## 对外服务（Host Service）
 
-插件在 Host 一侧注册 `ctx.bukaSkills`（`SERVICE_NAME = 'bukaSkills'`）。消费方声明依赖，不要 import 本包实现：
+插件在 Host 一侧注册 `ctx.skillCatalog`（`SERVICE_NAME = 'skillCatalog'`）。消费方声明依赖，不要 import 本包实现：
 
 ```js
-export const inject = ['bukaSkills']
+export const inject = ['skillCatalog']
 
 export function apply(ctx) {
-  ctx.effect(() => ctx.bukaSkills.listRepositories(), 'my-plugin: saved repos')
+  ctx.effect(() => ctx.skillCatalog.listRepositories(), 'my-plugin: saved repos')
 }
 ```
 
@@ -162,7 +162,7 @@ export function apply(ctx) {
 
 | 文件                                           | 作用                                                                                                   |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `src/index.ts`                                 | Host 入口：装配路由、工具与 `ctx.bukaSkills`；安装 / 卸载 / 检查 / 更新共用一条串行队列                |
+| `src/index.ts`                                 | Host 入口：装配路由、工具与 `ctx.skillCatalog`；安装 / 卸载 / 检查 / 更新共用一条串行队列                |
 | `src/service.ts`                               | 对外服务：`listRepositories()` / `listSkills()` / `checkSkills()` / `updateSkills()`                   |
 | `src/skill-install.ts`                         | 安装流程：收藏来源校验、目标解析、`installSkills` 调用与结果核对                                       |
 | `src/skill-update.ts`                          | 检查 / 更新：状态合成、`skills check` / `skills update` CLI 调用、跳过`modified` 与旧 marketplace 来源 |

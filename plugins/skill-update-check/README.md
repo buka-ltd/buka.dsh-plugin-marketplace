@@ -50,6 +50,6 @@
 
 ## 安全
 
-Host 注册两条本机路由（`GET /buka-skill-update-check/status` 与 `POST /buka-skill-update-check/update`），并沿用 DSH web 组合的信任栅栏（`connection.requestRejection`）：非本机或未认证的请求会被拒绝。浏览器只能传会话 id、`refresh=1` 与 skill 名字，不能传路径——目录完全由 Host 从会话与工作区注册表解析；更新只接受 JSON POST，名字有长度与数量上限，并且只更新一次强制检查确认过有更新的名字。
+Host 注册两条本机路由（`GET /skill-update-check/status` 与 `POST /skill-update-check/update`），并沿用 DSH web 组合的信任栅栏（`connection.requestRejection`）：非本机或未认证的请求会被拒绝。浏览器只能传会话 id、`refresh=1` 与 skill 名字，不能传路径——目录完全由 Host 从会话与工作区注册表解析；更新只接受 JSON POST，名字有长度与数量上限，并且只更新一次强制检查确认过有更新的名字。
 
 更完整的说明见 [`docs/DETAIL.zh.md`](docs/DETAIL.zh.md)（English: [`docs/DETAIL.md`](docs/DETAIL.md)）。

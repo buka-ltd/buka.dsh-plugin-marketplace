@@ -198,7 +198,7 @@ test('文件路由：目录树与文件内容可读，路径逃逸 / 未知执�
       },
     )
 
-    const tree = await request(routes, '/buka-workers/files?id=writer')
+    const tree = await request(routes, '/workflow/workers/files?id=writer')
     assert.equal(tree.status, 200)
     assert.equal(tree.body.ok, true)
     assert.deepEqual(
@@ -206,19 +206,19 @@ test('文件路由：目录树与文件内容可读，路径逃逸 / 未知执�
       ['AGENTS.md'],
     )
 
-    const file = await request(routes, '/buka-workers/file?id=writer&path=AGENTS.md')
+    const file = await request(routes, '/workflow/workers/file?id=writer&path=AGENTS.md')
     assert.equal(file.status, 200)
     assert.equal(file.body.content, '# AGENTS.md\n')
 
-    const escaped = await request(routes, '/buka-workers/file?id=writer&path=..%2Foutside.txt')
+    const escaped = await request(routes, '/workflow/workers/file?id=writer&path=..%2Foutside.txt')
     assert.equal(escaped.status, 400)
     assert.equal(escaped.body.code, 'invalid-path')
 
-    const unknown = await request(routes, '/buka-workers/files?id=nobody')
+    const unknown = await request(routes, '/workflow/workers/files?id=nobody')
     assert.equal(unknown.status, 404)
     assert.equal(unknown.body.code, 'unknown-worker')
 
-    const method = await request(routes, '/buka-workers/files?id=writer', 'POST')
+    const method = await request(routes, '/workflow/workers/files?id=writer', 'POST')
     assert.equal(method.status, 405)
   } finally {
     await harness.cleanup()

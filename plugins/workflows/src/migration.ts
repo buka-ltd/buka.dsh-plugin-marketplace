@@ -55,7 +55,7 @@ export async function runMigrations(options: RunMigrationsOptions): Promise<void
       await fs.rm(target, { recursive: true, force: true })
       removed.push(name)
     } catch (error) {
-      logger?.warn?.(`buka-workflows: could not remove legacy path ${target}`, error)
+      logger?.warn?.(`workflow: could not remove legacy path ${target}`, error)
     }
   }
 
@@ -63,6 +63,6 @@ export async function runMigrations(options: RunMigrationsOptions): Promise<void
   await fs.writeFile(marker, `${new Date().toISOString()}\n`, 'utf8')
 
   if (removed.length > 0) {
-    logger?.info?.(`buka-workflows: migrated to v4, removed legacy data: ${removed.join(', ')}`)
+    logger?.info?.(`workflow: migrated to v4, removed legacy data: ${removed.join(', ')}`)
   }
 }

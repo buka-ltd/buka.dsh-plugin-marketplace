@@ -2,7 +2,7 @@
  * Workers 插件：删除执行者（硬删）与删除影响面的路由级单测。
  *
  * 直接调用 `registerWorkerRoutes` 注册的路由 handler，用临时目录 + 假的工作区
- * 注册表 / 假 `bukaWorkflows` 服务；不启动 DSH、不联网。覆盖：
+ * 注册表 / 假 `workflowQuery` 服务；不启动 DSH、不联网。覆盖：
  *
  * - 影响面形状（阻塞作业 / 工作流 / 历史作业 / 目录 / 挂载）；
  * - 有 running 作业时 409 `worker-in-use` 且响应列出作业，作业结束后可删；
@@ -25,7 +25,7 @@ import {
   writeWorkerRegistry,
 } from '../plugins/workflows/src/workers/worker-store.ts'
 
-/** 一个可操纵的假 `bukaWorkflows` 服务。 */
+/** 一个可操纵的假 `workflowQuery` 服务。 */
 function makeWorkflowUsage() {
   return {
     runningJobs: [],
@@ -96,7 +96,7 @@ async function makeHarness({
       workspaceRegistry === 'default' ? defaultRegistry : (workspaceRegistry ?? undefined),
     logger,
     get(name) {
-      return name === 'bukaWorkflows' && withWorkflows ? workflowUsage : undefined
+      return name === 'workflowQuery' && withWorkflows ? workflowUsage : undefined
     },
   }
   registerWorkerRoutes(ctx, webCtx, {
@@ -196,7 +196,7 @@ test('删除影响面：返回路径 / 挂载 / 阻塞作业 / 工作流 / 历�
     ]
     harness.workflowUsage.finishedJobs = 4
 
-    const result = await callRoute(harness.routes, '/buka-workers/remove-impact', {
+    const result = await callRoute(harness.routes, '/workflow/workers/remove-impact', {
       id: 'writer',
     })
     assert.equal(result.status, 200)
@@ -230,7 +230,7 @@ test('删除：running 作业阻塞（响应列出作业），作业终止后可
     harness.workflowUsage.workflows = [{ workflowId: 'wf-1', name: '写作流程', status: 'active' }]
     harness.workflowUsage.finishedJobs = 2
 
-    const blocked = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const blocked = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     assert.equal(blocked.status, 409)
     assert.equal(blocked.body.code, 'worker-in-use')
     assert.equal(blocked.body.jobs.length, 1)
@@ -242,7 +242,7 @@ test('删除：running 作业阻塞（响应列出作业），作业终止后可
 
     // 终止作业后：工作流引用与历史作业不阻塞。
     harness.workflowUsage.runningJobs = []
-    const removed = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const removed = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     assert.equal(removed.status, 200)
     assert.equal(removed.body.ok, true)
     assert.equal(removed.body.removed, true)
@@ -265,7 +265,7 @@ test('删除：没有 Workflows 插件时视为没有作业引用，照常删除
   const harness = await makeHarness({ workflowUsage: false })
   try {
     const worker = await addMountedWorker(harness, 'writer')
-    const impact = await callRoute(harness.routes, '/buka-workers/remove-impact', {
+    const impact = await callRoute(harness.routes, '/workflow/workers/remove-impact', {
       id: 'writer',
     })
     assert.equal(impact.status, 200)
@@ -273,7 +273,7 @@ test('删除：没有 Workflows 插件时视为没有作业引用，照常删除
     assert.deepEqual(impact.body.workflows, [])
     assert.equal(impact.body.finishedJobs, 0)
 
-    const removed = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const removed = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     assert.equal(removed.status, 200)
     assert.equal(await exists(worker.path), false)
     assert.equal((await readWorkerRegistry({ file: harness.registryFile })).workers.length, 0)
@@ -291,7 +291,7 @@ test('删除回滚：工作区注册行删不掉时目录回到原位、登记�
       throw new Error('workspace delete failed')
     }
 
-    const result = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const result = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     assert.equal(result.status, 500)
     assert.equal(result.body.code, 'remove-failed')
     assert.equal(await exists(worker.path), true, '目录回到原位')
@@ -311,7 +311,7 @@ test('删除回滚：登记表写入失败时目录回到原位、登记条目�
     const worker = await addMountedWorker(harness, 'writer')
     // 让登记文件所在的父目录不可写：原子写失败，事务必须回滚。
     await fs.chmod(harness.root, 0o555)
-    const result = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const result = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     await fs.chmod(harness.root, 0o755)
     assert.equal(result.status, 500)
     assert.equal(result.body.code, 'remove-failed')
@@ -329,7 +329,7 @@ test('删除：已挂载但工作区服务不可用时拒绝，目录与登记�
   const harness = await makeHarness({ workspaceRegistry: null })
   try {
     const worker = await addMountedWorker(harness, 'writer')
-    const result = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+    const result = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
     assert.equal(result.status, 409)
     assert.equal(result.body.code, 'workspace-unavailable')
     assert.equal(await exists(worker.path), true)
@@ -359,7 +359,7 @@ test('删除：目录不在执行者根目录下时拒绝', async () => {
           },
         ],
       })
-      const result = await callRoute(harness.routes, '/buka-workers/remove', { id: 'writer' })
+      const result = await callRoute(harness.routes, '/workflow/workers/remove', { id: 'writer' })
       assert.equal(result.status, 409)
       assert.equal(result.body.code, 'outside-root')
       assert.equal(await exists(outside), true, '根目录外的目录没有被删')

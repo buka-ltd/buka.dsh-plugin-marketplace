@@ -57,10 +57,10 @@ export interface ExecutionPromptInput {
 /** 基准规则：能力说明，不暴露岗位 / 通道。 */
 const BASELINE_RULES = [
   '## 工作流规则',
-  '- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。',
-  '- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。',
-  '- 创建后续任务：`buka_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。',
-  '- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。',
+  '- 读取资产：`workflow_job_attachments` 列出并读取本任务可用的附件；`workflow_job_board` 查看本作业的任务，`workflow_task_get` 读取某个任务。',
+  '- 写入资产：提交结果时用 `workflow_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。',
+  '- 创建后续任务：`workflow_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。',
+  '- 完成任务：用 `workflow_task_complete` 交回一段总结；结果没有结构化契约。',
 ].join('\n')
 
 /** 工作树生效时的规则：执行者自己按仓库调用 `create_worktree`，不要直接改原检出。 */
@@ -232,7 +232,7 @@ export function buildEndDeliveryText(job: JobRecord, task: TaskRecord): string {
         '',
         '{{content}}',
         '',
-        '如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。',
+        '如果这份报告就是你要的结果，调用 `workflow_task_complete` 确认收到，作业即结束。',
       ].join('\n'),
       { content: task.content ?? null },
       { escape: true },
@@ -243,15 +243,15 @@ export function buildEndDeliveryText(job: JobRecord, task: TaskRecord): string {
     '',
     contentSection(task.content),
     '',
-    '如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。',
+    '如果这份报告就是你要的结果，调用 `workflow_task_complete` 确认收到，作业即结束。',
   ].join('\n')
 }
 
 /**
  * 助理承办人任务的固定提示。
  *
- * 助理只负责对接处理人；任务内容用 `buka_task_get` 读，人任务的动作见
- * `buka_task_complete` 的工具说明（由宿主列出工具）。
+ * 助理只负责对接处理人；任务内容用 `workflow_task_get` 读，人任务的动作见
+ * `workflow_task_complete` 的工具说明（由宿主列出工具）。
  *
  * @param input 任务与任务类型
  * @returns 提示文本

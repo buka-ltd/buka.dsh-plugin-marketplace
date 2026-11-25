@@ -10,10 +10,10 @@
 import type { SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** 侧边栏条目与主面板共用的 id：侧边栏注册的 id 必须与 `main` 的 key 相同。 */
-const PANEL_ID = 'buka-skills'
+const PANEL_ID = 'skills'
 
 /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
-const SAVE_FORM_ID = 'buka-skills-save-form'
+const SAVE_FORM_ID = 'skills-save-form'
 
 /**
  * Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。
@@ -24,14 +24,14 @@ const TABS = [
   {
     value: 'repos',
     labelKey: 'tabRepos',
-    id: 'buka-skills-tab-repos',
-    panelId: 'buka-skills-panel-repos',
+    id: 'skills-tab-repos',
+    panelId: 'skills-panel-repos',
   },
   {
     value: 'installed',
     labelKey: 'tabInstalled',
-    id: 'buka-skills-tab-installed',
-    panelId: 'buka-skills-panel-installed',
+    id: 'skills-tab-installed',
+    panelId: 'skills-panel-installed',
   },
 ] as const
 

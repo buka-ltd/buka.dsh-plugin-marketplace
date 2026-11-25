@@ -10,6 +10,9 @@
  * - 勾选框注册在官方 worktree 勾选框所在的 `conversation.hero.options`；
  * - 标题标记注册在紧挨会话标题的 `conversation.session.header.actions`，
  *   且只在当前会话开启了 Pen 时渲染成「描边图标 + 品牌名」的普通文字；
+ * - `/pen`、`/pen off` 经宿主 `commands` 服务注册，按会话开启 / 关闭，
+ *   命令卡片给出可读结果；
+ * - 标题标记用命令节点签名感知命令结算，命令后重新读 Host 状态；
  * - Host 确实在 Agent 作用域里挂 mcp-client、在 `agent/created` 上等待、并且
  *   首次连接失败会让激活失败（勾选成功 = 工具就绪）；
  * - bundle 清单与两份 locale 文案齐全。
@@ -20,6 +23,15 @@ import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 
+import { Context } from '@deepseek-ai/cordis'
+import CommandsService from '@deepseek-ai/dsh-commands'
+
+import {
+  COMMAND_NAME,
+  parsePenCommand,
+  penCommandResult,
+  registerPenCommand,
+} from '../plugins/pen/src/command.ts'
 import { STATE_ROUTE, TOGGLE_ROUTE } from '../plugins/pen/src/routes.ts'
 import { snapshotOf } from '../plugins/pen/src/state.ts'
 
@@ -67,8 +79,8 @@ test('快照：有错误时带上失败文本', () => {
 })
 
 test('Host 与浏览器一半的路由常量一致', () => {
-  assert.equal(STATE_ROUTE, '/buka-pen/state')
-  assert.equal(TOGGLE_ROUTE, '/buka-pen/toggle')
+  assert.equal(STATE_ROUTE, '/pen/state')
+  assert.equal(TOGGLE_ROUTE, '/pen/toggle')
   const api = source('api.ts', CLIENT_DIR)
   assert.ok(api.includes(`'${STATE_ROUTE}'`), 'api.ts 缺少读状态路由')
   assert.ok(api.includes(`'${TOGGLE_ROUTE}'`), 'api.ts 缺少勾选路由')
@@ -77,20 +89,22 @@ test('Host 与浏览器一半的路由常量一致', () => {
 test('勾选框注册在官方 worktree 勾选框的位置', () => {
   const client = source('index.ts', CLIENT_DIR)
   assert.ok(client.includes("'conversation.hero.options'"), '没有注册到新会话行')
-  assert.ok(client.includes("id: 'buka-pen'"))
+  assert.ok(client.includes("id: 'pen'"))
   assert.ok(client.includes('locale: NS'))
 })
 
-test('label 是「logo + Pen」：内联图标与固定品牌名', () => {
+test('label 是「logo + Pen」：笔尖描边 SVG 与固定品牌名', () => {
   const dictionary = source('dictionary.ts', CLIENT_DIR)
   assert.ok(dictionary.includes("export const LABEL = 'Pen'"), 'label 不是固定品牌名')
   const toggle = source('toggle.ts', CLIENT_DIR)
-  assert.ok(toggle.includes('PEN_LOGO'), '没有引用 Pen logo')
-  assert.ok(toggle.includes("'buka-pen-logo'"), '没有渲染 logo 的 class')
+  assert.ok(toggle.includes('PenLogo'), '没有引用 Pen 笔尖图标')
+  assert.ok(toggle.includes("className: 'buka-pen-logo'"), '没有渲染 logo 的 class')
   assert.ok(toggle.includes('LABEL'), '没有渲染 Pen 文字')
   const logo = source('logo.ts', CLIENT_DIR)
-  assert.ok(logo.includes("'data:image/png;base64,'"), 'logo 不是内联 PNG data URL')
-  assert.ok(logo.length > 1000, 'logo data URL 为空')
+  assert.ok(logo.includes("'svg'"), 'logo 不是内联 SVG')
+  assert.ok(logo.includes("'0 0 64 77'"), 'logo 缺少笔尖画布')
+  assert.ok(logo.includes("stroke: 'currentColor'"), '描边没有跟随主题文字颜色')
+  assert.ok(!logo.includes('data:image/png;base64,'), 'logo 仍然是位图')
 })
 
 test('Host 在 Agent 作用域挂载 mcp-client，并在 agent/created 上等待', () => {
@@ -101,12 +115,113 @@ test('Host 在 Agent 作用域挂载 mcp-client，并在 agent/created 上等待
   assert.ok(controller.includes('await fiber.dispose()'), '取消勾选没有断开连接')
 })
 
+test('/pen 只接受开启与 off 两种输入', () => {
+  assert.equal(parsePenCommand(''), 'on')
+  assert.equal(parsePenCommand('  ON '), 'on')
+  assert.equal(parsePenCommand('off'), 'off')
+  assert.equal(parsePenCommand(' off '), 'off')
+  assert.equal(parsePenCommand('bogus'), undefined)
+  assert.equal(parsePenCommand(undefined), 'on')
+  assert.equal(COMMAND_NAME, 'pen')
+})
+
+test('/pen 的命令卡片文本反映切换结果', () => {
+  assert.deepEqual(penCommandResult('off', { enabled: false, status: 'idle' }, 'pencil'), {
+    kind: 'success',
+    text: 'Pen MCP 已关闭，本会话不再提供 mcp__pencil__* 工具。',
+  })
+  assert.deepEqual(penCommandResult('on', { enabled: true, status: 'ready' }, 'pencil'), {
+    kind: 'success',
+    text: 'Pen MCP 已开启，本会话的下一轮消息可以使用 mcp__pencil__* 工具。',
+  })
+  assert.deepEqual(
+    penCommandResult('on', { enabled: true, status: 'error', message: 'spawn ENOENT' }, 'pencil'),
+    { kind: 'error', text: 'Pen MCP 连接失败：spawn ENOENT' },
+  )
+  assert.equal(
+    penCommandResult('on', { enabled: true, status: 'pending' }, 'pencil').kind,
+    'success',
+  )
+})
+
+/** 一个只记录切换调用、不做真实挂载的状态源。 */
+function fakePenSource(calls) {
+  return {
+    snapshot: () => ({ enabled: false, status: 'idle' }),
+    setEnabled: (sessionId, enabled) => {
+      calls.push([sessionId, enabled])
+      return { enabled, status: enabled ? 'ready' : 'idle' }
+    },
+  }
+}
+
+/** 一个能记录命令生命周期事件的最小会话。 */
+function makeSession(id) {
+  const events = []
+  return {
+    id,
+    get seq() {
+      return events.length
+    },
+    append(type, data) {
+      events.push({ type, data, seq: events.length })
+    },
+  }
+}
+
+test('/pen 命令按目标会话调用状态源，命令卡片可读', async () => {
+  const root = new Context()
+  try {
+    await root.plugin(CommandsService)
+    const calls = []
+    registerPenCommand(root, fakePenSource(calls), { serverName: 'pencil' })
+    // `ctx.inject` 在 commands 可用后注册；等一个微任务批次。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const commands = root.get('commands')
+    const agent = { id: 'pen-session', session: makeSession('pen-session') }
+
+    const on = await commands.execute(agent, '/pen', [], new AbortController().signal)
+    assert.equal(on?.result?.kind, 'success')
+    assert.deepEqual(calls[0], ['pen-session', true])
+
+    const off = await commands.execute(agent, '/pen off', [], new AbortController().signal)
+    assert.equal(off?.result?.kind, 'success')
+    assert.deepEqual(calls[1], ['pen-session', false])
+
+    const bogus = await commands.execute(agent, '/pen bogus', [], new AbortController().signal)
+    assert.equal(bogus?.result?.kind, 'error')
+    assert.equal(calls.length, 2, '不认识的参数不应该切换状态')
+  } finally {
+    await root.fiber.dispose()
+  }
+})
+
+test('命令节点签名：普通消息不触发，最近一条命令的 run/done 都触发', async () => {
+  registerClientStubs()
+  const { penCommandSignature } = await import('../plugins/pen/src/client/mark.ts')
+  const node = (id, outcome) => ({ kind: 'command', data: { commandId: id, outcome } })
+  const chat = (nodes) => ({ legacy: { nodes } })
+
+  assert.equal(penCommandSignature(chat([])), '')
+  assert.equal(penCommandSignature(chat([{ kind: 'message', data: null }])), '')
+  assert.equal(penCommandSignature(chat([node('c1', null)])), 'c1:run')
+  assert.equal(penCommandSignature(chat([node('c1', { kind: 'success' })])), 'c1:done')
+  assert.equal(
+    penCommandSignature(
+      chat([node('c1', { kind: 'success' }), node('c2', null), { kind: 'message', data: null }]),
+    ),
+    'c2:run',
+    '只看最近一条命令，后续普通消息不影响',
+  )
+})
+
 test('bundle 清单声明了 Host 入口、界面一半与 mcp-client peer', () => {
   const manifest = json('package.json')
   assert.equal(manifest.name, '@buka/dsh-plugin-pen')
   assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
   assert.equal(manifest.dsh?.client?.platform, 'web')
   assert.match(manifest.peerDependencies?.['@deepseek-ai/dsh-mcp-client'] ?? '', />=0\.2\.2-rc\.1/)
+  assert.match(manifest.peerDependencies?.['@deepseek-ai/dsh-commands'] ?? '', />=0\.2\.2-rc\.1/)
   assert.ok(source('cordis.patch.yml').includes(manifest.name))
 })
 
@@ -134,27 +249,17 @@ export const useState = (initial) => {
 }
 `
 
-/** 界面基座桩：标记只用到描边图标，形状由测试里的 className / size 断言。 */
-const PRIMITIVES_STUB = `
-const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
-export const IconListPenOutlineRegular = (props) => h('svg', props)
-`
-
 const REACT_URL = `data:text/javascript,${encodeURIComponent(REACT_STUB)}`
-const PRIMITIVES_URL = `data:text/javascript,${encodeURIComponent(PRIMITIVES_STUB)}`
 
 let stubsRegistered = false
 
-/** 把 `react` 与界面基座解析到桩模块；只注册一次。 */
+/** 把 `react` 解析到桩模块；只注册一次。 */
 function registerClientStubs() {
   if (stubsRegistered) return
   stubsRegistered = true
   registerHooks({
     resolve(specifier, context, next) {
       if (specifier === 'react') return { url: REACT_URL, shortCircuit: true }
-      if (specifier === '@deepseek-ai/dsh-client-ui-primitives') {
-        return { url: PRIMITIVES_URL, shortCircuit: true }
-      }
       return next(specifier, context)
     },
   })
@@ -179,8 +284,9 @@ function nodesOf(tree) {
 test('标题标记注册在紧挨会话标题的动作插槽', () => {
   const client = source('index.ts', CLIENT_DIR)
   assert.ok(client.includes("'conversation.session.header.actions'"), '没有注册到标题右侧')
-  assert.ok(client.includes("id: 'buka-pen-mark'"), '标题标记缺少 id')
+  assert.ok(client.includes("id: 'pen-mark'"), '标题标记缺少 id')
   assert.ok(source('dictionary.ts', CLIENT_DIR).includes("export const MARK_LABEL = 'Pen MCP'"))
+  assert.ok(source('src/command.ts').includes('COMMAND_NAME'), 'Host 一半没有 /pen 命令')
 })
 
 test('标题标记只在这个会话开启 Pen 时显示为普通文字', async () => {
@@ -202,6 +308,24 @@ test('标题标记只在这个会话开启 Pen 时显示为普通文字', async 
   const nodes = nodesOf(mark)
   const icon = nodes.find((node) => node.props.className === 'buka-pen-mark-icon')
   assert.ok(icon, '标记缺少描边图标')
-  assert.equal(icon.props.size, 14)
+  assert.equal(icon.props.height, 14)
   assert.deepEqual(mark.children, [icon, 'Pen MCP'], '标记应是「图标 + 品牌名」')
+})
+
+test('笔尖图标是跟随 currentColor 的内联 SVG', async () => {
+  registerClientStubs()
+  const { PenLogo } = await import('../plugins/pen/src/client/logo.ts')
+  const icon = PenLogo({ height: 14, className: 'buka-pen-mark-icon' })
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props.viewBox, '0 0 64 77')
+  assert.equal(icon.props.height, 14)
+  assert.equal(icon.props.width, 11.64)
+  assert.equal(icon.props.stroke, 'currentColor')
+  assert.equal(icon.props.fill, 'none')
+  assert.equal(icon.props.className, 'buka-pen-mark-icon')
+  assert.equal(icon.children.length, 3, '图标是「外轮廓 + 圆点 + 分缝」')
+
+  const appIcon = source('icon.svg')
+  assert.ok(appIcon.includes('stroke="#fff"'), '市场图标不是白色描边')
+  assert.ok(!appIcon.includes('<path d="M43.2 15.6a3.8'), '市场图标还是旧的实心笔形')
 })

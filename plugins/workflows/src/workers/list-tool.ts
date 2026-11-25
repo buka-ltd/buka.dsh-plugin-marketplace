@@ -1,5 +1,5 @@
 /**
- * `buka_workers` 工具的定义与执行包装。
+ * `workflow_workers` 工具的定义与执行包装。
  *
  * 只读工具，列出插件登记表里的执行者：标识符、展示名、目录、一句职责、挂载
  * 状态、AGENTS.md 是否存在，以及项目级 skills 清单。
@@ -22,10 +22,10 @@ import type { defineTool as defineToolType, ToolDefinition } from '@deepseek-ai/
 import type { listWorkers as listWorkersType, WorkspaceRegistryLike } from './worker-store.ts'
 
 /** 工具名；入口注册与文档都用它。 */
-export const WORKERS_LIST_TOOL_NAME = 'buka_workers'
+export const WORKERS_LIST_TOOL_NAME = 'workflow_workers'
 
 /**
- * 构造 `buka_workers` 工具。
+ * 构造 `workflow_workers` 工具。
  *
  */
 export function createWorkersListTool({
@@ -49,7 +49,7 @@ export function createWorkersListTool({
   return defineTool({
     name: WORKERS_LIST_TOOL_NAME,
     description:
-      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the Workflow preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.',
+      'List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the Workflow preset through workflow_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.',
     parameters: {},
     output: {
       schema: {

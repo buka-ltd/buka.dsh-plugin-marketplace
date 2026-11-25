@@ -8,7 +8,7 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type React from 'react'
 
-import { MISSING_AVATAR_ID, renderAvatar } from '../avatars.ts'
+import { executorAvatarId, renderAvatar } from '../avatars.ts'
 import { ClientModal, h } from '../element.ts'
 import { errorTextOf, formatBytes, formatTime } from '../format.ts'
 import {
@@ -102,10 +102,7 @@ function executorAvatar(page: AppContext, task: TaskDetail): string | undefined 
     currentDefinition(page.state),
   )
   const position = positionsOf(definition).find((item) => item.id === task.position)
-  if (position?.executor.missing === true) return MISSING_AVATAR_ID
-  return typeof position?.executor.avatar === 'string' && position.executor.avatar !== ''
-    ? position.executor.avatar
-    : undefined
+  return executorAvatarId(position?.executor)
 }
 
 /** 抽屉正文。 */

@@ -1,5 +1,5 @@
 /**
- * `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.bukaWorkflows`。
+ * `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.workflowQuery`。
  *
  * 目前只有一个能力：`workerUsage(id)`。Workers 插件在删除执行者前用它算出
  * 影响面与唯一阻塞条件（引用该标识符的运行中作业）；取不到服务时视为没有
@@ -14,8 +14,8 @@
 import type { WorkerUsage } from './domain/types.ts'
 import type { WorkflowEngine } from './engine/engine.ts'
 
-/** 服务名；消费方用 `ctx.get(SERVICE_NAME)` 读取，运行时是 `ctx.bukaWorkflows`。 */
-export const SERVICE_NAME = 'bukaWorkflows'
+/** 服务名；消费方用 `ctx.get(SERVICE_NAME)` 读取，运行时是 `ctx.workflowQuery`。 */
+export const SERVICE_NAME = 'workflowQuery'
 
 /** 查询服务：等价于转发给就绪后的引擎。 */
 export class WorkflowQueryService {

@@ -175,18 +175,377 @@ var WorkflowError = class extends Error {
 function describeError$4(error) {
 	return error instanceof Error ? error.message : String(error);
 }
+// .build/workflows/engine/session.js
+/**
+* 发起人会话投递与执行者句柄读取。
+*
+* 开始 / 结束任务的主体是发起人。发起人可能是普通会话：插件通过宿主
+* `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
+* agent，构造一条用户消息 `followup` 进去，再用 `sessions.flush` 等持久化确认。
+* 这与官方 `@deepseek-ai/dsh-schedule` 的提醒投递是同一机制。
+*
+* 消息形状按 DSH 的 `UserMessage` 结构构造（id / role / content / source）；
+* 不 import `@deepseek-ai/dsh-llm`，避免插件多一个运行时依赖。
+*
+* @module @buka/dsh-plugin-workflows/engine/session
+*/
+/**
+* 构造一条用户消息。
+*
+* @param text 消息正文
+* @returns UserMessage 形状的对象
+*/
+function createUserMessage(text) {
+	return {
+		id: randomUUID(),
+		role: "user",
+		content: [{
+			type: "text",
+			text
+		}],
+		source: { kind: "user" }
+	};
+}
+/**
+* 取一个会话的 live agent：先问 web 的 sessionController（会 resume），
+* 再退回 agents 注册表里的 live 实例。
+*
+* @param ctx 插件上下文
+* @param sessionId 会话 id
+* @returns live agent
+* @throws 该组成里无法恢复会话时抛出
+*/
+async function resolveLiveAgent(ctx, sessionId) {
+	const controller = ctx.get("sessionController");
+	if (controller !== void 0 && controller !== null && typeof controller.resolveAgent === "function") {
+		const resolved = await controller.resolveAgent(sessionId);
+		if (resolved !== void 0 && resolved !== null) {
+			if ("error" in resolved && resolved.error !== void 0) throw new Error(`cannot resume starter session "${sessionId}": ${describeError$4(resolved.error)}`);
+			if (resolved.agent !== void 0) return resolved.agent;
+		}
+	}
+	const live = ctx.get("agents")?.get?.(sessionId);
+	if (live !== void 0) return live;
+	throw new Error(`cannot resume starter session "${sessionId}" in this composition (no live agent and no sessionController)`);
+}
+/**
+* 宿主会话投递实现。
+*
+* @param ctx 插件上下文
+* @returns 投递器
+*/
+function createHostSessionDelivery(ctx) {
+	return { async deliver(sessionId, text) {
+		const agent = await resolveLiveAgent(ctx, sessionId);
+		const sessions = ctx.get("sessions");
+		const before = sessions?.get?.(sessionId);
+		const startSeq = typeof before?.seq === "number" ? before.seq : null;
+		if (typeof agent.followup !== "function") throw new Error(`starter session "${sessionId}" cannot accept a follow-up message`);
+		agent.followup(createUserMessage(text));
+		if (typeof sessions?.flush === "function" && agent.session !== void 0) try {
+			await sessions.flush(agent.session);
+		} catch {}
+		return startSeq;
+	} };
+}
+/**
+* 读一次执行者句柄的观测结果。
+*
+* @param handle workers 句柄
+* @param sinceSeq 起点 seq
+* @returns 本轮快照
+*/
+function readHandleResult(handle, sinceSeq) {
+	let raw;
+	if (typeof handle.readResult === "function") {
+		const value = handle.readResult({ sinceSeq });
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) raw = value;
+	}
+	return {
+		text: typeof raw?.text === "string" ? raw.text : "",
+		stopReason: typeof raw?.stopReason === "string" ? raw.stopReason : null,
+		turnEnded: raw?.turnEnded === true,
+		startSeq: typeof raw?.startSeq === "number" && Number.isInteger(raw.startSeq) ? raw.startSeq : null
+	};
+}
+/**
+* 读句柄的起点 seq。
+*
+* @param handle workers 句柄
+* @returns 起点 seq；未知时是 null
+*/
+function handleStartSeq(handle) {
+	return typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : null;
+}
+/**
+* 读句柄的会话 id。
+*
+* @param handle workers 句柄
+* @returns 会话 id；未知时是 null
+*/
+function handleSessionId(handle) {
+	return typeof handle.sessionId === "string" && handle.sessionId !== "" ? handle.sessionId : null;
+}
+/**
+* 等待一段会话轮次观测的定时器；返回取消函数。
+*
+* @param intervalMs 轮询间隔
+* @param check 每次轮询的回调；返回 true 时停止
+* @returns 取消函数
+*/
+function poll(intervalMs, check) {
+	let stopped = false;
+	let timer = null;
+	const tick = async () => {
+		if (stopped) return;
+		let done = false;
+		try {
+			done = await check();
+		} catch {
+			done = true;
+		}
+		if (stopped || done) return;
+		timer = setTimeout(tick, intervalMs);
+		timer.unref?.();
+	};
+	timer = setTimeout(tick, intervalMs);
+	timer.unref?.();
+	return () => {
+		stopped = true;
+		if (timer !== null) clearTimeout(timer);
+	};
+}
+// .build/workflows/job-mode.js
+/**
+* 作业模式：一个会话「只负责启动一个作业」的会话级状态。
+*
+* 与 plan mode 一样，模式本身不新增持久数据，而是折叠会话日志得到：
+*
+* - `command/run` / `command/done` 的成功配对记录「进入或退出」：
+*   `/job [说明]` 进入，`/job off` 退出；
+* - `tool/call` → `tool/result` 里 `workflow_job_start` 的成功调用记录「模式已消耗」；
+* - 日志里已有 `user/message` 或 `turn/start` 表示会话已经用过，不再是「刚开始」。
+*
+* 因此恢复、fork 与压缩都能从日志还原同一状态，命令、提示词与工具可见性
+* 读同一份折叠结果。
+*
+* 模式里不预设工作流：agent 用 `workflow_job_options` 看到全部可启动工作流，
+* 按用户描述挑选；用户没有说明用哪个时先问用户。这样用户不必在命令里记
+* workflow id。
+*
+* 约束：
+*
+* - 进入只允许发生在会话开始时（还没有用户消息 / 轮次）；
+* - 一个会话最多启动一个作业，成功后模式结束；
+* - 任意位置执行 `/job`、或在普通会话里调用 `workflow_job_start` 都会被拒绝。
+*
+* @module @buka/dsh-plugin-workflows/job-mode
+*/
+/** 不在作业模式的默认值。 */
+const EMPTY = {
+	entered: false,
+	consumed: false,
+	fresh: true
+};
+/** 默认折叠结果。 */
+const EMPTY_FOLD = {
+	committed: EMPTY,
+	selected: EMPTY
+};
+/** 折叠缓存：只在日志长度变化时重算。 */
+const folds = /* @__PURE__ */ new WeakMap();
+/**
+* 读会话已经结算的作业模式状态（命令处理器用）。
+*
+* 正在执行的 `/job` 不算：命令自己的 `command/run` 在处理器运行前就已落盘，
+* 如果把它算进去，处理器就看不到「进入之前」的会话状态了。
+*
+* @param session agent 的会话；形状不完整时按「不在作业模式」处理
+* @returns 作业模式状态
+*/
+function readJobMode(session) {
+	return foldOf(session).committed;
+}
+/**
+* 读会话当前的作业模式状态，包含正在执行的 `/job`（提示词与工具可见性用）。
+*
+* `agent.steer()` 会在命令结算前就开启下一步，所以提示词与工具必须把
+* 尚未结算的进入也算上，否则 `/job <说明>` 的第一步会看不到模式。
+*
+* @param session agent 的会话
+* @returns 作业模式状态
+*/
+function selectedJobMode(session) {
+	return foldOf(session).selected;
+}
+/**
+* 判断一个 agent 能否看到 / 使用作业模式的工具。
+*
+* @param agent 工具激活上下文里的 agent
+* @returns 在作业模式且还没启动过作业时为 true
+*/
+function inJobMode(agent) {
+	if (agent === void 0) return false;
+	const state = selectedJobMode(agent.session);
+	return state.entered && !state.consumed;
+}
+/** 读（或重算）一次日志折叠。 */
+function foldOf(session) {
+	if (!isRecord$1(session)) return EMPTY_FOLD;
+	const seq = typeof session.seq === "number" ? session.seq : 0;
+	const cached = folds.get(session);
+	if (cached !== void 0 && cached.seq === seq) return cached.fold;
+	const fold = foldSession(session);
+	folds.set(session, {
+		seq,
+		fold
+	});
+	return fold;
+}
+/**
+* 作业模式的提示词段落文本。
+*
+* 不内联任何工作流：列表与输入契约由 `workflow_job_options` 提供，段落只说明
+* 选择规则与「不启动一个作业」的约束。
+*
+* @returns 段落文本
+*/
+function jobModeSectionText() {
+	return [
+		"你处于作业模式。",
+		"本会话只用于启动一个作业；用户可能只说想做什么，也可能点名了某个工作流。",
+		"- 先调用 `workflow_job_options` 查看当前可启动的工作流：每项的 id、名称、描述、开始节点输入 schema，以及暂时不可启动的原因。",
+		"- 按用户描述挑最匹配的一个。用户没有说明用哪个、或几个都像时，先问用户确认，不要猜；用户点名了 id 或名称就直接用那个。",
+		"- 选定后按该工作流的开始节点 schema 向用户补齐输入（用户已经说过的不要重复问），然后调用 `workflow_job_start`。",
+		"- 本会话只能启动一个作业；启动后模式结束，最终报告会回到本会话，确认收到用 `workflow_task_complete`。",
+		"- 如果 `workflow_job_start` 报出作业启动失败、或本会话已经启动过作业，把原因告诉用户并让 ta 新建会话重试；不要反复调用。",
+		"- 不启动就退出：让用户执行 `/job off`。"
+	].join("\n");
+}
+/**
+* 折叠会话日志，同时给出「已结算」与「含正在执行命令」两档状态。
+*
+* 正在执行的 `/job` 在 `command/run` 写入时就先作用到 `selected`：`agent.steer()`
+* 会在 `command/done` 之前开启下一步。命令结算失败时把 `selected` 回退。
+*
+* @param session 会话
+* @returns 两档作业模式状态
+*/
+function foldSession(session) {
+	const end = typeof session.seq === "number" ? session.seq : 0;
+	let committed = false;
+	let selected = false;
+	let consumed = false;
+	let fresh = true;
+	let running = null;
+	const pendingCalls = /* @__PURE__ */ new Set();
+	for (let seq = 0; seq < end; seq += 1) {
+		const event = session.eventAt?.(seq);
+		if (!isRecord$1(event)) continue;
+		if (event.type === "turn/start" || event.type === "user/message") fresh = false;
+		const data = isRecord$1(event.data) ? event.data : void 0;
+		if (data === void 0) continue;
+		if (event.type === "command/run") {
+			if (data.name !== "job") continue;
+			const effect = commandEffect(data.args);
+			running = {
+				commandId: String(data.commandId ?? ""),
+				effect,
+				previousSelected: selected
+			};
+			selected = effect.kind === "enter";
+			continue;
+		}
+		if (event.type === "command/done") {
+			if (running === null || data.commandId !== running.commandId) continue;
+			if (data.kind === "success") committed = running.effect.kind === "enter";
+			else selected = running.previousSelected;
+			running = null;
+			continue;
+		}
+		if (event.type === "tool/call") {
+			if (data.name === "workflow_job_start" && typeof data.callId === "string") pendingCalls.add(data.callId);
+			continue;
+		}
+		if (event.type === "tool/result") {
+			const message = isRecord$1(data.message) ? data.message : void 0;
+			const callId = typeof message?.toolCallId === "string" ? message.toolCallId : "";
+			if (callId === "" || !pendingCalls.delete(callId)) continue;
+			if (data.error === void 0 && message?.isError !== true) consumed = true;
+		}
+	}
+	return {
+		committed: {
+			entered: committed,
+			consumed,
+			fresh
+		},
+		selected: {
+			entered: selected,
+			consumed,
+			fresh
+		}
+	};
+}
+/**
+* 把一条 `/job` 命令的原始输入解释成模式变更。
+*
+* 不带参数也进入模式（随后由 agent 询问用户想做什么）；`off` 是退出；
+* 其余文字只是附带说明，不在这里解析工作流 id。
+*
+* @param args `command/run` 记录下来的原始输入
+* @returns 模式影响
+*/
+function commandEffect(args) {
+	return typeof args === "string" && args.trim() === "off" ? { kind: "leave" } : { kind: "enter" };
+}
+/** 记录对象判断。 */
+function isRecord$1(value) {
+	return typeof value === "object" && value !== null;
+}
+/**
+* 注册作业模式的提示词段落。
+*
+* 段落只在作业模式激活且尚未消耗时出现；`workflow_job_options` /
+* `workflow_job_start` 的可见性由调用方用 {@link inJobMode} 判定，两处读的是
+* 同一份日志折叠结果。
+*
+* @param deps 上下文
+*/
+function installJobMode({ ctx }) {
+	ctx.inject(["systemPrompt"], (promptCtx) => {
+		const systemPrompt = promptCtx.systemPrompt;
+		if (systemPrompt?.section === void 0) return;
+		const dispose = systemPrompt.section({
+			name: "workflow_job_policy",
+			order: 520,
+			interpolate: false,
+			text: (context) => {
+				const agent = context.agent;
+				if (agent === void 0) return "";
+				return inJobMode(agent) ? jobModeSectionText() : "";
+			}
+		});
+		promptCtx.effect(() => dispose, "workflow: job mode prompt section");
+	});
+}
 // .build/workflows/commands/job.js
 /**
-* `/job` 命令：普通会话启动作业，发起人 = 当前会话。
+* `/job` 命令：普通会话进入作业模式，发起人 = 当前会话。
 *
-* 语法：
+* 语法（`/job` 必须是会话的第一条消息）：
 *
-* - `/job`：列出可用工作流与它们的启动输入要求；
-* - `/job <workflowId> <原始输入>`：创建作业，启动任务回到本会话执行（下一轮
-*   agent 按提示调用 `buka_task_complete` 交回结构化输入）。
+* - `/job [说明]`：进入作业模式。说明非空时作为第一条用户消息投递；agent
+*   之后用 `workflow_job_options` 列出可启动的工作流，按用户描述挑选，用户
+*   没有说明用哪个时先问用户；
+* - `/job off`：退出作业模式。
 *
-* 宿主 `commands` 服务没有注册 API 时返回 false，由 `index.ts` 记录日志；页面与
-* `buka_job_start` 工具仍是可用入口（spec §13.2 的降级路径）。
+* 命令不接收 workflow id：用户不必记住标识符，选择交给 agent；真正建单由
+* 模式里的 `workflow_job_start` 完成，这样结构化输入可以按开始节点的 schema 补齐。
+* 模式状态折叠自会话日志（见 `../job-mode.ts`），命令、提示词与工具读同一份。
+*
+* 宿主 `commands` 服务没有注册 API 时返回 false，由 `assembly.ts` 记录日志；
+* 页面仍可从侧边栏「新建作业」，人发起的作业不受作业模式影响。
 *
 * @module @buka/dsh-plugin-workflows/commands/job
 */
@@ -201,59 +560,69 @@ function registerJobCommand({ ctx, ready }) {
 	if (commands === void 0 || commands === null || typeof commands.register !== "function") return false;
 	const dispose = commands.register({
 		name: "job",
-		description: "启动一个工作流作业：/job <workflowId> <原始输入>。不带参数时列出可用的工作流。",
+		description: "进入作业模式：/job [说明] 作为会话第一条消息，说明可省略。之后由 agent 从可用工作流里选择或询问。/job off 退出。",
+		input: { hint: "[说明]|off" },
 		async handler(invocation) {
-			const engine = await ready();
-			const agentId = typeof invocation.agent?.id === "string" ? invocation.agent.id : "";
-			if (agentId === "") return {
+			const agent = invocation.agent;
+			const sessionId = typeof agent?.id === "string" ? agent.id : "";
+			if (agent === void 0 || sessionId === "") return {
 				kind: "error",
 				text: "/job 需要在一个会话里使用（发起人 = 当前会话）"
 			};
-			const raw = typeof invocation.rawInput === "string" ? invocation.rawInput.trim() : "";
-			if (raw === "") return {
-				kind: "success",
-				text: await describeAvailableWorkflows(engine)
-			};
-			const space = raw.search(/\s/u);
-			const workflowId = (space < 0 ? raw : raw.slice(0, space)).trim();
-			const request = space < 0 ? "" : raw.slice(space + 1).trim();
-			if (workflowId === "" || request === "") return {
-				kind: "error",
-				text: "用法：/job <workflowId> <原始输入>；不带参数可列出可用的工作流"
-			};
-			try {
-				const job = await engine.createJobFromSession({
-					workflowId,
-					content: { request },
-					sessionId: agentId
-				});
-				return {
-					kind: "success",
-					text: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`
-				};
-			} catch (error) {
-				return {
-					kind: "error",
-					text: error instanceof WorkflowError ? error.message : `创建工作流作业失败：${describeError$4(error)}`
-				};
-			}
+			return await runJobCommand({
+				engine: await ready(),
+				agent,
+				sessionId,
+				rawInput: typeof invocation.rawInput === "string" ? invocation.rawInput : ""
+			});
 		}
 	});
-	ctx.effect(() => dispose, "buka-workflows: /job command");
+	ctx.effect(() => dispose, "workflow: /job command");
 	return true;
 }
-/** 列出可用工作流与启动输入要求。 */
-async function describeAvailableWorkflows(engine) {
-	const workflows = (await engine.listWorkflowSummaries()).filter((workflow) => workflow.status === "active");
-	if (workflows.length === 0) return "没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。";
-	const lines = ["可用的工作流："];
-	for (const workflow of workflows) {
-		const id = typeof workflow.id === "string" ? workflow.id : "";
-		const name = typeof workflow.name === "string" ? workflow.name : id;
-		lines.push(`- ${id}「${name}」`);
+/**
+* 执行一条 `/job` 命令（拆出来便于单测）。
+*
+* @param input 引擎、会话与原始输入
+* @returns 命令结果
+*/
+async function runJobCommand(input) {
+	const { engine, agent, sessionId } = input;
+	const text = input.rawInput.trim();
+	const state = readJobMode(agent.session);
+	if (engine.jobIdForSession(sessionId) !== null || state.consumed) return text === "off" ? {
+		kind: "success",
+		text: "作业模式已结束（本会话已启动过作业）。"
+	} : {
+		kind: "error",
+		text: "本会话已经启动过作业，作业模式已结束；要再启动一个作业，请新建一个会话并以 /job 开头。"
+	};
+	if (text === "off") return {
+		kind: "success",
+		text: state.entered ? "已退出作业模式。" : "当前不在作业模式。"
+	};
+	if (!state.entered && !state.fresh) return {
+		kind: "error",
+		text: "作业模式只能在会话开始时进入：请新建一个会话，把 /job 作为第一条消息。"
+	};
+	let activeCount;
+	try {
+		activeCount = (await engine.listWorkflowSummaries()).filter((workflow) => workflow.status === "active").length;
+	} catch (error) {
+		return {
+			kind: "error",
+			text: `无法读取工作流列表：${describeError$4(error)}`
+		};
 	}
-	lines.push("用法：/job <workflowId> <原始输入>");
-	return lines.join("\n");
+	if (activeCount === 0) return {
+		kind: "error",
+		text: "没有可用的工作流。让编排会话保存一份定义，或在「工作流」页面重新启用一个已停用的工作流。"
+	};
+	if (text !== "") agent.steer?.(createUserMessage(text));
+	return {
+		kind: "success",
+		text: text === "" ? `已进入作业模式。说说你想做什么，我会从 ${activeCount} 个已启用工作流里挑一个；也可以直接说用哪个。退出作业模式：/job off。` : `已进入作业模式，并把你的说明作为第一条消息；我会从 ${activeCount} 个已启用工作流里挑一个，拿不准时问你。退出作业模式：/job off。`
+	};
 }
 // .build/workflows/domain/ids.js
 /**
@@ -1831,7 +2200,7 @@ function buildTemplateContext(input) {
 * 工作流 v9 定义校验。
 *
 * 纯函数：不读盘、不依赖 DSH。执行者存在性由调用方传入 `workers` 目录（按
-* 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
+* 标识符建索引），这样 `workflow_save` 用 workers 服务的登记表，单测用
 * 固定目录。
 *
 * 校验分两步：先解析出规范化定义，再跑跨节点规则（通道、可达性、动作、模板引用）。
@@ -2206,7 +2575,7 @@ function isRobotExecutor(executor, workers) {
 /**
 * 解析机器人任务类型的「完成后创建」。
 *
-* 只有机器人岗位能声明：agent 任务用 `buka_task_create` 动态创建，人任务用动作。
+* 只有机器人岗位能声明：agent 任务用 `workflow_task_create` 动态创建，人任务用动作。
 */
 function readRobotCreates(raw, path, executor, workers, issues) {
 	if (raw === void 0 || raw === null) return void 0;
@@ -3298,10 +3667,10 @@ function assertJobTransition(jobId, from, to) {
 /** 基准规则：能力说明，不暴露岗位 / 通道。 */
 const BASELINE_RULES = [
 	"## 工作流规则",
-	"- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。",
-	"- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。",
-	"- 创建后续任务：`buka_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。",
-	"- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。"
+	"- 读取资产：`workflow_job_attachments` 列出并读取本任务可用的附件；`workflow_job_board` 查看本作业的任务，`workflow_task_get` 读取某个任务。",
+	"- 写入资产：提交结果时用 `workflow_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。",
+	"- 创建后续任务：`workflow_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。",
+	"- 完成任务：用 `workflow_task_complete` 交回一段总结；结果没有结构化契约。"
 ].join("\n");
 /** 工作树生效时的规则：执行者自己按仓库调用 `create_worktree`，不要直接改原检出。 */
 const WORKTREE_RULES = ["## 工作树", "本任务需要改动代码时，不要直接修改原检出：先进入要修改的仓库目录，调用 `create_worktree` 新建并进入它的 Git 工作树，之后的读写和命令都在这个工作树里进行。任务涉及多个仓库时，对每个仓库分别创建 worktree；需要换仓库时先用 `working_directory` 切到那个仓库的目录。同一个仓库只创建一个工作树，任务结束前不要删除检出。"].join("\n");
@@ -3431,21 +3800,21 @@ function buildEndDeliveryText(job, task) {
 		"",
 		"{{content}}",
 		"",
-		"如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。"
+		"如果这份报告就是你要的结果，调用 `workflow_task_complete` 确认收到，作业即结束。"
 	].join("\n"), { content: task.content ?? null }, { escape: true });
 	return [
 		`工作流「${job.workflowName}」的作业 #${job.seq} 已经运行到最后一步，最终报告如下：`,
 		"",
 		contentSection(task.content),
 		"",
-		"如果这份报告就是你要的结果，调用 `buka_task_complete` 确认收到，作业即结束。"
+		"如果这份报告就是你要的结果，调用 `workflow_task_complete` 确认收到，作业即结束。"
 	].join("\n");
 }
 /**
 * 助理承办人任务的固定提示。
 *
-* 助理只负责对接处理人；任务内容用 `buka_task_get` 读，人任务的动作见
-* `buka_task_complete` 的工具说明（由宿主列出工具）。
+* 助理只负责对接处理人；任务内容用 `workflow_task_get` 读，人任务的动作见
+* `workflow_task_complete` 的工具说明（由宿主列出工具）。
 *
 * @param input 任务与任务类型
 * @returns 提示文本
@@ -3757,155 +4126,15 @@ async function appendJobEvent(store, logger, jobId, type, data) {
 		})}\n`;
 		await promises.appendFile(paths.events, line, "utf8");
 	} catch (error) {
-		logger?.warn?.(`buka-workflows: could not append job event ${type}: ${describeError$4(error)}`);
+		logger?.warn?.(`workflow: could not append job event ${type}: ${describeError$4(error)}`);
 	}
-}
-// .build/workflows/engine/session.js
-/**
-* 发起人会话投递与执行者句柄读取。
-*
-* 开始 / 结束任务的主体是发起人。发起人可能是普通会话：插件通过宿主
-* `sessionController.resolveAgent(sessionId)`（没有时退回 `agents.get`）拿到 live
-* agent，构造一条用户消息 `followup` 进去，再用 `sessions.flush` 等持久化确认。
-* 这与官方 `@deepseek-ai/dsh-schedule` 的提醒投递是同一机制。
-*
-* 消息形状按 DSH 的 `UserMessage` 结构构造（id / role / content / source）；
-* 不 import `@deepseek-ai/dsh-llm`，避免插件多一个运行时依赖。
-*
-* @module @buka/dsh-plugin-workflows/engine/session
-*/
-/**
-* 构造一条用户消息。
-*
-* @param text 消息正文
-* @returns UserMessage 形状的对象
-*/
-function createUserMessage(text) {
-	return {
-		id: randomUUID(),
-		role: "user",
-		content: [{
-			type: "text",
-			text
-		}],
-		source: { kind: "user" }
-	};
-}
-/**
-* 取一个会话的 live agent：先问 web 的 sessionController（会 resume），
-* 再退回 agents 注册表里的 live 实例。
-*
-* @param ctx 插件上下文
-* @param sessionId 会话 id
-* @returns live agent
-* @throws 该组成里无法恢复会话时抛出
-*/
-async function resolveLiveAgent(ctx, sessionId) {
-	const controller = ctx.get("sessionController");
-	if (controller !== void 0 && controller !== null && typeof controller.resolveAgent === "function") {
-		const resolved = await controller.resolveAgent(sessionId);
-		if (resolved !== void 0 && resolved !== null) {
-			if ("error" in resolved && resolved.error !== void 0) throw new Error(`cannot resume starter session "${sessionId}": ${describeError$4(resolved.error)}`);
-			if (resolved.agent !== void 0) return resolved.agent;
-		}
-	}
-	const live = ctx.get("agents")?.get?.(sessionId);
-	if (live !== void 0) return live;
-	throw new Error(`cannot resume starter session "${sessionId}" in this composition (no live agent and no sessionController)`);
-}
-/**
-* 宿主会话投递实现。
-*
-* @param ctx 插件上下文
-* @returns 投递器
-*/
-function createHostSessionDelivery(ctx) {
-	return { async deliver(sessionId, text) {
-		const agent = await resolveLiveAgent(ctx, sessionId);
-		const sessions = ctx.get("sessions");
-		const before = sessions?.get?.(sessionId);
-		const startSeq = typeof before?.seq === "number" ? before.seq : null;
-		if (typeof agent.followup !== "function") throw new Error(`starter session "${sessionId}" cannot accept a follow-up message`);
-		agent.followup(createUserMessage(text));
-		if (typeof sessions?.flush === "function" && agent.session !== void 0) try {
-			await sessions.flush(agent.session);
-		} catch {}
-		return startSeq;
-	} };
-}
-/**
-* 读一次执行者句柄的观测结果。
-*
-* @param handle workers 句柄
-* @param sinceSeq 起点 seq
-* @returns 本轮快照
-*/
-function readHandleResult(handle, sinceSeq) {
-	let raw;
-	if (typeof handle.readResult === "function") {
-		const value = handle.readResult({ sinceSeq });
-		if (value !== null && typeof value === "object" && !Array.isArray(value)) raw = value;
-	}
-	return {
-		text: typeof raw?.text === "string" ? raw.text : "",
-		stopReason: typeof raw?.stopReason === "string" ? raw.stopReason : null,
-		turnEnded: raw?.turnEnded === true,
-		startSeq: typeof raw?.startSeq === "number" && Number.isInteger(raw.startSeq) ? raw.startSeq : null
-	};
-}
-/**
-* 读句柄的起点 seq。
-*
-* @param handle workers 句柄
-* @returns 起点 seq；未知时是 null
-*/
-function handleStartSeq(handle) {
-	return typeof handle.startSeq === "number" && Number.isInteger(handle.startSeq) ? handle.startSeq : null;
-}
-/**
-* 读句柄的会话 id。
-*
-* @param handle workers 句柄
-* @returns 会话 id；未知时是 null
-*/
-function handleSessionId(handle) {
-	return typeof handle.sessionId === "string" && handle.sessionId !== "" ? handle.sessionId : null;
-}
-/**
-* 等待一段会话轮次观测的定时器；返回取消函数。
-*
-* @param intervalMs 轮询间隔
-* @param check 每次轮询的回调；返回 true 时停止
-* @returns 取消函数
-*/
-function poll(intervalMs, check) {
-	let stopped = false;
-	let timer = null;
-	const tick = async () => {
-		if (stopped) return;
-		let done = false;
-		try {
-			done = await check();
-		} catch {
-			done = true;
-		}
-		if (stopped || done) return;
-		timer = setTimeout(tick, intervalMs);
-		timer.unref?.();
-	};
-	timer = setTimeout(tick, intervalMs);
-	timer.unref?.();
-	return () => {
-		stopped = true;
-		if (timer !== null) clearTimeout(timer);
-	};
 }
 // .build/workflows/engine/tasks.js
 /**
 * 任务创建校验与记录构造。
 *
 * 创建任务的入口有三个：引擎按 `start.next` 生成初始任务、执行中的任务通过
-* `buka_task_create` 派生任务、人任务的动作创建任务。三者共享同一套校验：
+* `workflow_task_create` 派生任务、人任务的动作创建任务。三者共享同一套校验：
 *
 * 1. 通道存在、起点是创建任务的节点；
 * 2. 任务类型是目标岗位声明的类型（结束任务用 `end` 契约）；
@@ -4271,7 +4500,7 @@ const WORKER_CACHE_MS = 5e3;
 /**
 * 任务完成后再等多久释放会话句柄。
 *
-* `buka_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
+* `workflow_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
 * 的收尾回复不会生成。任务结果已经记好，所以先等这一轮落定再释放；等待本身
 * 有上限，避免一直挂在会话上。正常模型的收尾回复远短于 5 分钟，这个上限只兜底
 * 「turn 永不结束」。
@@ -4421,7 +4650,7 @@ var WorkflowEngine = class {
 			const listed = typeof workers.list === "function" ? await workers.list() : void 0;
 			this.catalog = parseWorkerCatalog(listed ?? workers);
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not read the workers registry: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not read the workers registry: ${describeError$4(error)}`);
 			this.catalog = /* @__PURE__ */ new Map();
 		}
 		this.catalogAt = Date.now();
@@ -4441,7 +4670,7 @@ var WorkflowEngine = class {
 		try {
 			return this.worktreeAvailableOf() === true;
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not detect the worktree plugin: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not detect the worktree plugin: ${describeError$4(error)}`);
 			return false;
 		}
 	}
@@ -4498,7 +4727,7 @@ var WorkflowEngine = class {
 			}
 			return new Set(ids);
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not read the agent preset roster: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not read the agent preset roster: ${describeError$4(error)}`);
 			return;
 		}
 	}
@@ -4618,6 +4847,51 @@ var WorkflowEngine = class {
 			content: input.content,
 			delivery: this.resolveDelivery(definition, input.delivery, starter, workers)
 		});
+	}
+	/**
+	* 作业模式里可见的全部工作流目标，供 `workflow_job_options` 列给 agent 挑选。
+	*
+	* 只列已启用的工作流；定义版本过旧或引用的执行者缺失时也列出来，但带上
+	* `error` 说明原因——让 agent 能告诉用户先修哪里，而不是只看到空列表。
+	* 登记表只刷新一次，不会为每个工作流各读一遍。
+	*
+	* @returns 目标列表（含暂时不可启动的工作流）
+	*/
+	async jobModeTargets() {
+		const workers = await this.refreshWorkers(true);
+		const targets = [];
+		for (const workflow of this.store.listWorkflows()) {
+			if (workflow.status !== "active") continue;
+			const found = this.store.readWorkflowVersion(workflow.id);
+			if (found === null) continue;
+			const { definition } = found.versionRecord;
+			if (definition.version !== 9) {
+				targets.push({
+					workflowId: workflow.id,
+					name: workflow.name,
+					description: workflow.description,
+					error: "this workflow is not on the current definition version; ask the orchestrator to rewrite it before starting"
+				});
+				continue;
+			}
+			const availability = definitionAvailability(definition, workers);
+			if (!availability.available) {
+				targets.push({
+					workflowId: workflow.id,
+					name: workflow.name,
+					description: workflow.description,
+					error: `it references missing worker identifiers (${describeUnavailable(availability)}); rebind those positions or task types first`
+				});
+				continue;
+			}
+			targets.push({
+				workflowId: workflow.id,
+				name: workflow.name,
+				description: workflow.description,
+				...definition.start.content === void 0 ? {} : { startContent: definition.start.content }
+			});
+		}
+		return targets;
 	}
 	/**
 	* 建作业 + 启动任务 + 初始任务。
@@ -5735,7 +6009,7 @@ var WorkflowEngine = class {
 				await this.recoverJobLocked(job.id);
 			});
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not recover job ${job.id}: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not recover job ${job.id}: ${describeError$4(error)}`);
 		}
 	}
 	/** 恢复一个作业：running 任务续接 / 失败，然后重新调度。 */
@@ -5791,7 +6065,7 @@ var WorkflowEngine = class {
 		if (startTask !== void 0 && startTask.status === "completed" && tasks.length === 1 && job.definition.start.next.length > 0) try {
 			await this.spawnInitialTasksLocked(job, startTask);
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not rebuild initial tasks for job ${jobId}: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not rebuild initial tasks for job ${jobId}: ${describeError$4(error)}`);
 		}
 		await this.recomputeLocked(jobId);
 	}
@@ -5811,7 +6085,7 @@ var WorkflowEngine = class {
 			});
 		} catch (error) {
 			this.unbindSessionTask(sessionId, task.id);
-			this.logger?.warn?.(`buka-workflows: could not resume session ${sessionId}: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not resume session ${sessionId}: ${describeError$4(error)}`);
 			return false;
 		}
 		const startSeq = handleStartSeq(handle) ?? attempt.startSeq ?? 0;
@@ -6181,7 +6455,7 @@ var WorkflowEngine = class {
 	async launchAgent(launch) {
 		const workers = this.workersOf();
 		if (workers === null || typeof workers.dispatchSession !== "function") {
-			await this.failOutside(launch.jobId, launch.taskId, "the workers service (ctx.bukaWorkers) with dispatchSession() is unavailable in this composition; update the plugin or check the composition");
+			await this.failOutside(launch.jobId, launch.taskId, "the workers service (ctx.workflowWorkers) with dispatchSession() is unavailable in this composition; update the plugin or check the composition");
 			return;
 		}
 		const task = this.store.getTask(launch.taskId);
@@ -6288,13 +6562,13 @@ var WorkflowEngine = class {
 			if (input.kind !== "assistant" && snapshot.stopReason === "completed") {
 				if (!waiting) {
 					waiting = true;
-					this.logger?.info?.(`buka-workflows: task ${input.taskId} is waiting for the session to continue after the turn completed`);
+					this.logger?.info?.(`workflow: task ${input.taskId} is waiting for the session to continue after the turn completed`);
 				}
 				return false;
 			}
 			finish(task.status);
 			if (input.kind === "assistant") await this.failAssistantOutside(input.jobId, input.taskId, snapshot, input.worker);
-			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
+			else await this.failOutside(input.jobId, input.taskId, `the task session ended without calling workflow_task_complete (stopReason: ${snapshot.stopReason ?? "unknown"})`);
 			return true;
 		});
 		this.active.set(input.taskId, execution);
@@ -6476,7 +6750,7 @@ var WorkflowEngine = class {
 				await this.recomputeLocked(jobId);
 			});
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not mark task ${taskId} failed: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not mark task ${taskId} failed: ${describeError$4(error)}`);
 		}
 	}
 	/** 代办失败（会话结束未提交）：任务与整个作业一起失败。 */
@@ -6488,7 +6762,7 @@ var WorkflowEngine = class {
 				await this.recomputeLocked(jobId);
 			});
 		} catch (error) {
-			this.logger?.warn?.(`buka-workflows: could not fail the job for assistant task ${taskId}: ${describeError$4(error)}`);
+			this.logger?.warn?.(`workflow: could not fail the job for assistant task ${taskId}: ${describeError$4(error)}`);
 		}
 	}
 	/** 代办失败的作业错误：写明是哪条任务、哪个代办者、什么原因。 */
@@ -6808,12 +7082,12 @@ async function runMigrations(options) {
 			});
 			removed.push(name);
 		} catch (error) {
-			logger?.warn?.(`buka-workflows: could not remove legacy path ${target}`, error);
+			logger?.warn?.(`workflow: could not remove legacy path ${target}`, error);
 		}
 	}
 	await promises.mkdir(path.join(dataDir, "jobs"), { recursive: true });
 	await promises.writeFile(marker, `${(/* @__PURE__ */ new Date()).toISOString()}\n`, "utf8");
-	if (removed.length > 0) logger?.info?.(`buka-workflows: migrated to v4, removed legacy data: ${removed.join(", ")}`);
+	if (removed.length > 0) logger?.info?.(`workflow: migrated to v4, removed legacy data: ${removed.join(", ")}`);
 }
 // .build/workflows/options.js
 /**
@@ -7107,18 +7381,18 @@ function sendMethodNotAllowed$1(res, allow) {
 */
 /** 路由路径。 */
 const ROUTES = {
-	workflows: "/buka-workflows/workflows",
-	workflow: "/buka-workflows/workflow",
-	workflowActivate: "/buka-workflows/workflow/activate",
-	jobs: "/buka-workflows/jobs",
-	jobStart: "/buka-workflows/job/start",
-	job: "/buka-workflows/job",
-	jobAction: "/buka-workflows/job/action",
-	jobRestart: "/buka-workflows/job/restart",
-	task: "/buka-workflows/task",
-	taskAction: "/buka-workflows/task/action",
-	attachments: "/buka-workflows/attachments",
-	attachment: "/buka-workflows/attachment"
+	workflows: "/workflow/list",
+	workflow: "/workflow/get",
+	workflowActivate: "/workflow/activate",
+	jobs: "/workflow/jobs",
+	jobStart: "/workflow/job/start",
+	job: "/workflow/job",
+	jobAction: "/workflow/job/action",
+	jobRestart: "/workflow/job/restart",
+	task: "/workflow/task",
+	taskAction: "/workflow/task/action",
+	attachments: "/workflow/attachments",
+	attachment: "/workflow/attachment"
 };
 /** 错误码 → HTTP 状态码。 */
 function statusForError(error) {
@@ -7146,7 +7420,7 @@ function sendRouteError(res, error, logger, fallbackCode = "internal") {
 	const status = statusForError(error);
 	const code = error instanceof WorkflowError ? error.code : fallbackCode;
 	const message = describeError$4(error);
-	if (status >= 500) logger?.warn?.(`buka-workflows: request failed: ${message}`);
+	if (status >= 500) logger?.warn?.(`workflow: request failed: ${message}`);
 	if (!res.headersSent) sendError$1(res, status, code, message);
 	else res.destroy(error instanceof Error ? error : void 0);
 }
@@ -7187,7 +7461,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 						sendRouteError(res, error, webCtx.logger);
 					}
 				}
-			}), `buka-workflows: ${path}`);
+			}), `workflow: ${path}`);
 		};
 		route(ROUTES.workflows, async (req, res) => {
 			if (req.method !== "GET") return sendMethodNotAllowed$1(res, "GET");
@@ -7422,7 +7696,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 					path: opened.file,
 					name: opened.record.name,
 					bytes: opened.record.bytes
-				}, { log: (error) => webCtx.logger?.warn?.(`buka-workflows: attachment read failed: ${describeError$4(error)}`) });
+				}, { log: (error) => webCtx.logger?.warn?.(`workflow: attachment read failed: ${describeError$4(error)}`) });
 				return;
 			}
 			if (mode === "inline") {
@@ -7437,7 +7711,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 				}, {
 					inline: true,
 					mime: preview.mime,
-					log: (error) => webCtx.logger?.warn?.(`buka-workflows: attachment read failed: ${describeError$4(error)}`)
+					log: (error) => webCtx.logger?.warn?.(`workflow: attachment read failed: ${describeError$4(error)}`)
 				});
 				return;
 			}
@@ -7490,7 +7764,7 @@ function registerWorkflowRoutes({ ctx, ready }) {
 }
 // .build/workflows/service.js
 /**
-* `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.bukaWorkflows`。
+* `@buka/dsh-plugin-workflows` 对外提供的只读查询服务：`ctx.workflowQuery`。
 *
 * 目前只有一个能力：`workerUsage(id)`。Workers 插件在删除执行者前用它算出
 * 影响面与唯一阻塞条件（引用该标识符的运行中作业）；取不到服务时视为没有
@@ -7501,8 +7775,8 @@ function registerWorkflowRoutes({ ctx, ready }) {
 *
 * @module @buka/dsh-plugin-workflows/service
 */
-/** 服务名；消费方用 `ctx.get(SERVICE_NAME)` 读取，运行时是 `ctx.bukaWorkflows`。 */
-const SERVICE_NAME$1 = "bukaWorkflows";
+/** 服务名；消费方用 `ctx.get(SERVICE_NAME)` 读取，运行时是 `ctx.workflowQuery`。 */
+const SERVICE_NAME$1 = "workflowQuery";
 /** 查询服务：等价于转发给就绪后的引擎。 */
 var WorkflowQueryService = class {
 	#ready;
@@ -12226,7 +12500,7 @@ var WorkflowStore = class {
 			}));
 			jobs += 1;
 		}
-		if (tasks > 0 || jobs > 0) this.logger?.info?.(`buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s))`);
+		if (tasks > 0 || jobs > 0) this.logger?.info?.(`workflow: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s))`);
 	}
 	/**
 	* 把 workflows 表里 v7 的定义快照升到 v8：主体的 `name` 改名成 `id`。
@@ -12258,7 +12532,7 @@ var WorkflowStore = class {
 			}));
 			workflows += 1;
 		}
-		if (definitions > 0) this.logger?.info?.(`buka-workflows: migrated ${definitions} workflow definition(s) to v8 (${workflows} workflow(s))`);
+		if (definitions > 0) this.logger?.info?.(`workflow: migrated ${definitions} workflow definition(s) to v8 (${workflows} workflow(s))`);
 	}
 	/** 打开域之后的初始化：键唯一性、旧草稿启用、作业编号回填。 */
 	async init() {
@@ -12278,13 +12552,13 @@ var WorkflowStore = class {
 			}));
 			promoted += 1;
 		}
-		if (promoted > 0) this.logger?.info?.(`buka-workflows: enabled ${promoted} legacy draft workflow(s)`);
+		if (promoted > 0) this.logger?.info?.(`workflow: enabled ${promoted} legacy draft workflow(s)`);
 		const maxSeq = /* @__PURE__ */ new Map();
 		for (const [, job] of this.domain.table("jobs").entries()) maxSeq.set(job.workflowId, Math.max(maxSeq.get(job.workflowId) ?? 0, job.seq));
 		for (const [workflowId, seq] of maxSeq) {
 			const workflow = this.domain.table("workflows").get(workflowId);
 			if (workflow === void 0) {
-				this.logger?.warn?.(`buka-workflows: job ${workflowId} has no workflow record`);
+				this.logger?.warn?.(`workflow: job ${workflowId} has no workflow record`);
 				continue;
 			}
 			if (workflow.jobSeq >= seq) continue;
@@ -12696,7 +12970,7 @@ function openWorkflowStore(ctx, options) {
 	let domain;
 	ctx.effect(() => () => {
 		if (domain !== void 0) domain.close().catch(() => void 0);
-	}, "buka-workflows: close workflow storage domain");
+	}, "workflow: close workflow storage domain");
 	return (async () => {
 		domain = await facility.open(workflowDomain);
 		const store = new WorkflowStore({
@@ -12716,7 +12990,7 @@ function openWorkflowStore(ctx, options) {
 }
 // .build/workflows/tools/descriptions.js
 /**
-* 执行工具（`buka_task_create` / `buka_task_complete`）的说明文本。
+* 执行工具（`workflow_task_create` / `workflow_task_complete`）的说明文本。
 *
 * 同一条工具在两种会话里各注册一份：
 *
@@ -12739,7 +13013,7 @@ const COMPLETE_HEAD = "Submit the result of the task this session is executing: 
 /** 全局会话看到的提交工具说明（任务会话会被同名的 scoped 版本遮蔽）。 */
 const DEFAULT_TASK_COMPLETE_DESCRIPTION = `${COMPLETE_HEAD} Handling a human task also needs the chosen \`action\` id and its form values in \`input\`; a task session lists the available actions in this description.`;
 /**
-* 生成 `buka_task_create` 的说明：列出本任务可创建的 target、展示名与任务内容
+* 生成 `workflow_task_create` 的说明：列出本任务可创建的 target、展示名与任务内容
 * schema。
 *
 * @param targets 可创建目标
@@ -12757,7 +13031,7 @@ function taskCreateDescription(targets) {
 	].join("\n");
 }
 /**
-* 生成 `buka_task_complete` 的说明：人任务列出动作 id、展示名与输入表单 schema。
+* 生成 `workflow_task_complete` 的说明：人任务列出动作 id、展示名与输入表单 schema。
 *
 * @param actions 人任务动作；非人任务为空
 * @returns 工具说明
@@ -12779,7 +13053,8 @@ function taskCompleteDescription(actions) {
 *
 * 可见性：
 * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
-* - 启动 / 状态 / 取消工具对普通会话可见（发起人 = 当前会话）；
+* - 作业工具（列出可启动工作流 / 启动）只对作业模式（`/job` 进入、尚未启动过
+*   作业）的会话可见；状态 / 取消工具对发起人 / 执行会话可见；
 * - 执行工具（建任务 / 提交结果 / 看板 / 任务 / 附件）只对引擎创建的任务会话、
 *   助理会话与发起人会话可见，并在 `execute` 里按会话再校验一次。
 *
@@ -12884,7 +13159,7 @@ function registerWorkflowTools(deps) {
 		ctx.tools.register(tool, when === void 0 ? void 0 : { when });
 	};
 	register(defineTool({
-		name: "buka_workflow_save",
+		name: "workflow_save",
 		description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v9 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
 		parameters: {
 			definition: {
@@ -12953,8 +13228,8 @@ function registerWorkflowTools(deps) {
 		}
 	}), orchestratorVisible);
 	register(defineTool({
-		name: "buka_workflow_list",
-		description: "List saved workflows (id, name, version, status, job count). Use buka_workflow_get to read a full definition.",
+		name: "workflow_list",
+		description: "List saved workflows (id, name, version, status, job count). Use workflow_get to read a full definition.",
 		parameters: {},
 		output: {
 			schema: {
@@ -12976,7 +13251,7 @@ function registerWorkflowTools(deps) {
 		}
 	}), orchestratorVisible);
 	register(defineTool({
-		name: "buka_workflow_get",
+		name: "workflow_get",
 		description: "Read one saved workflow definition (optionally a specific version).",
 		parameters: {
 			id: {
@@ -13021,17 +13296,55 @@ function registerWorkflowTools(deps) {
 		}
 	}), orchestratorVisible);
 	register(defineTool({
-		name: "buka_job_start",
-		description: "Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema). If the input or initialization fails, a failed job and a failed start task are kept as a trace and the error names the job; such a job cannot be restarted. The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.",
+		name: "workflow_job_options",
+		description: "List the workflows this job-mode session can start: id, name, description, the start node JSON Schema for `content`, and the reason when a workflow cannot start right now. Use it to pick the workflow that matches the user’s request. If the user did not say which workflow to use, or several fit equally, ask the user instead of guessing. Only available in job mode.",
+		parameters: {},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { workflows: {
+					type: "json",
+					required: true
+				} }
+			},
+			render: (_args, value) => {
+				const workflows = Array.isArray(value.workflows) ? value.workflows : [];
+				if (workflows.length === 0) return text$1("没有已启用的工作流；让用户先在「工作流」页面启用一个。");
+				const lines = ["可启动的工作流："];
+				for (const entry of workflows) {
+					const workflow = entry;
+					lines.push("");
+					lines.push(`- ${String(workflow.workflowId)}「${String(workflow.name)}」`);
+					const description = String(workflow.description ?? "").trim();
+					if (description !== "") lines.push(`  ${description}`);
+					if (workflow.error !== void 0) lines.push(`  （当前不可启动：${String(workflow.error)}）`);
+					else if (workflow.startContent === void 0) lines.push("  开始节点没有输入字段。");
+					else lines.push(`  开始节点输入 schema：${JSON.stringify(workflow.startContent)}`);
+				}
+				lines.push("");
+				lines.push("按用户描述挑一个；没有说明用哪个、或几个都像时先问用户。");
+				return text$1(lines.join("\n"));
+			}
+		},
+		async execute(_args, exec) {
+			const state = selectedJobMode(exec.agent?.session);
+			if (!state.entered || state.consumed) throw new Error("workflow_job_options is only available in job mode");
+			return { workflows: toolJson(await (await ready()).jobModeTargets()) };
+		}
+	}), (context) => inJobMode(context.agent));
+	register(defineTool({
+		name: "workflow_job_start",
+		description: "Start the workflow job of this session's job mode. This session may start exactly one job, and only while in job mode: enter it by making /job the first message of a new session, then pick the workflow with workflow_job_options. Pass that workflow's id and a `content` object matching the start node JSON Schema listed for it; omit `content` when it has no fields. If the input or initialization fails, a failed job and a failed start task are kept as a trace and the error names the job. The job runs on the board; the final report is delivered back into this conversation and you confirm it with workflow_task_complete.",
 		parameters: {
 			workflowId: {
 				type: "string",
 				required: true,
-				description: "Workflow id to start."
+				description: "Workflow id listed by workflow_job_options."
 			},
 			content: {
 				type: "json",
-				description: "Workflow input matching the start.content schema; omit for no input."
+				description: "Workflow input matching the start node JSON Schema listed by workflow_job_options; omit for no input."
 			},
 			delivery: {
 				type: "json",
@@ -13065,9 +13378,16 @@ function registerWorkflowTools(deps) {
 		},
 		async execute(args, exec) {
 			const sessionId = sessionIdOf(exec);
-			if (sessionId === "") throw new Error("buka_job_start must be called from a session");
-			const job = await (await ready()).createJobFromSession({
-				workflowId: args.workflowId,
+			if (sessionId === "") throw new Error("workflow_job_start must be called from a session");
+			const state = selectedJobMode(exec.agent?.session);
+			if (!state.entered) throw new Error("workflow_job_start is only available in job mode; open a new session with /job as its first message");
+			if (state.consumed) throw new Error("this session already started its workflow job; open a new session with /job to start another");
+			const workflowId = typeof args.workflowId === "string" ? args.workflowId.trim() : "";
+			if (workflowId === "") throw new Error("workflow_job_start requires a workflow id from workflow_job_options");
+			const engine = await ready();
+			if (engine.jobIdForSession(sessionId) !== null) throw new Error("this session already started its workflow job; open a new session with /job to start another");
+			const job = await engine.createJobFromSession({
+				workflowId,
 				content: args.content ?? {},
 				sessionId,
 				delivery: args.delivery
@@ -13076,10 +13396,10 @@ function registerWorkflowTools(deps) {
 				jobId: job.id,
 				seq: job.seq,
 				workflowName: job.workflowName,
-				message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`
+				message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 workflow_task_complete 确认收到。`
 			};
 		}
-	}));
+	}), (context) => inJobMode(context.agent));
 	register(defineJobStatusTool(ready), starterVisible);
 	register(defineJobCancelTool(ready), starterVisible);
 	register(defineTaskCreateTool(ready), executionVisible);
@@ -13091,7 +13411,7 @@ function registerWorkflowTools(deps) {
 /** 作业状态工具。 */
 function defineJobStatusTool(ready) {
 	return defineTool({
-		name: "buka_job_status",
+		name: "workflow_job_status",
 		description: "Read one workflow job (status, task counts) or, without jobId, the job started by this session.",
 		parameters: { jobId: {
 			type: "string",
@@ -13140,7 +13460,7 @@ function defineJobStatusTool(ready) {
 /** 取消作业工具。 */
 function defineJobCancelTool(ready) {
 	return defineTool({
-		name: "buka_job_cancel",
+		name: "workflow_job_cancel",
 		description: "Cancel a running workflow job started by this session (or the given job id).",
 		parameters: { jobId: {
 			type: "string",
@@ -13185,7 +13505,7 @@ function defineJobCancelTool(ready) {
 */
 function defineTaskCreateTool(ready, description = DEFAULT_TASK_CREATE_DESCRIPTION) {
 	return defineTool({
-		name: "buka_task_create",
+		name: "workflow_task_create",
 		description,
 		parameters: {
 			target: {
@@ -13223,9 +13543,9 @@ function defineTaskCreateTool(ready, description = DEFAULT_TASK_CREATE_DESCRIPTI
 		},
 		async execute(args, exec) {
 			const sessionId = sessionIdOf(exec);
-			if (sessionId === "") throw new Error("buka_task_create must be called from a task session");
+			if (sessionId === "") throw new Error("workflow_task_create must be called from a task session");
 			const target = typeof args.target === "string" ? args.target.trim() : "";
-			if (target === "") throw new Error("buka_task_create requires a target listed in its description");
+			if (target === "") throw new Error("workflow_task_create requires a target listed in its description");
 			const task = await (await ready()).createTaskFromTarget({
 				sessionId,
 				target,
@@ -13247,7 +13567,7 @@ function defineTaskCreateTool(ready, description = DEFAULT_TASK_CREATE_DESCRIPTI
 */
 function defineTaskCompleteTool(ready, description = DEFAULT_TASK_COMPLETE_DESCRIPTION) {
 	return defineTool({
-		name: "buka_task_complete",
+		name: "workflow_task_complete",
 		description,
 		parameters: {
 			text: {
@@ -13292,7 +13612,7 @@ function defineTaskCompleteTool(ready, description = DEFAULT_TASK_COMPLETE_DESCR
 		},
 		async execute(args, exec) {
 			const sessionId = sessionIdOf(exec);
-			if (sessionId === "") throw new Error("buka_task_complete must be called from a task session");
+			if (sessionId === "") throw new Error("workflow_task_complete must be called from a task session");
 			const result = await (await ready()).completeTaskFromSession({
 				sessionId,
 				text: typeof args.text === "string" ? args.text : "",
@@ -13311,7 +13631,7 @@ function defineTaskCompleteTool(ready, description = DEFAULT_TASK_COMPLETE_DESCR
 /** 看板工具。 */
 function defineBoardTool(ready) {
 	return defineTool({
-		name: "buka_job_board",
+		name: "workflow_job_board",
 		description: "Read the tasks of the job this session is executing: id, type, status, dependencies, result text and attachments. Useful to gather task ids when creating follow-up tasks.",
 		parameters: {},
 		output: {
@@ -13362,7 +13682,7 @@ function defineBoardTool(ready) {
 /** 任务读取工具。 */
 function defineTaskGetTool(ready) {
 	return defineTool({
-		name: "buka_task_get",
+		name: "workflow_task_get",
 		description: "Read one task of the job this session is executing: content, dependencies, result and attachments.",
 		parameters: { taskId: {
 			type: "string",
@@ -13394,7 +13714,7 @@ function defineTaskGetTool(ready) {
 /** 附件工具。 */
 function defineAttachmentsTool(ready) {
 	return defineTool({
-		name: "buka_job_attachments",
+		name: "workflow_job_attachments",
 		description: "Search or read the attachments this task is allowed to see (its own output plus the tasks it depends on, directly or transitively). Pass no arguments to list visible attachments; pass attachmentId to read one (metadata plus bounded inline text).",
 		parameters: {
 			query: {
@@ -13440,7 +13760,7 @@ function defineAttachmentsTool(ready) {
 * - 引擎在派发前就绑定「会话 → 任务」，host 的 `agent/created` 监听据此查出
 *   这张任务；
 * - 在 agent 作用域（`createScope(agent.ctx, agent)`）里各注册一份带本任务说明的
-*   `buka_task_create` / `buka_task_complete`，遮蔽同名全局工具；
+*   `workflow_task_create` / `workflow_task_complete`，遮蔽同名全局工具；
 * - 会话释放或插件卸载时撤销。
 *
 * 作用域注册跟随 agent 的 fiber 释放；`agent/disposed` 再兜底一次。
@@ -13463,11 +13783,11 @@ function installTaskScopedTools(deps) {
 	};
 	deps.ctx.effect(() => () => {
 		for (const sessionId of [...scopes.keys()]) disposeScope(sessionId);
-	}, "buka-workflows: dispose task tool scopes");
+	}, "workflow: dispose task tool scopes");
 	/** 会话开始执行任务时装配说明；`agent/created` 是串行事件，返回的 Promise 会被等待。 */
 	const mount = async (agent, sessionId) => {
 		const engine = await deps.ready().catch((error) => {
-			deps.ctx.logger?.warn?.(`buka-workflows: could not mount task tools for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+			deps.ctx.logger?.warn?.(`workflow: could not mount task tools for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
 			return null;
 		});
 		if (engine === null || engine.taskForSession(sessionId) === null) return void 0;
@@ -13510,9 +13830,9 @@ function installTaskScopedTools(deps) {
 * 1. 解析配置；
 * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
 * 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
-* 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
+* 4. 安装作业模式（提示词段落与目标缓存）并注册 `/job` 命令；宿主不支持命令注册时只能从页面建作业；
 * 5. 注册浏览器路由；
-* 6. 提供只读服务 `ctx.bukaWorkflows`（`workerUsage(id)`），供执行者删除前
+* 6. 提供只读服务 `ctx.workflowQuery`（`workerUsage(id)`），供执行者删除前
 *    计算引用面与唯一阻塞（运行中作业）。
 *
 * `storageDomain` 不放进 `inject`：缺少它的组合里插件仍然加载，只在真正需要
@@ -13536,7 +13856,7 @@ function applyWorkflows(ctx, config) {
 	ctx.effect(() => () => {
 		engine?.dispose();
 		engine = void 0;
-	}, "buka-workflows: dispose engine");
+	}, "workflow: dispose engine");
 	/**
 	* 初始化：迁移 → 打开存储 → 构造引擎 → 恢复。只做一次。
 	*
@@ -13556,7 +13876,7 @@ function applyWorkflows(ctx, config) {
 				}),
 				options,
 				logger: ctx.logger,
-				workers: () => ctx.get("bukaWorkers") ?? null,
+				workers: () => ctx.get("workflowWorkers") ?? null,
 				delivery: createHostSessionDelivery(ctx)
 			});
 			engine = created;
@@ -13566,8 +13886,9 @@ function applyWorkflows(ctx, config) {
 		return ready;
 	}
 	ensureReady().catch((error) => {
-		ctx.logger?.warn?.(`buka-workflows: 初始化工作流存储失败：${describeError$4(error)}`);
+		ctx.logger?.warn?.(`workflow: 初始化工作流存储失败：${describeError$4(error)}`);
 	});
+	installJobMode({ ctx });
 	ctx.provide(SERVICE_NAME$1, new WorkflowQueryService({ ready: ensureReady }));
 	/** 判定某个 agent 能否看到 / 调用工作流定义工具（编排 preset 根会话）。 */
 	function accessOf(agent) {
@@ -13611,10 +13932,12 @@ function applyWorkflows(ctx, config) {
 		ctx,
 		ready: ensureReady
 	});
-	if (!registerJobCommand({
-		ctx,
-		ready: ensureReady
-	})) ctx.logger?.info?.("buka-workflows: the host commands service cannot register /job; ordinary sessions can use the buka_job_start tool instead");
+	ctx.inject(["commands"], (commandCtx) => {
+		if (!registerJobCommand({
+			ctx: commandCtx,
+			ready: ensureReady
+		})) commandCtx.logger?.info?.("workflow: the host commands service cannot register /job; jobs can still be started from the Workflow page");
+	});
 	registerWorkflowRoutes({
 		ctx,
 		ready: ensureReady
@@ -13723,7 +14046,7 @@ function optionalService(ctx, name) {
 * @param sourceKind 消息来源；决定宿主按什么身份处理它
 * @returns UserMessage 形状的对象
 */
-function followupMessage(text, sourceKind = "buka-worker") {
+function followupMessage(text, sourceKind = "workflow_worker") {
 	return {
 		id: randomUUID(),
 		role: "user",
@@ -13742,7 +14065,7 @@ function followupMessage(text, sourceKind = "buka-worker") {
 * @returns 非用户来源的消息
 */
 function contextMessage(text) {
-	return followupMessage(text, "buka-worker");
+	return followupMessage(text, "workflow_worker");
 }
 /**
 * 流程维护者写的提示（任务类型的 `definition`）：用 `followup` 投递，来源是
@@ -15589,7 +15912,7 @@ async function setWorkerDescription({ file, id, description } = {}) {
 * 第 2～4 步任一步失败都把目录改回原名、登记条目保持原样；工作区注册行已经
 * 删掉时用 `create` 尽力恢复。内建 clock 与 `driver: robot` 的条目不可删。
 *
-* 唯一阻塞条件（引用该标识符的运行中作业）由路由通过 `bukaWorkflows` 服务
+* 唯一阻塞条件（引用该标识符的运行中作业）由路由通过 `workflowQuery` 服务
 * 检查，本模块只处理磁盘与登记表。
 *
 * @module @buka/dsh-plugin-workflows/workers/store/delete
@@ -16088,7 +16411,7 @@ async function moveLegacyCache(env, logger) {
 			force: true
 		});
 	}
-	logger?.info?.("buka-workers: 已把旧插件缓存目录迁移到 %s", current);
+	logger?.info?.("workflow-workers: 已把旧插件缓存目录迁移到 %s", current);
 	return true;
 }
 /**
@@ -16123,7 +16446,7 @@ async function upgradeRegistry(registryFile, legacyRoots, workersDir, logger) {
 	if (stored === null) return false;
 	const registry = await readWorkerRegistry({ file: registryFile });
 	if (registry.corrupt) {
-		logger?.warn?.("buka-workers: 登记文件无法读取，跳过格式迁移：%s", registryFile);
+		logger?.warn?.("workflow-workers: 登记文件无法读取，跳过格式迁移：%s", registryFile);
 		return false;
 	}
 	let changed = stored < 4;
@@ -16146,8 +16469,8 @@ async function upgradeRegistry(registryFile, legacyRoots, workersDir, logger) {
 		file: registryFile,
 		workers
 	});
-	if (stored < 4) logger?.info?.("buka-workers: 登记表已从 version %s 迁移到 version %s", stored, 4);
-	else logger?.info?.("buka-workers: 已把登记表里的旧目录路径平移到新根目录");
+	if (stored < 4) logger?.info?.("workflow-workers: 登记表已从 version %s 迁移到 version %s", stored, 4);
+	else logger?.info?.("workflow-workers: 已把登记表里的旧目录路径平移到新根目录");
 	return true;
 }
 /**
@@ -16169,7 +16492,7 @@ async function migrateWorkerStore(options) {
 	if (usingDefaultLayout || baseName === "workers") {
 		const renamedRoot = await renameIfMissing(legacySiblingRoot, workersDir);
 		const renamedRegistry = await renameIfMissing(legacySiblingRegistry, registryFile);
-		if (renamedRoot || renamedRegistry) options.logger?.info?.("buka-workers: 已把 robots 目录 / 登记文件改名为 workers");
+		if (renamedRoot || renamedRegistry) options.logger?.info?.("workflow-workers: 已把 robots 目录 / 登记文件改名为 workers");
 	} else if (baseName === "robots") await renameIfMissing(legacySiblingRegistry, registryFile);
 	await upgradeRegistry(registryFile, legacyRoots, workersDir, options.logger);
 }
@@ -16315,7 +16638,7 @@ async function applyWorkerModel(ctx, registryFile, payload) {
 		model: target.model.model,
 		...target.model.reasoningEffort === void 0 ? {} : { reasoningEffort: target.model.reasoningEffort }
 	});
-	ctx.logger?.info?.("buka-workers: 已为执行者 %s 的新会话选择模型 %s/%s", target.id, target.model.provider, target.model.model);
+	ctx.logger?.info?.("workflow-workers: 已为执行者 %s 的新会话选择模型 %s/%s", target.id, target.model.provider, target.model.model);
 }
 /**
 * 注册 `agent/created` 监听；插件卸载时随 effect 一起撤销。
@@ -16325,8 +16648,8 @@ async function applyWorkerModel(ctx, registryFile, payload) {
 */
 function registerWorkerModelEnforcement(ctx, registryFile) {
 	ctx.effect(() => ctx.on("agent/created", (payload) => applyWorkerModel(ctx, registryFile, payload).then(() => void 0).catch((error) => {
-		ctx.logger?.warn?.("buka-workers: 应用智能体模型失败：%s", error instanceof Error ? error.message : String(error));
-	})), "buka-workers: apply worker model on agent/created");
+		ctx.logger?.warn?.("workflow-workers: 应用智能体模型失败：%s", error instanceof Error ? error.message : String(error));
+	})), "workflow-workers: apply worker model on agent/created");
 }
 /**
 * 复用 web 组合的信任栅栏；被拒绝时已经写好响应。
@@ -16806,9 +17129,9 @@ async function resolveWorker(registryFile, id) {
 * @module @buka/dsh-plugin-workflows/workers/routes/files
 */
 /** 页面读取执行者目录树用的路由。 */
-const TREE_ROUTE = "/buka-workers/files";
+const TREE_ROUTE = "/workflow/workers/files";
 /** 页面读取单个文件内容用的路由。 */
-const FILE_ROUTE = "/buka-workers/file";
+const FILE_ROUTE = "/workflow/workers/file";
 /** 从请求地址读取查询参数。 */
 function query(req) {
 	return new URL(req.url ?? "/", "http://localhost").searchParams;
@@ -16855,11 +17178,11 @@ function registerFileRoutes(webCtx, deps) {
 					truncated: tree.truncated
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取执行者目录失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取执行者目录失败：%s", describeError$1(error));
 				sendError(res, 500, "files-failed", `读取执行者目录失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${TREE_ROUTE}`);
+	}), `workflow-workers: GET ${TREE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: FILE_ROUTE,
@@ -16890,11 +17213,11 @@ function registerFileRoutes(webCtx, deps) {
 					maxBytes: FILE_MAX_READ_BYTES
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取执行者文件失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取执行者文件失败：%s", describeError$1(error));
 				sendError(res, 500, "file-failed", `读取执行者文件失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${FILE_ROUTE}`);
+	}), `workflow-workers: GET ${FILE_ROUTE}`);
 }
 // .build/workflows/workers/serial-runner.js
 /**
@@ -17041,19 +17364,19 @@ function reportSkillUpdate(result) {
 * @module @buka/dsh-plugin-workflows/workers/routes/skills
 */
 /** 页面列出「技能仓库」收藏来源用的路由。 */
-const SKILL_REPOS_ROUTE = "/buka-workers/skills/repos";
+const SKILL_REPOS_ROUTE = "/workflow/workers/skills/repos";
 /** 页面列出一个收藏仓库里可安装的 skills 用的路由。 */
-const AVAILABLE_ROUTE = "/buka-workers/skills/available";
+const AVAILABLE_ROUTE = "/workflow/workers/skills/available";
 /** 页面安装项目级 skill 用的路由。 */
-const INSTALL_ROUTE = "/buka-workers/skills/install";
+const INSTALL_ROUTE = "/workflow/workers/skills/install";
 /** 页面移除项目级 skill 用的路由。 */
-const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
+const SKILL_REMOVE_ROUTE = "/workflow/workers/skills/remove";
 /** 单个执行者的 skill 更新入口（可选 `skills` 只更新其中几项）。 */
-const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
+const SKILL_UPDATE_ROUTE = "/workflow/workers/skills/update";
 /** 单个执行者的 skill 检查入口：页面进入「技能」页签时自动调用。 */
-const SKILL_CHECK_ROUTE = "/buka-workers/skills/check";
+const SKILL_CHECK_ROUTE = "/workflow/workers/skills/check";
 /** 列表页「更新全部执行者」。 */
-const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
+const SKILL_UPDATE_ALL_ROUTE = "/workflow/workers/skills/update-all";
 /** 项目级安装 / 移除的最长等待时间；比全局版 npx runner 默认的 120 s 更宽。 */
 const NPX_TIMEOUT_MS = 18e4;
 /**
@@ -17108,10 +17431,10 @@ function normalizeSkillSelection(value) {
 	if (names.length === 0 || names.length > MAX_SKILL_SELECTION) return null;
 	return names;
 }
-/** 从 web 上下文取可选的 `bukaSkills` 服务；插件没装时返回 null。 */
+/** 从 web 上下文取可选的 `skillCatalog` 服务；插件没装时返回 null。 */
 function skillsService(ctx) {
 	try {
-		return ctx.get?.("bukaSkills") ?? null;
+		return ctx.get?.("skillCatalog") ?? null;
 	} catch {
 		return null;
 	}
@@ -17240,11 +17563,11 @@ function registerSkillRoutes(webCtx, deps) {
 					...await readSavedRepositories(service)
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取技能仓库失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取技能仓库失败：%s", describeError$1(error));
 				sendError(res, 502, "repos-failed", `读取技能仓库失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${SKILL_REPOS_ROUTE}`);
+	}), `workflow-workers: GET ${SKILL_REPOS_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: AVAILABLE_ROUTE,
@@ -17297,7 +17620,7 @@ function registerSkillRoutes(webCtx, deps) {
 					return;
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已读取 skill 清单（%s ← %s，%d 个）", resolved.worker.path, repository.source, listed.skills.length);
+				webCtx.logger?.info?.("workflow-workers: 已读取 skill 清单（%s ← %s，%d 个）", resolved.worker.path, repository.source, listed.skills.length);
 				sendJson(res, 200, {
 					ok: true,
 					source: repository.source,
@@ -17305,11 +17628,11 @@ function registerSkillRoutes(webCtx, deps) {
 					installed: scanned.skills.map((skill) => skill.name)
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取 skill 清单失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取 skill 清单失败：%s", describeError$1(error));
 				sendError(res, 500, "available-failed", `读取 skill 清单失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${AVAILABLE_ROUTE}`);
+	}), `workflow-workers: POST ${AVAILABLE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: INSTALL_ROUTE,
@@ -17379,7 +17702,7 @@ function registerSkillRoutes(webCtx, deps) {
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
 				const claude = await ensureClaudeLink(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已安装 %d 个 skill（%s ← %s）", selected.length, resolved.worker.path, repository.source);
+				webCtx.logger?.info?.("workflow-workers: 已安装 %d 个 skill（%s ← %s）", selected.length, resolved.worker.path, repository.source);
 				sendJson(res, 200, {
 					ok: true,
 					output: result.output ?? "",
@@ -17387,11 +17710,11 @@ function registerSkillRoutes(webCtx, deps) {
 					claude
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 安装 skill 失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 安装 skill 失败：%s", describeError$1(error));
 				sendError(res, 500, "install-failed", `安装 skill 失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${INSTALL_ROUTE}`);
+	}), `workflow-workers: POST ${INSTALL_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: SKILL_REMOVE_ROUTE,
@@ -17429,18 +17752,18 @@ function registerSkillRoutes(webCtx, deps) {
 					return;
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已移除 skill（%s ← %s）", resolved.worker.path, skillName);
+				webCtx.logger?.info?.("workflow-workers: 已移除 skill（%s ← %s）", resolved.worker.path, skillName);
 				sendJson(res, 200, {
 					ok: true,
 					output: result.output ?? "",
 					skills: scanned.skills
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 移除 skill 失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 移除 skill 失败：%s", describeError$1(error));
 				sendError(res, 500, "remove-failed", `移除 skill 失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${SKILL_REMOVE_ROUTE}`);
+	}), `workflow-workers: POST ${SKILL_REMOVE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: SKILL_CHECK_ROUTE,
@@ -17476,11 +17799,11 @@ function registerSkillRoutes(webCtx, deps) {
 					check: result
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 检查 skill 更新失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 检查 skill 更新失败：%s", describeError$1(error));
 				sendError(res, 502, "check-failed", `检查 skill 更新失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${SKILL_CHECK_ROUTE}`);
+	}), `workflow-workers: POST ${SKILL_CHECK_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: SKILL_UPDATE_ROUTE,
@@ -17511,7 +17834,7 @@ function registerSkillRoutes(webCtx, deps) {
 				});
 				const report = reportSkillUpdate(result);
 				if (report.failure !== null) {
-					webCtx.logger?.warn?.("buka-workers: 更新 skill 失败（%s）：%s", resolved.worker.path, report.failure.message);
+					webCtx.logger?.warn?.("workflow-workers: 更新 skill 失败（%s）：%s", resolved.worker.path, report.failure.message);
 					sendJson(res, report.status, {
 						ok: false,
 						...report.failure.code === void 0 ? {} : { code: report.failure.code },
@@ -17521,18 +17844,18 @@ function registerSkillRoutes(webCtx, deps) {
 					return;
 				}
 				const scanned = await scanProjectSkills(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已更新 skill（%s，失败 %d 个）", resolved.worker.path, report.failed);
+				webCtx.logger?.info?.("workflow-workers: 已更新 skill（%s，失败 %d 个）", resolved.worker.path, report.failed);
 				sendJson(res, 200, {
 					ok: report.ok,
 					update: result,
 					skills: scanned.skills
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 更新 skill 失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 更新 skill 失败：%s", describeError$1(error));
 				sendError(res, 502, "update-failed", `更新 skill 失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${SKILL_UPDATE_ROUTE}`);
+	}), `workflow-workers: POST ${SKILL_UPDATE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: SKILL_UPDATE_ALL_ROUTE,
@@ -17558,24 +17881,24 @@ function registerSkillRoutes(webCtx, deps) {
 					workers: listed.workers,
 					update: (options) => updateSkills(options)
 				});
-				webCtx.logger?.info?.("buka-workers: 已更新全部执行者（%d 个 worker，%d 个失败）", batch.results.length, batch.failed);
+				webCtx.logger?.info?.("workflow-workers: 已更新全部执行者（%d 个 worker，%d 个失败）", batch.results.length, batch.failed);
 				sendJson(res, 200, {
 					ok: true,
 					...batch
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 更新全部执行者失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 更新全部执行者失败：%s", describeError$1(error));
 				sendError(res, 502, "update-failed", `更新全部执行者失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`);
+	}), `workflow-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`);
 }
 // .build/workflows/workers/builder.js
 /**
 * 「执行者」preset 的写操作：创建 / 修改执行者，并把它挂到工作区。
 *
 * 页面上的新建流程是「建目录 + 登记 + `workspaces.create` 挂载」；这里把同一套
-* 事实操作收成一个函数，供 `buka_worker_build` 工具调用（工具只对构建 preset
+* 事实操作收成一个函数，供 `workflow_worker_build` 工具调用（工具只对构建 preset
 * 的根会话可见，见 `access.js`）。与 `worker-store.js` 的分工：
 *
 * - 目录、登记表、AGENTS.md 的底层读写仍由 `worker-store.js` 负责；
@@ -17977,29 +18300,29 @@ async function revealDirectory(target) {
 * @module @buka/dsh-plugin-workflows/workers/routes/workers
 */
 /** 页面列出执行者用的路由；浏览器一半按同一常量访问。 */
-const LIST_ROUTE = "/buka-workers/list";
+const LIST_ROUTE = "/workflow/workers/list";
 /** 页面新建执行者用的路由。 */
-const CREATE_ROUTE = "/buka-workers/create";
+const CREATE_ROUTE = "/workflow/workers/create";
 /** 页面给执行者换头像用的路由。 */
-const AVATAR_ROUTE = "/buka-workers/avatar";
+const AVATAR_ROUTE = "/workflow/workers/avatar";
 /** 页面编辑执行者描述用的路由。 */
-const DESCRIPTION_ROUTE = "/buka-workers/description";
+const DESCRIPTION_ROUTE = "/workflow/workers/description";
 /** 页面读取可选模型目录用的路由。 */
-const MODELS_ROUTE = "/buka-workers/models";
+const MODELS_ROUTE = "/workflow/workers/models";
 /** 页面给智能体设置新会话模型用的路由。 */
-const MODEL_ROUTE = "/buka-workers/model";
+const MODEL_ROUTE = "/workflow/workers/model";
 /** 页面读取可用执行者预设（界面写作「模式」）列表用的路由。 */
-const PRESETS_ROUTE = "/buka-workers/presets";
+const PRESETS_ROUTE = "/workflow/workers/presets";
 /** 页面给智能体设置默认执行者预设用的路由。 */
-const PRESET_ROUTE = "/buka-workers/preset";
+const PRESET_ROUTE = "/workflow/workers/preset";
 /** 页面改执行者展示名（不移动目录）用的路由。 */
-const RENAME_ROUTE = "/buka-workers/rename";
+const RENAME_ROUTE = "/workflow/workers/rename";
 /** 页面读取删除影响面（阻塞作业 / 受影响工作流 / 历史作业数）用的路由。 */
-const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
+const REMOVE_IMPACT_ROUTE = "/workflow/workers/remove-impact";
 /** 页面删除执行者（登记 + 目录 + 工作区注册）用的路由。 */
-const REMOVE_ROUTE = "/buka-workers/remove";
+const REMOVE_ROUTE = "/workflow/workers/remove";
 /** 页面「打开 Finder」用的路由。 */
-const REVEAL_ROUTE = "/buka-workers/reveal";
+const REVEAL_ROUTE = "/workflow/workers/reveal";
 /**
 * 把 `agentPresets.list()` 的返回值收窄成页面稳定使用的形状。
 *
@@ -18060,7 +18383,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 	*
 	*/
 	async function readWorkerUsage(id) {
-		const service = optionalService(ctx, "bukaWorkflows");
+		const service = optionalService(ctx, "workflowQuery");
 		if (service === null || service === void 0 || typeof service.workerUsage !== "function") return {
 			runningJobs: [],
 			workflows: [],
@@ -18091,11 +18414,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					})
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取执行者列表失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取执行者列表失败：%s", describeError$1(error));
 				sendError(res, 500, "list-failed", `读取执行者列表失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${LIST_ROUTE}`);
+	}), `workflow-workers: GET ${LIST_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: CREATE_ROUTE,
@@ -18131,7 +18454,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					avatar,
 					description
 				}));
-				webCtx.logger?.info?.("buka-workers: 已登记执行者 %s（%s，%s）", result.worker.id, result.worker.name, result.worker.path);
+				webCtx.logger?.info?.("workflow-workers: 已登记执行者 %s（%s，%s）", result.worker.id, result.worker.name, result.worker.path);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker,
@@ -18162,11 +18485,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 409, String(errorCode(error)), describeError$1(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-workers: 创建执行者失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 创建执行者失败：%s", describeError$1(error));
 				sendError(res, 500, "create-failed", `创建执行者失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${CREATE_ROUTE}`);
+	}), `workflow-workers: POST ${CREATE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: AVATAR_ROUTE,
@@ -18190,7 +18513,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					id,
 					avatar
 				}));
-				webCtx.logger?.info?.("buka-workers: 执行者 %s 的头像改为 %s", id, avatar);
+				webCtx.logger?.info?.("workflow-workers: 执行者 %s 的头像改为 %s", id, avatar);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -18216,11 +18539,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 409, "registry-unreadable", describeError$1(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-workers: 修改执行者头像失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 修改执行者头像失败：%s", describeError$1(error));
 				sendError(res, 500, "avatar-failed", `修改执行者头像失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${AVATAR_ROUTE}`);
+	}), `workflow-workers: POST ${AVATAR_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: DESCRIPTION_ROUTE,
@@ -18248,7 +18571,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					id,
 					description
 				}));
-				webCtx.logger?.info?.("buka-workers: 已更新执行者 %s 的描述", id);
+				webCtx.logger?.info?.("workflow-workers: 已更新执行者 %s 的描述", id);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -18274,11 +18597,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 409, "registry-unreadable", describeError$1(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-workers: 更新执行者描述失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 更新执行者描述失败：%s", describeError$1(error));
 				sendError(res, 500, "description-failed", `更新执行者描述失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${DESCRIPTION_ROUTE}`);
+	}), `workflow-workers: POST ${DESCRIPTION_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: MODELS_ROUTE,
@@ -18297,11 +18620,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 				});
 			} catch (error) {
 				if (controller.signal.aborted) return;
-				webCtx.logger?.warn?.("buka-workers: 读取模型目录失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取模型目录失败：%s", describeError$1(error));
 				sendError(res, 500, "models-failed", `读取模型目录失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${MODELS_ROUTE}`);
+	}), `workflow-workers: GET ${MODELS_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: MODEL_ROUTE,
@@ -18329,7 +18652,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					id,
 					model: model === null || model === void 0 ? null : model
 				}));
-				webCtx.logger?.info?.("buka-workers: 智能体 %s 的模型已更新", id);
+				webCtx.logger?.info?.("workflow-workers: 智能体 %s 的模型已更新", id);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -18355,11 +18678,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 409, "registry-unreadable", describeError$1(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-workers: 更新智能体模型失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 更新智能体模型失败：%s", describeError$1(error));
 				sendError(res, 500, "model-failed", `更新智能体模型失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${MODEL_ROUTE}`);
+	}), `workflow-workers: POST ${MODEL_ROUTE}`);
 	/** 读一次 `agentPresets` 服务声明的预设；服务缺失时返回 `null`。 */
 	async function listAgentPresets() {
 		const service = optionalService(ctx, "agentPresets");
@@ -18383,11 +18706,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					presets: presets ?? []
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取执行者预设失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取执行者预设失败：%s", describeError$1(error));
 				sendError(res, 500, "presets-failed", `读取执行者预设失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: GET ${PRESETS_ROUTE}`);
+	}), `workflow-workers: GET ${PRESETS_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: PRESET_ROUTE,
@@ -18423,7 +18746,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					id,
 					agentPreset: nextPreset
 				}));
-				webCtx.logger?.info?.("buka-workers: 智能体 %s 的执行者预设已更新", id);
+				webCtx.logger?.info?.("workflow-workers: 智能体 %s 的执行者预设已更新", id);
 				sendJson(res, 200, {
 					ok: true,
 					worker: result.worker
@@ -18442,11 +18765,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					sendError(res, 409, code, describeError$1(error));
 					return;
 				}
-				webCtx.logger?.warn?.("buka-workers: 更新执行者预设失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 更新执行者预设失败：%s", describeError$1(error));
 				sendError(res, 500, "preset-failed", `更新执行者预设失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${PRESET_ROUTE}`);
+	}), `workflow-workers: POST ${PRESET_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: RENAME_ROUTE,
@@ -18489,7 +18812,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 						mount
 					};
 				});
-				webCtx.logger?.info?.("buka-workers: 执行者 %s 的展示名改为 %s", result.worker.id, result.worker.name);
+				webCtx.logger?.info?.("workflow-workers: 执行者 %s 的展示名改为 %s", result.worker.id, result.worker.name);
 				sendJson(res, 200, {
 					ok: true,
 					id: result.worker.id,
@@ -18521,12 +18844,12 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 						sendError(res, 409, "robot-worker", describeError$1(error));
 						return;
 					default:
-						webCtx.logger?.warn?.("buka-workers: 改展示名失败：%s", describeError$1(error));
+						webCtx.logger?.warn?.("workflow-workers: 改展示名失败：%s", describeError$1(error));
 						sendError(res, 500, "rename-failed", `改展示名失败：${describeError$1(error)}`);
 				}
 			}
 		}
-	}), `buka-workers: POST ${RENAME_ROUTE}`);
+	}), `workflow-workers: POST ${RENAME_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: REMOVE_IMPACT_ROUTE,
@@ -18572,11 +18895,11 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					finishedJobs: usage.finishedJobs
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 读取删除影响面失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 读取删除影响面失败：%s", describeError$1(error));
 				sendError(res, 500, "remove-impact-failed", `读取删除影响面失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${REMOVE_IMPACT_ROUTE}`);
+	}), `workflow-workers: POST ${REMOVE_IMPACT_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: REMOVE_ROUTE,
@@ -18610,7 +18933,7 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 					id,
 					workspaceRegistry: ctx.workspaceRegistry
 				}));
-				webCtx.logger?.info?.("buka-workers: 已删除执行者 %s（目录 %s，工作区注册 %s）", result.worker.id, result.path, result.workspaceId ?? "无");
+				webCtx.logger?.info?.("workflow-workers: 已删除执行者 %s（目录 %s，工作区注册 %s）", result.worker.id, result.path, result.workspaceId ?? "无");
 				sendJson(res, 200, {
 					ok: true,
 					id,
@@ -18637,12 +18960,12 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 						sendError(res, 404, "unknown-worker", describeError$1(error));
 						return;
 					default:
-						webCtx.logger?.warn?.("buka-workers: 删除执行者失败：%s", describeError$1(error));
+						webCtx.logger?.warn?.("workflow-workers: 删除执行者失败：%s", describeError$1(error));
 						sendError(res, 500, "remove-failed", `删除执行者失败：${describeError$1(error)}`);
 				}
 			}
 		}
-	}), `buka-workers: POST ${REMOVE_ROUTE}`);
+	}), `workflow-workers: POST ${REMOVE_ROUTE}`);
 	webCtx.effect(() => webCtx.webServer.register({
 		kind: "exact",
 		path: REVEAL_ROUTE,
@@ -18661,17 +18984,17 @@ function registerWorkerRoutes(hostCtx, webCtx, deps) {
 			}
 			try {
 				await revealDirectory(resolved.worker.path);
-				webCtx.logger?.info?.("buka-workers: 已打开执行者目录（%s）", resolved.worker.path);
+				webCtx.logger?.info?.("workflow-workers: 已打开执行者目录（%s）", resolved.worker.path);
 				sendJson(res, 200, {
 					ok: true,
 					path: resolved.worker.path
 				});
 			} catch (error) {
-				webCtx.logger?.warn?.("buka-workers: 打开执行者目录失败：%s", describeError$1(error));
+				webCtx.logger?.warn?.("workflow-workers: 打开执行者目录失败：%s", describeError$1(error));
 				sendError(res, 500, "reveal-failed", `打开执行者目录失败：${describeError$1(error)}`);
 			}
 		}
-	}), `buka-workers: POST ${REVEAL_ROUTE}`);
+	}), `workflow-workers: POST ${REVEAL_ROUTE}`);
 }
 // .build/workflows/workers/routes.js
 /**
@@ -18799,9 +19122,9 @@ function seedWorkersOnStartup({ ctx, workersDir, registryFile, serializeRegistry
 		file: registryFile,
 		workspaceRegistry: ctx.workspaceRegistry
 	}).then((result) => {
-		if (result.seeded.length > 0) ctx.logger?.info?.("buka-workers: 已初始化预设执行者：%s", result.seeded.join("、"));
+		if (result.seeded.length > 0) ctx.logger?.info?.("workflow-workers: 已初始化预设执行者：%s", result.seeded.join("、"));
 	})).catch((error) => {
-		ctx.logger?.warn?.("buka-workers: 初始化预设执行者失败：%s", describeError$1(error));
+		ctx.logger?.warn?.("workflow-workers: 初始化预设执行者失败：%s", describeError$1(error));
 	});
 }
 // .build/workflows/workers/engine/errors.js
@@ -18958,7 +19281,7 @@ function summarizeWorker(worker) {
 }
 // .build/workflows/workers/service.js
 /**
-* 执行者一半对外提供的 Host Service：`ctx.bukaWorkers`。
+* 执行者一半对外提供的 Host Service：`ctx.workflowWorkers`。
 *
 * 能力（工作流插件与将来的编排器使用）：
 *
@@ -18973,7 +19296,7 @@ function summarizeWorker(worker) {
 *
 * 一个任务一条新会话：`dispatchSession` 不复用上一条任务的会话；`openSession`
 * 只续接同一条会话，**不压缩**。压缩、结构化结果校验与结果追问都在工作流侧
-* （`buka_task_complete`），本服务不再注册 `structured_output` 工具。
+* （`workflow_task_complete`），本服务不再注册 `structured_output` 工具。
 *
 * 机器人（clock）没有会话：`dispatchSession` / `openSession` 会拒绝
 * 它们，执行由工作流按 `driver` + `program` 驱动。
@@ -18982,13 +19305,13 @@ function summarizeWorker(worker) {
 * 项目 skills 照常生效，会话挂到执行者工作区并出现在 DSH 侧边栏。创建或续接
 * 失败时直接抛错，不退回 subagent 子会话，也不另开新会话。
 *
-* 通过 `ctx.provide('bukaWorkers', new WorkerSessionService(...))` 注册，消费方
-* 用 `inject: ['bukaWorkers']` 或 `ctx.get('bukaWorkers')` 获取。
+* 通过 `ctx.provide('workflowWorkers', new WorkerSessionService(...))` 注册，消费方
+* 用 `inject: ['workflowWorkers']` 或 `ctx.get('workflowWorkers')` 获取。
 *
 * @module @buka/dsh-plugin-workflows/workers/service
 */
-/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaWorkers`。 */
-const SERVICE_NAME = "bukaWorkers";
+/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.workflowWorkers`。 */
+const SERVICE_NAME = "workflowWorkers";
 /** plan 模式入口不可用时给用户看的错误文案。 */
 const PLAN_MODE_UNAVAILABLE = "plan mode is unavailable in this composition; install or update @deepseek-ai/dsh-plan-mode to use a worker task type with \"plan\": true";
 /**
@@ -19138,7 +19461,7 @@ var WorkerSessionService = class {
 	/**
 	* 用调用方给的 `title` 给执行者会话命名。
 	*
-	* 执行者会话的第一条用户消息来源是 `buka-worker`，而 DSH 的自动标题只看
+	* 执行者会话的第一条用户消息来源是 `workflow_worker`，而 DSH 的自动标题只看
 	* `source.kind === 'user'` 的消息，所以这类会话不会自己长出标题：侧边栏与
 	* 会话列表里一直显示「未命名」。工作流进入节点时会把「运行目标 · 执行者」
 	* 作为 `title` 传进来，这里用 `sessionTitle.rename()` 写一条显式标题。
@@ -19157,7 +19480,7 @@ var WorkerSessionService = class {
 			if (typeof service.get === "function" && service.get(session) !== void 0) return;
 			service.rename(session, text);
 		} catch (error) {
-			this.ctx?.logger?.warn?.(`buka-workers: could not title worker session "${String(session?.id ?? "")}": ${describeError$2(error)}`);
+			this.ctx?.logger?.warn?.(`workflow-workers: could not title worker session "${String(session?.id ?? "")}": ${describeError$2(error)}`);
 		}
 	}
 	/**
@@ -19316,12 +19639,12 @@ var WorkerSessionService = class {
 				const failure = commandFailure(execution);
 				if (failure !== void 0) {
 					if (requested === true) throw new Error(`plan mode could not be entered: the /plan command reported "${failure}"; refusing to run the node in normal mode`);
-					this.ctx?.logger?.warn?.(`buka-workers: /plan off reported "${failure}" for worker session "${String(agent?.id ?? "")}"`);
+					this.ctx?.logger?.warn?.(`workflow-workers: /plan off reported "${failure}" for worker session "${String(agent?.id ?? "")}"`);
 				}
 			}
 		} catch (error) {
 			if (requested === true) throw error;
-			this.ctx?.logger?.warn?.(`buka-workers: could not leave plan mode for worker session "${String(agent?.id ?? "")}": ${describeError$2(error)}`);
+			this.ctx?.logger?.warn?.(`workflow-workers: could not leave plan mode for worker session "${String(agent?.id ?? "")}": ${describeError$2(error)}`);
 		}
 	}
 	/**
@@ -19419,7 +19742,7 @@ var WorkerSessionService = class {
 				try {
 					return await agent.whenIdle();
 				} catch (error) {
-					service.ctx?.logger?.warn?.(`buka-workers: could not wait for worker session "${observer.sessionId}" to settle: ${describeError$2(error)}`);
+					service.ctx?.logger?.warn?.(`workflow-workers: could not wait for worker session "${observer.sessionId}" to settle: ${describeError$2(error)}`);
 				}
 			},
 			/**
@@ -19434,7 +19757,7 @@ var WorkerSessionService = class {
 				try {
 					return { active: readPlanModeActive(session) };
 				} catch (error) {
-					service.ctx?.logger?.warn?.(`buka-workers: could not read plan mode for session "${observer.sessionId}": ${describeError$2(error)}`);
+					service.ctx?.logger?.warn?.(`workflow-workers: could not read plan mode for session "${observer.sessionId}": ${describeError$2(error)}`);
 					return null;
 				}
 			},
@@ -19450,7 +19773,7 @@ var WorkerSessionService = class {
 				if (active !== true && !readPlanModeActive(agent?.session)) return;
 				const line = active === true ? "/plan" : "/plan off";
 				const warn = (error) => {
-					service.ctx?.logger?.warn?.(`buka-workers: could not ${active === true ? "enter" : "leave"} plan mode for worker session "${observer.sessionId}": ${describeError$2(error)}`);
+					service.ctx?.logger?.warn?.(`workflow-workers: could not ${active === true ? "enter" : "leave"} plan mode for worker session "${observer.sessionId}": ${describeError$2(error)}`);
 				};
 				try {
 					const pending = commands.execute(agent, line, [], new AbortController().signal);
@@ -19516,14 +19839,14 @@ var WorkerSessionService = class {
 			const result = await controller.list({}, signal);
 			summary = (Array.isArray(result?.items) ? result.items : []).find((item) => item?.sessionId === id);
 		} catch (error) {
-			ctx.logger?.warn?.(`buka-workers: could not read the session list while re-announcing worker session "${id}": ${describeError$2(error)}`);
+			ctx.logger?.warn?.(`workflow-workers: could not read the session list while re-announcing worker session "${id}": ${describeError$2(error)}`);
 			return;
 		}
 		if (summary === void 0) return;
 		try {
 			ctx.emit("api-session/added", summary);
 		} catch (error) {
-			ctx.logger?.warn?.(`buka-workers: could not re-announce worker session "${id}" after releasing its agent: ${describeError$2(error)}`);
+			ctx.logger?.warn?.(`workflow-workers: could not re-announce worker session "${id}" after releasing its agent: ${describeError$2(error)}`);
 		}
 	}
 	/**
@@ -19548,7 +19871,7 @@ var WorkerSessionService = class {
 			}
 			if (workspace !== void 0 && workspace !== null && typeof workspace.attachSession === "function") await workspace.attachSession(sessionId);
 		} catch (error) {
-			this.ctx?.logger?.warn?.(`buka-workers: could not attach worker session "${sessionId}" to the worker workspace: ${describeError$2(error)}`);
+			this.ctx?.logger?.warn?.(`workflow-workers: could not attach worker session "${sessionId}" to the worker workspace: ${describeError$2(error)}`);
 		}
 	}
 	/**
@@ -19614,7 +19937,7 @@ var WorkerSessionService = class {
 };
 // .build/workflows/workers/build-tool.js
 /**
-* `buka_worker_build` 工具的定义与执行包装。
+* `workflow_worker_build` 工具的定义与执行包装。
 *
 * 放在独立模块里，`defineTool` 与真正的构建函数都由入口注入（与 `service.js`
 * 一致），这样工具的参数 / 结果映射可以脱离 DSH 运行时用假 `defineTool` 单测；
@@ -19627,9 +19950,9 @@ var WorkerSessionService = class {
 * @module @buka/dsh-plugin-workflows/workers/build-tool
 */
 /** 工具名；入口注册与日志都用它。 */
-const WORKER_BUILD_TOOL_NAME = "buka_worker_build";
+const WORKER_BUILD_TOOL_NAME = "workflow_worker_build";
 /**
-* 构造 `buka_worker_build` 工具。
+* 构造 `workflow_worker_build` 工具。
 *
 */
 function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess } = {}) {
@@ -19639,7 +19962,7 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 	const avatars = Array.isArray(avatarIds) && avatarIds.length > 0 ? avatarIds.join(", ") : "";
 	return defineTool({
 		name: WORKER_BUILD_TOOL_NAME,
-		description: `Create or update one worker of the Buka Workers page and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the Workflow preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents.`,
+		description: `Create or update one worker of the Buka Workers page and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the Workflow preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call workflow_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ${avatars}. Workers created here are agents.`,
 		parameters: {
 			id: {
 				type: "string",
@@ -19785,7 +20108,7 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 }
 // .build/workflows/workers/list-tool.js
 /**
-* `buka_workers` 工具的定义与执行包装。
+* `workflow_workers` 工具的定义与执行包装。
 *
 * 只读工具，列出插件登记表里的执行者：标识符、展示名、目录、一句职责、挂载
 * 状态、AGENTS.md 是否存在，以及项目级 skills 清单。
@@ -19804,9 +20127,9 @@ function createWorkerBuildTool({ defineTool, avatarIds, runBuild, assertAccess }
 * @module @buka/dsh-plugin-workflows/workers/list-tool
 */
 /** 工具名；入口注册与文档都用它。 */
-const WORKERS_LIST_TOOL_NAME = "buka_workers";
+const WORKERS_LIST_TOOL_NAME = "workflow_workers";
 /**
-* 构造 `buka_workers` 工具。
+* 构造 `workflow_workers` 工具。
 *
 */
 function createWorkersListTool({ defineTool, listWorkers, registryFile, workersDir, workspaceRegistry } = {}) {
@@ -19814,7 +20137,7 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 	if (typeof listWorkers !== "function") throw new TypeError("createWorkersListTool: listWorkers is required");
 	return defineTool({
 		name: WORKERS_LIST_TOOL_NAME,
-		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the Workflow preset through buka_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.",
+		description: "List the subjects a workflow can delegate a node to: agents created by the Buka Workers page and the built-in robots (v1: clock). Each worker has an immutable identifier (id) and an optional display name (name); the id is the reference key used by workflows and the directory name, while the name is only shown in the UI and falls back to the id when empty. An agent is a directory the plugin created under its own cache directory (default ~/.cache/dsh-plugin-workers/workers/<id>) and registered in workers.json, then mounted as a DSH workspace; a robot is a fixed program with no directory and no session. This is NOT the list of all DSH workspaces: only workers registered by the plugin appear. Each worker reports its id, display name, driver (agent or robot), whether it is currently mounted, its one-sentence responsibility statement (what a workflow orchestrator reads to decide which worker should run a node), its project-level skills and whether it has an AGENTS.md. Use this tool when the user asks which workers exist, which are mounted, what a worker is responsible for, what project-level skills it has, or whether it has an AGENTS.md. This tool is read-only: creating, updating or renaming a worker from a chat is available only to the Workflow preset through workflow_worker_build; robots (clock) cannot be created or removed. Removing workers, mounting them, installing skills and editing AGENTS.md remain user actions on the Workers page.",
 		parameters: {},
 		output: {
 			schema: {
@@ -19976,9 +20299,9 @@ function createWorkersListTool({ defineTool, listWorkers, registryFile, workersD
 *
 * 注册两个工具：
 *
-* - 只读的 `buka_workers`：让模型回答「有哪些执行者、挂没挂载、是否写了
+* - 只读的 `workflow_workers`：让模型回答「有哪些执行者、挂没挂载、是否写了
 *   AGENTS.md、装了什么技能」；
-* - 写工具 `buka_worker_build`：按标识符创建 / 修改执行者（改名只改展示名）、
+* - 写工具 `workflow_worker_build`：按标识符创建 / 修改执行者（改名只改展示名）、
 *   写 AGENTS.md 并挂到工作区，但**只对随包发布的 `Workflow` 预设的根会话
 *   可见**（Config.builderPresets）。
 *
@@ -20031,7 +20354,7 @@ function registerWorkerTools(ctx, deps) {
 	function assertWorkerBuilder(agent) {
 		const access = builderAccessOf(agent);
 		if (access.visible) return access;
-		throw new Error(`buka_worker_build is only available to the ${builderPresets.join(" / ")} preset (reason: ${access.reason})`);
+		throw new Error(`workflow_worker_build is only available to the ${builderPresets.join(" / ")} preset (reason: ${access.reason})`);
 	}
 	ctx.inject(["tools"], (toolCtx) => {
 		toolCtx.tools.register(createWorkersListTool({
@@ -20057,7 +20380,7 @@ function registerWorkerTools(ctx, deps) {
 					update: args?.update,
 					workspaceRegistry: ctx.workspaceRegistry
 				}));
-				ctx.logger?.info?.("buka-workers: %s 执行者 %s（%s，%s）", result.created ? "已创建" : result.renamed ? `已改展示名（原 ${result.previousName ?? ""}）` : "已更新", result.worker.id, result.worker.name, result.worker.path);
+				ctx.logger?.info?.("workflow-workers: %s 执行者 %s（%s，%s）", result.created ? "已创建" : result.renamed ? `已改展示名（原 ${result.previousName ?? ""}）` : "已更新", result.worker.id, result.worker.name, result.worker.path);
 				return result;
 			}
 		});
@@ -20076,39 +20399,39 @@ function registerWorkerTools(ctx, deps) {
 *
 * | 路由 | 作用 |
 * | --- | --- |
-* | `GET /buka-workers/list` | 列出登记表里的执行者、挂载状态、skills 与 AGENTS.md |
-* | `POST /buka-workers/create` | 按标识符建目录 + AGENTS.md 模板，并把执行者（含可选展示名 / 描述）插到登记表最前 |
-* | `POST /buka-workers/avatar` | 只改登记表里的头像 id |
-* | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选执行者） |
-* | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
-* | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
-* | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
-* | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
-* | `POST /buka-workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
-* | `GET /buka-workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
-* | `GET /buka-workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
-* | `GET /buka-workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
-* | `POST /buka-workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
-* | `POST /buka-workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
-* | `POST /buka-workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
-* | `POST /buka-workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
-* | `POST /buka-workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
-* | `POST /buka-workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
-* | `POST /buka-workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
+* | `GET /workflow/workers/list` | 列出登记表里的执行者、挂载状态、skills 与 AGENTS.md |
+* | `POST /workflow/workers/create` | 按标识符建目录 + AGENTS.md 模板，并把执行者（含可选展示名 / 描述）插到登记表最前 |
+* | `POST /workflow/workers/avatar` | 只改登记表里的头像 id |
+* | `POST /workflow/workers/description` | 只改登记表里的一行描述（工作流用它选执行者） |
+* | `GET /workflow/workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
+* | `POST /workflow/workers/model` | 设置 / 清除智能体新会话使用的模型 |
+* | `POST /workflow/workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
+* | `POST /workflow/workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
+* | `POST /workflow/workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
+* | `GET /workflow/workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
+* | `GET /workflow/workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
+* | `GET /workflow/workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
+* | `POST /workflow/workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
+* | `POST /workflow/workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
+* | `POST /workflow/workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
+* | `POST /workflow/workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
+* | `POST /workflow/workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
+* | `POST /workflow/workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
+* | `POST /workflow/workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
 *
 * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
-* 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`
+* 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `workflow_workers`
 * 让模型回答「有哪些执行者、挂没挂载、是否写了 AGENTS.md、装了什么技能」
-* （见 `lib/list-tool.js`）；写工具 `buka_worker_build`（见 `lib/builder.js`、
+* （见 `lib/list-tool.js`）；写工具 `workflow_worker_build`（见 `lib/builder.js`、
 * `lib/build-tool.js`）按标识符创建 / 修改执行者（改名只改展示名）、写 AGENTS.md
 * 并挂到工作区，但**只对随包发布的 `Workflow` 预设的根会话可见**
 * （Config.builderPresets，判定见 `lib/access.js`）。删除执行者与安装 skills
 * 仍然只留给用户；页面上的「文件」页签只读，不提供编辑 / 保存。
 *
-* 删除通过可选的 `ctx.bukaWorkflows` 服务读引用面（同一合并包内始终存在；
+* 删除通过可选的 `ctx.workflowQuery` 服务读引用面（同一合并包内始终存在；
 * 兜底分支仍按服务缺失处理）。唯一阻塞是引用该标识符的运行中作业。
 *
-* 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
+* 另通过 `ctx.provide('workflowWorkers', ...)` 对外提供一个 Host Service（见
 * `lib/service.js`）：`list()` 列出执行者（每条带 `id` / `name`，以及内建
 * 机器人 clock 的 `driver` / `program`），`avatarMap()` 按标识符
 * 给出执行者头像，`dispatchSession()` 新开一条会话并返回观测句柄，
@@ -20126,14 +20449,14 @@ function registerWorkerTools(ctx, deps) {
 /** 执行者根目录的默认位置：`<插件全局目录>/workers`。 */
 const DEFAULT_WORKERS_DIR = defaultWorkersRoot();
 /**
-* 能看到并调用 `buka_worker_build` 的 preset 名单；默认是随包发布的唯一
+* 能看到并调用 `workflow_worker_build` 的 preset 名单；默认是随包发布的唯一
 * `Workflow` 预设（id `workflow-orchestrator`，同时承担工作流编排）。
 */
 const DEFAULT_BUILDER_PRESETS = ["workflow-orchestrator"];
 /** 执行者一半的配置字段；合并后的插件入口把它与工作流配置拼成一份 `Config`。 */
 const workerConfigFields = {
 	workersDir: z.string().default(DEFAULT_WORKERS_DIR).description("执行者根目录：执行者目录建在插件全局目录下；登记文件固定为该目录同级的 workers.json，支持 ~ 前缀。"),
-	builderPresets: z.array(z.string()).default(DEFAULT_BUILDER_PRESETS).description("能看到并调用 buka_worker_build（创建 / 修改执行者）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `workflow-orchestrator`（Workflow）。"),
+	builderPresets: z.array(z.string()).default(DEFAULT_BUILDER_PRESETS).description("能看到并调用 workflow_worker_build（创建 / 修改执行者）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `workflow-orchestrator`（Workflow）。"),
 	seedPresets: z.boolean().default(true).description("全新安装（登记表为空）时是否自动补上「软件工程师」与「质量保障工程师」两个预设执行者；设为 false 则不初始化预设。")
 };
 /**
@@ -20164,10 +20487,10 @@ function applyWorkers(ctx, config) {
 		});
 		return ensureBuiltinWorkers({ file: registryFile });
 	}).then((result) => {
-		if (result.corrupt) ctx.logger?.warn?.("buka-workers: 登记文件损坏，跳过内建执行者登记：%s", registryFile);
-		else if (result.added.length > 0) ctx.logger?.info?.("buka-workers: 已登记内建执行者：%s", result.added.join("、"));
+		if (result.corrupt) ctx.logger?.warn?.("workflow-workers: 登记文件损坏，跳过内建执行者登记：%s", registryFile);
+		else if (result.added.length > 0) ctx.logger?.info?.("workflow-workers: 已登记内建执行者：%s", result.added.join("、"));
 	}).catch((error) => {
-		ctx.logger?.warn?.("buka-workers: 启动迁移或登记内建执行者失败：%s", describeError$1(error));
+		ctx.logger?.warn?.("workflow-workers: 启动迁移或登记内建执行者失败：%s", describeError$1(error));
 	});
 	seedWorkersOnStartup({
 		ctx,
@@ -20197,15 +20520,15 @@ function applyWorkers(ctx, config) {
 * 合并包承载两半能力：
 *
 * - **执行者**（`workers/`）：插件全局目录下的登记表与目录、AGENTS.md、项目
-*   skills、模型选择，`buka_workers` / `buka_worker_build` 两个模型工具，
-*   `/buka-workers/*` 页面路由，以及对外服务 `ctx.bukaWorkers`。
+*   skills、模型选择，`workflow_workers` / `workflow_worker_build` 两个模型工具，
+*   `/workflow/workers/*` 页面路由，以及对外服务 `ctx.workflowWorkers`。
 * - **工作流**（`assembly.ts`）：持久工作流定义、作业与任务级看板、显式依赖、
-*   内建开始 / 结束、人任务与助理，`buka_workflow_*` 工具与 `/job` 命令，
-*   `/buka-workflows/*` 页面路由，以及只读服务 `ctx.bukaWorkflows`
+*   内建开始 / 结束、人任务与助理，`workflow_*` 工具与 `/job` 命令，
+*   `/workflow/*` 页面路由，以及只读服务 `ctx.workflowQuery`
 *   （`workerUsage(id)` 供删除执行者算引用面）。
 *
-* 两半只在服务层互连：工作流引擎经 `ctx.get('bukaWorkers')` 读登记表与开
-* 执行者会话，执行者删除路由经 `ctx.get('bukaWorkflows')` 算影响面。合并后
+* 两半只在服务层互连：工作流引擎经 `ctx.get('workflowWorkers')` 读登记表与开
+* 执行者会话，执行者删除路由经 `ctx.get('workflowQuery')` 算影响面。合并后
 * 两者始终存在，原有「服务缺失」兜底分支保留（零行为变化）。随包发布唯一
 * 编排预设 `workflow-orchestrator`（显示名 `Workflow`），写工具与定义工具都
 * 只对该预设的根会话可见（分别由 `builderPresets` / `orchestratorPresets`

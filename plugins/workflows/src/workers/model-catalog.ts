@@ -42,7 +42,7 @@ export interface WorkerModelFailure {
   message: string
 }
 
-/** `/buka-workers/models` 的响应体。 */
+/** `/workflow/workers/models` 的响应体。 */
 export interface WorkerModelCatalog {
   available: boolean
   default: WorkerModelSelection | null

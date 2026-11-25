@@ -2,7 +2,7 @@
  * 工作流 v9 定义校验。
  *
  * 纯函数：不读盘、不依赖 DSH。执行者存在性由调用方传入 `workers` 目录（按
- * 标识符建索引），这样 `buka_workflow_save` 用 workers 服务的登记表，单测用
+ * 标识符建索引），这样 `workflow_save` 用 workers 服务的登记表，单测用
  * 固定目录。
  *
  * 校验分两步：先解析出规范化定义，再跑跨节点规则（通道、可达性、动作、模板引用）。
@@ -557,7 +557,7 @@ function isRobotExecutor(
 /**
  * 解析机器人任务类型的「完成后创建」。
  *
- * 只有机器人岗位能声明：agent 任务用 `buka_task_create` 动态创建，人任务用动作。
+ * 只有机器人岗位能声明：agent 任务用 `workflow_task_create` 动态创建，人任务用动作。
  */
 function readRobotCreates(
   raw: unknown,

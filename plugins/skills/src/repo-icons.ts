@@ -21,7 +21,7 @@ import path from 'node:path'
 import type { Homes } from './skill-store.ts'
 
 /** 页面读取仓库头像用的路由。 */
-export const ICON_ROUTE = '/buka-skills/icon'
+export const ICON_ROUTE = '/skills/icon'
 
 /** 缓存有效期：30 分钟，与仓库树缓存一致；过期后先回旧图再后台更新。 */
 export const ICON_TTL_MS = 30 * 60 * 1000

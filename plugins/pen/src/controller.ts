@@ -124,7 +124,7 @@ export class PenController implements PenStateSource {
     this.ctx.on('session/disposed', (session) => {
       this.onSessionDisposed(session.header.id)
     })
-    this.ctx.effect(() => () => this.dispose(), 'buka-pen: mounts')
+    this.ctx.effect(() => () => this.dispose(), 'pen: mounts')
   }
 
   /** @inheritdoc */
@@ -222,7 +222,7 @@ export class PenController implements PenStateSource {
     } catch (error) {
       delete entry.fiber
       entry.error = describeError(error)
-      this.ctx.logger.warn(`buka-pen: 连接 pen MCP 失败：${entry.error}`)
+      this.ctx.logger.warn(`pen: 连接 pen MCP 失败：${entry.error}`)
       if (fiber !== undefined) {
         try {
           await fiber.dispose()
@@ -241,7 +241,7 @@ export class PenController implements PenStateSource {
     try {
       await fiber.dispose()
     } catch (error) {
-      this.ctx.logger.warn(`buka-pen: 卸载 pen MCP 失败：${describeError(error)}`)
+      this.ctx.logger.warn(`pen: 卸载 pen MCP 失败：${describeError(error)}`)
     }
   }
 

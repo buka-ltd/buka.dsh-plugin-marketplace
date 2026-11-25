@@ -204,7 +204,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       ? null
       : h(
           'p',
-          { className: 'buka-skill-update-check-failure', role: 'alert' },
+          { className: 'skill-update-check-failure', role: 'alert' },
           h(StateDot, { state: 'error', size: 13 }),
           `${t(shownFailure.kind === 'check' ? 'error' : 'updateFailed')} ${shownFailure.text}`,
         )
@@ -212,7 +212,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
   const checkingLine = checking
     ? h(
         'p',
-        { className: 'buka-skill-update-check-status', role: 'status' },
+        { className: 'skill-update-check-status', role: 'status' },
         h(StateDot, { state: 'ongoing', size: 13 }),
         t('checking'),
       )
@@ -223,7 +223,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       ? null
       : h(
           'p',
-          { className: 'buka-skill-update-check-status', role: 'status' },
+          { className: 'skill-update-check-status', role: 'status' },
           h(StateDot, { state: 'ongoing', size: 13 }),
           updating.names.length === 1
             ? `${t('updating')} ${updating.names[0]}`
@@ -232,16 +232,14 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
 
   // 更新在后台继续，所以明确告诉用户可以关掉弹窗，而不是把关闭按钮锁住。
   const updatingHint =
-    updating === null
-      ? null
-      : h('p', { className: 'buka-skill-update-check-hint' }, t('updatingHint'))
+    updating === null ? null : h('p', { className: 'skill-update-check-hint' }, t('updatingHint'))
 
   const noticeLine =
     notice === null
       ? null
       : h(
           'p',
-          { className: 'buka-skill-update-check-notice', role: 'status' },
+          { className: 'skill-update-check-notice', role: 'status' },
           h(StateDot, { state: 'done', size: 13 }),
           notice,
         )
@@ -249,7 +247,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
   const failureLines = failures.map((item) =>
     h(
       'p',
-      { key: `failed-${item.name}`, className: 'buka-skill-update-check-failure', role: 'alert' },
+      { key: `failed-${item.name}`, className: 'skill-update-check-failure', role: 'alert' },
       h(StateDot, { state: 'error', size: 13 }),
       `${item.name} · ${item.message}`,
     ),
@@ -261,19 +259,19 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       updating !== null && updating.names.length === 1 && updating.names[0] === name
     return h(
       'li',
-      { key: name, className: 'buka-skill-update-check-row' },
+      { key: name, className: 'skill-update-check-row' },
       h(
         'span',
-        { className: 'buka-skill-update-check-rowMain' },
-        h('span', { className: 'buka-skill-update-check-name', title: name }, name),
+        { className: 'skill-update-check-rowMain' },
+        h('span', { className: 'skill-update-check-name', title: name }, name),
         source === undefined
           ? null
-          : h('span', { className: 'buka-skill-update-check-source', title: source }, source),
+          : h('span', { className: 'skill-update-check-source', title: source }, source),
       ),
       rowUpdating
         ? h(
             'span',
-            { className: 'buka-skill-update-check-rowStatus' },
+            { className: 'skill-update-check-rowStatus' },
             h(StateDot, { state: 'ongoing', size: 13 }),
             t('updating'),
           )
@@ -296,7 +294,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       ? null
       : h(
           'p',
-          { className: 'buka-skill-update-check-modified' },
+          { className: 'skill-update-check-modified' },
           h(StateDot, { state: 'warning', size: 13 }),
           `${t('modifiedTitle')} ${modified.join(t('separator'))}`,
         )
@@ -307,27 +305,27 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       ? status === 'up-to-date'
         ? h(
             'div',
-            { className: 'buka-skill-update-check-empty' },
+            { className: 'skill-update-check-empty' },
             h(
               'span',
-              { className: 'buka-skill-update-check-emptyIcon', 'aria-hidden': true },
+              { className: 'skill-update-check-emptyIcon', 'aria-hidden': true },
               h(IconCheckOutlineRegular, { size: 28 }),
             ),
-            h('p', { className: 'buka-skill-update-check-emptyTitle' }, t('upToDateTitle')),
-            h('p', { className: 'buka-skill-update-check-emptyHint' }, t('upToDateHint')),
+            h('p', { className: 'skill-update-check-emptyTitle' }, t('upToDateTitle')),
+            h('p', { className: 'skill-update-check-emptyHint' }, t('upToDateHint')),
           )
         : h(
             'div',
-            { className: 'buka-skill-update-check-empty' },
+            { className: 'skill-update-check-empty' },
             h(
               'span',
-              { className: 'buka-skill-update-check-emptyIconNeutral', 'aria-hidden': true },
+              { className: 'skill-update-check-emptyIconNeutral', 'aria-hidden': true },
               h(IconWarningOutlineRegular, { size: 24 }),
             ),
-            h('p', { className: 'buka-skill-update-check-emptyTitle' }, t('nothingToCheckTitle')),
+            h('p', { className: 'skill-update-check-emptyTitle' }, t('nothingToCheckTitle')),
             h(
               'p',
-              { className: 'buka-skill-update-check-emptyHint' },
+              { className: 'skill-update-check-emptyHint' },
               snapshot.message ?? t('nothingToCheckHint'),
             ),
           )
@@ -335,7 +333,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
 
   const body = h(
     'div',
-    { className: 'buka-skill-update-check-dialog' },
+    { className: 'skill-update-check-dialog' },
     failureLine,
     checkingLine,
     updatingLine,
@@ -343,7 +341,7 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
     noticeLine,
     failureLines,
     modifiedLine,
-    hasUpdates ? h('ul', { className: 'buka-skill-update-check-list' }, ...rows) : emptyState,
+    hasUpdates ? h('ul', { className: 'skill-update-check-list' }, ...rows) : emptyState,
   )
 
   return h(
@@ -353,8 +351,8 @@ export function SkillUpdatesDialog(props: SkillUpdatesDialogProps): ReactElement
       onClose: onClose,
       title: t('dialogTitle'),
       closeLabel: t('close'),
-      className: 'buka-skill-update-check-modal',
-      contentClassName: 'buka-skill-update-check-modalContent',
+      className: 'skill-update-check-modal',
+      contentClassName: 'skill-update-check-modalContent',
       footer: h(
         Fragment,
         null,

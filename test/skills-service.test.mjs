@@ -1,5 +1,5 @@
 /**
- * `ctx.bukaSkills` 对外服务的单测。
+ * `ctx.skillCatalog` 对外服务的单测。
  *
  * 服务是插件对其他插件的公开 ABI，所以直接构造实例（不经过 Host 入口）。
  * 收藏文件与缓存落在临时 DSH home，仓库来源用本地 fixture 目录，不联网：
@@ -199,5 +199,5 @@ test('checkSkills / updateSkills：经串行队列委托，dir 原样传给 CLI'
     args: ['update', 'demo', '-p', '-y'],
     options: { cwd: target },
   })
-  assert.equal(SERVICE_NAME, 'bukaSkills')
+  assert.equal(SERVICE_NAME, 'skillCatalog')
 })

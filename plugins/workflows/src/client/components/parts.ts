@@ -282,8 +282,8 @@ export function DrawerTabs(props: {
             items: props.tabs.map((tab) => ({
               value: tab.id,
               label: h(TabLabel, { text: tab.label }),
-              id: `buka-workflows-drawer-tab-${tab.id}`,
-              panelId: `buka-workflows-drawer-panel-${tab.id}`,
+              id: `workflow-drawer-tab-${tab.id}`,
+              panelId: `workflow-drawer-panel-${tab.id}`,
             })),
             onChange: (value: string) => setActive(value),
           }),

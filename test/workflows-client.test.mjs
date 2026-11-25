@@ -163,12 +163,12 @@ async function loadClient() {
     },
   })
   assert.equal(
-    typeof components['buka-workflows'],
+    typeof components['workflow'],
     'function',
     'client should register the workflows main page component',
   )
   return {
-    Page: components['buka-workflows'],
+    Page: components['workflow'],
     zh: i18n.zh,
     workersZh: workersI18n.zh,
     createInitialState: stateModule.createInitialState,
@@ -771,7 +771,7 @@ test('工作流详情：停用直接在工具栏里，不再藏进「更多」�
     clickButton(active.tree, '停用')
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(requests.length, 1, 'disable posts exactly once')
-    assert.equal(requests[0].url, '/buka-workflows/workflow/activate')
+    assert.equal(requests[0].url, '/workflow/activate')
     assert.deepEqual(JSON.parse(requests[0].body), { id: 'wf-1', active: false })
 
     // 已停用的工作流只给「重新启用」，工具栏里不再出现停用。
@@ -1027,7 +1027,8 @@ test('结构图：画通道、点节点打开抽屉、点通道记录选中', as
   const widths = new Map()
   walk(tree, (node) => {
     if (node.props?.className === 'buka-workflows-nodeWrap') {
-      widths.set(textOf(node).trim(), Number.parseFloat(node.props.style?.width ?? '0'))
+      const label = findBy(node, (child) => child.props?.className === 'buka-workflows-nodeLabel')
+      widths.set(textOf(label).trim(), Number.parseFloat(node.props.style?.width ?? '0'))
     }
   })
   assert.ok(
@@ -1124,6 +1125,49 @@ test('结构图：节点头像来自执行者登记，而不是定义快照', as
   const text = texts.join(' ')
   assert.match(text, /🚀/u, 'the worker avatar is drawn on the node')
   assert.ok(classes.includes('buka-workflows-avatar'), 'avatar chip rendered')
+})
+
+test('人岗位：结构图、实时流程与抽屉都画专用的人头像', async () => {
+  const client = await loadClient()
+  const definition = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+  })
+  assert.match(definition.texts.join(' '), /🧑/u, 'the human position draws a person avatar')
+  assert.ok(
+    definition.classes.includes('buka-workflows-avatarHuman'),
+    'the human avatar has its own chip color',
+  )
+
+  const flow = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'flow' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+  })
+  assert.match(flow.texts.join(' '), /🧑/u, 'the live flow draws it too')
+  assert.ok(flow.classes.includes('buka-workflows-avatarHuman'), 'live node uses the same avatar')
+
+  const drawer = render(client, {
+    route: { kind: 'workflow', workflowId: 'wf-1', tab: 'definition' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    definitionSelection: { kind: 'position', id: 'approve' },
+  })
+  assert.ok(
+    drawer.classes.includes('buka-workflows-avatarHuman'),
+    'the position drawer head shows the same avatar',
+  )
+
+  const task = render(client, {
+    route: { kind: 'job', workflowId: 'wf-1', jobId: 'job-1', view: 'board' },
+    workflow: { status: 'ready', data: WORKFLOW_DETAIL, error: null },
+    job: { status: 'ready', data: JOB_DETAIL, error: null },
+    taskId: 'task-3',
+    task: { status: 'ready', data: HUMAN_TASK_DETAIL.task, error: null },
+  })
+  assert.ok(
+    task.classes.includes('buka-workflows-avatarHuman'),
+    'the human task drawer head shows it too',
+  )
 })
 
 test('定义抽屉：岗位任务类型与 schema 按需展开', async () => {
@@ -1697,7 +1741,7 @@ test('人任务：选动作、按动作表单填写，提交走 task/action comp
     clickButton(tree, '执行这个动作')
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(requests.length, 1, 'complete should POST exactly once')
-    assert.equal(requests[0].url, '/buka-workflows/task/action')
+    assert.equal(requests[0].url, '/workflow/task/action')
     const body = JSON.parse(requests[0].body)
     assert.equal(body.jobId, 'job-1')
     assert.equal(body.taskId, 'task-3')
@@ -1773,7 +1817,7 @@ test('人任务：未认领也能直接提交，提交时自动认领（页面�
     submit.props.onClick({})
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(requests.length, 1, 'the implicit claim does not need a separate request')
-    assert.equal(requests[0].url, '/buka-workflows/task/action')
+    assert.equal(requests[0].url, '/workflow/task/action')
     const body = JSON.parse(requests[0].body)
     assert.equal(body.action, 'complete', 'submitting goes straight to complete')
     assert.equal(body.taskId, 'task-3')
@@ -1909,7 +1953,7 @@ test('附件抽屉：Markdown 附件经 MarkdownText 渲染，相对图片解析
   const resolve = markdown.props.pathImages.resolve
   const figure = resolve('figure.png')
   assert.equal(typeof figure, 'string')
-  assert.match(figure, /buka-workflows\/attachment/u)
+  assert.match(figure, /workflow\/attachment/u)
   assert.match(figure, /att-img-1/u)
   assert.match(figure, /mode=inline/u)
   assert.equal(resolve('./figure.png'), figure, '相对路径按文件名匹配')

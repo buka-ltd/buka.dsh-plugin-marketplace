@@ -8,7 +8,7 @@
  */
 
 /** 词典命名空间。 */
-export const NS = 'buka-skill-update-check'
+export const NS = 'skill-update-check'
 
 /** 英文文案。 */
 const en = {

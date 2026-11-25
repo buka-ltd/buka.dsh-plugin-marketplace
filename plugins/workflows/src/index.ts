@@ -4,15 +4,15 @@
  * 合并包承载两半能力：
  *
  * - **执行者**（`workers/`）：插件全局目录下的登记表与目录、AGENTS.md、项目
- *   skills、模型选择，`buka_workers` / `buka_worker_build` 两个模型工具，
- *   `/buka-workers/*` 页面路由，以及对外服务 `ctx.bukaWorkers`。
+ *   skills、模型选择，`workflow_workers` / `workflow_worker_build` 两个模型工具，
+ *   `/workflow/workers/*` 页面路由，以及对外服务 `ctx.workflowWorkers`。
  * - **工作流**（`assembly.ts`）：持久工作流定义、作业与任务级看板、显式依赖、
- *   内建开始 / 结束、人任务与助理，`buka_workflow_*` 工具与 `/job` 命令，
- *   `/buka-workflows/*` 页面路由，以及只读服务 `ctx.bukaWorkflows`
+ *   内建开始 / 结束、人任务与助理，`workflow_*` 工具与 `/job` 命令，
+ *   `/workflow/*` 页面路由，以及只读服务 `ctx.workflowQuery`
  *   （`workerUsage(id)` 供删除执行者算引用面）。
  *
- * 两半只在服务层互连：工作流引擎经 `ctx.get('bukaWorkers')` 读登记表与开
- * 执行者会话，执行者删除路由经 `ctx.get('bukaWorkflows')` 算影响面。合并后
+ * 两半只在服务层互连：工作流引擎经 `ctx.get('workflowWorkers')` 读登记表与开
+ * 执行者会话，执行者删除路由经 `ctx.get('workflowQuery')` 算影响面。合并后
  * 两者始终存在，原有「服务缺失」兜底分支保留（零行为变化）。随包发布唯一
  * 编排预设 `workflow-orchestrator`（显示名 `Workflow`），写工具与定义工具都
  * 只对该预设的根会话可见（分别由 `builderPresets` / `orchestratorPresets`

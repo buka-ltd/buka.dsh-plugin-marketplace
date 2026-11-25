@@ -1,7 +1,7 @@
 /**
  * 按 agent preset 收窄的可见性判定。
  *
- * 执行者写工具：`buka_worker_build` 注册在 Host 上，但只对随包发布的
+ * 执行者写工具：`workflow_worker_build` 注册在 Host 上，但只对随包发布的
  * `Workflow` 预设（bundle 补丁里的 `workflow-orchestrator` 行）的**根会话**
  * 可见：其他 preset、以及由它 spawn 出来的子会话都看不到，避免普通会话或
  * 执行者自己顺手把执行者改掉。

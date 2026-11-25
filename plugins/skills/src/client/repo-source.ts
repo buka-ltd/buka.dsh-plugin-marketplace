@@ -3,7 +3,7 @@
  *
  * 只做纯字符串判断：是否可打开网页、是否能让 Host 去列 skills。真正的来源
  * 分类在 Host 的 `repo-store.ts`，这里只按同一套规则给页面做即时反馈。
- * 仓库头像的缓存与更新在 Host（`/buka-skills/icon`），这里只拼请求地址。
+ * 仓库头像的缓存与更新在 Host（`/skills/icon`），这里只拼请求地址。
  *
  * @module @buka/dsh-plugin-skills/client/repo-source
  */
@@ -92,7 +92,7 @@ function repoIconUrl(value: unknown): string {
 
 /**
  * 直连 GitHub 的头像地址。只在 Host 图标路由不可用时作为退路：旧版 Host 还没
- * 注册 `/buka-skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
+ * 注册 `/skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
  *
  * @param value 来源或来源链接
  */

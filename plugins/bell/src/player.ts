@@ -35,7 +35,7 @@ export function createPlayer(ctx: Context): Player {
     warned.add(cue)
     try {
       ctx.logger.warn(
-        'buka-bell: no sound player is available for the %s cue; that moment will be silent',
+        'bell: no sound player is available for the %s cue; that moment will be silent',
         cue,
       )
     } catch {

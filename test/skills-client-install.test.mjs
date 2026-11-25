@@ -5,7 +5,7 @@
  * 环境，所以沿用 `test/skills-client-marketplace.test.mjs` 的源码断言风格，
  * 守住几条容易回归的约定：
  *
- * - 安装走 Host 路由 `POST /buka-skills/install`，请求体只传来源与仓库里的路径，
+ * - 安装走 Host 路由 `POST /skills/install`，请求体只传来源与仓库里的路径，
  *   名字与是否存在由 Host 的仓库列表决定；
  * - skill 叶子右侧固定三个入口：「全局安装」「安装到执行者」「安装到工作区」；
  * - 只有全局入口在已安装时变成禁用的「全局已安装」按钮，全局安装中显示状态点；
@@ -106,7 +106,7 @@ function loadFunction(name) {
 }
 
 test('安装走独立的 Host 路由，与卸载分开', () => {
-  assert.ok(source.includes("const INSTALL_ROUTE = '/buka-skills/install'"), '缺少安装路由常量')
+  assert.ok(source.includes("const INSTALL_ROUTE = '/skills/install'"), '缺少安装路由常量')
   const install = section('async function installSkill(repo, node)', '\n\n      /**')
   assert.ok(install.includes('requestJson(INSTALL_ROUTE, {'), '安装没有请求 Host 的安装路由')
   assert.ok(install.includes("method: 'POST'"), '安装必须是 POST')
@@ -357,7 +357,7 @@ test('中英文词典键完全一致，安装相关文案齐全', () => {
 })
 
 test('安装到执行者 / 工作区：先读目标列表，确认后带 target 请求 Host', () => {
-  assert.ok(source.includes("const TARGETS_ROUTE = '/buka-skills/targets'"), '缺少目标列表路由常量')
+  assert.ok(source.includes("const TARGETS_ROUTE = '/skills/targets'"), '缺少目标列表路由常量')
   const load = section('async function loadTargets(kind)', 'function openTargetDialog(')
   assert.ok(load.includes('requestJson(TARGETS_ROUTE)'), '没有读取目标列表')
   assert.ok(load.includes('setTargets('), '没有记录目标列表状态')

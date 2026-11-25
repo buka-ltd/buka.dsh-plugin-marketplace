@@ -46,7 +46,7 @@ export function optionalService<T>(ctx: Context, name: string): T | undefined {
  */
 export function followupMessage(
   text: string,
-  sourceKind: string = 'buka-worker',
+  sourceKind: string = 'workflow_worker',
 ): Record<string, unknown> {
   return {
     id: randomUUID(),
@@ -64,7 +64,7 @@ export function followupMessage(
  * @returns 非用户来源的消息
  */
 export function contextMessage(text: string): Record<string, unknown> {
-  return followupMessage(text, 'buka-worker')
+  return followupMessage(text, 'workflow_worker')
 }
 
 /**

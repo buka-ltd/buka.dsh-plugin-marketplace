@@ -6,7 +6,7 @@
 
 import type React from 'react'
 
-import { MISSING_AVATAR_ID, renderAvatar } from '../avatars.ts'
+import { executorAvatarId, renderAvatar } from '../avatars.ts'
 import { ClientModal, h } from '../element.ts'
 import { formatWaiting } from '../format.ts'
 import { fill } from '../i18n.ts'
@@ -37,12 +37,11 @@ export function renderNodeTasksDrawer(page: AppContext): React.ReactElement | nu
   const title = fill(t, 'nodeTasksTitle', { label: selection.label })
   const definition = mergedDefinition(currentJobDefinition(state), currentDefinition(state))
   const position = positionsOf(definition).find((item) => item.id === selection.positionId)
-  const avatar =
-    position?.executor.missing === true
-      ? renderAvatar(MISSING_AVATAR_ID, 28, 'buka-workflows-drawerAvatar')
-      : position !== undefined && typeof position.executor.avatar === 'string'
-        ? renderAvatar(position.executor.avatar, 28, 'buka-workflows-drawerAvatar')
-        : null
+  const avatar = renderAvatar(
+    executorAvatarId(position?.executor),
+    28,
+    'buka-workflows-drawerAvatar',
+  )
   const meta = [
     fill(t, 'flowTaskCount', { n: tasks.length }),
     position === undefined ? '' : renderExecutor(page, position.executor),

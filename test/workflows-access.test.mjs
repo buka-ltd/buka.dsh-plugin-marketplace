@@ -1,7 +1,7 @@
 /**
  * 工作流工具可见性判定的单测。
  *
- * `resolveWorkflowAccess` 决定 `buka_workflow_*` 工具对哪个会话可见：默认只
+ * `resolveWorkflowAccess` 决定 `workflow_*` 工具对哪个会话可见：默认只
  * 放行随插件发布的 `workflow-orchestrator` preset 的根会话。
  */
 

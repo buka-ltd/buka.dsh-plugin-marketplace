@@ -179,7 +179,7 @@ function workerIdentityLabel(worker) {
 * 收藏页的「安装到执行者 / 安装到工作区」需要两份列表，两份都来自别的插件或
 * 宿主服务，不能由浏览器传路径：
 *
-* - 执行者：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
+* - 执行者：`ctx.workflowWorkers`（workers 插件提供）的 `list()`。只保留智能体、
 *   目录存在的执行者；机器人没有目录，装不了项目级 skill。引用键是不可变的
 *   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
 *   `name`。
@@ -223,7 +223,7 @@ function optionalService(ctx, name) {
 * `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
 * workers 才用它兜底。
 *
-* @param record `bukaWorkers.list()` 的一条记录
+* @param record `workflowWorkers.list()` 的一条记录
 */
 function workerKeyOf(record) {
 	const id = typeof record.id === "string" ? record.id.trim() : "";
@@ -237,7 +237,7 @@ function workerKeyOf(record) {
 * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
 * 确认一次目录）。`name` 可以为空，按原值带回页面展示。
 *
-* @param result `bukaWorkers.list()` 的返回值
+* @param result `workflowWorkers.list()` 的返回值
 */
 function normalizeWorkers(result) {
 	const workers = result?.workers;
@@ -287,7 +287,7 @@ function normalizeWorkspaces(result) {
 * @param ctx 插件上下文
 */
 async function readWorkers(ctx) {
-	const service = optionalService(ctx, "bukaWorkers");
+	const service = optionalService(ctx, "workflowWorkers");
 	if (service === void 0 || typeof service?.list !== "function") return {
 		available: false,
 		error: null,
@@ -377,7 +377,7 @@ async function confirmDirectory(directory, label) {
 /**
 * 安装时把浏览器选中的目标解析成一个可信目录。
 *
-* - 执行者按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+* - 执行者按标识符在 `ctx.workflowWorkers` 的列表里找（旧版记录没有 `id` 时，
 *   浏览器传的仍是 `name`）；
 * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
 *
@@ -463,7 +463,7 @@ async function resolveInstallTarget(ctx, request) {
 * @module @buka/dsh-plugin-skills/repo-icons
 */
 /** 页面读取仓库头像用的路由。 */
-const ICON_ROUTE = "/buka-skills/icon";
+const ICON_ROUTE = "/skills/icon";
 /** 拉头像的超时：头像很小，10 秒足够。 */
 const ICON_FETCH_TIMEOUT_MS = 1e4;
 /** 头像大小上限；GitHub 的 80px 头像远小于这个值。 */
@@ -2308,20 +2308,20 @@ function requestedSkillPaths(value) {
 *
 * 路由：
 *
-* - `GET /buka-skills/list` 列出全局 skills；
-* - `POST /buka-skills/uninstall` 卸载一个；
-* - `GET /buka-skills/check` 检查全局 skill 的更新；
-* - `POST /buka-skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
-* - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
+* - `GET /skills/list` 列出全局 skills；
+* - `POST /skills/uninstall` 卸载一个；
+* - `GET /skills/check` 检查全局 skill 的更新；
+* - `POST /skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
+* - `GET /skills/targets` 列出可安装的执行者（`ctx.workflowWorkers`）与工作区
 *   （`ctx.workspaceRegistry`）；
-* - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
+* - `POST /skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
 *   skill）安装到全局、某个执行者目录或某个工作区目录；
-* - `GET /buka-skills/repos` 列出用户收藏的仓库，
-* - `POST /buka-skills/repos` 收藏一个，
-* - `POST /buka-skills/repos/remove` 移除一个，
-* - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
+* - `GET /skills/repos` 列出用户收藏的仓库，
+* - `POST /skills/repos` 收藏一个，
+* - `POST /skills/repos/remove` 移除一个，
+* - `GET /skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
 *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）；
-* - `GET /buka-skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
+* - `GET /skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
 *   过期时先回旧图、再在后台静默更新。
 *
 * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
@@ -2330,23 +2330,23 @@ function requestedSkillPaths(value) {
 * @module @buka/dsh-plugin-skills/routes
 */
 /** 页面读取列表用的路由；浏览器一半按同一常量访问。 */
-const LIST_ROUTE = "/buka-skills/list";
+const LIST_ROUTE = "/skills/list";
 /** 页面卸载 skill 用的路由。 */
-const UNINSTALL_ROUTE = "/buka-skills/uninstall";
+const UNINSTALL_ROUTE = "/skills/uninstall";
 /** 页面读取可安装目标（执行者 / 工作区）用的路由。 */
-const TARGETS_ROUTE = "/buka-skills/targets";
+const TARGETS_ROUTE = "/skills/targets";
 /** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 执行者 / 工作区用的路由。 */
-const INSTALL_ROUTE = "/buka-skills/install";
+const INSTALL_ROUTE = "/skills/install";
 /** 收藏仓库的列表 / 添加路由。 */
-const REPOS_ROUTE = "/buka-skills/repos";
+const REPOS_ROUTE = "/skills/repos";
 /** 收藏仓库的移除路由。 */
-const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
+const REPO_REMOVE_ROUTE = "/skills/repos/remove";
 /** 收藏仓库的 skills 树路由。 */
-const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
+const REPO_SKILLS_ROUTE = "/skills/repo-skills";
 /** 已安装 skill 的检查路由。 */
-const CHECK_ROUTE = "/buka-skills/check";
+const CHECK_ROUTE = "/skills/check";
 /** 已安装 skill 的更新路由。 */
-const UPDATE_ROUTE = "/buka-skills/update";
+const UPDATE_ROUTE = "/skills/update";
 /**
 * 注册全部路由。
 *
@@ -2391,7 +2391,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: GET ${LIST_ROUTE}`);
+		}), `skills: GET ${LIST_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: UNINSTALL_ROUTE,
@@ -2410,7 +2410,7 @@ function registerRoutes(ctx, deps) {
 						scope: fields?.scope,
 						id: fields?.id
 					}));
-					if (result.ok) webCtx.logger?.info?.("buka-skills: 已卸载 %s（%s）", String(fields?.id), result.method);
+					if (result.ok) webCtx.logger?.info?.("skills: 已卸载 %s（%s）", String(fields?.id), result.method);
 					sendJson(res, result.ok ? 200 : statusFor(result.code), result);
 				} catch (error) {
 					sendJson(res, 500, {
@@ -2419,7 +2419,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: POST ${UNINSTALL_ROUTE}`);
+		}), `skills: POST ${UNINSTALL_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: TARGETS_ROUTE,
@@ -2441,7 +2441,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: GET ${TARGETS_ROUTE}`);
+		}), `skills: GET ${TARGETS_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: INSTALL_ROUTE,
@@ -2476,7 +2476,7 @@ function registerRoutes(ctx, deps) {
 					}));
 					if (result.ok) {
 						const count = "installed" in result && Array.isArray(result.installed) ? result.installed.length : 1;
-						webCtx.logger?.info?.("buka-skills: 已安装 %d 个 skill（%s，%s）", count, String("repo" in result ? result.repo : ""), result.target ?? "global");
+						webCtx.logger?.info?.("skills: 已安装 %d 个 skill（%s，%s）", count, String("repo" in result ? result.repo : ""), result.target ?? "global");
 					}
 					sendJson(res, result.ok ? 200 : installStatusFor(result.code), result);
 				} catch (error) {
@@ -2486,7 +2486,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: POST ${INSTALL_ROUTE}`);
+		}), `skills: POST ${INSTALL_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: CHECK_ROUTE,
@@ -2506,7 +2506,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: GET ${CHECK_ROUTE}`);
+		}), `skills: GET ${CHECK_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: UPDATE_ROUTE,
@@ -2522,7 +2522,7 @@ function registerRoutes(ctx, deps) {
 				const skills = Array.isArray(fields?.skills) ? fields.skills.filter((name) => typeof name === "string") : void 0;
 				try {
 					const result = await catalog.updateSkills(skills === void 0 ? {} : { skills });
-					if (result.ok) webCtx.logger?.info?.("buka-skills: 更新完成（%d 个成功，%d 个失败）", result.updated.length, result.failed.length);
+					if (result.ok) webCtx.logger?.info?.("skills: 更新完成（%d 个成功，%d 个失败）", result.updated.length, result.failed.length);
 					sendJson(res, result.ok ? 200 : updateStatusFor(result.code), result);
 				} catch (error) {
 					sendJson(res, 500, {
@@ -2531,7 +2531,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: POST ${UPDATE_ROUTE}`);
+		}), `skills: POST ${UPDATE_ROUTE}`);
 		let repoQueue = Promise.resolve();
 		function serializeRepo(work) {
 			const run = repoQueue.then(work, work);
@@ -2570,7 +2570,7 @@ function registerRoutes(ctx, deps) {
 						source: fields?.source,
 						note: fields?.note
 					}));
-					if (result.ok) webCtx.logger?.info?.("buka-skills: 已收藏仓库 %s", String(fields?.source));
+					if (result.ok) webCtx.logger?.info?.("skills: 已收藏仓库 %s", String(fields?.source));
 					sendJson(res, result.ok ? 200 : repoStatusFor(result.code), result);
 				} catch (error) {
 					sendJson(res, 500, {
@@ -2579,7 +2579,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: ${REPOS_ROUTE}`);
+		}), `skills: ${REPOS_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: REPO_REMOVE_ROUTE,
@@ -2597,7 +2597,7 @@ function registerRoutes(ctx, deps) {
 						homes,
 						id: fields?.id
 					}));
-					if (result.ok) webCtx.logger?.info?.("buka-skills: 已移除收藏 %s", String(fields?.id));
+					if (result.ok) webCtx.logger?.info?.("skills: 已移除收藏 %s", String(fields?.id));
 					sendJson(res, result.ok ? 200 : repoStatusFor(result.code), result);
 				} catch (error) {
 					sendJson(res, 500, {
@@ -2606,7 +2606,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: POST ${REPO_REMOVE_ROUTE}`);
+		}), `skills: POST ${REPO_REMOVE_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: REPO_SKILLS_ROUTE,
@@ -2636,7 +2636,7 @@ function registerRoutes(ctx, deps) {
 					});
 				}
 			}
-		}), `buka-skills: GET ${REPO_SKILLS_ROUTE}`);
+		}), `skills: GET ${REPO_SKILLS_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: ICON_ROUTE,
@@ -2666,7 +2666,7 @@ function registerRoutes(ctx, deps) {
 					res.end();
 				}
 			}
-		}), `buka-skills: GET ${ICON_ROUTE}`);
+		}), `skills: GET ${ICON_ROUTE}`);
 	});
 }
 /**
@@ -4726,16 +4726,16 @@ function errorText(error) {
 }
 // .build/skills/service.js
 /**
-* `@buka/dsh-plugin-skills` 对外提供的 Host Service：`ctx.bukaSkills`。
+* `@buka/dsh-plugin-skills` 对外提供的 Host Service：`ctx.skillCatalog`。
 *
-* 页面和 `buka_skills` 工具只消费其中一部分能力；其他插件通过 Cordis 的
+* 页面和 `skill_list` 工具只消费其中一部分能力；其他插件通过 Cordis 的
 * 服务注入拿到同一个实例：
 *
 * ```js
-* export const inject = ['bukaSkills']
+* export const inject = ['skillCatalog']
 * export function apply(ctx) {
-*   const repos = await ctx.bukaSkills.listRepositories()
-*   const checked = await ctx.bukaSkills.checkSkills({ dir: '/path/to/worker' })
+*   const repos = await ctx.skillCatalog.listRepositories()
+*   const checked = await ctx.skillCatalog.checkSkills({ dir: '/path/to/worker' })
 * }
 * ```
 *
@@ -4761,13 +4761,13 @@ function errorText(error) {
 * Service`。原因是本包入口必须同时导出 `apply` 来注册路由与工具（Cordis 的
 * 插件入口两种形态不能混用），而且本仓库的单测不安装 `@deepseek-ai/*`，
 * 服务实现需要保持可被 `node --test` 直接 import。`ctx.provide` 是 Service
-* 基类底层的同一个原语：消费侧完全一致（`inject: ['bukaSkills']` /
-* `ctx.bukaSkills`），卸载时同样自动摘除并唤醒依赖方。
+* 基类底层的同一个原语：消费侧完全一致（`inject: ['skillCatalog']` /
+* `ctx.skillCatalog`），卸载时同样自动摘除并唤醒依赖方。
 *
 * @module @buka/dsh-plugin-skills/service
 */
-/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaSkills`。 */
-const SERVICE_NAME = "bukaSkills";
+/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.skillCatalog`。 */
+const SERVICE_NAME = "skillCatalog";
 /** `listRepositories()` 并发探测的上限：收藏列表再长也不一次打开太多连接。 */
 const PROBE_CONCURRENCY = 4;
 /**
@@ -5001,7 +5001,7 @@ async function readSnapshot(ctx, homes) {
 	try {
 		summaries = await ctx.skills.list({ cwd: homes.agentsHome });
 	} catch (error) {
-		ctx.logger?.warn?.("buka-skills: 无法读取 skills 注册表：%s", describeError$1(error));
+		ctx.logger?.warn?.("skills: 无法读取 skills 注册表：%s", describeError$1(error));
 	}
 	return collectGlobalSkills({
 		homes,
@@ -5012,7 +5012,7 @@ async function readSnapshot(ctx, homes) {
 /**
 * 模型工具：只读列举全局 skills。
 *
-* 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
+* 一个只读工具 `skill_list`，让模型能回答「本机装了哪些全局 skill、它们
 * 是不是 npx skills 装的」。安装与卸载都是写操作，只留给页面上的用户按钮，
 * 不开放给模型。
 *
@@ -5028,7 +5028,7 @@ function registerTools(ctx, deps) {
 	const { readSnapshot } = deps;
 	ctx.inject(["tools"], (toolCtx) => {
 		toolCtx.tools.register(defineTool({
-			name: "buka_skills",
+			name: "skill_list",
 			description: "List the skills installed globally for every DSH session (~/.agents/skills and ~/.dsh/skills) and mark the ones the npx skills CLI installed and manages. Use it when the user asks which global skills exist or how one of them got installed. Uninstalling is a user action on the Skills page in the DSH sidebar.",
 			parameters: {},
 			output: {
@@ -5106,16 +5106,16 @@ function registerTools(ctx, deps) {
 * 提供三件东西：
 *
 * - 包内 HTTP 路由，给浏览器一半的侧边栏「Skills」页面用：
-*   `GET /buka-skills/list` 列出全局 skills，`POST /buka-skills/uninstall` 卸载一个，
-*   `GET /buka-skills/icon` 返回缓存的 GitHub owner 头像（过期后台静默更新），
-*   `GET /buka-skills/check` 供页面自动检查更新，`POST /buka-skills/update` 应用更新
+*   `GET /skills/list` 列出全局 skills，`POST /skills/uninstall` 卸载一个，
+*   `GET /skills/icon` 返回缓存的 GitHub owner 头像（过期后台静默更新），
+*   `GET /skills/check` 供页面自动检查更新，`POST /skills/update` 应用更新
 *   （请求体带 `skills` 时只处理这些名字），
-*   `GET /buka-skills/targets` 列出可安装的执行者（可选的 `ctx.bukaWorkers`）与
-*   工作区（`ctx.workspaceRegistry`），`POST /buka-skills/install` 把某个收藏仓库
+*   `GET /skills/targets` 列出可安装的执行者（可选的 `ctx.workflowWorkers`）与
+*   工作区（`ctx.workspaceRegistry`），`POST /skills/install` 把某个收藏仓库
 *   里的一个 skill 安装到全局、某个执行者目录或某个工作区目录；
-*   `GET /buka-skills/repos` 列出用户收藏的仓库，
-*   `POST /buka-skills/repos` 收藏一个，`POST /buka-skills/repos/remove` 移除一个，
-*   `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
+*   `GET /skills/repos` 列出用户收藏的仓库，
+*   `POST /skills/repos` 收藏一个，`POST /skills/repos/remove` 移除一个，
+*   `GET /skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
 *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）。收藏只认仓库根
 *   `skills/` 下（任意层级子目录）的 SKILL.md；来源可以是 GitHub 仓库、任意
 *   git 远端（都浅克隆到本地缓存再扫描）或本地绝对路径（直接扫描目录）。
@@ -5123,10 +5123,10 @@ function registerTools(ctx, deps) {
 *   `src/repo-store.ts` 的 JSON 文件，仓库 skills 由 `src/repo-skills.ts` 按
 *   TTL 缓存仓库树；安装 / 卸载走 `skills` 包的库 API，检查 / 更新走同一包
 *   自带的 CLI，四类写入共用一条串行队列；
-* - 一个只读工具 `buka_skills`，让模型能回答「本机装了哪些全局 skill、它们
+* - 一个只读工具 `skill_list`，让模型能回答「本机装了哪些全局 skill、它们
 *   是不是 npx skills 装的」。安装与卸载都是写操作，只留给页面上的用户按钮，
 *   不开放给模型。
-* - 一个 Host Service `ctx.bukaSkills`（`src/service.ts`）：把收藏的仓库、
+* - 一个 Host Service `ctx.skillCatalog`（`src/service.ts`）：把收藏的仓库、
 *   仓库里的 skill 列表，以及按目录检查 / 更新的能力开放给其他插件。
 *   页面与工具也复用同一个服务实例，因此两处的缓存与并发请求是同一份。
 *

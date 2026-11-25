@@ -234,7 +234,7 @@ export class WorkflowStore {
 
     if (tasks > 0 || jobs > 0) {
       this.logger?.info?.(
-        `buka-workflows: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s))`,
+        `workflow: normalized legacy worker fields (${tasks} task(s), ${jobs} job(s))`,
       )
     }
   }
@@ -265,7 +265,7 @@ export class WorkflowStore {
     }
     if (definitions > 0) {
       this.logger?.info?.(
-        `buka-workflows: migrated ${definitions} workflow definition(s) to v8 (${workflows} workflow(s))`,
+        `workflow: migrated ${definitions} workflow definition(s) to v8 (${workflows} workflow(s))`,
       )
     }
   }
@@ -304,7 +304,7 @@ export class WorkflowStore {
       promoted += 1
     }
     if (promoted > 0) {
-      this.logger?.info?.(`buka-workflows: enabled ${promoted} legacy draft workflow(s)`)
+      this.logger?.info?.(`workflow: enabled ${promoted} legacy draft workflow(s)`)
     }
     // 作业编号在所属工作流内递增；记录损坏或迁移丢字段时按已有作业回填。
     const maxSeq = new Map<string, number>()
@@ -314,7 +314,7 @@ export class WorkflowStore {
     for (const [workflowId, seq] of maxSeq) {
       const workflow = this.domain.table('workflows').get(workflowId)
       if (workflow === undefined) {
-        this.logger?.warn?.(`buka-workflows: job ${workflowId} has no workflow record`)
+        this.logger?.warn?.(`workflow: job ${workflowId} has no workflow record`)
         continue
       }
       if (workflow.jobSeq >= seq) continue

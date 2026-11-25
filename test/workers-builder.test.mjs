@@ -612,7 +612,7 @@ test('createWorkerBuildTool：定义、可见性兜底与结果映射', async ()
   })
 
   assert.equal(tool.name, WORKER_BUILD_TOOL_NAME)
-  assert.equal(tool.name, 'buka_worker_build')
+  assert.equal(tool.name, 'workflow_worker_build')
   assert.equal(tool.parameters.id.required, true)
   assert.equal(tool.parameters.name.required, undefined, '展示名可选')
   assert.equal(tool.parameters.name.type, 'string')

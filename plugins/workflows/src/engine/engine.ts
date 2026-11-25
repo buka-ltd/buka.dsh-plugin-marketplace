@@ -98,6 +98,7 @@ import {
 import type {
   AgentPresetsServiceLike,
   EngineDeps,
+  JobModeTarget,
   TurnSnapshot,
   WorkerHandleLike,
   WorkersServiceLike,
@@ -114,7 +115,7 @@ const WORKER_CACHE_MS = 5000
 /**
  * 任务完成后再等多久释放会话句柄。
  *
- * `buka_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
+ * `workflow_task_complete` 是在会话的当前轮里调用的：立即释放会把这一轮掐断，模型
  * 的收尾回复不会生成。任务结果已经记好，所以先等这一轮落定再释放；等待本身
  * 有上限，避免一直挂在会话上。正常模型的收尾回复远短于 5 分钟，这个上限只兜底
  * 「turn 永不结束」。
@@ -374,9 +375,7 @@ export class WorkflowEngine {
       const listed = typeof workers.list === 'function' ? await workers.list() : undefined
       this.catalog = parseWorkerCatalog(listed ?? workers)
     } catch (error) {
-      this.logger?.warn?.(
-        `buka-workflows: could not read the workers registry: ${describeError(error)}`,
-      )
+      this.logger?.warn?.(`workflow: could not read the workers registry: ${describeError(error)}`)
       this.catalog = new Map()
     }
     this.catalogAt = Date.now()
@@ -398,9 +397,7 @@ export class WorkflowEngine {
     try {
       return this.worktreeAvailableOf() === true
     } catch (error) {
-      this.logger?.warn?.(
-        `buka-workflows: could not detect the worktree plugin: ${describeError(error)}`,
-      )
+      this.logger?.warn?.(`workflow: could not detect the worktree plugin: ${describeError(error)}`)
       return false
     }
   }
@@ -480,7 +477,7 @@ export class WorkflowEngine {
       return new Set(ids)
     } catch (error) {
       this.logger?.warn?.(
-        `buka-workflows: could not read the agent preset roster: ${describeError(error)}`,
+        `workflow: could not read the agent preset roster: ${describeError(error)}`,
       )
       return undefined
     }
@@ -628,6 +625,56 @@ export class WorkflowEngine {
       content: input.content,
       delivery: this.resolveDelivery(definition, input.delivery, starter, workers),
     })
+  }
+
+  /**
+   * 作业模式里可见的全部工作流目标，供 `workflow_job_options` 列给 agent 挑选。
+   *
+   * 只列已启用的工作流；定义版本过旧或引用的执行者缺失时也列出来，但带上
+   * `error` 说明原因——让 agent 能告诉用户先修哪里，而不是只看到空列表。
+   * 登记表只刷新一次，不会为每个工作流各读一遍。
+   *
+   * @returns 目标列表（含暂时不可启动的工作流）
+   */
+  async jobModeTargets(): Promise<JobModeTarget[]> {
+    // 与建单一致：刚被删除的执行者不能靠缓存进入作业模式。
+    const workers = await this.refreshWorkers(true)
+    const targets: JobModeTarget[] = []
+    for (const workflow of this.store.listWorkflows()) {
+      if (workflow.status !== 'active') continue
+      const found = this.store.readWorkflowVersion(workflow.id)
+      if (found === null) continue
+      const { definition } = found.versionRecord
+      if (definition.version !== DEFINITION_VERSION) {
+        targets.push({
+          workflowId: workflow.id,
+          name: workflow.name,
+          description: workflow.description,
+          error:
+            'this workflow is not on the current definition version; ask the orchestrator to rewrite it before starting',
+        })
+        continue
+      }
+      const availability = definitionAvailability(definition, workers)
+      if (!availability.available) {
+        targets.push({
+          workflowId: workflow.id,
+          name: workflow.name,
+          description: workflow.description,
+          error: `it references missing worker identifiers (${describeUnavailable(availability)}); rebind those positions or task types first`,
+        })
+        continue
+      }
+      targets.push({
+        workflowId: workflow.id,
+        name: workflow.name,
+        description: workflow.description,
+        ...(definition.start.content === undefined
+          ? {}
+          : { startContent: definition.start.content }),
+      })
+    }
+    return targets
   }
 
   /**
@@ -2014,9 +2061,7 @@ export class WorkflowEngine {
           await this.recoverJobLocked(job.id)
         })
       } catch (error) {
-        this.logger?.warn?.(
-          `buka-workflows: could not recover job ${job.id}: ${describeError(error)}`,
-        )
+        this.logger?.warn?.(`workflow: could not recover job ${job.id}: ${describeError(error)}`)
       }
     }
   }
@@ -2125,7 +2170,7 @@ export class WorkflowEngine {
         await this.spawnInitialTasksLocked(job, startTask)
       } catch (error) {
         this.logger?.warn?.(
-          `buka-workflows: could not rebuild initial tasks for job ${jobId}: ${describeError(error)}`,
+          `workflow: could not rebuild initial tasks for job ${jobId}: ${describeError(error)}`,
         )
       }
     }
@@ -2151,7 +2196,7 @@ export class WorkflowEngine {
     } catch (error) {
       this.unbindSessionTask(sessionId, task.id)
       this.logger?.warn?.(
-        `buka-workflows: could not resume session ${sessionId}: ${describeError(error)}`,
+        `workflow: could not resume session ${sessionId}: ${describeError(error)}`,
       )
       return false
     }
@@ -2627,14 +2672,14 @@ export class WorkflowEngine {
       await this.failOutside(
         launch.jobId,
         launch.taskId,
-        'the workers service (ctx.bukaWorkers) with dispatchSession() is unavailable in this composition; update the plugin or check the composition',
+        'the workers service (ctx.workflowWorkers) with dispatchSession() is unavailable in this composition; update the plugin or check the composition',
       )
       return
     }
     const task = this.store.getTask(launch.taskId)
     if (task === undefined || task.status !== 'running') return
     // 先绑定会话 → 任务，再投递提示词：dispatchSession 返回前就已经在会话里开了
-    // 第一轮，首步组装工具清单时按 taskForSession() 计算（buka_task_complete 等）。
+    // 第一轮，首步组装工具清单时按 taskForSession() 计算（workflow_task_complete 等）。
     // 会话 id 由调用方先生成并交给 workers 服务，所以绑定与投递看到的是同一条会话。
     const newSessionId = randomUUID()
     this.sessionTasks.set(newSessionId, { jobId: launch.jobId, taskId: launch.taskId })
@@ -2753,14 +2798,14 @@ export class WorkflowEngine {
       const snapshot = readHandleResult(input.handle, input.startSeq)
       if (!snapshot.turnEnded) return false
       // 回合正常结束只说明这一轮把话说完（常见于 agent 提问后等用户回复），
-      // 任务仍在 running：保留句柄继续轮询，由 buka_task_complete、取消或
+      // 任务仍在 running：保留句柄继续轮询，由 workflow_task_complete、取消或
       // taskTimeoutMs 收口。其它结束原因（error / aborted / max-tokens 等）
       // 仍按失败处理。助理任务规则不变。
       if (input.kind !== 'assistant' && snapshot.stopReason === 'completed') {
         if (!waiting) {
           waiting = true
           this.logger?.info?.(
-            `buka-workflows: task ${input.taskId} is waiting for the session to continue after the turn completed`,
+            `workflow: task ${input.taskId} is waiting for the session to continue after the turn completed`,
           )
         }
         return false
@@ -2772,7 +2817,7 @@ export class WorkflowEngine {
         await this.failOutside(
           input.jobId,
           input.taskId,
-          `the task session ended without calling buka_task_complete (stopReason: ${snapshot.stopReason ?? 'unknown'})`,
+          `the task session ended without calling workflow_task_complete (stopReason: ${snapshot.stopReason ?? 'unknown'})`,
         )
       }
       return true
@@ -2871,7 +2916,7 @@ export class WorkflowEngine {
       return
     }
     // 先写会话 → 任务句柄，再投递：投递会立刻在发起人会话开启新回合，
-    // 该回合的工具清单按 taskForSession() 计算（buka_task_complete 等）。
+    // 该回合的工具清单按 taskForSession() 计算（workflow_task_complete 等）。
     // 会话原来绑着别的任务时记下来：投递失败要还回去。
     const displaced = this.sessionTasks.get(sessionId)
     this.sessionTasks.set(sessionId, { jobId, taskId })
@@ -2994,9 +3039,7 @@ export class WorkflowEngine {
         await this.recomputeLocked(jobId)
       })
     } catch (error) {
-      this.logger?.warn?.(
-        `buka-workflows: could not mark task ${taskId} failed: ${describeError(error)}`,
-      )
+      this.logger?.warn?.(`workflow: could not mark task ${taskId} failed: ${describeError(error)}`)
     }
   }
 
@@ -3020,7 +3063,7 @@ export class WorkflowEngine {
       })
     } catch (error) {
       this.logger?.warn?.(
-        `buka-workflows: could not fail the job for assistant task ${taskId}: ${describeError(error)}`,
+        `workflow: could not fail the job for assistant task ${taskId}: ${describeError(error)}`,
       )
     }
   }

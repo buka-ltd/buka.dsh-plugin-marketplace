@@ -137,7 +137,7 @@ function makeHandle(sessionId) {
     },
     setPlanMode() {},
     /**
-     * 测试钩子：结束这一轮但不调用 buka_task_complete。
+     * 测试钩子：结束这一轮但不调用 workflow_task_complete。
      *
      * @param stopReason 本轮的结束原因；默认用 `stop` 这个非 `completed` 值，
      *   让既有「会话异常结束」测试保持原来的失败语义。
@@ -1734,7 +1734,7 @@ test('engine: the end report is delivered to the starter session and waits for c
     const message = env.delivery.messages[0]
     assert.equal(message.sessionId, 'starter-session')
     assert.match(message.text, /最终交付物/u)
-    assert.match(message.text, /buka_task_complete/u)
+    assert.match(message.text, /workflow_task_complete/u)
     const endTask = taskAt(env.store, job.id, 'end')
     assert.equal(endTask.status, 'running', 'delivered, waiting for the starter to confirm')
     assert.equal(env.store.getJob(job.id).status, 'running')
@@ -2376,7 +2376,7 @@ test('engine: a task session that ends its turn completed while unfinished waits
     assert.equal(env.store.getTask(dev.id).status, 'running', 'taskTimeoutMs 为 0 时无限等待')
     assert.equal(handle.state.disposed, false)
 
-    // 用户在会话里回复并调用 buka_task_complete：任务完成，观测器清理干净。
+    // 用户在会话里回复并调用 workflow_task_complete：任务完成，观测器清理干净。
     await env.engine.completeTaskFromSession({
       sessionId: handle.sessionId,
       text: '收到',
@@ -2406,7 +2406,7 @@ for (const stopReason of ['error', 'aborted', 'max-tokens', 'interrupted', 'bloc
       await waitFor(() => env.store.getTask(dev.id).status === 'failed')
       // 异常结束仍按失败处理，错误信息保留 stopReason；作业等人工决定。
       assert.equal(env.store.getJob(job.id).status, 'running')
-      assert.match(env.store.getTask(dev.id).error, /without calling buka_task_complete/u)
+      assert.match(env.store.getTask(dev.id).error, /without calling workflow_task_complete/u)
       assert.match(env.store.getTask(dev.id).error, new RegExp(`stopReason: ${stopReason}`, 'u'))
       await waitFor(() => handle.state.disposed === true)
     } finally {
@@ -3185,6 +3185,73 @@ test('engine: workflow detail resolves worker avatars even when the workers serv
   }
 })
 
+test('engine: job mode lists active workflows with their start schema', async () => {
+  const fixture = await setup(simpleDevDefinition())
+  try {
+    const active = await fixture.engine.jobModeTargets()
+    const target = active.find((entry) => entry.workflowId === fixture.workflowId)
+    assert.ok(target, 'the active workflow is listed')
+    assert.equal(target.name, '简单研发')
+    assert.equal(target.error, undefined)
+    assert.equal(target.startContent?.properties?.requirement?.type, 'string')
+
+    await fixture.engine.setWorkflowActive(fixture.workflowId, false)
+    const afterRetire = await fixture.engine.jobModeTargets()
+    assert.equal(
+      afterRetire.some((entry) => entry.workflowId === fixture.workflowId),
+      false,
+      'a retired workflow is not listed',
+    )
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('engine: job mode lists a workflow with a missing worker and the reason', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'buka-workflows-jobmode-'))
+  const store = new WorkflowStore({ domain: new FakeDomain(), dataDir })
+  await store.init()
+  const delivery = makeDelivery()
+  const options = makeOptions(dataDir)
+  const fullWorkers = makeWorkers()
+  let engine
+  try {
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => fullWorkers,
+      delivery,
+    })
+    await engine.start()
+    const workflow = await engine.saveWorkflow({ definition: simpleDevDefinition() })
+    await engine.setWorkflowActive(workflow.id, true)
+    engine.dispose()
+
+    // 删除执行者：新引擎读到的是缺了「软件工程师」的登记表。
+    const missingWorkers = makeWorkers(WORKER_ENTRIES.filter((entry) => entry.id !== '软件工程师'))
+    engine = new WorkflowEngine({
+      ctx: {},
+      store,
+      options,
+      logger: undefined,
+      workers: () => missingWorkers,
+      delivery,
+    })
+    await engine.start()
+
+    const targets = await engine.jobModeTargets()
+    const target = targets.find((entry) => entry.workflowId === workflow.id)
+    assert.ok(target, 'the unavailable workflow is still listed')
+    assert.match(target.error, /missing worker identifiers/u)
+    assert.equal(target.startContent, undefined)
+  } finally {
+    engine?.dispose()
+    await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 附件
 // ---------------------------------------------------------------------------
@@ -3353,16 +3420,14 @@ test('附件预览路由：markdown 附件返回全文与同作业图片清单�
         },
         ready: async () => engine,
       })
-      const attachmentRoute = registered.find(
-        (entry) => entry.path === '/buka-workflows/attachment',
-      )
+      const attachmentRoute = registered.find((entry) => entry.path === '/workflow/attachment')
       assert.ok(attachmentRoute, 'the attachment route is registered')
 
       /** 发一个 GET preview 请求。 */
       const preview = async (attachmentId) => {
         const req = {
           method: 'GET',
-          url: `/buka-workflows/attachment?jobId=${job.id}&attachmentId=${attachmentId}&mode=preview`,
+          url: `/workflow/attachment?jobId=${job.id}&attachmentId=${attachmentId}&mode=preview`,
           headers: {},
           async *[Symbol.asyncIterator]() {},
         }
@@ -3442,23 +3507,23 @@ test('routes: registers the contract paths and answers the workflow list', async
     registerWorkflowRoutes({ ctx, ready: async () => env.engine })
     const paths = registered.map((route) => route.path)
     for (const expected of [
-      '/buka-workflows/workflows',
-      '/buka-workflows/workflow',
-      '/buka-workflows/workflow/activate',
-      '/buka-workflows/jobs',
-      '/buka-workflows/job/start',
-      '/buka-workflows/job',
-      '/buka-workflows/job/action',
-      '/buka-workflows/job/restart',
-      '/buka-workflows/task',
-      '/buka-workflows/task/action',
-      '/buka-workflows/attachments',
-      '/buka-workflows/attachment',
+      '/workflow/list',
+      '/workflow/get',
+      '/workflow/activate',
+      '/workflow/jobs',
+      '/workflow/job/start',
+      '/workflow/job',
+      '/workflow/job/action',
+      '/workflow/job/restart',
+      '/workflow/task',
+      '/workflow/task/action',
+      '/workflow/attachments',
+      '/workflow/attachment',
     ]) {
       assert.ok(paths.includes(expected), `missing route ${expected}`)
     }
 
-    const route = registered.find((entry) => entry.path === '/buka-workflows/workflows')
+    const route = registered.find((entry) => entry.path === '/workflow/list')
     const res = {
       statusCode: 200,
       headers: {},
@@ -3471,7 +3536,7 @@ test('routes: registers the contract paths and answers the workflow list', async
     }
     const req = {
       method: 'GET',
-      url: '/buka-workflows/workflows',
+      url: '/workflow/list',
       headers: {},
       async *[Symbol.asyncIterator]() {},
     }
@@ -3513,7 +3578,7 @@ test('routes: POST job/restart validates the mode and returns a stable error cod
       workflowId: env.workflowId,
       content: { requirement: 'x' },
     })
-    const restartRoute = registered.find((entry) => entry.path === '/buka-workflows/job/restart')
+    const restartRoute = registered.find((entry) => entry.path === '/workflow/job/restart')
     assert.ok(restartRoute, 'the restart route is registered')
 
     /** 发一个 JSON POST。 */
@@ -3521,7 +3586,7 @@ test('routes: POST job/restart validates the mode and returns a stable error cod
       const text = JSON.stringify(body)
       const req = {
         method: 'POST',
-        url: '/buka-workflows/job/restart',
+        url: '/workflow/job/restart',
         headers: { 'content-type': 'application/json' },
         async *[Symbol.asyncIterator]() {
           yield Buffer.from(text)

@@ -35,6 +35,6 @@ export async function appendJobEvent(
     const line = `${JSON.stringify({ at: nowIso(), type, data })}\n`
     await fs.appendFile(paths.events, line, 'utf8')
   } catch (error) {
-    logger?.warn?.(`buka-workflows: could not append job event ${type}: ${describeError(error)}`)
+    logger?.warn?.(`workflow: could not append job event ${type}: ${describeError(error)}`)
   }
 }

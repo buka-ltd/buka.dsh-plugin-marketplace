@@ -289,9 +289,9 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skills/client/constants
     */
     /** 侧边栏条目与主面板共用的 id：侧边栏注册的 id 必须与 `main` 的 key 相同。 */
-    const PANEL_ID = "buka-skills";
+    const PANEL_ID = "skills";
     /** 收藏对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
-    const SAVE_FORM_ID = "buka-skills-save-form";
+    const SAVE_FORM_ID = "skills-save-form";
     /**
     * Tab 与对应面板的固定 id（页面只挂载一份，不需要 `useId`）。
     *
@@ -300,13 +300,13 @@ window.__ModuleLoader__.load({
     const TABS = [{
     	value: "repos",
     	labelKey: "tabRepos",
-    	id: "buka-skills-tab-repos",
-    	panelId: "buka-skills-panel-repos"
+    	id: "skills-tab-repos",
+    	panelId: "skills-panel-repos"
     }, {
     	value: "installed",
     	labelKey: "tabInstalled",
-    	id: "buka-skills-tab-installed",
-    	panelId: "buka-skills-panel-installed"
+    	id: "skills-tab-installed",
+    	panelId: "skills-panel-installed"
     }];
     // .build/skills/client/api.js
     /**
@@ -319,15 +319,15 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skills/client/api
     */
     /** 与 Host 一半的路由常量保持一致。 */
-    const LIST_ROUTE = "/buka-skills/list";
-    const TARGETS_ROUTE = "/buka-skills/targets";
-    const INSTALL_ROUTE = "/buka-skills/install";
-    const REPOS_ROUTE = "/buka-skills/repos";
-    const REPO_REMOVE_ROUTE = "/buka-skills/repos/remove";
-    const REPO_SKILLS_ROUTE = "/buka-skills/repo-skills";
-    const CHECK_ROUTE = "/buka-skills/check";
-    const ICON_ROUTE = "/buka-skills/icon";
-    const UPDATE_ROUTE = "/buka-skills/update";
+    const LIST_ROUTE = "/skills/list";
+    const TARGETS_ROUTE = "/skills/targets";
+    const INSTALL_ROUTE = "/skills/install";
+    const REPOS_ROUTE = "/skills/repos";
+    const REPO_REMOVE_ROUTE = "/skills/repos/remove";
+    const REPO_SKILLS_ROUTE = "/skills/repo-skills";
+    const CHECK_ROUTE = "/skills/check";
+    const ICON_ROUTE = "/skills/icon";
+    const UPDATE_ROUTE = "/skills/update";
     /**
     * 取错误上的 `code` 字段（Host 的失败响应带它）。
     */
@@ -541,7 +541,7 @@ window.__ModuleLoader__.load({
     *
     * 只做纯字符串判断：是否可打开网页、是否能让 Host 去列 skills。真正的来源
     * 分类在 Host 的 `repo-store.ts`，这里只按同一套规则给页面做即时反馈。
-    * 仓库头像的缓存与更新在 Host（`/buka-skills/icon`），这里只拼请求地址。
+    * 仓库头像的缓存与更新在 Host（`/skills/icon`），这里只拼请求地址。
     *
     * @module @buka/dsh-plugin-skills/client/repo-source
     */
@@ -624,7 +624,7 @@ window.__ModuleLoader__.load({
     }
     /**
     * 直连 GitHub 的头像地址。只在 Host 图标路由不可用时作为退路：旧版 Host 还没
-    * 注册 `/buka-skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
+    * 注册 `/skills/icon` 时页面仍能显示头像，重启 DSH 后再回到缓存路由。
     *
     * @param value 来源或来源链接
     */
@@ -793,7 +793,7 @@ window.__ModuleLoader__.load({
     * 页面状态与请求：一个 Hook 管住「技能仓库」与「全局技能」两个面板的数据。
     *
     * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
-    * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
+    * 路由（`/skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
     * 这样「怎么卸载」「怎么安装」「收藏存在哪」都只有一份实现。收藏页的展开状态与
     * 上次拿到的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
     * 关闭 DSH 再打开时先按上次的样子渲染，再找 Host 校正，不用干等网络。
@@ -1131,7 +1131,7 @@ window.__ModuleLoader__.load({
     	async function uninstall(entry) {
     		setBusy(entryKey(entry));
     		try {
-    			flash("success", `${(await requestJson("/buka-skills/uninstall", {
+    			flash("success", `${(await requestJson("/skills/uninstall", {
     				method: "POST",
     				body: JSON.stringify({
     					scope: entry.scope,
@@ -2132,7 +2132,7 @@ window.__ModuleLoader__.load({
     * 选中项可以是单个 skill，也可以是目录（装其下全部 skill）；标题下的说明行
     * 分别显示「目标 skill」或「目标目录 · 数量」。
     *
-    * 目标列表来自 Host 的 `GET /buka-skills/targets`：执行者只列智能体且目录
+    * 目标列表来自 Host 的 `GET /skills/targets`：执行者只列智能体且目录
     * 存在的条目，工作区列 DSH 注册过的目录。Host 在安装时会再用标识符 / 路径回去
     * 解析一次，所以这里展示的列表只用于选择。
     *
@@ -2338,7 +2338,7 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skills/client/dictionary
     */
     /** 词典命名空间。 */
-    const NS = "buka-skills";
+    const NS = "skills";
     /** 英文文案。 */
     const en = {
     	panel: "Skills",
@@ -2669,7 +2669,7 @@ window.__ModuleLoader__.load({
     *   每个可列出 skills 的仓库静默探测类型（`probe=1`，只读仓库树，不阻塞
     *   列表），标题行标出「npx skills」或「不可用」。展开后的每个 skill 右侧有
     *   三个入口：「全局安装」「安装到执行者」「安装到工作区」。后两个打开对话框，
-    *   分别列出 `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
+    *   分别列出 `ctx.workflowWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
     *   工作区；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾
     *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个
     *   skill 交给 Host 逐个安装，已装过的跳过。
@@ -2691,7 +2691,7 @@ window.__ModuleLoader__.load({
     * 这样两个页面共享同一套尺寸、圆角、颜色 token 与控件手感。
     *
     * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
-    * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
+    * 路由（`/skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
     * 这样「怎么卸载」「怎么安装」「收藏存在哪」都只有一份实现。收藏页的展开状态与
     * 上次拿到的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
     * 关闭 DSH 再打开时先按上次的样子渲染，再找 Host 校正，不用干等网络。
@@ -2715,14 +2715,14 @@ window.__ModuleLoader__.load({
     	ctx.effect(() => ctx.locale.register(NS, {
     		zh,
     		en
-    	}), "buka-skills: dictionaries");
+    	}), "skills: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-skills";
     		tag.textContent = CSS;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-skills: styles");
+    	}, "skills: styles");
     	ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
     		name: "sidebar.panellist",
     		id: PANEL_ID,

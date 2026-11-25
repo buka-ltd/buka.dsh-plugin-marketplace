@@ -12,7 +12,7 @@
  * 第 2～4 步任一步失败都把目录改回原名、登记条目保持原样；工作区注册行已经
  * 删掉时用 `create` 尽力恢复。内建 clock 与 `driver: robot` 的条目不可删。
  *
- * 唯一阻塞条件（引用该标识符的运行中作业）由路由通过 `bukaWorkflows` 服务
+ * 唯一阻塞条件（引用该标识符的运行中作业）由路由通过 `workflowQuery` 服务
  * 检查，本模块只处理磁盘与登记表。
  *
  * @module @buka/dsh-plugin-workflows/workers/store/delete

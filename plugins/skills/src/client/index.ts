@@ -19,7 +19,7 @@
  *   每个可列出 skills 的仓库静默探测类型（`probe=1`，只读仓库树，不阻塞
  *   列表），标题行标出「npx skills」或「不可用」。展开后的每个 skill 右侧有
  *   三个入口：「全局安装」「安装到执行者」「安装到工作区」。后两个打开对话框，
- *   分别列出 `ctx.bukaWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
+ *   分别列出 `ctx.workflowWorkers` 的智能体与 `ctx.workspaceRegistry` 的已注册
  *   工作区；只有全局安装会在已装过时变成禁用的「全局已安装」按钮（带对勾
  *   图标）。目录行也有这三个入口，全局入口叫「全部安装」：一次把目录下每个
  *   skill 交给 Host 逐个安装，已装过的跳过。
@@ -41,7 +41,7 @@
  * 这样两个页面共享同一套尺寸、圆角、颜色 token 与控件手感。
  *
  * 页面只做展示与触发：列表、卸载、安装、收藏的读写都走 Host 一半注册的包内
- * 路由（`/buka-skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
+ * 路由（`/skills/*`），不在浏览器里判断 npx 的安装方式，也不碰文件系统 ——
  * 这样「怎么卸载」「怎么安装」「收藏存在哪」都只有一份实现。收藏页的展开状态与
  * 上次拿到的树属于纯页面状态，缓存在 localStorage（`dsh.buka-skills.view.v1`）：
  * 关闭 DSH 再打开时先按上次的样子渲染，再找 Host 校正，不用干等网络。
@@ -73,14 +73,14 @@ export const inject = ['slots', 'locale']
  */
 export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'buka-skills: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'skills: dictionaries')
   ctx.effect(() => {
     const tag = document.createElement('style')
     tag.dataset.plugin = '@buka/dsh-plugin-skills'
     tag.textContent = CSS
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'buka-skills: styles')
+  }, 'skills: styles')
 
   // 侧边栏图标：id 与 main 的 key 相同，点击由侧边栏自己完成。
   ctx.slots.inject('sidebar.panellist', () =>

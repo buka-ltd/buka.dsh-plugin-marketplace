@@ -30,20 +30,20 @@ export const inject = ['slots', 'locale']
  */
 export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'buka-skill-update-check: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'skill-update-check: dictionaries')
   ctx.effect(() => {
     const tag = document.createElement('style')
     tag.dataset.plugin = '@buka/dsh-plugin-skill-update-check'
     tag.textContent = CSS
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'buka-skill-update-check: styles')
+  }, 'skill-update-check: styles')
 
   ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(
       {
         name: 'conversation.composer.dock',
-        id: 'buka-skill-update-check',
+        id: 'skill-update-check',
         order: 20,
         label: () => t('label'),
         locale: NS,

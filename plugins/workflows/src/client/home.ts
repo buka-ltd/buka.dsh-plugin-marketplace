@@ -120,14 +120,14 @@ export function HomePage(props: {
     {
       value: 'workflow',
       label: h(TabLabel, { text: t('topTabWorkflow') }),
-      id: 'buka-workflows-hometab-workflow',
-      panelId: 'buka-workflows-homepanel-workflow',
+      id: 'workflow-hometab-workflow',
+      panelId: 'workflow-homepanel-workflow',
     },
     {
       value: 'worker',
       label: h(TabLabel, { text: t('topTabWorker') }),
-      id: 'buka-workflows-hometab-worker',
-      panelId: 'buka-workflows-homepanel-worker',
+      id: 'workflow-hometab-worker',
+      panelId: 'workflow-homepanel-worker',
     },
   ]
 

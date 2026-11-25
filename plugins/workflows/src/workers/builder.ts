@@ -2,7 +2,7 @@
  * 「执行者」preset 的写操作：创建 / 修改执行者，并把它挂到工作区。
  *
  * 页面上的新建流程是「建目录 + 登记 + `workspaces.create` 挂载」；这里把同一套
- * 事实操作收成一个函数，供 `buka_worker_build` 工具调用（工具只对构建 preset
+ * 事实操作收成一个函数，供 `workflow_worker_build` 工具调用（工具只对构建 preset
  * 的根会话可见，见 `access.js`）。与 `worker-store.js` 的分工：
  *
  * - 目录、登记表、AGENTS.md 的底层读写仍由 `worker-store.js` 负责；

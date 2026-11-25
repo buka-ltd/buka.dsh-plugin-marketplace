@@ -17,7 +17,7 @@ import { SkillChecker } from './check.ts'
 import { registerRoutes } from './routes.ts'
 
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
-export const name = 'check-buka-skill-update'
+export const name = 'check-skill-update'
 
 /** 依赖的服务：按会话解析当前工作区。 */
 export const inject = ['sessions']

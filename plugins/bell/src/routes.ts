@@ -1,5 +1,5 @@
 /**
- * 试听路由的注册：`POST /buka-bell/preview` 的信任栅栏与请求体解析。
+ * 试听路由的注册：`POST /bell/preview` 的信任栅栏与请求体解析。
  *
  * @module @buka/dsh-plugin-bell/routes
  */
@@ -59,7 +59,7 @@ export function registerPreviewRoutes(ctx: Context, play: Player): void {
             sendJson(res, 200, { ok: true })
           },
         }),
-      `buka-bell: POST ${PREVIEW_ROUTE}`,
+      `bell: POST ${PREVIEW_ROUTE}`,
     )
   })
 }

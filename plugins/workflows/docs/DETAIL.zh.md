@@ -18,7 +18,7 @@
 
 ## 工作流模型
 
-- **工作流**：持久定义，可多版本；由编排预设用 `buka_workflow_save` 保存，保存后即可使用；页面只负责审阅与停用 / 重新启用。定义只有当前版本（v9）有效：v8 工作流标记「待升级」，不能再启动作业，由编排预设按 v9 改写后保存新版本（纯文字定义无法机械迁移）；v7 定义在打开存储时自动迁移到 v8，同样停在「待升级」。进行中的旧作业按钉住的快照版本跑完。
+- **工作流**：持久定义，可多版本；由编排预设用 `workflow_save` 保存，保存后即可使用；页面只负责审阅与停用 / 重新启用。定义只有当前版本（v9）有效：v8 工作流标记「待升级」，不能再启动作业，由编排预设按 v9 改写后保存新版本（纯文字定义无法机械迁移）；v7 定义在打开存储时自动迁移到 v8，同样停在「待升级」。进行中的旧作业按钉住的快照版本跑完。
 - **岗位**：图里的节点（内建开始 / 结束之外），给人看清流程结构。一个岗位一种主体：工作人员或执行者（agent / robot），执行者按不可变标识符引用。岗位是定义的书写载体：点名执行者、承载任务类型、作为通道端点与看板行；调度只看任务类型、通道与执行者，不把岗位当互斥资源。
 - **任务类型**：岗位声明的任务契约：
   - **定义**（`definition`）：编排者预设的信息——这个任务类型是什么、要做什么、外部系统的事实（例如各服务的流水线地址）。v9 起它是一段模板：用 `{{content}}` / `{{content.<path>}}` 引用这一张任务的任务内容，执行时渲染成以用户身份投递的那条消息；代入值里的 `/skill` 手势会被转义（模板原文里的仍生效）。保存时校验路径在任务内容 schema 里声明、经过非必填字段必须写 `?`；`{{input.*}}` / `{{nodes.*}}` 一律拒绝；
@@ -47,7 +47,7 @@
 2. 在侧边栏唯一的入口里管理：**Workflow** 页签审阅定义图与契约，暂时不用时在页头把工作流停用，需要时重新启用；**Worker** 页签管理职责与项目 skills。
 3. 新建作业：
    - 页面：填作业输入（开始节点的 content schema），选择最终报告交回自己还是交给助理，发起人 = 人；
-   - 会话：用 `buka_job_start` 或 `/job` 命令给出作业输入，发起人 = 当前会话。
+   - 会话：新会话的第一条消息执行 `/job [说明]` 进入作业模式。agent 用 `workflow_job_options` 列出可启动工作流（id、名称、描述、开始节点输入 schema 与不可用原因），按说明挑选；用户没说用哪个、或几个都像时先问用户。选定后按 schema 补齐输入并调用 `workflow_job_start`，发起人 = 当前会话。`/job off` 退出；一个会话最多启动一个作业。
 4. 作业看板上，执行者岗位自动认领就绪任务；人任务由点名的助理承办，或由人直接点动作提交（提交即自动认领）。跨分支看板可见整张作业；任务工具按数据流授权附件。
 5. 执行中的任务沿通道创建后续任务；最后交出结束任务，发起人确认收到，作业结算。
 
@@ -55,25 +55,36 @@
 
 | 工具 / 命令                                | 作用                                                                                                                     |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `buka_workers`                             | 列出执行者：id、展示名、driver、挂载状态、一句职责、项目 skills 与 AGENTS.md                                             |
-| `buka_worker_build`                        | Workflow 预设根会话：按批准过的 id / 名称 / 头像 / 描述 / AGENTS.md 创建或更新执行者                                     |
-| `/job`                                     | 普通会话入口：列可用工作流，或按输入启动一个作业（发起人 = 当前会话）                                                    |
-| `buka_workflow_save`                       | Workflow 预设根会话：校验并保存工作流新版本（保存后即可用）                                                              |
-| `buka_workflow_list` / `buka_workflow_get` | 读工作流目录 / 全文                                                                                                      |
-| `buka_job_start`                           | 会话里启动作业：给作业输入与交回方式                                                                                     |
-| `buka_job_status` / `buka_job_cancel`      | 读作业、取消作业                                                                                                         |
-| `buka_task_create`                         | 执行中的任务：按目标随时创建下游任务（可多次），通道由引擎解析；工具说明直接列出本任务的 target、展示名与任务内容 schema |
-| `buka_task_complete`                       | 执行中的任务 / 助理：提交结果文本与附件；人任务可带动作与表单，工具说明直接列出动作 id、展示名与输入表单 schema          |
-| `buka_job_board` / `buka_task_get`         | 执行中的任务 / 助理：只读作业看板、任务与依赖                                                                            |
-| `buka_job_attachments`                     | 执行中的任务 / 助理：按可见范围检索 / 读取附件                                                                           |
+| `workflow_workers`                             | 列出执行者：id、展示名、driver、挂载状态、一句职责、项目 skills 与 AGENTS.md                                             |
+| `workflow_worker_build`                        | Workflow 预设根会话：按批准过的 id / 名称 / 头像 / 描述 / AGENTS.md 创建或更新执行者                                     |
+| `/job`                                     | 普通会话入口：以会话第一条消息进入作业模式（`/job [说明]`，说明可省略）；`/job off` 退出                                   |
+| `workflow_save`                       | Workflow 预设根会话：校验并保存工作流新版本（保存后即可用）                                                              |
+| `workflow_list` / `workflow_get` | 读工作流目录 / 全文                                                                                                      |
+| `workflow_job_options`                       | 作业模式内列出可启动工作流：id、名称、描述、开始节点输入 schema 与不可用原因；由 agent 按用户描述选择或询问用户             |
+| `workflow_job_start`                           | 作业模式内创建作业：给选定的工作流、作业输入与交回方式；只在作业模式会话里可见                                           |
+| `workflow_job_status` / `workflow_job_cancel`      | 读作业、取消作业                                                                                                         |
+| `workflow_task_create`                         | 执行中的任务：按目标随时创建下游任务（可多次），通道由引擎解析；工具说明直接列出本任务的 target、展示名与任务内容 schema |
+| `workflow_task_complete`                       | 执行中的任务 / 助理：提交结果文本与附件；人任务可带动作与表单，工具说明直接列出动作 id、展示名与输入表单 schema          |
+| `workflow_job_board` / `workflow_task_get`         | 执行中的任务 / 助理：只读作业看板、任务与依赖                                                                            |
+| `workflow_job_attachments`                     | 执行中的任务 / 助理：按可见范围检索 / 读取附件                                                                           |
 
-写工具（`buka_worker_build`）只对 `builderPresets` 点名的 preset 根会话可见；编辑工作流的工具只对 `orchestratorPresets` 点名的 preset 根会话、以及 `orchestratorWorkspaces` 点名目录里的会话可见——两个名单默认都指向随包发布的 `workflow-orchestrator`（显示名 `Workflow`）。执行工具只对本次任务会话、助理会话与发起人会话可见。人任务没有模型回答工具。
+写工具（`workflow_worker_build`）只对 `builderPresets` 点名的 preset 根会话可见；编辑工作流的工具只对 `orchestratorPresets` 点名的 preset 根会话、以及 `orchestratorWorkspaces` 点名目录里的会话可见——两个名单默认都指向随包发布的 `workflow-orchestrator`（显示名 `Workflow`）。执行工具只对本次任务会话、助理会话与发起人会话可见。`workflow_job_options` / `workflow_job_start` 只对作业模式（已 `/job` 且尚未启动过作业）的会话可见。人任务没有模型回答工具。
+
+## 作业模式
+
+普通会话不再能在任意位置启动作业：会话的第一条消息必须是 `/job [说明]`，它只做一件事——把会话切进**作业模式**。命令不接收 workflow id：用户不需要记住标识符，选择交给 agent。模式期间：
+
+- 系统提示词多出 `workflow_job_policy` 段落，说明「先列工作流、按用户描述挑选、拿不准就问用户」的流程与「只启动这一个作业」的约束。
+- `workflow_job_options` 列出全部已启用工作流（id、名称、描述、开始节点输入 JSON Schema；定义过旧或执行者缺失时带原因），`workflow_job_start` 用选定的 id 与输入建单。两个工具都只在这个会话里可见。
+- 启动成功后模式结束，作业进入看板，最终报告照常回到本会话。`/job off` 退出；失败或未结算的工具调用不消耗模式。
+
+模式状态不新增持久数据，而是折叠会话日志：`/job` 的 `command/run` → `command/done`（成功）记录进入 / 退出，`workflow_job_start` 的 `tool/call` → `tool/result`（成功）记录模式已消耗，日志里已有 `user/message` 或 `turn/start` 表示会话已不是「刚开始」。恢复、fork 与压缩都从同一份日志还原；命令、提示词段落与工具可见性读同一份折叠结果。工作流列表与输入契约每次由 `workflow_job_options` 现查，不缓存。
 
 ## 执行提示词
 
 执行者（agent 任务）每次派发两条消息：
 
-1. **上下文**（非用户来源）：**工作流规则**（引擎注入的能力说明——读写资产、`buka_task_create` 创建后续任务、`buka_task_complete` 提交结果）与**工作树规则**（仅任务类型的 `worktree` 不是 `none` 时出现）：`create` 生效时要求执行者按仓库自己调用 `create_worktree`，多仓库分别创建、用 `working_directory` 切换；`guard`（显式选择，或 `create` 降级）只说明不创建新工作树，要求执行者先检查工作区与要修改的每个仓库、有未提交修改就必须停下来询问用户；
+1. **上下文**（非用户来源）：**工作流规则**（引擎注入的能力说明——读写资产、`workflow_task_create` 创建后续任务、`workflow_task_complete` 提交结果）与**工作树规则**（仅任务类型的 `worktree` 不是 `none` 时出现）：`create` 生效时要求执行者按仓库自己调用 `create_worktree`，多仓库分别创建、用 `working_directory` 切换；`guard`（显式选择，或 `create` 降级）只说明不创建新工作树，要求执行者先检查工作区与要修改的每个仓库、有未提交修改就必须停下来询问用户；
 2. **用户消息**（`followup`，来源是 `user`）：任务类型的定义按本任务的任务内容渲染后的文本；定义省略时是整份任务内容。
 
 岗位名、通道 id、作业编号、依赖清单与附件清单都不进提示词——这些是页面与编排层的信息，避免把「岗位 / 通道」这类构建工作流的概念暴露给执行者。
@@ -87,7 +98,7 @@ v8 及更早的作业快照仍按旧语义（上下文带任务内容、用户�
 - 人任务 = 人岗位产出的普通任务，没有「等待人工」状态，所有任务都在看板上。
 - 助理是**工作流上的点名**，不是执行者身上的标记：人任务类型用 `assistant` 点名一个智能体（或 `null`），交回方式也可以点名一个智能体代收最终报告。校验只要求标识符已登记且 `driver: "agent"`；任何已登记的智能体都能被点名，不需要先被「标记为助理」。
 - 人任务类型点名一个 `assistant`（智能体标识符）或 `null`：
-  - 点名助理：任务就绪后引擎按标识符启动该助理的会话；助理只收到一条固定提示（任务类型与任务 id），用 `buka_task_get` 读任务内容，动作见 `buka_task_complete` 的工具说明，负责与人沟通，然后代人点动作完成。
+  - 点名助理：任务就绪后引擎按标识符启动该助理的会话；助理只收到一条固定提示（任务类型与任务 id），用 `workflow_task_get` 读任务内容，动作见 `workflow_task_complete` 的工具说明，负责与人沟通，然后代人点动作完成。
   - `null`：任务停在待认领；人在看板直接点一个动作（有表单的填完）提交，或者只提交结果不创建任务，提交时自动完成认领。
 - 被点名的助理没交出结果时（会话结束未提交、超时、恢复失败），任务标失败、作业立即失败：其余非终态任务被取消并写清终止原因，作业错误写明是哪条任务、哪个代办者、什么原因。不自动换助理，人也不能接手。
 
@@ -110,13 +121,13 @@ v8 及更早的作业快照仍按旧语义（上下文带任务内容、用户�
 - **作业**：作业页标注「不可用」；缺失执行者的任务派发失败，错误里写明是哪条任务、哪个岗位、缺哪个标识符，任务可重试，其它分支继续跑。点名的助理已不存在的人任务不再自动派发，留在「待认领」由人兜底完成。
 - **与「停用」的区别**：停用是人为收起，已有作业照常运行；不可用是引用断了，需要重新绑定。历史展示里已删执行者的岗位 / 任务 / 点名的助理显示占位头像与「已删除」，不保留墓碑记录。
 
-删除执行者是硬删（登记条目、目录与工作区注册一起删除），唯一阻塞是引用该标识符的运行中作业。删除确认弹窗通过本插件内的只读服务 `ctx.bukaWorkflows.workerUsage(id)` 取得引用面。
+删除执行者是硬删（登记条目、目录与工作区注册一起删除），唯一阻塞是引用该标识符的运行中作业。删除确认弹窗通过本插件内的只读服务 `ctx.workflowQuery.workerUsage(id)` 取得引用面。
 
 ## 结束任务与交回
 
 - 结束任务由前一个任务沿通道创建，`content` 就是最终报告，按结束节点的 content schema 校验。
 - 交回方式在创建作业时定：
-  - **交回发起人**：会话发起时，最终报告投递进那个会话，等会话调 `buka_task_complete` 确认；人发起时，结束任务落在发起人自己的看板上，由他点「已收到」。
+  - **交回发起人**：会话发起时，最终报告投递进那个会话，等会话调 `workflow_task_complete` 确认；人发起时，结束任务落在发起人自己的看板上，由他点「已收到」。
   - **交给助理**：结束任务的主体是指定的助理，由它代收并确认。
 - 发起人确认后作业才变成 completed；投递失败可以重试。
 
@@ -142,7 +153,7 @@ v8 及更早的作业快照仍按旧语义（上下文带任务内容、用户�
 
 ## 依赖与存储
 
-- 执行者登记与任务会话由本插件自带（`ctx.bukaWorkers` 服务）；工作流元数据需要 DSH 组合里的 `ctx.storageDomain`（base 组合自带）。
+- 执行者登记与任务会话由本插件自带（`ctx.workflowWorkers` 服务）；工作流元数据需要 DSH 组合里的 `ctx.storageDomain`（base 组合自带）。
 - **工作树能力是可选的**：任务类型的 `worktree: "create"` 依赖 DSH 的工作树插件（`ctx.worktrees` 与 `create_worktree` 工具，通常由「变更请求与工作树」组合包提供）。插件未启用时定义照常保存，执行时降级为 `"guard"`；`"none"` 与 `"guard"` 不依赖任何工作树能力。插件不预先创建检出，由执行者按任务自己调用工具。
 - 执行者数据在 `~/.cache/dsh-plugin-workers/`（`workers.json` 登记表 + `workers/<id>/` 目录）；工作流 / 作业 / 任务 / 执行记录 / 附件元数据在 `ctx.storageDomain` 的 `buka_workflow` 域；大文本与附件文件在插件数据目录 `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`。
 - **版本策略**：定义格式当前版本是 v9。打开存储时会把 v7 工作流定义迁移到 v8（主体的 `name` 字段改名为 `id`，值不变），迁移幂等；v8 不会自动升级到 v9（纯文字定义无法机械改成模板）。v7 / v8 工作流保留在列表里，带「待升级」标签，不能再启动作业；升级 = 由编排者在当前格式下重写一份新版本。作业快照不迁移：v7 / v8 作业保留旧字段与旧语义，仍可读取、恢复与推进。
@@ -162,9 +173,9 @@ v8 及更早的作业快照仍按旧语义（上下文带任务内容、用户�
 
 ## 结构
 
-- `src/workers/**`：执行者一半——登记表、目录、AGENTS.md、项目 skills、模型工具与 `/buka-workers/*` 路由。
+- `src/workers/**`：执行者一半——登记表、目录、AGENTS.md、项目 skills、模型工具与 `/workflow/workers/*` 路由。
 - `src/domain/**`、`src/store/**`、`src/definition/**`、`src/engine/**`：工作流类型、状态机、存储域、定义校验与调度引擎。
-- `src/tools/**`、`src/commands/**`：工作流模型工具与 `/job` 命令。
+- `src/tools/**`、`src/commands/**`：工作流模型工具与 `/job` 命令；`src/job-mode.ts`：作业模式的会话日志折叠与 `workflow_job_policy` 段落。
 - `src/routes/**`：工作流页面路由。
 - `src/client/**`：工作流页面；`src/client/workers/**`：执行者页面；`src/client/home.ts` 装配首页的两个页签。
 - `src/index.ts`、`src/client/index.ts`：合并后的两个装配入口（只装配）。
@@ -172,4 +183,4 @@ v8 及更早的作业快照仍按旧语义（上下文带任务内容、用户�
 
 ## 测试
 
-`test/workers-*.test.mjs`（执行者：登记表、构建工具、路由、client 冒烟）、`test/workflows-core.test.mjs`（domain / store / definition）、`test/workflows-server.test.mjs`（引擎 / 恢复 / 附件 / 工具）、`test/workflows-task-tools.test.mjs`（用真实 `dsh-tools` + `dsh-scope` 钉住按任务注册的工具说明与遮蔽）、`test/workflows-client.test.mjs`（渲染冒烟）、`test/preset-prompts.test.mjs`（preset persona 渲染回归）。跑 `node --test`。
+`test/workers-*.test.mjs`（执行者：登记表、构建工具、路由、client 冒烟）、`test/workflows-core.test.mjs`（domain / store / definition）、`test/workflows-server.test.mjs`（引擎 / 恢复 / 附件 / 工具）、`test/workflows-task-tools.test.mjs`（用真实 `dsh-tools` + `dsh-scope` 钉住按任务注册的工具说明与遮蔽）、`test/workflows-job-mode.test.mjs`（作业模式的日志折叠、命令门禁与提示词段落）、`test/workflows-client.test.mjs`（渲染冒烟）、`test/preset-prompts.test.mjs`（preset persona 渲染回归）。跑 `node --test`。

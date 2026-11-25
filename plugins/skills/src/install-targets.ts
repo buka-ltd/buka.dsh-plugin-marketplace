@@ -4,7 +4,7 @@
  * 收藏页的「安装到执行者 / 安装到工作区」需要两份列表，两份都来自别的插件或
  * 宿主服务，不能由浏览器传路径：
  *
- * - 执行者：`ctx.bukaWorkers`（workers 插件提供）的 `list()`。只保留智能体、
+ * - 执行者：`ctx.workflowWorkers`（workers 插件提供）的 `list()`。只保留智能体、
  *   目录存在的执行者；机器人没有目录，装不了项目级 skill。引用键是不可变的
  *   标识符 `id`，`name` 只是可选展示名（可以为空），旧版没有 `id` 时退回
  *   `name`。
@@ -59,7 +59,7 @@ export interface InstallTargetList<T> {
   readonly items: T[]
 }
 
-/** `GET /buka-skills/targets` 的响应体。 */
+/** `GET /skills/targets` 的响应体。 */
 export interface InstallTargetsSnapshot {
   readonly workers: InstallTargetList<WorkerInstallTarget>
   readonly workspaces: InstallTargetList<WorkspaceInstallTarget>
@@ -103,7 +103,7 @@ function optionalService<T>(ctx: Context, name: string): T | undefined {
  * `name` 只是可选展示名，不能单独作为新记录的键；只有仍只返回 `name` 的旧版
  * workers 才用它兜底。
  *
- * @param record `bukaWorkers.list()` 的一条记录
+ * @param record `workflowWorkers.list()` 的一条记录
  */
 function workerKeyOf(record: Record<string, unknown>): string {
   const id = typeof record.id === 'string' ? record.id.trim() : ''
@@ -118,7 +118,7 @@ function workerKeyOf(record: Record<string, unknown>): string {
  * 读取而不是依赖固定类型，旧版本缺 `exists` 时按「存在」处理（安装时还会再
  * 确认一次目录）。`name` 可以为空，按原值带回页面展示。
  *
- * @param result `bukaWorkers.list()` 的返回值
+ * @param result `workflowWorkers.list()` 的返回值
  */
 function normalizeWorkers(result: unknown): WorkerInstallTarget[] {
   const workers = (result as { workers?: unknown } | null | undefined)?.workers
@@ -178,7 +178,7 @@ function normalizeWorkspaces(result: unknown): WorkspaceInstallTarget[] {
  * @param ctx 插件上下文
  */
 async function readWorkers(ctx: Context): Promise<InstallTargetList<WorkerInstallTarget>> {
-  const service = optionalService<WorkersServiceLike>(ctx, 'bukaWorkers')
+  const service = optionalService<WorkersServiceLike>(ctx, 'workflowWorkers')
   if (service === undefined || typeof service?.list !== 'function') {
     return { available: false, error: null, items: [] }
   }
@@ -242,7 +242,7 @@ async function confirmDirectory(directory: string, label: string): Promise<Resol
 /**
  * 安装时把浏览器选中的目标解析成一个可信目录。
  *
- * - 执行者按标识符在 `ctx.bukaWorkers` 的列表里找（旧版记录没有 `id` 时，
+ * - 执行者按标识符在 `ctx.workflowWorkers` 的列表里找（旧版记录没有 `id` 时，
  *   浏览器传的仍是 `name`）；
  * - 工作区按路径（也接受 id）在 `ctx.workspaceRegistry` 的列表里找。
  *

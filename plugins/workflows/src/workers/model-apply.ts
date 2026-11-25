@@ -146,7 +146,7 @@ async function applyWorkerModel(
       : { reasoningEffort: target.model.reasoningEffort }),
   })
   ctx.logger?.info?.(
-    'buka-workers: 已为执行者 %s 的新会话选择模型 %s/%s',
+    'workflow-workers: 已为执行者 %s 的新会话选择模型 %s/%s',
     target.id,
     target.model.provider,
     target.model.model,
@@ -167,12 +167,12 @@ export function registerWorkerModelEnforcement(ctx: Context, registryFile: strin
           .then(() => undefined)
           .catch((error: unknown) => {
             ctx.logger?.warn?.(
-              'buka-workers: 应用智能体模型失败：%s',
+              'workflow-workers: 应用智能体模型失败：%s',
               error instanceof Error ? error.message : String(error),
             )
             return undefined
           }),
       ),
-    'buka-workers: apply worker model on agent/created',
+    'workflow-workers: apply worker model on agent/created',
   )
 }

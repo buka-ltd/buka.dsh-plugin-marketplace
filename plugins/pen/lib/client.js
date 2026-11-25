@@ -29,22 +29,11 @@ window.__ModuleLoader__.load({
     react = __toESM(react, 1);
     let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
     // .build/pen/client/dictionary.js
-    /**
-    * 勾选框与会话标题标记的文案。
-    *
-    * 两处可见文字都是品牌名，不做翻译：勾选框是「Pen」（前面是 Pen 的 logo，见
-    * `logo.ts`），会话标题旁是「Pen MCP」。只有 tooltip 的说明随 DSH 的界面
-    * 语言切换。
-    *
-    * @module @buka/dsh-plugin-pen/client/dictionary
-    */
-    /** 界面文案的命名空间；插槽的 `locale` 与 `ctx.locale.bind` 共用它。 */
-    const NS = "buka-pen";
     /** 会话标题旁标记的文字：同样是不翻译的品牌名。 */
     const MARK_LABEL = "Pen MCP";
     /** 中文文案。 */
     const zh = {
-    	hint: "勾选后，这个会话会加载 Pen（pen.dev）的 MCP 工具；不勾选则完全不启动 Pen MCP。",
+    	hint: "勾选后，这个会话会加载 Pen（pen.dev）的 MCP 工具；会话中随时可用 /pen 开启、/pen off 关闭。",
     	hintPending: "会话开始后自动连接 Pen MCP。",
     	hintConnecting: "正在连接 Pen MCP…",
     	hintReady: "这个会话已加载 Pen MCP 工具（mcp__pencil__*）。",
@@ -52,7 +41,7 @@ window.__ModuleLoader__.load({
     };
     /** 英文文案。 */
     const en = {
-    	hint: "When checked, this session loads the Pen (pen.dev) MCP tools. Unchecked, no Pen MCP server is started at all.",
+    	hint: "When checked, this session loads the Pen (pen.dev) MCP tools. During a session, /pen enables them and /pen off disables them.",
     	hintPending: "Pen MCP connects when the session starts.",
     	hintConnecting: "Connecting to Pen MCP…",
     	hintReady: "This session has the Pen MCP tools (mcp__pencil__*).",
@@ -244,9 +233,9 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-pen/client/api
     */
     /** 与 Host 一致的读状态路由。 */
-    const STATE_ROUTE = "/buka-pen/state";
+    const STATE_ROUTE = "/pen/state";
     /** 与 Host 一致的勾选路由。 */
-    const TOGGLE_ROUTE = "/buka-pen/toggle";
+    const TOGGLE_ROUTE = "/pen/toggle";
     /**
     * 把响应体收成快照；`message` 只在存在时带上，满足可选字段的严格类型。
     */
@@ -282,29 +271,103 @@ window.__ModuleLoader__.load({
     		})
     	}));
     }
+    // .build/pen/client/logo.js
+    /**
+    * Pen 官方 logo（笔尖 / nib）的描边版本。
+    *
+    * 形状照着 Pen（pen.dev）的笔尖 logo 描摹：宽顶、直边、底部收成尖，中间一个
+    * 圆点和一条竖线。这里以前内联的是 `assets/pen-logo.png` 的 PNG data URL，
+    * 12px 下会糊成一个灰点；改成矢量描边后，勾选框与标题标记都用 `currentColor`
+    * 跟随主题，任意尺寸都清晰。
+    *
+    * 与 `plugins/pen/icon.svg`（市场图标）共用同一组路径；改形状时两处一起改。
+    *
+    * @module @buka/dsh-plugin-pen/client/logo
+    */
+    /** 原始画布：与 Pen 笔尖 logo 的宽高比一致（64×77）。 */
+    const VIEWBOX = "0 0 64 77";
+    /** 描边粗细（原始画布单位）；缩到 12–14px 时约为 1px。 */
+    const STROKE_WIDTH = 4.6;
+    /** 外轮廓：宽顶、直边、底部收尖。 */
+    const OUTLINE = "M9.5 4.5h45a3 3 0 0 1 3 3V37L32 73.5 6.5 37V7.5a3 3 0 0 1 3-3Z";
+    /** 笔尖的圆点与分缝。 */
+    const CIRCLE = {
+    	cx: 32,
+    	cy: 27.5,
+    	r: 8
+    };
+    const SEAM = "M32 36v29";
+    /** 画布宽高比；用来按高度算宽度。 */
+    const ASPECT = 64 / 77;
+    /**
+    * 渲染 Pen 笔尖描边图标。
+    *
+    * @param props 高度与 class
+    * @returns 跟随文字颜色的 SVG
+    */
+    function PenLogo({ height = 14, className }) {
+    	return h("svg", {
+    		className,
+    		width: Math.round(height * ASPECT * 100) / 100,
+    		height,
+    		viewBox: VIEWBOX,
+    		fill: "none",
+    		stroke: "currentColor",
+    		strokeWidth: STROKE_WIDTH,
+    		strokeLinejoin: "round",
+    		strokeLinecap: "round",
+    		"aria-hidden": "true"
+    	}, h("path", { d: OUTLINE }), h("circle", CIRCLE), h("path", { d: SEAM }));
+    }
     // .build/pen/client/mark.js
     /**
     * 会话标题右侧的「Pen MCP」标记：标识这条会话已开启 Pen。
     *
     * 插槽 `conversation.session.header.actions` 紧挨在标题之后、官方工具按钮之前，
-    * 是「标题右侧」这个位置。标记只在**该会话**勾选过 Pen 时出现；插件没启用时
+    * 是「标题右侧」这个位置。标记只在**该会话**开启 Pen 时出现；插件没启用时
     * 浏览器一半根本不会加载，所以「插件开着」这条不需要额外判断。
     *
-    * 显示成一行普通文字（官方描边图标 + 品牌名），不做胶囊、不加悬浮提示：它只
-    * 回答「这条会话开没开 Pen」。勾选只发生在空会话，会话开始后勾选框不再出现，
-    * 所以状态不会在标记挂载后再变，读一次 Host 状态就够了。
+    * 显示成一行普通文字（Pen 笔尖描边图标 + 品牌名），不做胶囊、不加悬浮提示：
+    * 它只回答「这条会话开没开 Pen」。图标是内联 SVG，跟随主题文字颜色。
+    *
+    * 会话进行中还能用 `/pen` 与 `/pen off` 命令切换，所以状态不再是「挂载后不
+    * 变」：每条命令都会在会话里留下 `command/run`、`command/done` 事件，标记借
+    * 标准插槽 prop `useChat` 观察命令节点，命令一落地就重新读 Host 状态。没有
+    * `useChat` 时（例如测试桩）退化成挂载时读一次。
     *
     * @module @buka/dsh-plugin-pen/client/mark
     */
-    /** 图标边长（像素），与 12px 文字放在一行里。 */
+    /** 图标高度（像素），与 12px 文字放在一行里。 */
     const ICON_SIZE = 14;
+    /**
+    * 最近一条命令的「身份 + 状态」签名。
+    *
+    * 从后往前找第一个命令节点即可：普通消息与流式输出都不会改变它，所以标记
+    * 不会跟着每个 token 发请求；命令从 `run` 变成 `done` 时签名变化，正好在
+    * 切换完成后重新读一次 Host 状态。
+    *
+    * @param snapshot 当前 Chat 快照
+    * @returns 用于判断是否需要重新读 Host 状态的字符串；没有命令时为空
+    */
+    function penCommandSignature(snapshot) {
+    	const nodes = snapshot.legacy?.nodes;
+    	if (!Array.isArray(nodes)) return "";
+    	for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    		const node = nodes[index];
+    		if (node?.kind !== "command") continue;
+    		const done = node.data?.outcome !== void 0 && node.data?.outcome !== null;
+    		return `${String(node.data?.commandId ?? index)}:${done ? "done" : "run"}`;
+    	}
+    	return "";
+    }
     /**
     * 渲染标题旁的 Pen MCP 标记；会话没开启 Pen 时不占位置。
     *
-    * @param props 会话 id
+    * @param props 会话 id 与 Chat 快照 hook
     * @returns 标记，或 null
     */
-    function PenMark({ sessionId }) {
+    function PenMark({ sessionId, useChat }) {
+    	const signature = useChat === void 0 ? "" : useChat(penCommandSignature);
     	const [snapshot, setSnapshot] = (0, react.useState)(null);
     	(0, react.useEffect)(() => {
     		if (sessionId === void 0) {
@@ -320,10 +383,10 @@ window.__ModuleLoader__.load({
     		return () => {
     			live = false;
     		};
-    	}, [sessionId]);
+    	}, [sessionId, signature]);
     	if (sessionId === void 0 || snapshot?.enabled !== true) return null;
-    	return h("span", { className: "buka-pen-mark" }, h(_deepseek_ai_dsh_client_ui_primitives.IconListPenOutlineRegular, {
-    		size: ICON_SIZE,
+    	return h("span", { className: "buka-pen-mark" }, h(PenLogo, {
+    		height: ICON_SIZE,
     		className: "buka-pen-mark-icon"
     	}), MARK_LABEL);
     }
@@ -344,7 +407,7 @@ window.__ModuleLoader__.load({
     @media (hover:hover){.buka-pen-toggle:hover:not([data-disabled]){background:var(--dsw-alias-interactive-bg-hover)}}
     .buka-pen-toggle[data-disabled]{color:var(--dsw-alias-label-dimmed);cursor:default}
     .buka-pen-brand{align-items:center;gap:4px;min-width:0;display:inline-flex}
-    .buka-pen-logo{width:12px;height:auto;flex:none;display:block;object-fit:contain}
+    .buka-pen-logo{flex:none;display:block}
     .buka-pen-toggle:has(.buka-pen-checkbox:focus-visible){outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
     .buka-pen-checkbox{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:inherit;flex:none;margin:0}
     .buka-pen-checkbox:focus-visible{outline:none}
@@ -352,18 +415,6 @@ window.__ModuleLoader__.load({
     .buka-pen-mark{flex:none;align-items:center;gap:4px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-size:12px;font-weight:500;line-height:18px;display:inline-flex}
     .buka-pen-mark-icon{flex:none;display:block}
     `;
-    // .build/pen/client/logo.js
-    /**
-    * Pen 标记：透明背景的银色笔尖，显示在勾选框文字前。
-    *
-    * 源图是用户提供的 Pen logo，裁切为 64×77 后内联成 data URL。这样浏览器一半
-    * 不依赖额外的静态资源路由，刷新页面即可显示；`assets/pen-logo.png` 保留同
-    * 一份文件，便于以后替换。
-    *
-    * @module @buka/dsh-plugin-pen/client/logo
-    */
-    /** 内联的 Pen 标记（PNG data URL）。 */
-    const PEN_LOGO = "data:image/png;base64,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";
     // .build/pen/client/toggle.js
     /**
     * 新会话行右上角的「Pen」勾选框。
@@ -451,12 +502,9 @@ window.__ModuleLoader__.load({
     		checked: enabled,
     		disabled: busy,
     		onChange: change
-    	}), h("span", { className: "buka-pen-brand" }, h("img", {
+    	}), h("span", { className: "buka-pen-brand" }, h(PenLogo, {
     		className: "buka-pen-logo",
-    		src: PEN_LOGO,
-    		alt: "",
-    		"aria-hidden": "true",
-    		draggable: false
+    		height: 14
     	}), "Pen"))), status === "error" ? h("span", { className: "buka-pen-warning" }, "!") : null);
     }
     // .build/pen/client/index.js
@@ -469,8 +517,8 @@ window.__ModuleLoader__.load({
     * - `conversation.hero.options`——官方 worktree 勾选框就在这里，位置在新会话框
     *   右上角、工作区与预设控件之后；只在空会话（新会话）阶段出现。
     * - `conversation.session.header.actions`——紧挨会话标题的右侧、官方工具按钮
-    *   之前；标记只在这一会话勾选过 Pen 时显示，补上「会话开始后看不到勾选框」
-    *   的信息缺口。
+    *   之前；标记只在这一会话开启 Pen 时显示，补上「会话开始后看不到勾选框」
+    *   的信息缺口，并会随 `/pen`、`/pen off` 命令的结果刷新。
     *
     * 勾选框在 `toggle.ts`，标题标记在 `mark.ts`，请求在 `api.ts`，文案在
     * `dictionary.ts`，样式在 `styles.ts`。
@@ -488,27 +536,27 @@ window.__ModuleLoader__.load({
     * @param ctx 浏览器插件上下文
     */
     function apply(ctx) {
-    	ctx.effect(() => ctx.locale.register(NS, {
+    	ctx.effect(() => ctx.locale.register("pen", {
     		zh,
     		en
-    	}), "buka-pen: dictionaries");
+    	}), "pen: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-pen";
     		tag.textContent = CSS;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-pen: styles");
+    	}, "pen: styles");
     	ctx.slots.inject("conversation.hero.options", () => ctx.slots.register({
     		name: "conversation.hero.options",
-    		id: "buka-pen",
+    		id: "pen",
     		order: 20,
     		label: () => "Pen",
-    		locale: NS
+    		locale: "pen"
     	}, PenToggle));
     	ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
     		name: "conversation.session.header.actions",
-    		id: "buka-pen-mark",
+    		id: "pen-mark",
     		order: 10,
     		label: () => MARK_LABEL
     	}, PenMark));

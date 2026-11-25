@@ -719,6 +719,6 @@ async function refreshSessionsIfUnknown(
   try {
     await (sessions.refresh as () => Promise<unknown>)()
   } catch (failure) {
-    console.warn('buka-workflows: refreshing the session list failed:', failure)
+    console.warn('workflow: refreshing the session list failed:', failure)
   }
 }

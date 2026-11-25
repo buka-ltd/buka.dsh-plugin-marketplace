@@ -23,7 +23,7 @@ export type Command = readonly [file: string, args: readonly string[]]
 export const SILENT = 'none'
 
 /** 设置页试听路由：Host 注册它、浏览器一半按同一字符串请求。 */
-export const PREVIEW_ROUTE = '/buka-bell/preview'
+export const PREVIEW_ROUTE = '/bell/preview'
 
 /**
  * macOS 系统自带提示音清单；设置页下拉框的可选项与这里保持一致。

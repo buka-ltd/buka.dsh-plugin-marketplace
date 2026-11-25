@@ -77,20 +77,20 @@ export function renderPage(page: AppContext): React.ReactElement {
           {
             value: 'jobs',
             label: t('jobsTab'),
-            id: 'buka-workflows-tab-jobs',
-            panelId: 'buka-workflows-panel-jobs',
+            id: 'workflow-tab-jobs',
+            panelId: 'workflow-panel-jobs',
           },
           {
             value: 'definition',
             label: t('definitionTab'),
-            id: 'buka-workflows-tab-definition',
-            panelId: 'buka-workflows-panel-definition',
+            id: 'workflow-tab-definition',
+            panelId: 'workflow-panel-definition',
           },
           {
             value: 'types',
             label: t('taskTypesTab'),
-            id: 'buka-workflows-tab-types',
-            panelId: 'buka-workflows-panel-types',
+            id: 'workflow-tab-types',
+            panelId: 'workflow-panel-types',
           },
         ]
       : route.kind === 'job'
@@ -98,26 +98,26 @@ export function renderPage(page: AppContext): React.ReactElement {
             {
               value: 'overview',
               label: t('overviewTab'),
-              id: 'buka-workflows-tab-overview',
-              panelId: 'buka-workflows-panel-overview',
+              id: 'workflow-tab-overview',
+              panelId: 'workflow-panel-overview',
             },
             {
               value: 'flow',
               label: t('flowTab'),
-              id: 'buka-workflows-tab-flow',
-              panelId: 'buka-workflows-panel-flow',
+              id: 'workflow-tab-flow',
+              panelId: 'workflow-panel-flow',
             },
             {
               value: 'board',
               label: t('boardTab'),
-              id: 'buka-workflows-tab-board',
-              panelId: 'buka-workflows-panel-board',
+              id: 'workflow-tab-board',
+              panelId: 'workflow-panel-board',
             },
             {
               value: 'outputs',
               label: t('outputsTab'),
-              id: 'buka-workflows-tab-outputs',
-              panelId: 'buka-workflows-panel-outputs',
+              id: 'workflow-tab-outputs',
+              panelId: 'workflow-panel-outputs',
             },
           ]
         : null

@@ -4,7 +4,7 @@
 
 import type React from 'react'
 
-import { MISSING_AVATAR_ID } from '../avatars.ts'
+import { executorAvatarId } from '../avatars.ts'
 import { h } from '../element.ts'
 import type { GraphEdgeInput, GraphNodeInput } from '../graph/layout.ts'
 import { renderWorkflowGraph } from '../graph/render.ts'
@@ -32,19 +32,18 @@ export function renderWorkflowDefinition(page: AppContext): React.ReactElement {
       kind: 'start',
       status: 'idle',
     },
-    ...positions.map((position) => ({
-      id: position.id,
-      label: position.label,
-      kind: 'position' as const,
-      executor: position.executor,
-      ...(position.executor.missing === true
-        ? { avatar: MISSING_AVATAR_ID }
-        : typeof position.executor.avatar === 'string' && position.executor.avatar !== ''
-          ? { avatar: position.executor.avatar }
-          : {}),
-      status: 'idle',
-      title: `${position.label} · ${renderExecutor(page, position.executor)}`,
-    })),
+    ...positions.map((position) => {
+      const avatar = executorAvatarId(position.executor)
+      return {
+        id: position.id,
+        label: position.label,
+        kind: 'position' as const,
+        executor: position.executor,
+        ...(avatar === undefined ? {} : { avatar }),
+        status: 'idle',
+        title: `${position.label} · ${renderExecutor(page, position.executor)}`,
+      }
+    }),
     {
       id: 'end',
       label: t('graphEnd'),

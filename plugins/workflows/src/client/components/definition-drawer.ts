@@ -10,7 +10,7 @@
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type React from 'react'
 
-import { renderAvatar } from '../avatars.ts'
+import { executorAvatarId, renderAvatar } from '../avatars.ts'
 import { ClientModal, h } from '../element.ts'
 import {
   channelOf,
@@ -40,9 +40,9 @@ export function renderDefinitionDrawer(page: AppContext): React.ReactElement | n
   const position =
     selection.kind === 'position' ? positions.find((item) => item.id === selection.id) : undefined
   const avatar =
-    position !== undefined && typeof position.executor.avatar === 'string'
-      ? renderAvatar(position.executor.avatar, 28, 'buka-workflows-drawerAvatar')
-      : null
+    position === undefined
+      ? null
+      : renderAvatar(executorAvatarId(position.executor), 28, 'buka-workflows-drawerAvatar')
   const tabs = definitionTabs(page, selection, { definition, positions, labels, builtin })
   const backChannel =
     selection.kind === 'channel' && channelOf(definition, selection.id)?.back === true

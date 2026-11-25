@@ -7,10 +7,10 @@
  *
  * - 「执行者」页（`workers/`）负责「工作区身份」：挂载 / 删除工作区注册 /
  *   打开会话都走 DSH 的 Client Service（`workspaces.*`、`uiWorkspace.*`），
- *   磁盘内容由 Host 的 `/buka-workers/*` 路由处理。
+ *   磁盘内容由 Host 的 `/workflow/workers/*` 路由处理。
  * - 「工作流」页（本目录其余模块）只做一条链：工作流列表 → 工作流
  *   （作业 / 结构图 / 任务类型）→ 作业（概览 / 实时流程 / 看板 / 资产），数据与动作来自
- *   Host 的 `/buka-workflows/*` 路由。
+ *   Host 的 `/workflow/*` 路由。
  *
  * 两个页签由 `home.ts` 的 `HomePage` 装配：页签由 hash 驱动（`#/workers`
  * ↔ 执行者页签），跨页签跳转（如删除影响面里的「打开作业」）只写 hash。
@@ -63,7 +63,7 @@ export function apply(ctx: Context): void {
   // ---- 两半页面的词典与样式 ------------------------------------------------
   ctx.effect(
     () => ctx.locale.register(WORKERS_NS, { zh: workersZh, en: workersEn }),
-    'buka-workers: dictionaries',
+    'workflow-workers: dictionaries',
   )
   ctx.effect(() => {
     const tag = document.createElement('style')
@@ -71,16 +71,16 @@ export function apply(ctx: Context): void {
     tag.textContent = workersCss
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'buka-workers: styles')
+  }, 'workflow-workers: styles')
 
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'buka-workflows: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'workflow: dictionaries')
   ctx.effect(() => {
     const tag = document.createElement('style')
     tag.dataset.plugin = '@buka/dsh-plugin-workflows'
     tag.textContent = CSS
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'buka-workflows: styles')
+  }, 'workflow: styles')
 
   // ---- 唯一的侧边栏条目与首页 ----------------------------------------------
   ctx.slots.inject('sidebar.panellist', () =>

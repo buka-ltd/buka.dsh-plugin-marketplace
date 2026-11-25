@@ -8,7 +8,7 @@
  */
 
 /** 词典命名空间。 */
-const NS = 'buka-skills'
+const NS = 'skills'
 
 /** 翻译函数：词典命名空间里取文案。 */
 type Translate = (key: string) => string

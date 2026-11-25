@@ -564,8 +564,8 @@ function isInside(target, root) {
 /**
 * 浏览器一半用的两条包内 HTTP 路由：检查与更新当前会话所在工作区的项目技能。
 *
-* - `GET /buka-skill-update-check/status` 检查；`refresh=1` 跳过 5 分钟缓存。
-* - `POST /buka-skill-update-check/update` 更新；请求体是
+* - `GET /skill-update-check/status` 检查；`refresh=1` 跳过 5 分钟缓存。
+* - `POST /skill-update-check/update` 更新；请求体是
 *   `{ sessionId, skills? }`，省略 `skills` 表示更新检查得到的全部。名字会先
 *   与一次强制检查的结果求交集，Host 不接受浏览器指定的路径。
 *
@@ -576,9 +576,9 @@ function isInside(target, root) {
 * @module @buka/dsh-plugin-skill-update-check/routes
 */
 /** 浏览器一半按同一常量访问。 */
-const CHECK_ROUTE = "/buka-skill-update-check/status";
+const CHECK_ROUTE = "/skill-update-check/status";
 /** 更新路由；请求体只有会话 id 与若干 skill 名。 */
-const UPDATE_ROUTE = "/buka-skill-update-check/update";
+const UPDATE_ROUTE = "/skill-update-check/update";
 /** 会话 id 的宽松上限；真实 id 远小于它。 */
 const MAX_SESSION_ID_LENGTH = 128;
 /** 单个 skill 名的长度上限；真实名字远小于它。 */
@@ -661,7 +661,7 @@ function registerRoutes(ctx, deps) {
 					sendError(res, 500, "check-failed", describeError(error));
 				}
 			}
-		}), `buka-skill-update-check: GET ${CHECK_ROUTE}`);
+		}), `skill-update-check: GET ${CHECK_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: UPDATE_ROUTE,
@@ -696,7 +696,7 @@ function registerRoutes(ctx, deps) {
 					sendError(res, 500, "update-failed", describeError(error));
 				}
 			}
-		}), `buka-skill-update-check: POST ${UPDATE_ROUTE}`);
+		}), `skill-update-check: POST ${UPDATE_ROUTE}`);
 	});
 }
 /**
@@ -776,7 +776,7 @@ function registryOf(ctx) {
 * @module @buka/dsh-plugin-skill-update-check
 */
 /** Cordis 插件名，出现在 composition 里；与补丁行的 `id` 保持一致。 */
-const name = "check-buka-skill-update";
+const name = "check-skill-update";
 /** 依赖的服务：按会话解析当前工作区。 */
 const inject = ["sessions"];
 /**

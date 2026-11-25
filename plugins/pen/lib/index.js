@@ -62,6 +62,95 @@ function sendMethodNotAllowed(res, allow) {
 	res.end();
 }
 process.platform;
+/**
+* 解析 `/pen` 之后的原始输入。
+*
+* 与 `/plan` 对齐：不带参数表示开启，显式 `on` 也开启，`off` 关闭。
+*
+* @param rawInput 命令名之后的文本
+* @returns 要执行的动作；语法不认识时返回 undefined
+*/
+function parsePenCommand(rawInput) {
+	const input = typeof rawInput === "string" ? rawInput.trim().toLowerCase() : "";
+	if (input === "" || input === "on") return "on";
+	if (input === "off") return "off";
+}
+/**
+* 把一次切换结果翻成命令卡片上的文本。
+*
+* @param action 刚才执行的动作
+* @param snapshot 切换后的 Host 状态
+* @param serverName MCP 服务名，用来拼出工具名前缀
+* @returns 成功或失败结果
+*/
+function penCommandResult(action, snapshot, serverName) {
+	if (action === "off") return {
+		kind: "success",
+		text: `Pen MCP 已关闭，本会话不再提供 mcp__${serverName}__* 工具。`
+	};
+	if (snapshot.status === "error") return {
+		kind: "error",
+		text: `Pen MCP 连接失败：${snapshot.message ?? "未知错误"}`
+	};
+	if (snapshot.status === "ready") return {
+		kind: "success",
+		text: `Pen MCP 已开启，本会话的下一轮消息可以使用 mcp__${serverName}__* 工具。`
+	};
+	return {
+		kind: "success",
+		text: "Pen MCP 已开启，会话开始后自动连接。"
+	};
+}
+/**
+* 执行一条 `/pen` 命令。
+*
+* @param source pen 状态源
+* @param serverName MCP 服务名
+* @param invocation 命令调用
+* @returns 命令卡片上的结果
+*/
+async function runPenCommand(source, serverName, invocation) {
+	const sessionId = typeof invocation.agent?.id === "string" ? invocation.agent.id : "";
+	if (sessionId === "") return {
+		kind: "error",
+		text: "/pen 只能在一个会话里使用。"
+	};
+	const action = parsePenCommand(invocation.rawInput);
+	if (action === void 0) return {
+		kind: "error",
+		text: "用法：/pen 开启 Pen MCP，/pen off 关闭。"
+	};
+	try {
+		return penCommandResult(action, await source.setEnabled(sessionId, action === "on"), serverName);
+	} catch (error) {
+		return {
+			kind: "error",
+			text: `切换 Pen MCP 失败：${describeError(error)}`
+		};
+	}
+}
+/**
+* 注册 `/pen` 命令；宿主没有 `commands` 服务时不注册。
+*
+* @param ctx 插件上下文
+* @param source pen 状态源（Host 控制器）
+* @param options 命令文案要用的配置
+*/
+function registerPenCommand(ctx, source, options) {
+	ctx.inject(["commands"], (commandCtx) => {
+		const commands = commandCtx.get("commands");
+		if (commands === void 0 || typeof commands.register !== "function") {
+			commandCtx.logger?.warn?.("pen: 宿主没有 commands 服务，/pen 命令不可用");
+			return;
+		}
+		const dispose = commands.register({
+			name: "pen",
+			description: "开启或关闭本会话的 Pen MCP 工具：/pen 开启，/pen off 关闭。",
+			handler: (invocation) => runPenCommand(source, options.serverName, invocation)
+		});
+		commandCtx.effect(() => dispose, "pen: /pen command");
+	});
+}
 // .build/pen/state.js
 /**
 * 一个会话的 pen MCP 连接状态，以及浏览器一半读到的快照。
@@ -183,7 +272,7 @@ var PenController = class {
 		this.ctx.on("session/disposed", (session) => {
 			this.onSessionDisposed(session.header.id);
 		});
-		this.ctx.effect(() => () => this.dispose(), "buka-pen: mounts");
+		this.ctx.effect(() => () => this.dispose(), "pen: mounts");
 	}
 	/** @inheritdoc */
 	snapshot(sessionId) {
@@ -270,7 +359,7 @@ var PenController = class {
 		} catch (error) {
 			delete entry.fiber;
 			entry.error = describeError(error);
-			this.ctx.logger.warn(`buka-pen: 连接 pen MCP 失败：${entry.error}`);
+			this.ctx.logger.warn(`pen: 连接 pen MCP 失败：${entry.error}`);
 			if (fiber !== void 0) try {
 				await fiber.dispose();
 			} catch {}
@@ -284,7 +373,7 @@ var PenController = class {
 		try {
 			await fiber.dispose();
 		} catch (error) {
-			this.ctx.logger.warn(`buka-pen: 卸载 pen MCP 失败：${describeError(error)}`);
+			this.ctx.logger.warn(`pen: 卸载 pen MCP 失败：${describeError(error)}`);
 		}
 	}
 	/**
@@ -318,9 +407,9 @@ var PenController = class {
 * @module @buka/dsh-plugin-pen/routes
 */
 /** 读取状态的路由；浏览器一半按同一常量访问。 */
-const STATE_ROUTE = "/buka-pen/state";
+const STATE_ROUTE = "/pen/state";
 /** 勾选 / 取消勾选的路由。 */
-const TOGGLE_ROUTE = "/buka-pen/toggle";
+const TOGGLE_ROUTE = "/pen/toggle";
 /** 两条路由的请求体都很小。 */
 const MAX_BODY_BYTES = 16384;
 /** 会话 id 的宽松上限；真实 id 远小于它。 */
@@ -400,7 +489,7 @@ function registerRoutes(ctx, source) {
 					...source.snapshot(sessionId)
 				});
 			}
-		}), `buka-pen: GET ${STATE_ROUTE}`);
+		}), `pen: GET ${STATE_ROUTE}`);
 		webCtx.effect(() => webCtx.webServer.register({
 			kind: "exact",
 			path: TOGGLE_ROUTE,
@@ -427,7 +516,7 @@ function registerRoutes(ctx, source) {
 					sendError(res, 500, "toggle-failed", describeError(error));
 				}
 			}
-		}), `buka-pen: POST ${TOGGLE_ROUTE}`);
+		}), `pen: POST ${TOGGLE_ROUTE}`);
 	});
 }
 /** 插件配置：只在需要时启动 pen MCP。 */
@@ -449,11 +538,13 @@ const Config = z.object({
 });
 // .build/pen/index.js
 /**
-* `@buka/dsh-plugin-pen` 的 Host 一半：把 pen MCP 变成新会话框里的一个勾选框。
+* `@buka/dsh-plugin-pen` 的 Host 一半：把 pen MCP 变成按会话开启的能力。
 *
-* 勾选后，这条会话的 Agent 作用域里挂一个 `@deepseek-ai/dsh-mcp-client`，
-* 工具（`mcp__pencil__*`）只对该会话可见；不勾选的会话看不到、也不会为它
-* 启动 pen 进程。具体时机与状态机在 `controller.ts`，HTTP 路由在 `routes.ts`。
+* 两个入口都走同一个控制器：新会话框里的勾选框，以及会话进行中的 `/pen`
+* 与 `/pen off` 命令。开启后，这条会话的 Agent 作用域里挂一个
+* `@deepseek-ai/dsh-mcp-client`，工具（`mcp__pencil__*`）只对该会话可见；
+* 没开启的会话看不到、也不会为它启动 pen 进程。具体时机与状态机在
+* `controller.ts`，命令在 `command.ts`，HTTP 路由在 `routes.ts`。
 *
 * 本文件只装配：导出 Cordis 插件名、依赖、配置与 `apply`。
 *
@@ -472,6 +563,7 @@ const inject = ["agents"];
 function apply(ctx, config) {
 	const pen = new PenController(ctx, config);
 	pen.watch();
+	registerPenCommand(ctx, pen, { serverName: config.serverName });
 	registerRoutes(ctx, pen);
 }
 export { Config, apply, inject, name };

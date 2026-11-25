@@ -42,7 +42,7 @@ test('目标列表：过滤机器人与缺路径的执行者，工作区标题�
   const { root, dir } = await makeDir('repo')
   try {
     const ctx = fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           return {
             workers: [
@@ -92,7 +92,7 @@ test('解析执行者：按名字回登记表，机器人与空名字都有错�
   const { root, dir } = await makeDir('worker')
   try {
     const ctx = fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           return {
             workers: [
@@ -164,7 +164,7 @@ test('服务缺失 / 读取失败 / 目录消失时返回稳定错误码', async
 
   const broken = await resolveInstallTarget(
     fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           throw new Error('registry is corrupt')
         },
@@ -177,7 +177,7 @@ test('服务缺失 / 读取失败 / 目录消失时返回稳定错误码', async
 
   const missing = await resolveInstallTarget(
     fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           return { workers: [{ name: 'bot', driver: 'agent', path: gone, exists: true }] }
         },
@@ -198,7 +198,7 @@ test('目标列表：以标识符为键，展示名为空也保留，旧版只�
   const { root, dir } = await makeDir('repo')
   try {
     const ctx = fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           return {
             workers: [
@@ -247,7 +247,7 @@ test('解析执行者：按标识符匹配，名称只作展示，旧版退回 n
       await fs.mkdir(dir, { recursive: true })
     }
     const ctx = fakeContext({
-      bukaWorkers: {
+      workflowWorkers: {
         async list() {
           return {
             workers: [

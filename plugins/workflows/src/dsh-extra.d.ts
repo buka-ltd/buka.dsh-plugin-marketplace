@@ -11,12 +11,14 @@ import type {} from '@deepseek-ai/cordis'
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** 执行者服务（合并包的执行者一半提供）；按可选服务处理，缺省时消费方降级。 */
-    bukaWorkers: BukaWorkersService | undefined
+    workflowWorkers: WorkflowWorkersService | undefined
     /**
      * Web 组合的会话控制器：按 sessionId 解析 / 恢复 ordinary session 的 live agent。
      * 只有 web 组合提供；`ctx.get('sessionController')` 取不到时按「无法恢复会话」处理。
      */
     sessionController: SessionControllerService | undefined
+    /** 系统提示词注册表：作业模式用它注入 `workflow_job_policy` 段落。 */
+    systemPrompt: SystemPromptService | undefined
   }
 }
 
@@ -26,7 +28,7 @@ declare module '@deepseek-ai/cordis' {
  * 服务只负责会话与 turn 观测：一个任务一条新会话，恢复时只续接同一条会话；
  * 压缩、结果契约与追问都在 workflows 侧。
  */
-export interface BukaWorkersService {
+export interface WorkflowWorkersService {
   /** 执行者登记表 + 目录状态。 */
   list?: () => Promise<unknown> | unknown
   /** 执行者名 → 头像 id 表。 */
@@ -46,4 +48,34 @@ export interface SessionControllerService {
    * @returns `{ agent }` 或 `{ error }`
    */
   resolveAgent?: (sessionId: string) => Promise<unknown>
+}
+
+/** 系统提示词注册表里本插件用到的部分（形状见 dsh-system-prompt 的 `section()`）。 */
+export interface SystemPromptService {
+  /**
+   * 注册一个提示词段落；返回撤销注册的函数。
+   *
+   * @param section 段落定义
+   */
+  section?: (section: SystemPromptSection) => () => void
+}
+
+/** 一个提示词段落。 */
+export interface SystemPromptSection {
+  /** 段落名；同名会遮蔽全局项。 */
+  readonly name: string
+  /** 段落的排序位置。 */
+  readonly order: number
+  /** 段落正文，或按当前组装上下文求值的函数。 */
+  readonly text: string | ((context: SystemPromptContext) => string)
+  /** 是否对正文做 `{{variable}}` 插值；作业模式写的是原文，必须关掉。 */
+  readonly interpolate?: boolean
+}
+
+/** 段落求值时的上下文（只声明本插件读取的字段）。 */
+export interface SystemPromptContext {
+  readonly agent?: {
+    readonly id?: unknown
+    readonly session?: unknown
+  }
 }

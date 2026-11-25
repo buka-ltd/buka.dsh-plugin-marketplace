@@ -17,10 +17,10 @@ import type {
 } from '../types.ts'
 
 /** 与 Host 一致的检查路由。 */
-export const CHECK_ROUTE = '/buka-skill-update-check/status'
+export const CHECK_ROUTE = '/skill-update-check/status'
 
 /** 与 Host 一致的更新路由。 */
-export const UPDATE_ROUTE = '/buka-skill-update-check/update'
+export const UPDATE_ROUTE = '/skill-update-check/update'
 
 /**
  * 检查一个会话所在工作区的项目技能。

@@ -18,7 +18,7 @@ History: the plugin used to be `@buka/dsh-plugin-robots` (later renamed workers)
 
 ## Workflow model
 
-- **Workflow**: a persistent definition with versions; an orchestrator preset saves it with `buka_workflow_save`, and it is usable immediately. The page reviews it and can disable / re-enable it. Only the current definition version (v9) is valid: v8 workflows are tagged "needs upgrade" and cannot start jobs until the orchestrator rewrites them to v9 (a plain-text definition cannot be migrated mechanically); v7 definitions are migrated to v8 when the store opens and also stop at "needs upgrade". Jobs already running finish on their pinned snapshot version.
+- **Workflow**: a persistent definition with versions; an orchestrator preset saves it with `workflow_save`, and it is usable immediately. The page reviews it and can disable / re-enable it. Only the current definition version (v9) is valid: v8 workflows are tagged "needs upgrade" and cannot start jobs until the orchestrator rewrites them to v9 (a plain-text definition cannot be migrated mechanically); v7 definitions are migrated to v8 when the store opens and also stop at "needs upgrade". Jobs already running finish on their pinned snapshot version.
 - **Position**: a graph node (besides the built-in start / end) that shows the shape of the flow. One position has one executor — a person or a worker (agent / robot) referenced by the worker's immutable identifier. A position is the author's writing unit: it names the executor, carries task types, and serves as a channel endpoint and board row; scheduling reads task types, channels and executors, never the position as a mutual-exclusion resource.
 - **Task type**: the contract a position declares:
   - **definition**: preset information written by the orchestrator — what this kind of task is, what to do, facts about external systems (for example each service's pipeline). Since v9 it is a template: `{{content}}` / `{{content.<path>}}` reference this task's content, and the rendered text is the user-authored message the executor receives. Substituted values have their `/skill` gestures escaped (the template text itself keeps working). Saving checks that every path is declared in the task content schema and that paths passing through optional fields end with `?`; `{{input.*}}` / `{{nodes.*}}` are rejected;
@@ -47,32 +47,43 @@ History: the plugin used to be `@buka/dsh-plugin-robots` (later renamed workers)
 2. Manage responsibilities and project skills on the **Worker** tab of the single sidebar entry; review graphs and contracts on the **Workflow** tab, disable a workflow when it is not needed and re-enable it later.
 3. Create a job:
    - page: fill the job input (the start node content schema) and choose whether the final report comes back to you or to an assistant; the starter is the person;
-   - session: use `buka_job_start` or `/job` with the job input; the starter is that session.
+   - session: the first message of a new session is `/job [note]`, which enters job mode. The agent lists startable workflows with `workflow_job_options` (id, name, description, start node input schema and any reason it cannot start), picks one from the user's note, and asks the user when no workflow is named or several fit. It then collects the input against that schema and calls `workflow_job_start`; the starter is that session. `/job off` leaves job mode, and one session starts at most one job.
 4. On the job board, worker positions auto-claim ready tasks; human tasks are handled by the named assistant, or by the person, who picks an action (submitting claims the task for them). Executors create follow-up tasks along channels; the end task goes back to the starter, and confirming it settles the job.
 
 ## Tools
 
 | Tool / command                             | Purpose                                                                                                                                                          |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `buka_workers`                             | List workers: id, display name, driver, mount state, responsibility, project skills, AGENTS.md                                                                   |
-| `buka_worker_build`                        | Workflow preset root session: create or update a worker from the approved id / name / avatar / description / AGENTS.md                                           |
-| `/job`                                     | Ordinary sessions: list usable workflows or start a job (starter = current session)                                                                              |
-| `buka_workflow_save`                       | Workflow preset root session: validate and save a new, immediately usable version                                                                                |
-| `buka_workflow_list` / `buka_workflow_get` | Read the workflow catalog / full definition                                                                                                                      |
-| `buka_job_start`                           | Start a job from a session: job input plus delivery rule                                                                                                         |
-| `buka_job_status` / `buka_job_cancel`      | Read or cancel a job                                                                                                                                             |
-| `buka_task_create`                         | Running tasks: add a downstream task by target, any number of times; the engine routes it. The description lists this task's targets, labels and content schemas |
-| `buka_task_complete`                       | Running tasks / assistant: submit result text and attachments; human tasks pick an action. The description lists the action ids, labels and input schemas        |
-| `buka_job_board` / `buka_task_get`         | Running tasks / assistant: read the board, a task and its dependencies                                                                                           |
-| `buka_job_attachments`                     | Running tasks / assistant: search / read attachments within the visible set                                                                                      |
+| `workflow_workers`                             | List workers: id, display name, driver, mount state, responsibility, project skills, AGENTS.md                                                                   |
+| `workflow_worker_build`                        | Workflow preset root session: create or update a worker from the approved id / name / avatar / description / AGENTS.md                                           |
+| `/job`                                     | Ordinary sessions: enter job mode with `/job [note]` as the session's first message, note optional; `/job off` leaves                                              |
+| `workflow_save`                       | Workflow preset root session: validate and save a new, immediately usable version                                                                                |
+| `workflow_list` / `workflow_get` | Read the workflow catalog / full definition                                                                                                                      |
+| `workflow_job_options`                       | Inside job mode: list startable workflows — id, name, description, start node input schema and unavailability reasons; the agent picks or asks the user           |
+| `workflow_job_start`                           | Inside job mode: start the job from a chosen workflow — job input plus delivery rule; visible only in a job-mode session                                          |
+| `workflow_job_status` / `workflow_job_cancel`      | Read or cancel a job                                                                                                                                             |
+| `workflow_task_create`                         | Running tasks: add a downstream task by target, any number of times; the engine routes it. The description lists this task's targets, labels and content schemas |
+| `workflow_task_complete`                       | Running tasks / assistant: submit result text and attachments; human tasks pick an action. The description lists the action ids, labels and input schemas        |
+| `workflow_job_board` / `workflow_task_get`         | Running tasks / assistant: read the board, a task and its dependencies                                                                                           |
+| `workflow_job_attachments`                     | Running tasks / assistant: search / read attachments within the visible set                                                                                      |
 
-`buka_worker_build` is visible only to root sessions of the presets named by `builderPresets`; workflow-editing tools are visible only to root sessions of the presets named by `orchestratorPresets`, plus sessions started inside a directory listed in `orchestratorWorkspaces`. Both lists default to the shipped `workflow-orchestrator` (display name `Workflow`). Execution tools are visible only to task sessions, assistant sessions and starter sessions. Human tasks have no model answer tool.
+`workflow_worker_build` is visible only to root sessions of the presets named by `builderPresets`; workflow-editing tools are visible only to root sessions of the presets named by `orchestratorPresets`, plus sessions started inside a directory listed in `orchestratorWorkspaces`. Both lists default to the shipped `workflow-orchestrator` (display name `Workflow`). Execution tools are visible only to task sessions, assistant sessions and starter sessions. `workflow_job_options` / `workflow_job_start` are visible only to a job-mode session (one that entered with `/job` and has not started its job yet). Human tasks have no model answer tool.
+
+## Job mode
+
+An ordinary session can no longer start a job from anywhere: its first message must be `/job [note]`, which does exactly one thing — put the session into **job mode**. The command takes no workflow id: the user does not need to remember an identifier, the agent chooses.
+
+- The `workflow_job_policy` system-prompt section spells out the flow — list workflows, pick one from the user's description, ask when it is ambiguous — and the "start this one job only" constraint.
+- `workflow_job_options` lists every enabled workflow (id, name, description, start node input JSON Schema, plus the reason when the definition is outdated or a worker is missing); `workflow_job_start` starts the job from the chosen id and input. Both tools are visible only in that session.
+- A successful start ends the mode, the job runs on the board, and the final report comes back to this session as before. `/job off` leaves; failed or unsettled tool calls do not consume the mode.
+
+The mode state is not new persisted data — it folds the session log: a successful `/job` pair of `command/run` → `command/done` records enter / leave, a successful `workflow_job_start` pair of `tool/call` → `tool/result` records the mode as consumed, and a `user/message` or `turn/start` already in the log means the session is no longer fresh. Resume, fork and compaction all recover it from the same log, and the command, the prompt section and tool visibility read the same fold. The workflow list and input contracts are read fresh by `workflow_job_options` on every call; there is no cache.
 
 ## Execution prompt
 
 An agent task is dispatched as two messages:
 
-1. **Context** (not from the user): **workflow rules** (engine-injected capabilities — read / write assets, create follow-up tasks with `buka_task_create`, submit with `buka_task_complete`) and **worktree rules** (only when a task type's `worktree` is not `none`): when `create` takes effect they tell the executor to call `create_worktree` itself for each repository it changes, creating one per repository and switching with `working_directory`; when `guard` applies (explicitly chosen, or `create` degraded) they say no new worktree is created and require the executor to check the workspace and every repository it will modify, stopping to ask the user when there are uncommitted changes;
+1. **Context** (not from the user): **workflow rules** (engine-injected capabilities — read / write assets, create follow-up tasks with `workflow_task_create`, submit with `workflow_task_complete`) and **worktree rules** (only when a task type's `worktree` is not `none`): when `create` takes effect they tell the executor to call `create_worktree` itself for each repository it changes, creating one per repository and switching with `working_directory`; when `guard` applies (explicitly chosen, or `create` degraded) they say no new worktree is created and require the executor to check the workspace and every repository it will modify, stopping to ask the user when there are uncommitted changes;
 2. **User message** (`followup`, source `user`): the task type definition rendered with this task's content; when the definition is omitted, the whole task content.
 
 Position labels, channel ids, job numbers, dependency lists and attachment lists never enter the prompt: they belong to the page and orchestration layers, so the executor is not exposed to the position / channel vocabulary of workflow authoring.
@@ -86,7 +97,7 @@ Running v8-and-earlier job snapshots keep the old shape (context carries the tas
 - A human task is an ordinary task from a human position. There is no "waiting for human" state; every task lives on the board.
 - An assistant is a **name on the workflow**, not a flag on a worker: a human task type names an `assistant` (an agent identifier) or `null`, and the delivery rule can name one for the final report. Validation only requires the identifier to exist and be an agent; any registered agent can be named, whether or not it was ever "marked" as an assistant.
 - A human task type names an `assistant` (an agent identifier) or `null`:
-  - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets one fixed sentence (the task type and the task id), reads the task content with `buka_task_get`, finds the actions in the `buka_task_complete` description, talks to the person, and applies the action on their behalf.
+  - named assistant: when the task is ready the engine starts that assistant's session by identifier; the assistant gets one fixed sentence (the task type and the task id), reads the task content with `workflow_task_get`, finds the actions in the `workflow_task_complete` description, talks to the person, and applies the action on their behalf.
   - `null`: the task waits in ready; the person picks an action (filling its form when it has one) and submits — or submits a bare result without creating anything. Submitting claims the task for them.
 - If the named assistant does not hand back a result (its session ends without submitting, the task times out, or the session cannot be resumed), the task fails and the job immediately fails: the other open tasks are cancelled with a written reason, and the job error names the task, the assistant and the cause. There is no automatic switch and the person cannot take over.
 
@@ -109,13 +120,13 @@ Workflows and jobs can enter a derived "unavailable" state: a worker identifier 
 - **Job**: the job page marks it unavailable. A task whose executor is missing fails dispatch with an error that names the task, the position and the missing identifier; the task can be retried and other branches keep running. Human tasks whose named assistant is missing are no longer dispatched automatically and stay claimable, so a person can finish them.
 - **Difference from "disabled"**: disabled is a deliberate pause and existing jobs keep running; unavailable means a reference broke and must be rebound. History shows a placeholder avatar and "Deleted" for positions, tasks and named assistants of deleted workers, keeping no tombstone records.
 
-Deleting a worker is a hard delete (registry entry, directory and workspace registration together), blocked only by running jobs that reference the identifier. The delete dialog reads the impact through the plugin's read-only `ctx.bukaWorkflows.workerUsage(id)` service.
+Deleting a worker is a hard delete (registry entry, directory and workspace registration together), blocked only by running jobs that reference the identifier. The delete dialog reads the impact through the plugin's read-only `ctx.workflowQuery.workerUsage(id)` service.
 
 ## Ending a job
 
 - The previous task creates the end task along a channel; its `content` is the final report, validated against the end node content schema.
 - The delivery rule is chosen at job creation:
-  - **back to the starter**: a session starter receives the report in that conversation and confirms with `buka_task_complete`; a human starter gets the end task on their own board and clicks "received".
+  - **back to the starter**: a session starter receives the report in that conversation and confirms with `workflow_task_complete`; a human starter gets the end task on their own board and clicks "received".
   - **to an assistant**: the end task is assigned to that assistant, who receives and confirms it.
 - The job becomes completed only after the starter confirms; a failed delivery can be retried.
 
@@ -141,7 +152,7 @@ The two tabs link to each other: "Open job" in the worker delete dialog just wri
 
 ## Dependencies and storage
 
-- Worker registration and task sessions ship in this plugin (the `ctx.bukaWorkers` service); workflow metadata needs `ctx.storageDomain` (shipped by the base composition).
+- Worker registration and task sessions ship in this plugin (the `ctx.workflowWorkers` service); workflow metadata needs `ctx.storageDomain` (shipped by the base composition).
 - **The worktree capability is optional**: a task type's `worktree: "create"` needs the DSH worktree plugin (`ctx.worktrees` plus the `create_worktree` tool, usually provided by the "change request and worktree" bundle). Without it the definition still saves and execution degrades to `"guard"`; `"none"` and `"guard"` need no worktree capability. The plugin never creates a checkout up front: the executor creates its own worktrees per repository.
 - Worker data lives under `~/.cache/dsh-plugin-workers/` (`workers.json` registry plus `workers/<id>/` directories); workflows / jobs / tasks / attempts / attachment metadata live in the `buka_workflow` domain; large texts and attachment files live under `~/.cache/dsh-plugin-workflows/jobs/<jobId>/`.
 - **Version policy**: the current definition version is v9. v7 workflow definitions are migrated to v8 when the store opens (the executor `name` field becomes `id`, the value is unchanged); the migration is idempotent, and v8 is not upgraded to v9 (a plain-text definition cannot be turned into a template mechanically). v7 / v8 workflows stay in the list with a "needs upgrade" tag and cannot start jobs; upgrading means rewriting the definition in the current format from the orchestrator. Job snapshots are not migrated: v7 / v8 jobs keep their old fields and old semantics and stay readable and resumable.
@@ -161,9 +172,9 @@ This plugin merges `@buka/dsh-plugin-workers` and `@buka/dsh-plugin-workflows` (
 
 ## Structure
 
-- `src/workers/**`: the workers half — registry, directories, AGENTS.md, project skills, model tools and `/buka-workers/*` routes.
+- `src/workers/**`: the workers half — registry, directories, AGENTS.md, project skills, model tools and `/workflow/workers/*` routes.
 - `src/domain/**`, `src/store/**`, `src/definition/**`, `src/engine/**`: workflow types, state machines, storage domain, definition validation and the scheduling engine.
-- `src/tools/**`, `src/commands/**`: workflow model tools and the `/job` command.
+- `src/tools/**`, `src/commands/**`: workflow model tools and the `/job` command; `src/job-mode.ts`: job-mode log fold and the `workflow_job_policy` section.
 - `src/routes/**`: workflow page routes.
 - `src/client/**`: the workflows page; `src/client/workers/**`: the workers page; `src/client/home.ts` assembles the home page's two tabs.
 - `src/index.ts`, `src/client/index.ts`: the two merged assembly entries (assembly only).
@@ -171,4 +182,4 @@ This plugin merges `@buka/dsh-plugin-workers` and `@buka/dsh-plugin-workflows` (
 
 ## Tests
 
-`test/workers-*.test.mjs` (workers: registry, build tool, routes, client smoke), `test/workflows-core.test.mjs` (domain / store / definition), `test/workflows-server.test.mjs` (engine / recovery / attachments / tools), `test/workflows-task-tools.test.mjs` (real `dsh-tools` + `dsh-scope` pin the per-task tool descriptions and shadowing), `test/workflows-client.test.mjs` (render smoke), `test/preset-prompts.test.mjs` (preset persona rendering regression). Run `node --test`.
+`test/workers-*.test.mjs` (workers: registry, build tool, routes, client smoke), `test/workflows-core.test.mjs` (domain / store / definition), `test/workflows-server.test.mjs` (engine / recovery / attachments / tools), `test/workflows-task-tools.test.mjs` (real `dsh-tools` + `dsh-scope` pin the per-task tool descriptions and shadowing), `test/workflows-job-mode.test.mjs` (job-mode log fold, command gating and prompt section), `test/workflows-client.test.mjs` (render smoke), `test/preset-prompts.test.mjs` (preset persona rendering regression). Run `node --test`.

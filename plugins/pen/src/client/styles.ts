@@ -15,7 +15,7 @@ export const CSS = `.buka-pen-root{flex:none;align-items:center;gap:2px;min-widt
 @media (hover:hover){.buka-pen-toggle:hover:not([data-disabled]){background:var(--dsw-alias-interactive-bg-hover)}}
 .buka-pen-toggle[data-disabled]{color:var(--dsw-alias-label-dimmed);cursor:default}
 .buka-pen-brand{align-items:center;gap:4px;min-width:0;display:inline-flex}
-.buka-pen-logo{width:12px;height:auto;flex:none;display:block;object-fit:contain}
+.buka-pen-logo{flex:none;display:block}
 .buka-pen-toggle:has(.buka-pen-checkbox:focus-visible){outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 .buka-pen-checkbox{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:inherit;flex:none;margin:0}
 .buka-pen-checkbox:focus-visible{outline:none}

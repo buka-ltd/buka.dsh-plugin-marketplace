@@ -54,10 +54,10 @@ test('prompt v9: buildExecutionPrompt is the landed text', () => {
       definitionVersion: 9,
     }),
     '## 工作流规则\n' +
-      '- 读取资产：`buka_job_attachments` 列出并读取本任务可用的附件；`buka_job_board` 查看本作业的任务，`buka_task_get` 读取某个任务。\n' +
-      '- 写入资产：提交结果时用 `buka_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。\n' +
-      '- 创建后续任务：`buka_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。\n' +
-      '- 完成任务：用 `buka_task_complete` 交回一段总结；结果没有结构化契约。\n' +
+      '- 读取资产：`workflow_job_attachments` 列出并读取本任务可用的附件；`workflow_job_board` 查看本作业的任务，`workflow_task_get` 读取某个任务。\n' +
+      '- 写入资产：提交结果时用 `workflow_task_complete` 的 `attachments` 归档产出文件（path 相对你的工作目录）；`text` 写一段给人看的总结。\n' +
+      '- 创建后续任务：`workflow_task_create` 创建后续任务（不传 `deps` 时默认依赖本任务）；可创建的目标与任务内容格式见该工具的说明。\n' +
+      '- 完成任务：用 `workflow_task_complete` 交回一段总结；结果没有结构化契约。\n' +
       '\n单号 A',
   )
 })
@@ -167,7 +167,7 @@ test('prompt: the end delivery renders the report into the fixed text', () => {
   const text = buildEndDeliveryText(job, task)
   assert.match(text, /工作流「研发交付」的作业 #3/u)
   assert.match(text, /"summary": "全部通过"/u)
-  assert.match(text, /buka_task_complete/u)
+  assert.match(text, /workflow_task_complete/u)
   assert.doesNotMatch(text, /\{\{content\}\}/u)
 
   const legacy = buildEndDeliveryText(

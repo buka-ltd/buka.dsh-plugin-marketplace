@@ -137,7 +137,7 @@ export function createDetailActions(state: WorkersPageState, t: Translate) {
   }
 
   /**
-   * 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `buka_workers`
+   * 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `workflow_workers`
    * 工具读它，决定是否把节点交给这个执行者。
    *
    * 设置页签没有保存按钮：页面在输入停下后自动调用这里，所以成功后只局部

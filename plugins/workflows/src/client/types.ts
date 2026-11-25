@@ -15,46 +15,46 @@ export type Translate = (key: string) => string
 export type JsonRecord = Record<string, unknown>
 
 /** 侧边栏条目的词典命名空间，也是 `main` 插槽的 locale。 */
-export const NS = 'buka-workflows'
+export const NS = 'workflow'
 
 /** 侧边栏条目 id；与 `main` 插槽的 key 必须相同。 */
-export const PANEL_ID = 'buka-workflows'
+export const PANEL_ID = 'workflow'
 
 /** 工作流列表。 */
-export const WORKFLOWS_ROUTE = '/buka-workflows/workflows'
+export const WORKFLOWS_ROUTE = '/workflow/list'
 
 /** 工作流详情（定义快照 + 图 + 作业列表）。 */
-export const WORKFLOW_ROUTE = '/buka-workflows/workflow'
+export const WORKFLOW_ROUTE = '/workflow/get'
 
 /** 激活 / 停用工作流。 */
-export const WORKFLOW_ACTIVATE_ROUTE = '/buka-workflows/workflow/activate'
+export const WORKFLOW_ACTIVATE_ROUTE = '/workflow/activate'
 
 /** 某个工作流下的作业列表。 */
-export const JOBS_ROUTE = '/buka-workflows/jobs'
+export const JOBS_ROUTE = '/workflow/jobs'
 
 /** 作业详情（含任务摘要）。 */
-export const JOB_ROUTE = '/buka-workflows/job'
+export const JOB_ROUTE = '/workflow/job'
 
 /** 页面人启动作业。 */
-export const JOB_START_ROUTE = '/buka-workflows/job/start'
+export const JOB_START_ROUTE = '/workflow/job/start'
 
 /** 作业动作：cancel / retry-delivery。 */
-export const JOB_ACTION_ROUTE = '/buka-workflows/job/action'
+export const JOB_ACTION_ROUTE = '/workflow/job/action'
 
 /** 重启失败作业：failed（从失败位置）/ scratch（从头开始）。 */
-export const JOB_RESTART_ROUTE = '/buka-workflows/job/restart'
+export const JOB_RESTART_ROUTE = '/workflow/job/restart'
 
 /** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
-export const TASK_ROUTE = '/buka-workflows/task'
+export const TASK_ROUTE = '/workflow/task'
 
 /** 任务动作：cancel / retry / claim / complete。 */
-export const TASK_ACTION_ROUTE = '/buka-workflows/task/action'
+export const TASK_ACTION_ROUTE = '/workflow/task/action'
 
 /** 作业附件库。 */
-export const ATTACHMENTS_ROUTE = '/buka-workflows/attachments'
+export const ATTACHMENTS_ROUTE = '/workflow/attachments'
 
 /** 单个附件的下载 / 预览 / 内联地址。 */
-export const ATTACHMENT_ROUTE = '/buka-workflows/attachment'
+export const ATTACHMENT_ROUTE = '/workflow/attachment'
 
 /** 有运行中作业时的刷新间隔（沿用旧页面风格）。 */
 export const LIVE_REFRESH_MS = 1500

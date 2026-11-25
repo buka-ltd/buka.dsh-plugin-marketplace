@@ -11,7 +11,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type { PageTab } from './constants.ts'
 import type { Translate } from './dictionary.ts'
 
-/** Host `GET /buka-skills/list` 返回的一条已安装 skill。 */
+/** Host `GET /skills/list` 返回的一条已安装 skill。 */
 export interface InstalledSkill {
   readonly id: string
   readonly name: string
@@ -22,7 +22,7 @@ export interface InstalledSkill {
   readonly npxSourceUrl?: string | null
 }
 
-/** `GET /buka-skills/check` 返回的一行状态。 */
+/** `GET /skills/check` 返回的一行状态。 */
 export interface SkillCheckEntry {
   readonly name?: string
   readonly source?: string | null
@@ -30,7 +30,7 @@ export interface SkillCheckEntry {
   readonly message?: string
 }
 
-/** `GET /buka-skills/check` 的响应。 */
+/** `GET /skills/check` 的响应。 */
 export interface SkillCheckSnapshot {
   readonly ok?: boolean
   readonly scope?: string
@@ -38,7 +38,7 @@ export interface SkillCheckSnapshot {
   readonly message?: string
 }
 
-/** `POST /buka-skills/update` 的响应。 */
+/** `POST /skills/update` 的响应。 */
 export interface SkillUpdateSnapshot {
   readonly ok?: boolean
   readonly updated?: Array<{ name?: string }>
@@ -87,7 +87,7 @@ export interface SkillTreeLeaf {
 export type TargetDialogKind = 'worker' | 'workspace'
 
 /**
- * Host `GET /buka-skills/targets` 返回的一个执行者。
+ * Host `GET /skills/targets` 返回的一个执行者。
  *
  * `id` 是不可变标识符（引用键）；`name` 是可选展示名，可能为空串；旧版
  * workers 没有 `id` 时 Host 已把 `name` 填进 `id`。
@@ -99,7 +99,7 @@ export interface WorkerInstallTarget {
   readonly description?: string
 }
 
-/** Host `GET /buka-skills/targets` 返回的一个工作区。 */
+/** Host `GET /skills/targets` 返回的一个工作区。 */
 export interface WorkspaceInstallTarget {
   readonly id?: string
   readonly title: string
@@ -141,14 +141,14 @@ export type SkillTreeChild = SkillTreeLeaf | SkillTreeDir
 /** 一次安装的目标：单个 skill 叶子，或整个目录（装其下全部 skill）。 */
 export type SkillTreeSelection = SkillTreeLeaf | SkillTreeDir
 
-/** Host `POST /buka-skills/install` 在目录安装时返回的每个 skill 的去向。 */
+/** Host `POST /skills/install` 在目录安装时返回的每个 skill 的去向。 */
 export interface SkillGroupInstallSnapshot {
   readonly installed?: Array<{ name?: string; id?: string; path?: string }>
   readonly skipped?: Array<{ name?: string }>
   readonly failed?: Array<{ name?: string; message?: string }>
 }
 
-/** Host `GET /buka-skills/repo-skills` 返回的仓库树。 */
+/** Host `GET /skills/repo-skills` 返回的仓库树。 */
 export interface RepoTreeData {
   readonly kind?: string
   readonly root?: SkillTreeChild[]

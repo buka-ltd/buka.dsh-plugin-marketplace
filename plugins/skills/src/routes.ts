@@ -3,20 +3,20 @@
  *
  * 路由：
  *
- * - `GET /buka-skills/list` 列出全局 skills；
- * - `POST /buka-skills/uninstall` 卸载一个；
- * - `GET /buka-skills/check` 检查全局 skill 的更新；
- * - `POST /buka-skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
- * - `GET /buka-skills/targets` 列出可安装的执行者（`ctx.bukaWorkers`）与工作区
+ * - `GET /skills/list` 列出全局 skills；
+ * - `POST /skills/uninstall` 卸载一个；
+ * - `GET /skills/check` 检查全局 skill 的更新；
+ * - `POST /skills/update` 应用可用的更新（`skills` 给出名字时只处理这些）；
+ * - `GET /skills/targets` 列出可安装的执行者（`ctx.workflowWorkers`）与工作区
  *   （`ctx.workspaceRegistry`）；
- * - `POST /buka-skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
+ * - `POST /skills/install` 把某个收藏仓库里的一个 skill（或目录里的一组
  *   skill）安装到全局、某个执行者目录或某个工作区目录；
- * - `GET /buka-skills/repos` 列出用户收藏的仓库，
- * - `POST /buka-skills/repos` 收藏一个，
- * - `POST /buka-skills/repos/remove` 移除一个，
- * - `GET /buka-skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
+ * - `GET /skills/repos` 列出用户收藏的仓库，
+ * - `POST /skills/repos` 收藏一个，
+ * - `POST /skills/repos/remove` 移除一个，
+ * - `GET /skills/repo-skills` 列出某个收藏仓库里可安装的 skills（带缓存；
  *   `probe=1` 时只探测仓库类型：标准 npx 仓库 / 不可用）；
- * - `GET /buka-skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
+ * - `GET /skills/icon?owner=…` 返回 GitHub owner 的仓库头像：先读本地缓存，
  *   过期时先回旧图、再在后台静默更新。
  *
  * 路由在 `webServer` 就绪后注册，并沿用 web 组合的信任栅栏
@@ -40,31 +40,31 @@ import { uninstallGlobalSkill } from './skill-store.ts'
 import type { SkillUpdateResult } from './skill-update.ts'
 
 /** 页面读取列表用的路由；浏览器一半按同一常量访问。 */
-const LIST_ROUTE = '/buka-skills/list'
+const LIST_ROUTE = '/skills/list'
 
 /** 页面卸载 skill 用的路由。 */
-const UNINSTALL_ROUTE = '/buka-skills/uninstall'
+const UNINSTALL_ROUTE = '/skills/uninstall'
 
 /** 页面读取可安装目标（执行者 / 工作区）用的路由。 */
-const TARGETS_ROUTE = '/buka-skills/targets'
+const TARGETS_ROUTE = '/skills/targets'
 
 /** 页面把收藏仓库里的一个 skill（或目录里的一组 skill）安装到全局 / 执行者 / 工作区用的路由。 */
-const INSTALL_ROUTE = '/buka-skills/install'
+const INSTALL_ROUTE = '/skills/install'
 
 /** 收藏仓库的列表 / 添加路由。 */
-const REPOS_ROUTE = '/buka-skills/repos'
+const REPOS_ROUTE = '/skills/repos'
 
 /** 收藏仓库的移除路由。 */
-const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
+const REPO_REMOVE_ROUTE = '/skills/repos/remove'
 
 /** 收藏仓库的 skills 树路由。 */
-const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
+const REPO_SKILLS_ROUTE = '/skills/repo-skills'
 
 /** 已安装 skill 的检查路由。 */
-const CHECK_ROUTE = '/buka-skills/check'
+const CHECK_ROUTE = '/skills/check'
 
 /** 已安装 skill 的更新路由。 */
-const UPDATE_ROUTE = '/buka-skills/update'
+const UPDATE_ROUTE = '/skills/update'
 
 /** 请求体里本插件认识的可选字段；其余字段忽略。 */
 interface RequestBody {
@@ -142,7 +142,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: GET ${LIST_ROUTE}`,
+      `skills: GET ${LIST_ROUTE}`,
     )
 
     webCtx.effect(
@@ -168,11 +168,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
                 }),
               )
               if (result.ok) {
-                webCtx.logger?.info?.(
-                  'buka-skills: 已卸载 %s（%s）',
-                  String(fields?.id),
-                  result.method,
-                )
+                webCtx.logger?.info?.('skills: 已卸载 %s（%s）', String(fields?.id), result.method)
               }
               sendJson(res, result.ok ? 200 : statusFor(result.code), result)
             } catch (error) {
@@ -180,11 +176,11 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: POST ${UNINSTALL_ROUTE}`,
+      `skills: POST ${UNINSTALL_ROUTE}`,
     )
 
     // ---- 可安装目标：执行者 / 工作区 ---------------------------------------
-    // 两份列表都来自 Host 的登记表（可选的 `bukaWorkers` 服务与 DSH 的
+    // 两份列表都来自 Host 的登记表（可选的 `workflowWorkers` 服务与 DSH 的
     // `workspaceRegistry`），浏览器只拿到标识符、名称 / 标题与路径，安装时再把
     // 选中的字符串换回可信目录。
 
@@ -207,7 +203,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: GET ${TARGETS_ROUTE}`,
+      `skills: GET ${TARGETS_ROUTE}`,
     )
 
     // ---- 从收藏列表一键安装 ------------------------------------------------
@@ -261,7 +257,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
                     ? result.installed.length
                     : 1
                 webCtx.logger?.info?.(
-                  'buka-skills: 已安装 %d 个 skill（%s，%s）',
+                  'skills: 已安装 %d 个 skill（%s，%s）',
                   count,
                   String('repo' in result ? result.repo : ''),
                   result.target ?? 'global',
@@ -273,7 +269,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: POST ${INSTALL_ROUTE}`,
+      `skills: POST ${INSTALL_ROUTE}`,
     )
 
     // ---- 已安装 skill 的检查 / 更新 ---------------------------------------
@@ -298,7 +294,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: GET ${CHECK_ROUTE}`,
+      `skills: GET ${CHECK_ROUTE}`,
     )
 
     webCtx.effect(
@@ -316,7 +312,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             if (body === undefined) return
             const fields = body as RequestBody | null
             // 页面上的行内「更新」只传这一行 skill 的名字；不传时与以前一样更新
-            // 全部候选（其他插件通过 `ctx.bukaSkills.updateSkills()` 调用）。
+            // 全部候选（其他插件通过 `ctx.skillCatalog.updateSkills()` 调用）。
             const skills = Array.isArray(fields?.skills)
               ? fields.skills.filter((name): name is string => typeof name === 'string')
               : undefined
@@ -325,7 +321,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
                 await catalog.updateSkills(skills === undefined ? {} : { skills })
               if (result.ok) {
                 webCtx.logger?.info?.(
-                  'buka-skills: 更新完成（%d 个成功，%d 个失败）',
+                  'skills: 更新完成（%d 个成功，%d 个失败）',
                   result.updated.length,
                   result.failed.length,
                 )
@@ -336,7 +332,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: POST ${UPDATE_ROUTE}`,
+      `skills: POST ${UPDATE_ROUTE}`,
     )
 
     // ---- 收藏的仓库 --------------------------------------------------------
@@ -382,7 +378,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
                 addSavedRepo({ homes, source: fields?.source, note: fields?.note }),
               )
               if (result.ok) {
-                webCtx.logger?.info?.('buka-skills: 已收藏仓库 %s', String(fields?.source))
+                webCtx.logger?.info?.('skills: 已收藏仓库 %s', String(fields?.source))
               }
               sendJson(res, result.ok ? 200 : repoStatusFor(result.code), result)
             } catch (error) {
@@ -390,7 +386,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: ${REPOS_ROUTE}`,
+      `skills: ${REPOS_ROUTE}`,
     )
 
     webCtx.effect(
@@ -410,7 +406,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             try {
               const result = await serializeRepo(() => removeSavedRepo({ homes, id: fields?.id }))
               if (result.ok) {
-                webCtx.logger?.info?.('buka-skills: 已移除收藏 %s', String(fields?.id))
+                webCtx.logger?.info?.('skills: 已移除收藏 %s', String(fields?.id))
               }
               sendJson(res, result.ok ? 200 : repoStatusFor(result.code), result)
             } catch (error) {
@@ -418,7 +414,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: POST ${REPO_REMOVE_ROUTE}`,
+      `skills: POST ${REPO_REMOVE_ROUTE}`,
     )
 
     webCtx.effect(
@@ -447,7 +443,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: GET ${REPO_SKILLS_ROUTE}`,
+      `skills: GET ${REPO_SKILLS_ROUTE}`,
     )
 
     // ---- 仓库头像 ----------------------------------------------------------
@@ -487,7 +483,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skills: GET ${ICON_ROUTE}`,
+      `skills: GET ${ICON_ROUTE}`,
     )
   })
 }

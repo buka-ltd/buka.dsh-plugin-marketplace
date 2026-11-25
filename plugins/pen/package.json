@@ -1,7 +1,7 @@
 {
   "name": "@buka/dsh-plugin-pen",
-  "version": "0.2.0",
-  "description": "新建会话时勾选「Pen」（带 Pen 图标），这个会话就注入 Pen（pen.dev）的 MCP 工具；会话标题旁显示「Pen MCP」标记。",
+  "version": "0.3.0",
+  "description": "新会话勾选「Pen」或在会话中用 /pen、/pen off 随时开关，这个会话就注入 Pen（pen.dev）的 MCP 工具；会话标题旁显示「Pen MCP」标记。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -26,6 +26,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-commands": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-mcp-client": ">=0.2.2-rc.1 <0.3.0"
   },
   "dsh": {

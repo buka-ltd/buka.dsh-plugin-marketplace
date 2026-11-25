@@ -1,8 +1,8 @@
 /**
- * `/buka-workers/skills/*` 路由的「只读技能仓库」约束回归。
+ * `/workflow/workers/skills/*` 路由的「只读技能仓库」约束回归。
  *
  * 页面不能再用任意第三方来源列出 / 安装 skill：来源必须出现在 Skills 插件的
- * 收藏列表里。这里用假的 `ctx.bukaSkills` 与临时执行者目录跑真实的路由处理
+ * 收藏列表里。这里用假的 `ctx.skillCatalog` 与临时执行者目录跑真实的路由处理
  * 函数，不启动 webServer，也不执行 npx。
  */
 
@@ -16,9 +16,9 @@ import test from 'node:test'
 import { registerSkillRoutes } from '../plugins/workflows/src/workers/routes/skills.ts'
 import { writeWorkerRegistry } from '../plugins/workflows/src/workers/store/registry.ts'
 
-const REPOS_ROUTE = '/buka-workers/skills/repos'
-const AVAILABLE_ROUTE = '/buka-workers/skills/available'
-const INSTALL_ROUTE = '/buka-workers/skills/install'
+const REPOS_ROUTE = '/workflow/workers/skills/repos'
+const AVAILABLE_ROUTE = '/workflow/workers/skills/available'
+const INSTALL_ROUTE = '/workflow/workers/skills/install'
 
 /** 一条假的收藏仓库。 */
 const SAVED_REPO = {
@@ -91,7 +91,7 @@ async function makeHarness({
       },
     },
     get(name) {
-      return name === 'bukaSkills' ? service : undefined
+      return name === 'skillCatalog' ? service : undefined
     },
     connection: { requestRejection: () => undefined },
     logger: { info() {}, warn() {} },

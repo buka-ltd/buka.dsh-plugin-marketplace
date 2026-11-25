@@ -38,18 +38,18 @@ export interface WorkflowRouteDeps {
 
 /** 路由路径。 */
 const ROUTES = {
-  workflows: '/buka-workflows/workflows',
-  workflow: '/buka-workflows/workflow',
-  workflowActivate: '/buka-workflows/workflow/activate',
-  jobs: '/buka-workflows/jobs',
-  jobStart: '/buka-workflows/job/start',
-  job: '/buka-workflows/job',
-  jobAction: '/buka-workflows/job/action',
-  jobRestart: '/buka-workflows/job/restart',
-  task: '/buka-workflows/task',
-  taskAction: '/buka-workflows/task/action',
-  attachments: '/buka-workflows/attachments',
-  attachment: '/buka-workflows/attachment',
+  workflows: '/workflow/list',
+  workflow: '/workflow/get',
+  workflowActivate: '/workflow/activate',
+  jobs: '/workflow/jobs',
+  jobStart: '/workflow/job/start',
+  job: '/workflow/job',
+  jobAction: '/workflow/job/action',
+  jobRestart: '/workflow/job/restart',
+  task: '/workflow/task',
+  taskAction: '/workflow/task/action',
+  attachments: '/workflow/attachments',
+  attachment: '/workflow/attachment',
 } as const
 
 /** 错误码 → HTTP 状态码。 */
@@ -90,7 +90,7 @@ function sendRouteError(
   const status = statusForError(error)
   const code = error instanceof WorkflowError ? error.code : fallbackCode
   const message = describeError(error)
-  if (status >= 500) logger?.warn?.(`buka-workflows: request failed: ${message}`)
+  if (status >= 500) logger?.warn?.(`workflow: request failed: ${message}`)
   if (!res.headersSent) sendError(res, status, code, message)
   else res.destroy(error instanceof Error ? error : undefined)
 }
@@ -140,7 +140,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
               }
             },
           }),
-        `buka-workflows: ${path}`,
+        `workflow: ${path}`,
       )
     }
 
@@ -356,9 +356,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
           { path: opened.file, name: opened.record.name, bytes: opened.record.bytes },
           {
             log: (error) =>
-              webCtx.logger?.warn?.(
-                `buka-workflows: attachment read failed: ${describeError(error)}`,
-              ),
+              webCtx.logger?.warn?.(`workflow: attachment read failed: ${describeError(error)}`),
           },
         )
         return
@@ -380,9 +378,7 @@ export function registerWorkflowRoutes({ ctx, ready }: WorkflowRouteDeps): void 
             inline: true,
             mime: preview.mime,
             log: (error) =>
-              webCtx.logger?.warn?.(
-                `buka-workflows: attachment read failed: ${describeError(error)}`,
-              ),
+              webCtx.logger?.warn?.(`workflow: attachment read failed: ${describeError(error)}`),
           },
         )
         return

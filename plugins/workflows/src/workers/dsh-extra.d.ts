@@ -10,7 +10,7 @@ declare module '@deepseek-ai/cordis' {
     /** 工作区注册表：执行者挂载、列表、改名同步与删除时用它。 */
     workspaceRegistry: WorkspaceRegistry
     /** 工作流一半的只读查询服务；按可选服务处理，取不到时删除按「没有作业引用」处理。 */
-    bukaWorkflows: BukaWorkflowsService | undefined
+    workflowQuery: WorkflowUsageService | undefined
   }
 
   interface Events {
@@ -49,12 +49,12 @@ export interface WorkspaceRegistry {
 }
 
 /**
- * 工作流一半提供的只读查询服务（`ctx.bukaWorkflows`）。
+ * 工作流一半提供的只读查询服务（`ctx.workflowQuery`）。
  *
  * 执行者一半只在删除前调用它：引用该标识符的运行中作业是唯一的删除阻塞，
  * 引用了它但已结束的作业与工作流只用于展示影响面。
  */
-export interface BukaWorkflowsService {
+export interface WorkflowUsageService {
   /**
    * 一个执行者标识符被哪些工作流 / 作业引用。
    *

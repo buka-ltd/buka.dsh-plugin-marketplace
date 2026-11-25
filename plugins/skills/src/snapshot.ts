@@ -28,7 +28,7 @@ export async function readSnapshot(
   try {
     summaries = await ctx.skills.list({ cwd: homes.agentsHome })
   } catch (error) {
-    ctx.logger?.warn?.('buka-skills: 无法读取 skills 注册表：%s', describeError(error))
+    ctx.logger?.warn?.('skills: 无法读取 skills 注册表：%s', describeError(error))
   }
   return collectGlobalSkills({ homes, summaries })
 }

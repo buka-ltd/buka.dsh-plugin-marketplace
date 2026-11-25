@@ -1,5 +1,5 @@
 /**
- * 执行工具（`buka_task_create` / `buka_task_complete`）的说明文本。
+ * 执行工具（`workflow_task_create` / `workflow_task_complete`）的说明文本。
  *
  * 同一条工具在两种会话里各注册一份：
  *
@@ -32,7 +32,7 @@ const COMPLETE_HEAD =
 export const DEFAULT_TASK_COMPLETE_DESCRIPTION = `${COMPLETE_HEAD} Handling a human task also needs the chosen \`action\` id and its form values in \`input\`; a task session lists the available actions in this description.`
 
 /**
- * 生成 `buka_task_create` 的说明：列出本任务可创建的 target、展示名与任务内容
+ * 生成 `workflow_task_create` 的说明：列出本任务可创建的 target、展示名与任务内容
  * schema。
  *
  * @param targets 可创建目标
@@ -56,7 +56,7 @@ export function taskCreateDescription(targets: readonly CreatableTarget[]): stri
 }
 
 /**
- * 生成 `buka_task_complete` 的说明：人任务列出动作 id、展示名与输入表单 schema。
+ * 生成 `workflow_task_complete` 的说明：人任务列出动作 id、展示名与输入表单 schema。
  *
  * @param actions 人任务动作；非人任务为空
  * @returns 工具说明

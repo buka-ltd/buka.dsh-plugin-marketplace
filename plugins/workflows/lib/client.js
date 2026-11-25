@@ -1056,31 +1056,31 @@ window.__ModuleLoader__.load({
     * 只做防御式读取，不做完整校验。
     */
     /** 侧边栏条目的词典命名空间，也是 `main` 插槽的 locale。 */
-    const NS$1 = "buka-workflows";
+    const NS$1 = "workflow";
     /** 侧边栏条目 id；与 `main` 插槽的 key 必须相同。 */
-    const PANEL_ID = "buka-workflows";
+    const PANEL_ID = "workflow";
     /** 工作流列表。 */
-    const WORKFLOWS_ROUTE = "/buka-workflows/workflows";
+    const WORKFLOWS_ROUTE = "/workflow/list";
     /** 工作流详情（定义快照 + 图 + 作业列表）。 */
-    const WORKFLOW_ROUTE = "/buka-workflows/workflow";
+    const WORKFLOW_ROUTE = "/workflow/get";
     /** 激活 / 停用工作流。 */
-    const WORKFLOW_ACTIVATE_ROUTE = "/buka-workflows/workflow/activate";
+    const WORKFLOW_ACTIVATE_ROUTE = "/workflow/activate";
     /** 作业详情（含任务摘要）。 */
-    const JOB_ROUTE = "/buka-workflows/job";
+    const JOB_ROUTE = "/workflow/job";
     /** 页面人启动作业。 */
-    const JOB_START_ROUTE = "/buka-workflows/job/start";
+    const JOB_START_ROUTE = "/workflow/job/start";
     /** 作业动作：cancel / retry-delivery。 */
-    const JOB_ACTION_ROUTE = "/buka-workflows/job/action";
+    const JOB_ACTION_ROUTE = "/workflow/job/action";
     /** 重启失败作业：failed（从失败位置）/ scratch（从头开始）。 */
-    const JOB_RESTART_ROUTE = "/buka-workflows/job/restart";
+    const JOB_RESTART_ROUTE = "/workflow/job/restart";
     /** 任务详情（payload / 依赖 / 执行记录 / 结果 / 操作）。 */
-    const TASK_ROUTE = "/buka-workflows/task";
+    const TASK_ROUTE = "/workflow/task";
     /** 任务动作：cancel / retry / claim / complete。 */
-    const TASK_ACTION_ROUTE = "/buka-workflows/task/action";
+    const TASK_ACTION_ROUTE = "/workflow/task/action";
     /** 作业附件库。 */
-    const ATTACHMENTS_ROUTE = "/buka-workflows/attachments";
+    const ATTACHMENTS_ROUTE = "/workflow/attachments";
     /** 单个附件的下载 / 预览 / 内联地址。 */
-    const ATTACHMENT_ROUTE = "/buka-workflows/attachment";
+    const ATTACHMENT_ROUTE = "/workflow/attachment";
     /** 有运行中作业时的刷新间隔（沿用旧页面风格）。 */
     const LIVE_REFRESH_MS = 1500;
     /** 没有运行中作业时的刷新间隔。 */
@@ -2270,8 +2270,8 @@ window.__ModuleLoader__.load({
     		items: props.tabs.map((tab) => ({
     			value: tab.id,
     			label: h(TabLabel, { text: tab.label }),
-    			id: `buka-workflows-drawer-tab-${tab.id}`,
-    			panelId: `buka-workflows-drawer-panel-${tab.id}`
+    			id: `workflow-drawer-tab-${tab.id}`,
+    			panelId: `workflow-drawer-panel-${tab.id}`
     		})),
     		onChange: (value) => setActive(value)
     	})), h("div", { className: "buka-workflows-drawerTabPanel" }, current?.content ?? null));
@@ -2577,8 +2577,15 @@ window.__ModuleLoader__.load({
     * 预设头像：id → emoji / 底色。
     *
     * 预设表统一在界面侧公共包里，与 workers 页共用同一份；图模型只带 id，
-    * 不认识的 id 当作没有头像。
+    * 不认识的 id 当作没有头像。人岗位与「已删执行者」不在预设表里，各有专门的
+    * id，由这里换成固定画法。
     */
+    /** 人岗位专用头像 id；不属于执行者预设，执行者页也选不到。 */
+    const HUMAN_AVATAR_ID = "__human__";
+    /** 已删执行者的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
+    const MISSING_AVATAR_ID = "__missing-worker__";
+    /** 人岗位头像里画的人；与执行者的动物头像区分开。 */
+    const HUMAN_AVATAR_EMOJI = "🧑";
     /**
     * 头像 id → 预设；不认识的 id 返回 null（图上就不画头像）。
     *
@@ -2593,6 +2600,21 @@ window.__ModuleLoader__.load({
     	};
     }
     /**
+    * 执行者 → 节点 / 抽屉里画的头像 id。
+    *
+    * 已删执行者优先：登记表里查不到时画灰色问号，不再区分人还是执行者。人岗位
+    * 拿专用头像，执行者岗位用登记表里挑的那一个。
+    *
+    * @param executor 岗位上的执行者；缺失时返回 undefined
+    * @returns 头像 id，或 undefined（不画头像）
+    */
+    function executorAvatarId(executor) {
+    	if (executor === null || executor === void 0) return void 0;
+    	if (executor.missing === true) return MISSING_AVATAR_ID;
+    	if (executor.kind === "human") return HUMAN_AVATAR_ID;
+    	return typeof executor.avatar === "string" && executor.avatar !== "" ? executor.avatar : void 0;
+    }
+    /**
     * 执行者头像小圆片：emoji 画在预设色的浅底上。[size] 是直径（px），`className`
     * 给胶囊 / 详情标题这类不同位置补间距。
     *
@@ -2603,6 +2625,7 @@ window.__ModuleLoader__.load({
     */
     function renderAvatar$1(avatar, size, className = "") {
     	if (avatar === "__missing-worker__") return renderMissingAvatar(size, className);
+    	if (avatar === "__human__") return renderHumanAvatar(size, className);
     	const preset = avatarPreset$1(avatar);
     	if (preset === null) return null;
     	return h("span", {
@@ -2617,8 +2640,25 @@ window.__ModuleLoader__.load({
     		"aria-hidden": true
     	}, preset.emoji);
     }
-    /** 已删执行者的占位头像 id；图节点只带 id，渲染时换成灰色问号。 */
-    const MISSING_AVATAR_ID = "__missing-worker__";
+    /**
+    * 人岗位的头像：人像 emoji 画在琥珀色浅底上，与图上人节点的描边同色；固定不变，
+    * 不参与执行者头像的挑选。
+    *
+    * @param size 直径（px）
+    * @param className 额外类名
+    * @returns React 元素
+    */
+    function renderHumanAvatar(size, className = "") {
+    	return h("span", {
+    		className: `buka-workflows-avatar buka-workflows-avatarHuman${className === "" ? "" : ` ${className}`}`,
+    		style: {
+    			width: `${size}px`,
+    			height: `${size}px`,
+    			fontSize: `${Math.max(8, Math.round(size * .62))}px`
+    		},
+    		"aria-hidden": true
+    	}, HUMAN_AVATAR_EMOJI);
+    }
     /**
     * 已删执行者的占位头像：灰色圆片 + 问号，与预设头像同样尺寸。
     *
@@ -2760,7 +2800,7 @@ window.__ModuleLoader__.load({
     	const labels = taskTypeLabels(definition);
     	const title = titleOf(page, selection, definition);
     	const position = selection.kind === "position" ? positions.find((item) => item.id === selection.id) : void 0;
-    	const avatar = position !== void 0 && typeof position.executor.avatar === "string" ? renderAvatar$1(position.executor.avatar, 28, "buka-workflows-drawerAvatar") : null;
+    	const avatar = position === void 0 ? null : renderAvatar$1(executorAvatarId(position.executor), 28, "buka-workflows-drawerAvatar");
     	const tabs = definitionTabs(page, selection, {
     		definition,
     		positions,
@@ -4346,12 +4386,13 @@ window.__ModuleLoader__.load({
     			},
     			...positions.map((position) => {
     				const list = tasksOf(position.id);
+    				const avatar = executorAvatarId(position.executor);
     				return {
     					id: position.id,
     					label: position.label,
     					kind: "position",
     					executor: position.executor,
-    					...position.executor.missing === true ? { avatar: MISSING_AVATAR_ID } : typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
+    					...avatar === void 0 ? {} : { avatar },
     					status: aggregateOf(list),
     					meta: metaOf(list),
     					title: titleOf(position.label, list),
@@ -4632,7 +4673,7 @@ window.__ModuleLoader__.load({
     	const tasks = sortTasks(jobTasks(state).filter((task) => task.position === selection.positionId));
     	const title = fill(t, "nodeTasksTitle", { label: selection.label });
     	const position = positionsOf(mergedDefinition(currentJobDefinition(state), currentDefinition(state))).find((item) => item.id === selection.positionId);
-    	const avatar = position?.executor.missing === true ? renderAvatar$1(MISSING_AVATAR_ID, 28, "buka-workflows-drawerAvatar") : position !== void 0 && typeof position.executor.avatar === "string" ? renderAvatar$1(position.executor.avatar, 28, "buka-workflows-drawerAvatar") : null;
+    	const avatar = renderAvatar$1(executorAvatarId(position?.executor), 28, "buka-workflows-drawerAvatar");
     	const meta = [fill(t, "flowTaskCount", { n: tasks.length }), position === void 0 ? "" : renderExecutor(page, position.executor)].filter((part) => part !== "");
     	return h(ClientModal, {
     		open: true,
@@ -4845,9 +4886,7 @@ window.__ModuleLoader__.load({
     /** 任务岗位对应的执行者头像。 */
     function executorAvatar(page, task) {
     	if (task.position === void 0 || task.position === "") return void 0;
-    	const position = positionsOf(mergedDefinition(currentJobDefinition(page.state), currentDefinition(page.state))).find((item) => item.id === task.position);
-    	if (position?.executor.missing === true) return MISSING_AVATAR_ID;
-    	return typeof position?.executor.avatar === "string" && position.executor.avatar !== "" ? position.executor.avatar : void 0;
+    	return executorAvatarId(positionsOf(mergedDefinition(currentJobDefinition(page.state), currentDefinition(page.state))).find((item) => item.id === task.position)?.executor);
     }
     /** 抽屉正文。 */
     function renderTaskBody(page, task) {
@@ -5056,15 +5095,18 @@ window.__ModuleLoader__.load({
     			kind: "start",
     			status: "idle"
     		},
-    		...positions.map((position) => ({
-    			id: position.id,
-    			label: position.label,
-    			kind: "position",
-    			executor: position.executor,
-    			...position.executor.missing === true ? { avatar: MISSING_AVATAR_ID } : typeof position.executor.avatar === "string" && position.executor.avatar !== "" ? { avatar: position.executor.avatar } : {},
-    			status: "idle",
-    			title: `${position.label} · ${renderExecutor(page, position.executor)}`
-    		})),
+    		...positions.map((position) => {
+    			const avatar = executorAvatarId(position.executor);
+    			return {
+    				id: position.id,
+    				label: position.label,
+    				kind: "position",
+    				executor: position.executor,
+    				...avatar === void 0 ? {} : { avatar },
+    				status: "idle",
+    				title: `${position.label} · ${renderExecutor(page, position.executor)}`
+    			};
+    		}),
     		{
     			id: "end",
     			label: t("graphEnd"),
@@ -5401,45 +5443,45 @@ window.__ModuleLoader__.load({
     		{
     			value: "jobs",
     			label: t("jobsTab"),
-    			id: "buka-workflows-tab-jobs",
-    			panelId: "buka-workflows-panel-jobs"
+    			id: "workflow-tab-jobs",
+    			panelId: "workflow-panel-jobs"
     		},
     		{
     			value: "definition",
     			label: t("definitionTab"),
-    			id: "buka-workflows-tab-definition",
-    			panelId: "buka-workflows-panel-definition"
+    			id: "workflow-tab-definition",
+    			panelId: "workflow-panel-definition"
     		},
     		{
     			value: "types",
     			label: t("taskTypesTab"),
-    			id: "buka-workflows-tab-types",
-    			panelId: "buka-workflows-panel-types"
+    			id: "workflow-tab-types",
+    			panelId: "workflow-panel-types"
     		}
     	] : route.kind === "job" ? [
     		{
     			value: "overview",
     			label: t("overviewTab"),
-    			id: "buka-workflows-tab-overview",
-    			panelId: "buka-workflows-panel-overview"
+    			id: "workflow-tab-overview",
+    			panelId: "workflow-panel-overview"
     		},
     		{
     			value: "flow",
     			label: t("flowTab"),
-    			id: "buka-workflows-tab-flow",
-    			panelId: "buka-workflows-panel-flow"
+    			id: "workflow-tab-flow",
+    			panelId: "workflow-panel-flow"
     		},
     		{
     			value: "board",
     			label: t("boardTab"),
-    			id: "buka-workflows-tab-board",
-    			panelId: "buka-workflows-panel-board"
+    			id: "workflow-tab-board",
+    			panelId: "workflow-panel-board"
     		},
     		{
     			value: "outputs",
     			label: t("outputsTab"),
-    			id: "buka-workflows-tab-outputs",
-    			panelId: "buka-workflows-panel-outputs"
+    			id: "workflow-tab-outputs",
+    			panelId: "workflow-panel-outputs"
     		}
     	] : null;
     	const activeTab = route.kind === "workflow" ? route.tab : route.kind === "job" ? route.view : "";
@@ -6338,7 +6380,7 @@ window.__ModuleLoader__.load({
     	try {
     		await sessions.refresh();
     	} catch (failure) {
-    		console.warn("buka-workflows: refreshing the session list failed:", failure);
+    		console.warn("workflow: refreshing the session list failed:", failure);
     	}
     }
     // .build/workflows/client/state/use-effects.js
@@ -6899,7 +6941,7 @@ window.__ModuleLoader__.load({
     /**
     * 「执行者」页面与 Host 通信的请求 / 错误处理。
     *
-    * 所有 `/buka-workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
+    * 所有 `/workflow/workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
     * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。逐项更新是例外：请求
     * 成功但部分 skill 失败时回 200 + `ok:false`，由调用方读取 `update.failed`。
     *
@@ -7072,65 +7114,65 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-workflows/workers/client/constants
     */
     /** 词典命名空间（面板合并后仍独立，供 `home.ts` 绑定执行者文案）。 */
-    const NS = "buka-workers";
+    const NS = "workflow-workers";
     /** 「创建执行者」对话框里表单的 id：页脚按钮通过 `form` 属性提交它。 */
-    const CREATE_FORM_ID = "buka-workers-create-form";
-    /** 与 Host 一半（`src/workers/` 的 `/buka-workers/*` 路由）的路由常量保持一致。 */
-    const LIST_ROUTE = "/buka-workers/list";
-    const CREATE_ROUTE = "/buka-workers/create";
-    const RENAME_ROUTE = "/buka-workers/rename";
-    const AVATAR_ROUTE = "/buka-workers/avatar";
-    const FILES_ROUTE = "/buka-workers/files";
-    const FILE_ROUTE = "/buka-workers/file";
-    const DESCRIPTION_ROUTE = "/buka-workers/description";
-    const MODELS_ROUTE = "/buka-workers/models";
-    const PRESETS_ROUTE = "/buka-workers/presets";
-    const PRESET_ROUTE = "/buka-workers/preset";
-    const REMOVE_IMPACT_ROUTE = "/buka-workers/remove-impact";
-    const REMOVE_ROUTE = "/buka-workers/remove";
-    const REVEAL_ROUTE = "/buka-workers/reveal";
+    const CREATE_FORM_ID = "workflow-workers-create-form";
+    /** 与 Host 一半（`src/workers/` 的 `/workflow/workers/*` 路由）的路由常量保持一致。 */
+    const LIST_ROUTE = "/workflow/workers/list";
+    const CREATE_ROUTE = "/workflow/workers/create";
+    const RENAME_ROUTE = "/workflow/workers/rename";
+    const AVATAR_ROUTE = "/workflow/workers/avatar";
+    const FILES_ROUTE = "/workflow/workers/files";
+    const FILE_ROUTE = "/workflow/workers/file";
+    const DESCRIPTION_ROUTE = "/workflow/workers/description";
+    const MODELS_ROUTE = "/workflow/workers/models";
+    const PRESETS_ROUTE = "/workflow/workers/presets";
+    const PRESET_ROUTE = "/workflow/workers/preset";
+    const REMOVE_IMPACT_ROUTE = "/workflow/workers/remove-impact";
+    const REMOVE_ROUTE = "/workflow/workers/remove";
+    const REVEAL_ROUTE = "/workflow/workers/reveal";
     /**
     * DSH 内置 `@deepseek-ai/dsh-client-ui-open-in-app` 的跨插件 HTTP 契约：
     * 应用清单、应用图标与「用某个应用打开目录」。不在插件间 import，只在浏览器
     * 里 fetch 这三个包内路由；路由不可用（Web / headless / 非桌面组合）时页面
-    * 退回 `/buka-workers/reveal`。
+    * 退回 `/workflow/workers/reveal`。
     */
     const OPEN_IN_APP_APPS_ROUTE = "/open-in-app/apps";
     const OPEN_IN_APP_OPEN_ROUTE = "/open-in-app/open";
     const OPEN_IN_APP_ICON_ROUTE = "/open-in-app/icon";
     /** 与内置 open-in-app 共享的「上次选中的应用」localStorage 键（JSON 字符串）。 */
     const OPEN_IN_APP_CHOICE_KEY = "dsh.open-in-app.choice";
-    const SKILL_REPOS_ROUTE = "/buka-workers/skills/repos";
-    const AVAILABLE_ROUTE = "/buka-workers/skills/available";
-    const INSTALL_ROUTE = "/buka-workers/skills/install";
-    const SKILL_REMOVE_ROUTE = "/buka-workers/skills/remove";
-    const SKILL_CHECK_ROUTE = "/buka-workers/skills/check";
-    const SKILL_UPDATE_ROUTE = "/buka-workers/skills/update";
-    const SKILL_UPDATE_ALL_ROUTE = "/buka-workers/skills/update-all";
+    const SKILL_REPOS_ROUTE = "/workflow/workers/skills/repos";
+    const AVAILABLE_ROUTE = "/workflow/workers/skills/available";
+    const INSTALL_ROUTE = "/workflow/workers/skills/install";
+    const SKILL_REMOVE_ROUTE = "/workflow/workers/skills/remove";
+    const SKILL_CHECK_ROUTE = "/workflow/workers/skills/check";
+    const SKILL_UPDATE_ROUTE = "/workflow/workers/skills/update";
+    const SKILL_UPDATE_ALL_ROUTE = "/workflow/workers/skills/update-all";
     /**
     * 来源只来自 Skills 插件的「技能仓库」：两个插件不互相 import，Host 通过
-    * `ctx.bukaSkills` 读收藏、`listSkills()` 读仓库内容；浏览器不再手填来源。
+    * `ctx.skillCatalog` 读收藏、`listSkills()` 读仓库内容；浏览器不再手填来源。
     */
     /** 详情页的页签；id / panelId 与 `DetailTabs` 的 ARIA 契约一致。 */
     const TABS = [
     	{
     		value: "settings",
-    		id: "buka-workers-tab-settings",
-    		panelId: "buka-workers-panel-settings"
+    		id: "workflow-workers-tab-settings",
+    		panelId: "workflow-workers-panel-settings"
     	},
     	{
     		value: "files",
-    		id: "buka-workers-tab-files",
-    		panelId: "buka-workers-panel-files"
+    		id: "workflow-workers-tab-files",
+    		panelId: "workflow-workers-panel-files"
     	},
     	{
     		value: "skills",
-    		id: "buka-workers-tab-skills",
-    		panelId: "buka-workers-panel-skills"
+    		id: "workflow-workers-tab-skills",
+    		panelId: "workflow-workers-panel-skills"
     	}
     ];
     /** 「更换头像」对话框里表单的 id：页脚「保存」按钮通过 `form` 属性提交它。 */
-    const AVATAR_FORM_ID = "buka-workers-avatar-form";
+    const AVATAR_FORM_ID = "workflow-workers-avatar-form";
     /**
     * 新标识符的字符集（与 Host 的 `isValidWorkerId` 一致）：小写字母开头，
     * 后面可以跟小写字母、数字、`_` 与 `-`，总长 1–64。
@@ -7234,7 +7276,7 @@ window.__ModuleLoader__.load({
     		return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
     	}
     	/**
-    	* 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `buka_workers`
+    	* 保存「描述」页签：Host 折叠空白后写进登记表。工作流通过 `workflow_workers`
     	* 工具读它，决定是否把节点交给这个执行者。
     	*
     	* 设置页签没有保存按钮：页面在输入停下后自动调用这里，所以成功后只局部
@@ -7272,7 +7314,7 @@ window.__ModuleLoader__.load({
     		setModelSaving(true);
     		setModelError(null);
     		try {
-    			const saved = (await requestJson("/buka-workers/model", {
+    			const saved = (await requestJson("/workflow/workers/model", {
     				method: "POST",
     				body: JSON.stringify({
     					id: selectedId,
@@ -7337,7 +7379,7 @@ window.__ModuleLoader__.load({
     	/** 候选清单请求序号：切换仓库时旧响应不能覆盖新仓库的清单。 */
     	let candidatesSequence = 0;
     	/**
-    	* 读 Skills 插件的「技能仓库」。Host 通过 `ctx.bukaSkills` 读收藏，插件没装
+    	* 读 Skills 插件的「技能仓库」。Host 通过 `ctx.skillCatalog` 读收藏，插件没装
     	* 或版本太旧时回 503；页面据此显示安装提示，而不是让用户手填第三方来源。
     	*/
     	async function loadInstallRepos() {
@@ -8011,7 +8053,7 @@ window.__ModuleLoader__.load({
     /**
     * 「执行者」页面的全部 UI 状态与派生值。
     *
-    * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/buka-workers/list`。
+    * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/workflow/workers/list`。
     * 状态集中在 `useWorkersState` 里，视图与动作模块只读写它，不各自持有副本。
     *
     * @module @buka/dsh-plugin-workflows/workers/client/state
@@ -9468,7 +9510,7 @@ window.__ModuleLoader__.load({
     	}, nameError));
     }
     /**
-    * 「描述」区块：一句话摘要。工作流通过 `buka_workers` 读这一行，决定是否把
+    * 「描述」区块：一句话摘要。工作流通过 `workflow_workers` 读这一行，决定是否把
     * 节点交给这个执行者。
     *
     * 没有保存按钮：停止输入后自动保存，失焦时立即保存；区块右上角只显示
@@ -10008,7 +10050,7 @@ window.__ModuleLoader__.load({
     /**
     * 「执行者」页签（首页 Worker Tab 的内容）。
     *
-    * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/buka-workers/list`，
+    * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/workflow/workers/list`，
     * 挂载 / 摘除 / 打开工作区则通过注入的 `getService` 取 DSH 的 Client
     * Service，两者都失败时用 Toast 说明原因。
     *
@@ -10160,13 +10202,13 @@ window.__ModuleLoader__.load({
     	const tabs = [{
     		value: "workflow",
     		label: h(TabLabel, { text: t("topTabWorkflow") }),
-    		id: "buka-workflows-hometab-workflow",
-    		panelId: "buka-workflows-homepanel-workflow"
+    		id: "workflow-hometab-workflow",
+    		panelId: "workflow-homepanel-workflow"
     	}, {
     		value: "worker",
     		label: h(TabLabel, { text: t("topTabWorker") }),
-    		id: "buka-workflows-hometab-worker",
-    		panelId: "buka-workflows-homepanel-worker"
+    		id: "workflow-hometab-worker",
+    		panelId: "workflow-homepanel-worker"
     	}];
     	const topTabs = h(_deepseek_ai_dsh_client_ui_primitives.SegmentedTabs, {
     		size: "sm",
@@ -10533,6 +10575,7 @@ window.__ModuleLoader__.load({
     .buka-workflows-restartTask{margin:0;color:var(--dsw-alias-label-secondary);font-size:var(--buka-text-meta, 12px);line-height:var(--buka-line-18, 18px);overflow-wrap:anywhere}
     .buka-workflows-avatar{box-sizing:border-box;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;border:1px solid transparent;line-height:1;user-select:none}
     .buka-workflows-avatarMissing{background:var(--dsw-alias-fill-secondary);border-color:var(--dsw-alias-border-secondary);color:var(--dsw-alias-label-tertiary);font-weight:600}
+    .buka-workflows-avatarHuman{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 16%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 40%,transparent)}
     .buka-workflows-drawer.buka-workflows-drawer{position:fixed;inset-block:0;right:0;left:auto;width:min(720px,100vw);max-width:none;max-height:none;height:auto;margin:0;padding:0;gap:0;border-radius:0;border-left:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);box-shadow:-12px 0 32px rgb(0 0 0 / 18%);display:flex;flex-direction:column;overflow:hidden;animation:buka-workflows-drawer-in 160ms ease-out}
     .buka-workflows-inspector.buka-workflows-inspector{width:min(640px,100vw)}
     .buka-workflows-nodeTasks.buka-workflows-nodeTasks{width:min(480px,100vw)}
@@ -11252,10 +11295,10 @@ window.__ModuleLoader__.load({
     *
     * - 「执行者」页（`workers/`）负责「工作区身份」：挂载 / 删除工作区注册 /
     *   打开会话都走 DSH 的 Client Service（`workspaces.*`、`uiWorkspace.*`），
-    *   磁盘内容由 Host 的 `/buka-workers/*` 路由处理。
+    *   磁盘内容由 Host 的 `/workflow/workers/*` 路由处理。
     * - 「工作流」页（本目录其余模块）只做一条链：工作流列表 → 工作流
     *   （作业 / 结构图 / 任务类型）→ 作业（概览 / 实时流程 / 看板 / 资产），数据与动作来自
-    *   Host 的 `/buka-workflows/*` 路由。
+    *   Host 的 `/workflow/*` 路由。
     *
     * 两个页签由 `home.ts` 的 `HomePage` 装配：页签由 hash 驱动（`#/workers`
     * ↔ 执行者页签），跨页签跳转（如删除影响面里的「打开作业」）只写 hash。
@@ -11294,25 +11337,25 @@ window.__ModuleLoader__.load({
     	ctx.effect(() => ctx.locale.register(NS, {
     		zh,
     		en
-    	}), "buka-workers: dictionaries");
+    	}), "workflow-workers: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-workflows";
     		tag.textContent = CSS;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-workers: styles");
+    	}, "workflow-workers: styles");
     	ctx.effect(() => ctx.locale.register(NS$1, {
     		zh: zh$1,
     		en: en$1
-    	}), "buka-workflows: dictionaries");
+    	}), "workflow: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-workflows";
     		tag.textContent = CSS$1;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-workflows: styles");
+    	}, "workflow: styles");
     	ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
     		name: "sidebar.panellist",
     		id: PANEL_ID,

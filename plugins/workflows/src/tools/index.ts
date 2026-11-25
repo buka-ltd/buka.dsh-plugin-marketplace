@@ -3,7 +3,8 @@
  *
  * 可见性：
  * - 工作流定义工具只对配置点名的编排 preset 根会话可见；
- * - 启动 / 状态 / 取消工具对普通会话可见（发起人 = 当前会话）；
+ * - 作业工具（列出可启动工作流 / 启动）只对作业模式（`/job` 进入、尚未启动过
+ *   作业）的会话可见；状态 / 取消工具对发起人 / 执行会话可见；
  * - 执行工具（建任务 / 提交结果 / 看板 / 任务 / 附件）只对引擎创建的任务会话、
  *   助理会话与发起人会话可见，并在 `execute` 里按会话再校验一次。
  *
@@ -16,6 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import type { DeliveryRule, JsonValue } from '../domain/types.ts'
 import type { WorkflowEngine } from '../engine/engine.ts'
+import { inJobMode, selectedJobMode } from '../job-mode.ts'
 import type { ResolvedOptions } from '../options.ts'
 import {
   DEFAULT_TASK_COMPLETE_DESCRIPTION,
@@ -152,7 +154,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(
     defineTool({
-      name: 'buka_workflow_save',
+      name: 'workflow_save',
       description: `Validate and save a workflow definition as a new version. New workflows are enabled immediately. Only the orchestration preset can see this tool. Pass the complete v9 definition; executors and assistants reference workers by their immutable identifier; without "id" a new workflow is created.\n\n${DEFINITION_HELP}`,
       parameters: {
         definition: {
@@ -216,9 +218,9 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(
     defineTool({
-      name: 'buka_workflow_list',
+      name: 'workflow_list',
       description:
-        'List saved workflows (id, name, version, status, job count). Use buka_workflow_get to read a full definition.',
+        'List saved workflows (id, name, version, status, job count). Use workflow_get to read a full definition.',
       parameters: {},
       output: {
         schema: {
@@ -251,7 +253,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(
     defineTool({
-      name: 'buka_workflow_get',
+      name: 'workflow_get',
       description: 'Read one saved workflow definition (optionally a specific version).',
       parameters: {
         id: { type: 'string', required: true, description: 'Workflow id.' },
@@ -290,14 +292,70 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 
   register(
     defineTool({
-      name: 'buka_job_start',
+      name: 'workflow_job_options',
       description:
-        'Start a workflow job from this session. The starter is this session: supply the workflow input as `content` (it must match the workflow start.content schema). If the input or initialization fails, a failed job and a failed start task are kept as a trace and the error names the job; such a job cannot be restarted. The job runs on the board; the final report is delivered back into this conversation and you confirm it with buka_task_complete. Use /job instead when the host supports commands.',
+        'List the workflows this job-mode session can start: id, name, description, the start node JSON Schema for `content`, and the reason when a workflow cannot start right now. Use it to pick the workflow that matches the user’s request. If the user did not say which workflow to use, or several fit equally, ask the user instead of guessing. Only available in job mode.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            workflows: { type: 'json', required: true },
+          },
+        },
+        render: (_args, value) => {
+          const workflows = Array.isArray(value.workflows) ? value.workflows : []
+          if (workflows.length === 0) {
+            return text('没有已启用的工作流；让用户先在「工作流」页面启用一个。')
+          }
+          const lines = ['可启动的工作流：']
+          for (const entry of workflows) {
+            const workflow = entry as Record<string, unknown>
+            lines.push('')
+            lines.push(`- ${String(workflow.workflowId)}「${String(workflow.name)}」`)
+            const description = String(workflow.description ?? '').trim()
+            if (description !== '') lines.push(`  ${description}`)
+            if (workflow.error !== undefined) {
+              lines.push(`  （当前不可启动：${String(workflow.error)}）`)
+            } else if (workflow.startContent === undefined) {
+              lines.push('  开始节点没有输入字段。')
+            } else {
+              lines.push(`  开始节点输入 schema：${JSON.stringify(workflow.startContent)}`)
+            }
+          }
+          lines.push('')
+          lines.push('按用户描述挑一个；没有说明用哪个、或几个都像时先问用户。')
+          return text(lines.join('\n'))
+        },
+      },
+      async execute(_args, exec) {
+        const state = selectedJobMode(exec.agent?.session)
+        if (!state.entered || state.consumed) {
+          throw new Error('workflow_job_options is only available in job mode')
+        }
+        const engine = await ready()
+        return { workflows: toolJson(await engine.jobModeTargets()) }
+      },
+    }),
+    (context) => inJobMode(context.agent),
+  )
+
+  register(
+    defineTool({
+      name: 'workflow_job_start',
+      description:
+        "Start the workflow job of this session's job mode. This session may start exactly one job, and only while in job mode: enter it by making /job the first message of a new session, then pick the workflow with workflow_job_options. Pass that workflow's id and a `content` object matching the start node JSON Schema listed for it; omit `content` when it has no fields. If the input or initialization fails, a failed job and a failed start task are kept as a trace and the error names the job. The job runs on the board; the final report is delivered back into this conversation and you confirm it with workflow_task_complete.",
       parameters: {
-        workflowId: { type: 'string', required: true, description: 'Workflow id to start.' },
+        workflowId: {
+          type: 'string',
+          required: true,
+          description: 'Workflow id listed by workflow_job_options.',
+        },
         content: {
           type: 'json',
-          description: 'Workflow input matching the start.content schema; omit for no input.',
+          description:
+            'Workflow input matching the start node JSON Schema listed by workflow_job_options; omit for no input.',
         },
         delivery: {
           type: 'json',
@@ -320,10 +378,31 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
       },
       async execute(args, exec) {
         const sessionId = sessionIdOf(exec)
-        if (sessionId === '') throw new Error('buka_job_start must be called from a session')
+        if (sessionId === '') throw new Error('workflow_job_start must be called from a session')
+        const state = selectedJobMode(exec.agent?.session)
+        if (!state.entered) {
+          throw new Error(
+            'workflow_job_start is only available in job mode; open a new session with /job as its first message',
+          )
+        }
+        if (state.consumed) {
+          throw new Error(
+            'this session already started its workflow job; open a new session with /job to start another',
+          )
+        }
+        const workflowId = typeof args.workflowId === 'string' ? args.workflowId.trim() : ''
+        if (workflowId === '') {
+          throw new Error('workflow_job_start requires a workflow id from workflow_job_options')
+        }
         const engine = await ready()
+        // 同一批并行调用可能都在消费前被准入：以引擎记录为准再挡一次。
+        if (engine.jobIdForSession(sessionId) !== null) {
+          throw new Error(
+            'this session already started its workflow job; open a new session with /job to start another',
+          )
+        }
         const job = await engine.createJobFromSession({
-          workflowId: args.workflowId,
+          workflowId,
           content: (args.content ?? {}) as JsonValue,
           sessionId,
           delivery: args.delivery as DeliveryRule | undefined,
@@ -332,10 +411,11 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
           jobId: job.id,
           seq: job.seq,
           workflowName: job.workflowName,
-          message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 buka_task_complete 确认收到。`,
+          message: `已创建作业 #${job.seq}「${job.workflowName}」，任务已进入看板调度。作业结束后最终报告会回到本会话，调用 workflow_task_complete 确认收到。`,
         }
       },
     }),
+    (context) => inJobMode(context.agent),
   )
 
   register(defineJobStatusTool(ready), starterVisible)
@@ -350,7 +430,7 @@ export function registerWorkflowTools(deps: WorkflowToolDeps): void {
 /** 作业状态工具。 */
 function defineJobStatusTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
-    name: 'buka_job_status',
+    name: 'workflow_job_status',
     description:
       'Read one workflow job (status, task counts) or, without jobId, the job started by this session.',
     parameters: {
@@ -396,7 +476,7 @@ function defineJobStatusTool(ready: () => Promise<WorkflowEngine>) {
 /** 取消作业工具。 */
 function defineJobCancelTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
-    name: 'buka_job_cancel',
+    name: 'workflow_job_cancel',
     description: 'Cancel a running workflow job started by this session (or the given job id).',
     parameters: {
       jobId: { type: 'string', description: 'Job id; defaults to this session’s job.' },
@@ -440,7 +520,7 @@ export function defineTaskCreateTool(
   description: string = DEFAULT_TASK_CREATE_DESCRIPTION,
 ) {
   return defineTool({
-    name: 'buka_task_create',
+    name: 'workflow_task_create',
     description,
     parameters: {
       target: {
@@ -473,10 +553,11 @@ export function defineTaskCreateTool(
     },
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
-      if (sessionId === '') throw new Error('buka_task_create must be called from a task session')
+      if (sessionId === '')
+        throw new Error('workflow_task_create must be called from a task session')
       const target = typeof args.target === 'string' ? args.target.trim() : ''
       if (target === '') {
-        throw new Error('buka_task_create requires a target listed in its description')
+        throw new Error('workflow_task_create requires a target listed in its description')
       }
       const engine = await ready()
       const task = await engine.createTaskFromTarget({
@@ -501,7 +582,7 @@ export function defineTaskCompleteTool(
   description: string = DEFAULT_TASK_COMPLETE_DESCRIPTION,
 ) {
   return defineTool({
-    name: 'buka_task_complete',
+    name: 'workflow_task_complete',
     description,
     parameters: {
       text: {
@@ -541,7 +622,8 @@ export function defineTaskCompleteTool(
     },
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
-      if (sessionId === '') throw new Error('buka_task_complete must be called from a task session')
+      if (sessionId === '')
+        throw new Error('workflow_task_complete must be called from a task session')
       const engine = await ready()
       const result = await engine.completeTaskFromSession({
         sessionId,
@@ -558,7 +640,7 @@ export function defineTaskCompleteTool(
 /** 看板工具。 */
 function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
-    name: 'buka_job_board',
+    name: 'workflow_job_board',
     description:
       'Read the tasks of the job this session is executing: id, type, status, dependencies, result text and attachments. Useful to gather task ids when creating follow-up tasks.',
     parameters: {},
@@ -604,7 +686,7 @@ function defineBoardTool(ready: () => Promise<WorkflowEngine>) {
 /** 任务读取工具。 */
 function defineTaskGetTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
-    name: 'buka_task_get',
+    name: 'workflow_task_get',
     description:
       'Read one task of the job this session is executing: content, dependencies, result and attachments.',
     parameters: {
@@ -633,7 +715,7 @@ function defineTaskGetTool(ready: () => Promise<WorkflowEngine>) {
 /** 附件工具。 */
 function defineAttachmentsTool(ready: () => Promise<WorkflowEngine>) {
   return defineTool({
-    name: 'buka_job_attachments',
+    name: 'workflow_job_attachments',
     description:
       'Search or read the attachments this task is allowed to see (its own output plus the tasks it depends on, directly or transitively). Pass no arguments to list visible attachments; pass attachmentId to read one (metadata plus bounded inline text).',
     parameters: {

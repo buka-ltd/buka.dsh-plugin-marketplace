@@ -28,25 +28,25 @@ import {
 import { resolveWorker } from './target.ts'
 
 /** 页面列出「技能仓库」收藏来源用的路由。 */
-const SKILL_REPOS_ROUTE = '/buka-workers/skills/repos'
+const SKILL_REPOS_ROUTE = '/workflow/workers/skills/repos'
 
 /** 页面列出一个收藏仓库里可安装的 skills 用的路由。 */
-const AVAILABLE_ROUTE = '/buka-workers/skills/available'
+const AVAILABLE_ROUTE = '/workflow/workers/skills/available'
 
 /** 页面安装项目级 skill 用的路由。 */
-const INSTALL_ROUTE = '/buka-workers/skills/install'
+const INSTALL_ROUTE = '/workflow/workers/skills/install'
 
 /** 页面移除项目级 skill 用的路由。 */
-const SKILL_REMOVE_ROUTE = '/buka-workers/skills/remove'
+const SKILL_REMOVE_ROUTE = '/workflow/workers/skills/remove'
 
 /** 单个执行者的 skill 更新入口（可选 `skills` 只更新其中几项）。 */
-const SKILL_UPDATE_ROUTE = '/buka-workers/skills/update'
+const SKILL_UPDATE_ROUTE = '/workflow/workers/skills/update'
 
 /** 单个执行者的 skill 检查入口：页面进入「技能」页签时自动调用。 */
-const SKILL_CHECK_ROUTE = '/buka-workers/skills/check'
+const SKILL_CHECK_ROUTE = '/workflow/workers/skills/check'
 
 /** 列表页「更新全部执行者」。 */
-const SKILL_UPDATE_ALL_ROUTE = '/buka-workers/skills/update-all'
+const SKILL_UPDATE_ALL_ROUTE = '/workflow/workers/skills/update-all'
 
 /** 项目级安装 / 移除的最长等待时间；比全局版 npx runner 默认的 120 s 更宽。 */
 const NPX_TIMEOUT_MS = 180_000
@@ -159,10 +159,10 @@ interface SkillsHostService extends SerialQueueService {
   checkSkills?(options: { dir: string }): Promise<unknown>
 }
 
-/** 从 web 上下文取可选的 `bukaSkills` 服务；插件没装时返回 null。 */
+/** 从 web 上下文取可选的 `skillCatalog` 服务；插件没装时返回 null。 */
 function skillsService(ctx: Context): SkillsHostService | null {
   try {
-    return (ctx.get?.('bukaSkills') ?? null) as SkillsHostService | null
+    return (ctx.get?.('skillCatalog') ?? null) as SkillsHostService | null
   } catch {
     return null
   }
@@ -337,12 +337,12 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             const saved = await readSavedRepositories(service)
             sendJson(res, 200, { ok: true, ...saved })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取技能仓库失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取技能仓库失败：%s', describeError(error))
             sendError(res, 502, 'repos-failed', `读取技能仓库失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${SKILL_REPOS_ROUTE}`,
+    `workflow-workers: GET ${SKILL_REPOS_ROUTE}`,
   )
 
   webCtx.effect(
@@ -417,7 +417,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             }
             const scanned = await scanProjectSkills(resolved.worker.path)
             webCtx.logger?.info?.(
-              'buka-workers: 已读取 skill 清单（%s ← %s，%d 个）',
+              'workflow-workers: 已读取 skill 清单（%s ← %s，%d 个）',
               resolved.worker.path,
               repository.source,
               listed.skills.length,
@@ -429,12 +429,12 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
               installed: scanned.skills.map((skill) => skill.name),
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取 skill 清单失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取 skill 清单失败：%s', describeError(error))
             sendError(res, 500, 'available-failed', `读取 skill 清单失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${AVAILABLE_ROUTE}`,
+    `workflow-workers: POST ${AVAILABLE_ROUTE}`,
   )
 
   webCtx.effect(
@@ -543,7 +543,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             const scanned = await scanProjectSkills(resolved.worker.path)
             const claude = await ensureClaudeLink(resolved.worker.path)
             webCtx.logger?.info?.(
-              'buka-workers: 已安装 %d 个 skill（%s ← %s）',
+              'workflow-workers: 已安装 %d 个 skill（%s ← %s）',
               selected.length,
               resolved.worker.path,
               repository.source,
@@ -555,12 +555,12 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
               claude,
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 安装 skill 失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 安装 skill 失败：%s', describeError(error))
             sendError(res, 500, 'install-failed', `安装 skill 失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${INSTALL_ROUTE}`,
+    `workflow-workers: POST ${INSTALL_ROUTE}`,
   )
 
   webCtx.effect(
@@ -603,18 +603,18 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             }
             const scanned = await scanProjectSkills(resolved.worker.path)
             webCtx.logger?.info?.(
-              'buka-workers: 已移除 skill（%s ← %s）',
+              'workflow-workers: 已移除 skill（%s ← %s）',
               resolved.worker.path,
               skillName,
             )
             sendJson(res, 200, { ok: true, output: result.output ?? '', skills: scanned.skills })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 移除 skill 失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 移除 skill 失败：%s', describeError(error))
             sendError(res, 500, 'remove-failed', `移除 skill 失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${SKILL_REMOVE_ROUTE}`,
+    `workflow-workers: POST ${SKILL_REMOVE_ROUTE}`,
   )
 
   // ---- 执行者 skill 检查 / 更新 ---------------------------------------------
@@ -657,12 +657,12 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             }
             sendJson(res, 200, { ok: true, check: result })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 检查 skill 更新失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 检查 skill 更新失败：%s', describeError(error))
             sendError(res, 502, 'check-failed', `检查 skill 更新失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${SKILL_CHECK_ROUTE}`,
+    `workflow-workers: POST ${SKILL_CHECK_ROUTE}`,
   )
 
   webCtx.effect(
@@ -706,7 +706,7 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             const report = reportSkillUpdate(result)
             if (report.failure !== null) {
               webCtx.logger?.warn?.(
-                'buka-workers: 更新 skill 失败（%s）：%s',
+                'workflow-workers: 更新 skill 失败（%s）：%s',
                 resolved.worker.path,
                 report.failure.message,
               )
@@ -720,18 +720,18 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
             }
             const scanned = await scanProjectSkills(resolved.worker.path)
             webCtx.logger?.info?.(
-              'buka-workers: 已更新 skill（%s，失败 %d 个）',
+              'workflow-workers: 已更新 skill（%s，失败 %d 个）',
               resolved.worker.path,
               report.failed,
             )
             sendJson(res, 200, { ok: report.ok, update: result, skills: scanned.skills })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 更新 skill 失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 更新 skill 失败：%s', describeError(error))
             sendError(res, 502, 'update-failed', `更新 skill 失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${SKILL_UPDATE_ROUTE}`,
+    `workflow-workers: POST ${SKILL_UPDATE_ROUTE}`,
   )
 
   webCtx.effect(
@@ -770,17 +770,17 @@ export function registerSkillRoutes(webCtx: Context, deps: SkillRouteDeps): void
               update: (options) => updateSkills(options),
             })
             webCtx.logger?.info?.(
-              'buka-workers: 已更新全部执行者（%d 个 worker，%d 个失败）',
+              'workflow-workers: 已更新全部执行者（%d 个 worker，%d 个失败）',
               batch.results.length,
               batch.failed,
             )
             sendJson(res, 200, { ok: true, ...batch })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 更新全部执行者失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 更新全部执行者失败：%s', describeError(error))
             sendError(res, 502, 'update-failed', `更新全部执行者失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`,
+    `workflow-workers: POST ${SKILL_UPDATE_ALL_ROUTE}`,
   )
 }

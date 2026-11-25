@@ -89,7 +89,7 @@ async function moveLegacyCache(
     await fs.cp(legacy, current, { recursive: true, force: false, errorOnExist: false })
     await fs.rm(legacy, { recursive: true, force: true })
   }
-  logger?.info?.('buka-workers: 已把旧插件缓存目录迁移到 %s', current)
+  logger?.info?.('workflow-workers: 已把旧插件缓存目录迁移到 %s', current)
   return true
 }
 
@@ -132,7 +132,7 @@ async function upgradeRegistry(
   if (stored === null) return false
   const registry = await readWorkerRegistry({ file: registryFile })
   if (registry.corrupt) {
-    logger?.warn?.('buka-workers: 登记文件无法读取，跳过格式迁移：%s', registryFile)
+    logger?.warn?.('workflow-workers: 登记文件无法读取，跳过格式迁移：%s', registryFile)
     return false
   }
   let changed = stored < WORKER_REGISTRY_VERSION
@@ -151,12 +151,12 @@ async function upgradeRegistry(
   await writeWorkerRegistry({ file: registryFile, workers })
   if (stored < WORKER_REGISTRY_VERSION) {
     logger?.info?.(
-      'buka-workers: 登记表已从 version %s 迁移到 version %s',
+      'workflow-workers: 登记表已从 version %s 迁移到 version %s',
       stored,
       WORKER_REGISTRY_VERSION,
     )
   } else {
-    logger?.info?.('buka-workers: 已把登记表里的旧目录路径平移到新根目录')
+    logger?.info?.('workflow-workers: 已把登记表里的旧目录路径平移到新根目录')
   }
   return true
 }
@@ -193,7 +193,7 @@ export async function migrateWorkerStore(options: MigrateWorkerStoreOptions): Pr
     const renamedRoot = await renameIfMissing(legacySiblingRoot, workersDir)
     const renamedRegistry = await renameIfMissing(legacySiblingRegistry, registryFile)
     if (renamedRoot || renamedRegistry) {
-      options.logger?.info?.('buka-workers: 已把 robots 目录 / 登记文件改名为 workers')
+      options.logger?.info?.('workflow-workers: 已把 robots 目录 / 登记文件改名为 workers')
     }
   } else if (baseName === 'robots') {
     await renameIfMissing(legacySiblingRegistry, registryFile)

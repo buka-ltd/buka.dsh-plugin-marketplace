@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 */
 const SILENT = "none";
 /** 设置页试听路由：Host 注册它、浏览器一半按同一字符串请求。 */
-const PREVIEW_ROUTE = "/buka-bell/preview";
+const PREVIEW_ROUTE = "/bell/preview";
 /**
 * macOS 系统自带提示音清单；设置页下拉框的可选项与这里保持一致。
 * 文件位置固定为 `/System/Library/Sounds/<name>.aiff`。
@@ -240,7 +240,7 @@ function createPlayer(ctx) {
 		if (warned.has(cue)) return;
 		warned.add(cue);
 		try {
-			ctx.logger.warn("buka-bell: no sound player is available for the %s cue; that moment will be silent", cue);
+			ctx.logger.warn("bell: no sound player is available for the %s cue; that moment will be silent", cue);
 		} catch {}
 	}
 	return (cue, sound) => {
@@ -323,7 +323,7 @@ function sendMethodNotAllowed(res, allow) {
 process.platform;
 // .build/bell/routes.js
 /**
-* 试听路由的注册：`POST /buka-bell/preview` 的信任栅栏与请求体解析。
+* 试听路由的注册：`POST /bell/preview` 的信任栅栏与请求体解析。
 *
 * @module @buka/dsh-plugin-bell/routes
 */
@@ -370,7 +370,7 @@ function registerPreviewRoutes(ctx, play) {
 				play("finish", sound);
 				sendJson(res, 200, { ok: true });
 			}
-		}), `buka-bell: POST ${PREVIEW_ROUTE}`);
+		}), `bell: POST ${PREVIEW_ROUTE}`);
 	});
 }
 /**
@@ -582,7 +582,7 @@ function watch(ctx, config, play) {
 * 这个时机不播放。
 *
 * 试听与选择是分开的两步：设置页先列出所有候选，点一下只播放一次
-* （`POST /buka-bell/preview`，不写配置），听完再在列表里决定四个时机
+* （`POST /bell/preview`，不写配置），听完再在列表里决定四个时机
 * 各用哪个。路由沿用 web 组合的信任栅栏，只接受本机、已认证的浏览器请求。
 *
 * @module @buka/dsh-plugin-bell

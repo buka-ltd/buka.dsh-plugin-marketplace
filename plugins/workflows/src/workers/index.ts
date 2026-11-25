@@ -9,39 +9,39 @@
  *
  * | 路由 | 作用 |
  * | --- | --- |
- * | `GET /buka-workers/list` | 列出登记表里的执行者、挂载状态、skills 与 AGENTS.md |
- * | `POST /buka-workers/create` | 按标识符建目录 + AGENTS.md 模板，并把执行者（含可选展示名 / 描述）插到登记表最前 |
- * | `POST /buka-workers/avatar` | 只改登记表里的头像 id |
- * | `POST /buka-workers/description` | 只改登记表里的一行描述（工作流用它选执行者） |
- * | `GET /buka-workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
- * | `POST /buka-workers/model` | 设置 / 清除智能体新会话使用的模型 |
- * | `POST /buka-workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
- * | `POST /buka-workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
- * | `POST /buka-workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
- * | `GET /buka-workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
- * | `GET /buka-workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
- * | `GET /buka-workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
- * | `POST /buka-workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
- * | `POST /buka-workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
- * | `POST /buka-workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
- * | `POST /buka-workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
- * | `POST /buka-workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
- * | `POST /buka-workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
- * | `POST /buka-workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
+ * | `GET /workflow/workers/list` | 列出登记表里的执行者、挂载状态、skills 与 AGENTS.md |
+ * | `POST /workflow/workers/create` | 按标识符建目录 + AGENTS.md 模板，并把执行者（含可选展示名 / 描述）插到登记表最前 |
+ * | `POST /workflow/workers/avatar` | 只改登记表里的头像 id |
+ * | `POST /workflow/workers/description` | 只改登记表里的一行描述（工作流用它选执行者） |
+ * | `GET /workflow/workers/models` | 读宿主模型目录（按提供方分组，供「模型」页签选择） |
+ * | `POST /workflow/workers/model` | 设置 / 清除智能体新会话使用的模型 |
+ * | `POST /workflow/workers/rename` | 只改展示名 + 同步工作区标题（不移动目录、不重建工作区） |
+ * | `POST /workflow/workers/remove-impact` | 删除影响面：阻塞的运行中作业、受影响的工作流、历史作业数与目录 |
+ * | `POST /workflow/workers/remove` | 硬删登记条目 + 执行者目录 + 工作区注册；有 running 作业引用时 409 |
+ * | `GET /workflow/workers/files` | 只读列出执行者目录树（跳过 `.git` / `node_modules`） |
+ * | `GET /workflow/workers/file` | 只读读取执行者目录里的一个文本文件（`path` 限定在目录内） |
+ * | `GET /workflow/workers/skills/repos` | 读 Skills 插件的「技能仓库」：收藏来源、类型与预计 skill 数 |
+ * | `POST /workflow/workers/skills/available` | 只从已收藏来源里列出可安装的 skills（不再接受手填第三方来源） |
+ * | `POST /workflow/workers/skills/install` | 只安装收藏仓库里选中的 skills，同时落 `.agents/skills` 与 `.claude/skills` |
+ * | `POST /workflow/workers/skills/remove` | 在执行者目录里执行 `npx skills remove <skill> -y` |
+ * | `POST /workflow/workers/skills/check` | 只读检查执行者目录里项目级 skill 的更新状态（进入「技能」页签时自动调用） |
+ * | `POST /workflow/workers/skills/update` | 更新执行者的项目级 skill（可用 `skills` 收窄到某一项） |
+ * | `POST /workflow/workers/skills/update-all` | 列表页「更新全部执行者」：顺序更新所有符合条件的执行者 |
+ * | `POST /workflow/workers/reveal` | 兜底：用系统文件管理器打开执行者目录（页面优先用内核 open-in-app 的应用清单） |
  *
  * 工作区的注册、删除与打开必须走 DSH 自己的 Client Service（侧边栏才会同步），
- * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `buka_workers`
+ * 所以都在浏览器一半，这里不重复实现。另注册两个模型工具：只读的 `workflow_workers`
  * 让模型回答「有哪些执行者、挂没挂载、是否写了 AGENTS.md、装了什么技能」
- * （见 `lib/list-tool.js`）；写工具 `buka_worker_build`（见 `lib/builder.js`、
+ * （见 `lib/list-tool.js`）；写工具 `workflow_worker_build`（见 `lib/builder.js`、
  * `lib/build-tool.js`）按标识符创建 / 修改执行者（改名只改展示名）、写 AGENTS.md
  * 并挂到工作区，但**只对随包发布的 `Workflow` 预设的根会话可见**
  * （Config.builderPresets，判定见 `lib/access.js`）。删除执行者与安装 skills
  * 仍然只留给用户；页面上的「文件」页签只读，不提供编辑 / 保存。
  *
- * 删除通过可选的 `ctx.bukaWorkflows` 服务读引用面（同一合并包内始终存在；
+ * 删除通过可选的 `ctx.workflowQuery` 服务读引用面（同一合并包内始终存在；
  * 兜底分支仍按服务缺失处理）。唯一阻塞是引用该标识符的运行中作业。
  *
- * 另通过 `ctx.provide('bukaWorkers', ...)` 对外提供一个 Host Service（见
+ * 另通过 `ctx.provide('workflowWorkers', ...)` 对外提供一个 Host Service（见
  * `lib/service.js`）：`list()` 列出执行者（每条带 `id` / `name`，以及内建
  * 机器人 clock 的 `driver` / `program`），`avatarMap()` 按标识符
  * 给出执行者头像，`dispatchSession()` 新开一条会话并返回观测句柄，
@@ -77,7 +77,7 @@ import {
 const DEFAULT_WORKERS_DIR = defaultWorkersRoot()
 
 /**
- * 能看到并调用 `buka_worker_build` 的 preset 名单；默认是随包发布的唯一
+ * 能看到并调用 `workflow_worker_build` 的 preset 名单；默认是随包发布的唯一
  * `Workflow` 预设（id `workflow-orchestrator`，同时承担工作流编排）。
  */
 const DEFAULT_BUILDER_PRESETS = ['workflow-orchestrator']
@@ -94,7 +94,7 @@ export const workerConfigFields = {
     .array(z.string())
     .default(DEFAULT_BUILDER_PRESETS)
     .description(
-      '能看到并调用 buka_worker_build（创建 / 修改执行者）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `workflow-orchestrator`（Workflow）。',
+      '能看到并调用 workflow_worker_build（创建 / 修改执行者）的 agent preset 名单。留空表示不按 preset 收窄（所有会话可见，不推荐）；推荐只保留随插件发布的 `workflow-orchestrator`（Workflow）。',
     ),
   seedPresets: z
     .boolean()
@@ -124,7 +124,7 @@ export function applyWorkers(
   const workersDir = resolveWorkersDir(config?.workersDir)
   const registryFile = resolveWorkerRegistryFile(workersDir)
 
-  // 对外服务：工作流引擎通过 ctx.bukaWorkers 列出执行者、开启执行者会话。
+  // 对外服务：工作流引擎通过 ctx.workflowWorkers 列出执行者、开启执行者会话。
   ctx.provide(
     SERVICE_NAME,
     new WorkerSessionService({
@@ -155,13 +155,13 @@ export function applyWorkers(
   })
     .then((result) => {
       if (result.corrupt) {
-        ctx.logger?.warn?.('buka-workers: 登记文件损坏，跳过内建执行者登记：%s', registryFile)
+        ctx.logger?.warn?.('workflow-workers: 登记文件损坏，跳过内建执行者登记：%s', registryFile)
       } else if (result.added.length > 0) {
-        ctx.logger?.info?.('buka-workers: 已登记内建执行者：%s', result.added.join('、'))
+        ctx.logger?.info?.('workflow-workers: 已登记内建执行者：%s', result.added.join('、'))
       }
     })
     .catch((error) => {
-      ctx.logger?.warn?.('buka-workers: 启动迁移或登记内建执行者失败：%s', describeError(error))
+      ctx.logger?.warn?.('workflow-workers: 启动迁移或登记内建执行者失败：%s', describeError(error))
     })
 
   // 全新安装（只补过内建机器人）时补上两个预设智能体；串行进队列，
@@ -175,7 +175,7 @@ export function applyWorkers(
     enabled: config?.seedPresets !== false,
   })
 
-  // 能看到 / 调用 `buka_worker_build` 的 preset 名单（Config 可覆盖）。
+  // 能看到 / 调用 `workflow_worker_build` 的 preset 名单（Config 可覆盖）。
   const builderPresets = normalizePresets(config?.builderPresets ?? DEFAULT_BUILDER_PRESETS)
 
   // ---- HTTP 路由：浏览器一半的列表与配置 ---------------------------------

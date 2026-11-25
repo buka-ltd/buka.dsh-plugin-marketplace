@@ -72,7 +72,7 @@ export function createSkillActions(state: WorkersPageState, t: Translate) {
   let candidatesSequence = 0
 
   /**
-   * 读 Skills 插件的「技能仓库」。Host 通过 `ctx.bukaSkills` 读收藏，插件没装
+   * 读 Skills 插件的「技能仓库」。Host 通过 `ctx.skillCatalog` 读收藏，插件没装
    * 或版本太旧时回 503；页面据此显示安装提示，而不是让用户手填第三方来源。
    */
   async function loadInstallRepos() {

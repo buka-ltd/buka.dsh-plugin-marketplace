@@ -1,8 +1,8 @@
 /**
  * 浏览器一半用的两条包内 HTTP 路由：检查与更新当前会话所在工作区的项目技能。
  *
- * - `GET /buka-skill-update-check/status` 检查；`refresh=1` 跳过 5 分钟缓存。
- * - `POST /buka-skill-update-check/update` 更新；请求体是
+ * - `GET /skill-update-check/status` 检查；`refresh=1` 跳过 5 分钟缓存。
+ * - `POST /skill-update-check/update` 更新；请求体是
  *   `{ sessionId, skills? }`，省略 `skills` 表示更新检查得到的全部。名字会先
  *   与一次强制检查的结果求交集，Host 不接受浏览器指定的路径。
  *
@@ -30,10 +30,10 @@ import type { SessionLike, WorkspaceRegistryLike } from './workspace.ts'
 import { resolveWorkspaceDir } from './workspace.ts'
 
 /** 浏览器一半按同一常量访问。 */
-export const CHECK_ROUTE = '/buka-skill-update-check/status'
+export const CHECK_ROUTE = '/skill-update-check/status'
 
 /** 更新路由；请求体只有会话 id 与若干 skill 名。 */
-export const UPDATE_ROUTE = '/buka-skill-update-check/update'
+export const UPDATE_ROUTE = '/skill-update-check/update'
 
 /** 会话 id 的宽松上限；真实 id 远小于它。 */
 const MAX_SESSION_ID_LENGTH = 128
@@ -136,7 +136,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skill-update-check: GET ${CHECK_ROUTE}`,
+      `skill-update-check: GET ${CHECK_ROUTE}`,
     )
 
     // 更新会改写工作区里的 lock 与安装目录，所以只接受 POST，且名字必须先在
@@ -186,7 +186,7 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
             }
           },
         }),
-      `buka-skill-update-check: POST ${UPDATE_ROUTE}`,
+      `skill-update-check: POST ${UPDATE_ROUTE}`,
     )
   })
 }

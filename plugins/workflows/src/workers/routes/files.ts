@@ -21,10 +21,10 @@ import { resolveWorker } from './target.ts'
 import type { WorkerRouteDeps } from './workers.ts'
 
 /** 页面读取执行者目录树用的路由。 */
-const TREE_ROUTE = '/buka-workers/files'
+const TREE_ROUTE = '/workflow/workers/files'
 
 /** 页面读取单个文件内容用的路由。 */
-const FILE_ROUTE = '/buka-workers/file'
+const FILE_ROUTE = '/workflow/workers/file'
 
 /** 从请求地址读取查询参数。 */
 function query(req: IncomingMessage): URLSearchParams {
@@ -79,12 +79,12 @@ export function registerFileRoutes(webCtx: Context, deps: WorkerRouteDeps): void
               truncated: tree.truncated,
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取执行者目录失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取执行者目录失败：%s', describeError(error))
             sendError(res, 500, 'files-failed', `读取执行者目录失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${TREE_ROUTE}`,
+    `workflow-workers: GET ${TREE_ROUTE}`,
   )
 
   webCtx.effect(
@@ -119,11 +119,11 @@ export function registerFileRoutes(webCtx: Context, deps: WorkerRouteDeps): void
               maxBytes: FILE_MAX_READ_BYTES,
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取执行者文件失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取执行者文件失败：%s', describeError(error))
             sendError(res, 500, 'file-failed', `读取执行者文件失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${FILE_ROUTE}`,
+    `workflow-workers: GET ${FILE_ROUTE}`,
   )
 }

@@ -613,7 +613,7 @@ test('workers service: dispatchSession injects the context before the user promp
       'user',
       'workflow rules and task content are not user input',
     )
-    assert.equal(injected.source.kind, 'buka-worker')
+    assert.equal(injected.source.kind, 'workflow_worker')
     assert.equal(injected.content[0].text, context)
     assert.equal(followed.source.kind, 'user', 'the task type definition is delivered as the user')
     assert.equal(followed.content[0].text, userPrompt)
@@ -641,7 +641,7 @@ test('workers service: dispatchSession without a user prompt keeps a single foll
       })
       assert.deepEqual(fake.state.injected, [], 'no empty context is injected')
       assert.equal(fake.state.followups.length, 1, 'no empty user message is produced')
-      assert.equal(fake.state.followups[0].source.kind, 'buka-worker')
+      assert.equal(fake.state.followups[0].source.kind, 'workflow_worker')
       assert.equal(fake.state.followups[0].content[0].text, 'do the work')
       await handle.dispose()
     }
@@ -673,7 +673,7 @@ test('workers service: a plan-mode dispatch without a user prompt delivers a sin
     )
     assert.equal(fake.state.injected.length, 0)
     assert.equal(fake.state.followups.length, 1)
-    assert.equal(fake.state.followups[0].source.kind, 'buka-worker')
+    assert.equal(fake.state.followups[0].source.kind, 'workflow_worker')
     await handle.dispose()
   } finally {
     await fs.rm(home.root, { recursive: true, force: true })

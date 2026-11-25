@@ -4,7 +4,7 @@
  * 页面本身不保存任何状态：读写都走 DSH 的设置表单服务 `ctx.configForms`
  * （Host 设置的浏览器镜像）。交互是两级的：设置页是四行，点一行进入该时机的
  * **独立声音列表页**；列表里点一项就同时「选中 + 试听」——写入配置并请求
- * Host 播放一次（`POST /buka-bell/preview`），不自动返回，只有点「返回」才
+ * Host 播放一次（`POST /bell/preview`），不自动返回，只有点「返回」才
  * 回到四行页面，方便连着听几个再定。「无」表示那个时机不响。
  *
  * 不用 Modal、也不在行内展开：设置本身就是浮层，再叠一层弹窗或撑开页面都
@@ -31,14 +31,14 @@ export const inject = ['slots', 'locale', 'configForms']
  */
 export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'buka-bell: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'bell: dictionaries')
   ctx.effect(() => {
     const tag = document.createElement('style')
     tag.dataset.plugin = '@buka/dsh-plugin-bell'
     tag.textContent = CSS
     document.head.appendChild(tag)
     return () => tag.remove()
-  }, 'buka-bell: styles')
+  }, 'bell: styles')
 
   const form = ctx.configForms.get(NAMESPACE)
   const bellForm = {
@@ -50,7 +50,7 @@ export function apply(ctx: Context): void {
     ctx.slots.register(
       {
         name: 'settings.section',
-        id: 'buka-bell',
+        id: 'bell',
         order: 16,
         label: () => t('nav'),
         locale: NS,

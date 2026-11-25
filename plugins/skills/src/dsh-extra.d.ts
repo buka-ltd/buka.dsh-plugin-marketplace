@@ -12,7 +12,7 @@ import type { SkillsCatalogService } from './service.ts'
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** 本插件用 `ctx.provide(SERVICE_NAME, …)` 注册的只读目录服务。 */
-    bukaSkills: SkillsCatalogService
+    skillCatalog: SkillsCatalogService
     /**
      * DSH 的 skills 注册表（由 `@deepseek-ai/dsh-skill-filesystem` 提供，本仓库
      * 没有安装它的类型包）。插件只调用 `list({ cwd })`，摘要字段随上游版本

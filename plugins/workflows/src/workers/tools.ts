@@ -3,9 +3,9 @@
  *
  * 注册两个工具：
  *
- * - 只读的 `buka_workers`：让模型回答「有哪些执行者、挂没挂载、是否写了
+ * - 只读的 `workflow_workers`：让模型回答「有哪些执行者、挂没挂载、是否写了
  *   AGENTS.md、装了什么技能」；
- * - 写工具 `buka_worker_build`：按标识符创建 / 修改执行者（改名只改展示名）、
+ * - 写工具 `workflow_worker_build`：按标识符创建 / 修改执行者（改名只改展示名）、
  *   写 AGENTS.md 并挂到工作区，但**只对随包发布的 `Workflow` 预设的根会话
  *   可见**（Config.builderPresets）。
  *
@@ -29,7 +29,7 @@ import { listWorkers } from './worker-store.ts'
 export interface WorkerToolDeps {
   workersDir: string
   registryFile: string
-  /** 能看到 / 调用 `buka_worker_build` 的 preset 名单（Config 可覆盖）。 */
+  /** 能看到 / 调用 `workflow_worker_build` 的 preset 名单（Config 可覆盖）。 */
   builderPresets: string[]
   serializeRegistry: <T>(work: () => Promise<T>) => Promise<T>
 }
@@ -105,7 +105,7 @@ export function registerWorkerTools(ctx: Context, deps: WorkerToolDeps): void {
     const access = builderAccessOf(agent)
     if (access.visible) return access
     throw new Error(
-      `buka_worker_build is only available to the ${builderPresets.join(' / ')} preset (reason: ${access.reason})`,
+      `workflow_worker_build is only available to the ${builderPresets.join(' / ')} preset (reason: ${access.reason})`,
     )
   }
 
@@ -143,7 +143,7 @@ export function registerWorkerTools(ctx: Context, deps: WorkerToolDeps): void {
           }),
         )
         ctx.logger?.info?.(
-          'buka-workers: %s 执行者 %s（%s，%s）',
+          'workflow-workers: %s 执行者 %s（%s，%s）',
           result.created
             ? '已创建'
             : result.renamed

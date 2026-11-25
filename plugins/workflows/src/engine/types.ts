@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { JsonValue } from '../domain/types.ts'
+import type { JsonSchema } from '../json-schema.ts'
 import type { ResolvedOptions } from '../options.ts'
 import type { LoggerLike, WorkflowStore } from '../store/index.ts'
 
@@ -94,6 +95,22 @@ export interface EngineDeps {
    * 默认 5 分钟；测试可以传一个很短的值来验证兜底路径。
    */
   readonly retireGraceMs?: number | undefined
+}
+
+/**
+ * 作业模式里一个可启动（或暂时不可启动）的工作流。
+ *
+ * `workflow_job_options` 一次返回全部目标，agent 按用户描述挑选；开始节点的
+ * 输入契约随目标一起给出，选中后不用再查一次定义。
+ */
+export interface JobModeTarget {
+  readonly workflowId: string
+  readonly name: string
+  readonly description: string
+  /** 开始节点的输入 schema；没有输入字段时缺省。 */
+  readonly startContent?: JsonSchema | undefined
+  /** 目标当前不可启动的原因；正常目标不出现。 */
+  readonly error?: string
 }
 
 /** 引擎对外抛出的输入 / 状态错误。 */

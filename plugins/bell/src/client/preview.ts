@@ -7,7 +7,7 @@
 import { requestJson } from '@buka/plugin-ui'
 
 /** 与 Host 侧一致的试听路由：播放一次，不写配置。 */
-const PREVIEW_ROUTE = '/buka-bell/preview'
+const PREVIEW_ROUTE = '/bell/preview'
 
 /**
  * 请求 Host 播放一个候选声音。只负责试听，选中与否由列表页各自的写入

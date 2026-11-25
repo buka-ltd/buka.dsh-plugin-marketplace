@@ -11,16 +11,16 @@
 import { messageOf, requestJson } from '@buka/plugin-ui'
 
 /** 与 Host 一半的路由常量保持一致。 */
-const LIST_ROUTE = '/buka-skills/list'
-const UNINSTALL_ROUTE = '/buka-skills/uninstall'
-const TARGETS_ROUTE = '/buka-skills/targets'
-const INSTALL_ROUTE = '/buka-skills/install'
-const REPOS_ROUTE = '/buka-skills/repos'
-const REPO_REMOVE_ROUTE = '/buka-skills/repos/remove'
-const REPO_SKILLS_ROUTE = '/buka-skills/repo-skills'
-const CHECK_ROUTE = '/buka-skills/check'
-const ICON_ROUTE = '/buka-skills/icon'
-const UPDATE_ROUTE = '/buka-skills/update'
+const LIST_ROUTE = '/skills/list'
+const UNINSTALL_ROUTE = '/skills/uninstall'
+const TARGETS_ROUTE = '/skills/targets'
+const INSTALL_ROUTE = '/skills/install'
+const REPOS_ROUTE = '/skills/repos'
+const REPO_REMOVE_ROUTE = '/skills/repos/remove'
+const REPO_SKILLS_ROUTE = '/skills/repo-skills'
+const CHECK_ROUTE = '/skills/check'
+const ICON_ROUTE = '/skills/icon'
+const UPDATE_ROUTE = '/skills/update'
 
 /**
  * 取错误上的 `code` 字段（Host 的失败响应带它）。

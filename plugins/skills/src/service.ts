@@ -1,14 +1,14 @@
 /**
- * `@buka/dsh-plugin-skills` 对外提供的 Host Service：`ctx.bukaSkills`。
+ * `@buka/dsh-plugin-skills` 对外提供的 Host Service：`ctx.skillCatalog`。
  *
- * 页面和 `buka_skills` 工具只消费其中一部分能力；其他插件通过 Cordis 的
+ * 页面和 `skill_list` 工具只消费其中一部分能力；其他插件通过 Cordis 的
  * 服务注入拿到同一个实例：
  *
  * ```js
- * export const inject = ['bukaSkills']
+ * export const inject = ['skillCatalog']
  * export function apply(ctx) {
- *   const repos = await ctx.bukaSkills.listRepositories()
- *   const checked = await ctx.bukaSkills.checkSkills({ dir: '/path/to/worker' })
+ *   const repos = await ctx.skillCatalog.listRepositories()
+ *   const checked = await ctx.skillCatalog.checkSkills({ dir: '/path/to/worker' })
  * }
  * ```
  *
@@ -34,8 +34,8 @@
  * Service`。原因是本包入口必须同时导出 `apply` 来注册路由与工具（Cordis 的
  * 插件入口两种形态不能混用），而且本仓库的单测不安装 `@deepseek-ai/*`，
  * 服务实现需要保持可被 `node --test` 直接 import。`ctx.provide` 是 Service
- * 基类底层的同一个原语：消费侧完全一致（`inject: ['bukaSkills']` /
- * `ctx.bukaSkills`），卸载时同样自动摘除并唤醒依赖方。
+ * 基类底层的同一个原语：消费侧完全一致（`inject: ['skillCatalog']` /
+ * `ctx.skillCatalog`），卸载时同样自动摘除并唤醒依赖方。
  *
  * @module @buka/dsh-plugin-skills/service
  */
@@ -61,8 +61,8 @@ import type {
 } from './skill-update.ts'
 import { checkSkills, updateSkills } from './skill-update.ts'
 
-/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaSkills`。 */
-export const SERVICE_NAME = 'bukaSkills'
+/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.skillCatalog`。 */
+export const SERVICE_NAME = 'skillCatalog'
 
 /** `listRepositories()` 并发探测的上限：收藏列表再长也不一次打开太多连接。 */
 const PROBE_CONCURRENCY = 4

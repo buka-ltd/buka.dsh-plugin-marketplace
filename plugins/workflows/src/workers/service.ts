@@ -1,5 +1,5 @@
 /**
- * 执行者一半对外提供的 Host Service：`ctx.bukaWorkers`。
+ * 执行者一半对外提供的 Host Service：`ctx.workflowWorkers`。
  *
  * 能力（工作流插件与将来的编排器使用）：
  *
@@ -14,7 +14,7 @@
  *
  * 一个任务一条新会话：`dispatchSession` 不复用上一条任务的会话；`openSession`
  * 只续接同一条会话，**不压缩**。压缩、结构化结果校验与结果追问都在工作流侧
- * （`buka_task_complete`），本服务不再注册 `structured_output` 工具。
+ * （`workflow_task_complete`），本服务不再注册 `structured_output` 工具。
  *
  * 机器人（clock）没有会话：`dispatchSession` / `openSession` 会拒绝
  * 它们，执行由工作流按 `driver` + `program` 驱动。
@@ -23,8 +23,8 @@
  * 项目 skills 照常生效，会话挂到执行者工作区并出现在 DSH 侧边栏。创建或续接
  * 失败时直接抛错，不退回 subagent 子会话，也不另开新会话。
  *
- * 通过 `ctx.provide('bukaWorkers', new WorkerSessionService(...))` 注册，消费方
- * 用 `inject: ['bukaWorkers']` 或 `ctx.get('bukaWorkers')` 获取。
+ * 通过 `ctx.provide('workflowWorkers', new WorkerSessionService(...))` 注册，消费方
+ * 用 `inject: ['workflowWorkers']` 或 `ctx.get('workflowWorkers')` 获取。
  *
  * @module @buka/dsh-plugin-workflows/workers/service
  */
@@ -70,8 +70,8 @@ import {
   workerDisplayName,
 } from './worker-store.ts'
 
-/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.bukaWorkers`。 */
-export const SERVICE_NAME = 'bukaWorkers'
+/** 服务名；消费方用 `inject: [SERVICE_NAME]`，运行时读 `ctx.workflowWorkers`。 */
+export const SERVICE_NAME = 'workflowWorkers'
 
 /** plan 模式入口不可用时给用户看的错误文案。 */
 const PLAN_MODE_UNAVAILABLE =
@@ -257,7 +257,7 @@ export class WorkerSessionService {
   /**
    * 用调用方给的 `title` 给执行者会话命名。
    *
-   * 执行者会话的第一条用户消息来源是 `buka-worker`，而 DSH 的自动标题只看
+   * 执行者会话的第一条用户消息来源是 `workflow_worker`，而 DSH 的自动标题只看
    * `source.kind === 'user'` 的消息，所以这类会话不会自己长出标题：侧边栏与
    * 会话列表里一直显示「未命名」。工作流进入节点时会把「运行目标 · 执行者」
    * 作为 `title` 传进来，这里用 `sessionTitle.rename()` 写一条显式标题。
@@ -278,7 +278,7 @@ export class WorkerSessionService {
     } catch (error) {
       // 标题只是可读性增强：服务缺失 / 会话不是 live 时不影响节点执行。
       this.ctx?.logger?.warn?.(
-        `buka-workers: could not title worker session "${String(session?.id ?? '')}": ${describeError(error)}`,
+        `workflow-workers: could not title worker session "${String(session?.id ?? '')}": ${describeError(error)}`,
       )
     }
   }
@@ -367,7 +367,7 @@ export class WorkerSessionService {
 
     const agent = handle.agent
     await this.#assertVisibleAgent(agent, handle)
-    // 执行者会话的用户消息来源是 `buka-worker`，DSH 的自动标题只认 `user`
+    // 执行者会话的用户消息来源是 `workflow_worker`，DSH 的自动标题只认 `user`
     // 来源的消息，所以新会话在这里显式命名，侧边栏里才不是「未命名」。
     this.#titleSession(agent, request.title)
     // 审批默认按部署策略（省略 / 'ask'）；只有显式 'never' 时才强制拒绝需要审批
@@ -543,14 +543,14 @@ export class WorkerSessionService {
             )
           }
           this.ctx?.logger?.warn?.(
-            `buka-workers: /plan off reported "${failure}" for worker session "${String(agent?.id ?? '')}"`,
+            `workflow-workers: /plan off reported "${failure}" for worker session "${String(agent?.id ?? '')}"`,
           )
         }
       }
     } catch (error) {
       if (requested === true) throw error
       this.ctx?.logger?.warn?.(
-        `buka-workers: could not leave plan mode for worker session "${String(agent?.id ?? '')}": ${describeError(error)}`,
+        `workflow-workers: could not leave plan mode for worker session "${String(agent?.id ?? '')}": ${describeError(error)}`,
       )
     }
   }
@@ -595,7 +595,7 @@ export class WorkerSessionService {
     const startSeq = seqOf(prepared.agent)
     const userPrompt = typeof request.userPrompt === 'string' ? request.userPrompt : ''
     if (userPrompt.trim() === '') {
-      // 没有用户身份提示：保持单条 followup，来源仍是 `buka-worker`。
+      // 没有用户身份提示：保持单条 followup，来源仍是 `workflow_worker`。
       prepared.agent.followup(followupMessage(request.prompt ?? ''))
     } else {
       // 先 inject 上下文（不唤醒），再 followup 用户消息唤醒这一轮；宿主在同一个
@@ -690,7 +690,7 @@ export class WorkerSessionService {
           return await agent.whenIdle()
         } catch (error) {
           service.ctx?.logger?.warn?.(
-            `buka-workers: could not wait for worker session "${observer.sessionId}" to settle: ${describeError(error)}`,
+            `workflow-workers: could not wait for worker session "${observer.sessionId}" to settle: ${describeError(error)}`,
           )
         }
       },
@@ -707,7 +707,7 @@ export class WorkerSessionService {
           return { active: readPlanModeActive(session) }
         } catch (error) {
           service.ctx?.logger?.warn?.(
-            `buka-workers: could not read plan mode for session "${observer.sessionId}": ${describeError(error)}`,
+            `workflow-workers: could not read plan mode for session "${observer.sessionId}": ${describeError(error)}`,
           )
           return null
         }
@@ -725,7 +725,7 @@ export class WorkerSessionService {
         const line = active === true ? '/plan' : '/plan off'
         const warn = (error: unknown) => {
           service.ctx?.logger?.warn?.(
-            `buka-workers: could not ${active === true ? 'enter' : 'leave'} plan mode for worker session "${observer.sessionId}": ${describeError(error)}`,
+            `workflow-workers: could not ${active === true ? 'enter' : 'leave'} plan mode for worker session "${observer.sessionId}": ${describeError(error)}`,
           )
         }
         try {
@@ -807,7 +807,7 @@ export class WorkerSessionService {
       summary = items.find((item) => item?.sessionId === id)
     } catch (error) {
       ctx.logger?.warn?.(
-        `buka-workers: could not read the session list while re-announcing worker session "${id}": ${describeError(error)}`,
+        `workflow-workers: could not read the session list while re-announcing worker session "${id}": ${describeError(error)}`,
       )
       return
     }
@@ -817,7 +817,7 @@ export class WorkerSessionService {
       ctx.emit('api-session/added', summary)
     } catch (error) {
       ctx.logger?.warn?.(
-        `buka-workers: could not re-announce worker session "${id}" after releasing its agent: ${describeError(error)}`,
+        `workflow-workers: could not re-announce worker session "${id}" after releasing its agent: ${describeError(error)}`,
       )
     }
   }
@@ -854,7 +854,7 @@ export class WorkerSessionService {
       }
     } catch (error) {
       this.ctx?.logger?.warn?.(
-        `buka-workers: could not attach worker session "${sessionId}" to the worker workspace: ${describeError(error)}`,
+        `workflow-workers: could not attach worker session "${sessionId}" to the worker workspace: ${describeError(error)}`,
       )
     }
   }

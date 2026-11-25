@@ -121,6 +121,8 @@ export interface ConfigFormsService {
  * 驱动某个具体会话，而不是直接拿 planMode 服务实例。
  */
 export interface CommandsService {
+  /** 注册一条斜杠命令；返回撤销注册的函数。 */
+  register?(definition: CommandDefinition): () => void
   /** 对目标 agent 执行一条斜杠命令；名称或语法不可解析时返回 undefined。 */
   execute?(
     agent: unknown,
@@ -129,6 +131,29 @@ export interface CommandsService {
     signal: AbortSignal,
   ): Promise<unknown> | unknown
 }
+
+/** 插件注册的一条用户命令；只声明本仓库实际编写的字段。 */
+export interface CommandDefinition {
+  /** 小写命令名，不带前导斜杠。 */
+  readonly name: string
+  /** 命令发现界面里的一句说明。 */
+  readonly description: string
+  /** 直接对接收命令的 agent 执行，不进入模型对话。 */
+  readonly handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
+}
+
+/** 一次命令调用；`agent.id` 就是会话 id。 */
+export interface CommandInvocation {
+  /** 接收这条命令的 agent。 */
+  readonly agent?: { readonly id?: unknown }
+  /** 命令名之后的原始文本，保留分隔空白。 */
+  readonly rawInput?: unknown
+}
+
+/** 命令结果：直接展示在界面上的成功或失败文本。 */
+export type CommandResult =
+  | { readonly kind: 'success'; readonly text?: string }
+  | { readonly kind: 'error'; readonly text: string }
 
 /**
  * 配置里一个可热更新的字符串字段：值是引用，读取要经 `.get()`。

@@ -1,73 +1,66 @@
 /**
- * Pen 标记：透明背景的银色笔尖，显示在勾选框文字前。
+ * Pen 官方 logo（笔尖 / nib）的描边版本。
  *
- * 源图是用户提供的 Pen logo，裁切为 64×77 后内联成 data URL。这样浏览器一半
- * 不依赖额外的静态资源路由，刷新页面即可显示；`assets/pen-logo.png` 保留同
- * 一份文件，便于以后替换。
+ * 形状照着 Pen（pen.dev）的笔尖 logo 描摹：宽顶、直边、底部收成尖，中间一个
+ * 圆点和一条竖线。这里以前内联的是 `assets/pen-logo.png` 的 PNG data URL，
+ * 12px 下会糊成一个灰点；改成矢量描边后，勾选框与标题标记都用 `currentColor`
+ * 跟随主题，任意尺寸都清晰。
+ *
+ * 与 `plugins/pen/icon.svg`（市场图标）共用同一组路径；改形状时两处一起改。
  *
  * @module @buka/dsh-plugin-pen/client/logo
  */
 
-/** 内联的 Pen 标记（PNG data URL）。 */
-export const PEN_LOGO =
-  'data:image/png;base64,' +
-  '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' +
-  'RK5CYII='
+import { h } from '@buka/plugin-ui'
+import type { ReactElement } from 'react'
+
+/** 原始画布：与 Pen 笔尖 logo 的宽高比一致（64×77）。 */
+const VIEWBOX = '0 0 64 77'
+
+/** 描边粗细（原始画布单位）；缩到 12–14px 时约为 1px。 */
+const STROKE_WIDTH = 4.6
+
+/** 外轮廓：宽顶、直边、底部收尖。 */
+const OUTLINE = 'M9.5 4.5h45a3 3 0 0 1 3 3V37L32 73.5 6.5 37V7.5a3 3 0 0 1 3-3Z'
+
+/** 笔尖的圆点与分缝。 */
+const CIRCLE = { cx: 32, cy: 27.5, r: 8 } as const
+const SEAM = 'M32 36v29'
+
+/** 画布宽高比；用来按高度算宽度。 */
+const ASPECT = 64 / 77
+
+/** 描边笔尖图标的 props。 */
+export interface PenLogoProps {
+  /** 渲染高度（像素）；宽度按 logo 比例算。 */
+  readonly height?: number
+  /** 额外的 class；颜色由 `currentColor` 继承。 */
+  readonly className?: string
+}
+
+/**
+ * 渲染 Pen 笔尖描边图标。
+ *
+ * @param props 高度与 class
+ * @returns 跟随文字颜色的 SVG
+ */
+export function PenLogo({ height = 14, className }: PenLogoProps): ReactElement {
+  return h(
+    'svg',
+    {
+      className,
+      width: Math.round(height * ASPECT * 100) / 100,
+      height,
+      viewBox: VIEWBOX,
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: STROKE_WIDTH,
+      strokeLinejoin: 'round',
+      strokeLinecap: 'round',
+      'aria-hidden': 'true',
+    },
+    h('path', { d: OUTLINE }),
+    h('circle', CIRCLE),
+    h('path', { d: SEAM }),
+  )
+}

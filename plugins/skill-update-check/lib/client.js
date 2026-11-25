@@ -214,9 +214,9 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skill-update-check/client/api
     */
     /** 与 Host 一致的检查路由。 */
-    const CHECK_ROUTE = "/buka-skill-update-check/status";
+    const CHECK_ROUTE = "/skill-update-check/status";
     /** 与 Host 一致的更新路由。 */
-    const UPDATE_ROUTE = "/buka-skill-update-check/update";
+    const UPDATE_ROUTE = "/skill-update-check/update";
     /**
     * 检查一个会话所在工作区的项目技能。
     *
@@ -565,29 +565,29 @@ window.__ModuleLoader__.load({
     		updateStore.start(sessionId, names);
     	};
     	const failureLine = shownFailure === null ? null : h("p", {
-    		className: "buka-skill-update-check-failure",
+    		className: "skill-update-check-failure",
     		role: "alert"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "error",
     		size: 13
     	}), `${t(shownFailure.kind === "check" ? "error" : "updateFailed")} ${shownFailure.text}`);
     	const checkingLine = checking ? h("p", {
-    		className: "buka-skill-update-check-status",
+    		className: "skill-update-check-status",
     		role: "status"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "ongoing",
     		size: 13
     	}), t("checking")) : null;
     	const updatingLine = updating === null ? null : h("p", {
-    		className: "buka-skill-update-check-status",
+    		className: "skill-update-check-status",
     		role: "status"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "ongoing",
     		size: 13
     	}), updating.names.length === 1 ? `${t("updating")} ${updating.names[0]}` : t("updatingCount", { count: updating.names.length }));
-    	const updatingHint = updating === null ? null : h("p", { className: "buka-skill-update-check-hint" }, t("updatingHint"));
+    	const updatingHint = updating === null ? null : h("p", { className: "skill-update-check-hint" }, t("updatingHint"));
     	const noticeLine = notice === null ? null : h("p", {
-    		className: "buka-skill-update-check-notice",
+    		className: "skill-update-check-notice",
     		role: "status"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "done",
@@ -595,7 +595,7 @@ window.__ModuleLoader__.load({
     	}), notice);
     	const failureLines = failures.map((item) => h("p", {
     		key: `failed-${item.name}`,
-    		className: "buka-skill-update-check-failure",
+    		className: "skill-update-check-failure",
     		role: "alert"
     	}, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "error",
@@ -606,14 +606,14 @@ window.__ModuleLoader__.load({
     		const rowUpdating = updating !== null && updating.names.length === 1 && updating.names[0] === name;
     		return h("li", {
     			key: name,
-    			className: "buka-skill-update-check-row"
-    		}, h("span", { className: "buka-skill-update-check-rowMain" }, h("span", {
-    			className: "buka-skill-update-check-name",
+    			className: "skill-update-check-row"
+    		}, h("span", { className: "skill-update-check-rowMain" }, h("span", {
+    			className: "skill-update-check-name",
     			title: name
     		}, name), source === void 0 ? null : h("span", {
-    			className: "buka-skill-update-check-source",
+    			className: "skill-update-check-source",
     			title: source
-    		}, source)), rowUpdating ? h("span", { className: "buka-skill-update-check-rowStatus" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    		}, source)), rowUpdating ? h("span", { className: "skill-update-check-rowStatus" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     			state: "ongoing",
     			size: 13
     		}), t("updating")) : h(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -624,25 +624,25 @@ window.__ModuleLoader__.load({
     			onClick: () => update([name])
     		}, t("update")));
     	});
-    	const modifiedLine = modified.length === 0 ? null : h("p", { className: "buka-skill-update-check-modified" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+    	const modifiedLine = modified.length === 0 ? null : h("p", { className: "skill-update-check-modified" }, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     		state: "warning",
     		size: 13
     	}), `${t("modifiedTitle")} ${modified.join(t("separator"))}`);
-    	const emptyState = snapshot !== null && !checking && !hasUpdates ? status === "up-to-date" ? h("div", { className: "buka-skill-update-check-empty" }, h("span", {
-    		className: "buka-skill-update-check-emptyIcon",
+    	const emptyState = snapshot !== null && !checking && !hasUpdates ? status === "up-to-date" ? h("div", { className: "skill-update-check-empty" }, h("span", {
+    		className: "skill-update-check-emptyIcon",
     		"aria-hidden": true
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 28 })), h("p", { className: "buka-skill-update-check-emptyTitle" }, t("upToDateTitle")), h("p", { className: "buka-skill-update-check-emptyHint" }, t("upToDateHint"))) : h("div", { className: "buka-skill-update-check-empty" }, h("span", {
-    		className: "buka-skill-update-check-emptyIconNeutral",
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 28 })), h("p", { className: "skill-update-check-emptyTitle" }, t("upToDateTitle")), h("p", { className: "skill-update-check-emptyHint" }, t("upToDateHint"))) : h("div", { className: "skill-update-check-empty" }, h("span", {
+    		className: "skill-update-check-emptyIconNeutral",
     		"aria-hidden": true
-    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 24 })), h("p", { className: "buka-skill-update-check-emptyTitle" }, t("nothingToCheckTitle")), h("p", { className: "buka-skill-update-check-emptyHint" }, snapshot.message ?? t("nothingToCheckHint"))) : null;
-    	const body = h("div", { className: "buka-skill-update-check-dialog" }, failureLine, checkingLine, updatingLine, updatingHint, noticeLine, failureLines, modifiedLine, hasUpdates ? h("ul", { className: "buka-skill-update-check-list" }, ...rows) : emptyState);
+    	}, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 24 })), h("p", { className: "skill-update-check-emptyTitle" }, t("nothingToCheckTitle")), h("p", { className: "skill-update-check-emptyHint" }, snapshot.message ?? t("nothingToCheckHint"))) : null;
+    	const body = h("div", { className: "skill-update-check-dialog" }, failureLine, checkingLine, updatingLine, updatingHint, noticeLine, failureLines, modifiedLine, hasUpdates ? h("ul", { className: "skill-update-check-list" }, ...rows) : emptyState);
     	return h(_deepseek_ai_dsh_client_ui_primitives.Modal, {
     		open,
     		onClose,
     		title: t("dialogTitle"),
     		closeLabel: t("close"),
-    		className: "buka-skill-update-check-modal",
-    		contentClassName: "buka-skill-update-check-modalContent",
+    		className: "skill-update-check-modal",
+    		contentClassName: "skill-update-check-modalContent",
     		footer: h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.Button, {
     			variant: "ghost",
     			icon: h(_deepseek_ai_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 }),
@@ -775,7 +775,7 @@ window.__ModuleLoader__.load({
     		maxWidth: 360
     	}, h("button", {
     		type: "button",
-    		className: "buka-skill-update-check-badge",
+    		className: "skill-update-check-badge",
     		"data-state": state,
     		"aria-label": label,
     		"aria-haspopup": "dialog",
@@ -790,13 +790,13 @@ window.__ModuleLoader__.load({
     		return h(react.Fragment, null, badgeButton("updating", hint, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
     			state: "ongoing",
     			size: 12
-    		}), h("span", { className: "buka-skill-update-check-text" }, label))), dialog);
+    		}), h("span", { className: "skill-update-check-text" }, label))), dialog);
     	}
     	if (completed !== null && !open) {
     		const label = completed.count === 1 ? t("updatedBadgeOne") : t("updatedBadge", { count: completed.count });
-    		return h(react.Fragment, null, badgeButton("done", label, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 13 }), h("span", { className: "buka-skill-update-check-text" }, label))), dialog);
+    		return h(react.Fragment, null, badgeButton("done", label, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconCheckOutlineRegular, { size: 13 }), h("span", { className: "skill-update-check-text" }, label))), dialog);
     	}
-    	if (failure !== null) return h(react.Fragment, null, badgeButton("error", `${t("error")} ${failure} · ${t("hintOpen")}`, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 13 }), h("span", { className: "buka-skill-update-check-errorMark" }, "!"))), dialog);
+    	if (failure !== null) return h(react.Fragment, null, badgeButton("error", `${t("error")} ${failure} · ${t("hintOpen")}`, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 13 }), h("span", { className: "skill-update-check-errorMark" }, "!"))), dialog);
     	if (snapshot === null || snapshot.status !== "updates" || snapshot.updates.length === 0) return open ? dialog : null;
     	const count = snapshot.updates.length;
     	const label = `${count} ${count === 1 ? t("badgeOne") : t("badgeMany")}`;
@@ -804,7 +804,7 @@ window.__ModuleLoader__.load({
     	const extra = count - shown.length;
     	const names = `${shown.join(t("separator"))}${extra > 0 ? "…" : ""}`;
     	const hint = `${t("hint")} ${names} · ${t("hintOpen")}`;
-    	return h(react.Fragment, null, badgeButton("updates", hint, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 13 }), h("span", { className: "buka-skill-update-check-text" }, label))), dialog);
+    	return h(react.Fragment, null, badgeButton("updates", hint, h(react.Fragment, null, h(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, { size: 13 }), h("span", { className: "skill-update-check-text" }, label))), dialog);
     }
     // .build/skill-update-check/client/dictionary.js
     /**
@@ -816,7 +816,7 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skill-update-check/client/dictionary
     */
     /** 词典命名空间。 */
-    const NS = "buka-skill-update-check";
+    const NS = "skill-update-check";
     /** 英文文案。 */
     const en = {
     	label: "SKILL updates",
@@ -899,36 +899,36 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-skill-update-check/client/styles
     */
     /** 注入到 `document.head` 的样式表。 */
-    const CSS = `.buka-skill-update-check-badge{order:1;align-items:center;gap:5px;height:24px;min-width:0;max-width:200px;color:var(--dsw-alias-state-warn-primary);white-space:nowrap;cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);border:none;border-radius:var(--dsw-radius-sm);padding:0 8px;font-size:12px;font-weight:600;line-height:18px;display:inline-flex}
-    @media (hover:hover){.buka-skill-update-check-badge:hover{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 18%,transparent)}}
-    .buka-skill-update-check-badge[data-state=error]{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
-    @media (hover:hover){.buka-skill-update-check-badge[data-state=error]:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 18%,transparent)}}
-    .buka-skill-update-check-badge[data-state=done]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}
-    @media (hover:hover){.buka-skill-update-check-badge[data-state=done]:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 18%,transparent)}}
-    .buka-skill-update-check-badge:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
-    .buka-skill-update-check-text{min-width:0;overflow:hidden;text-overflow:ellipsis}
-    .buka-skill-update-check-errorMark{font-size:12px;font-weight:700;line-height:1}
-    .buka-skill-update-check-modal{max-height:100%}
-    .buka-skill-update-check-modalContent{min-height:0;overflow:auto}
-    .buka-skill-update-check-dialog{box-sizing:border-box;width:100%;min-width:0;flex-direction:column;gap:10px;display:flex}
-    .buka-skill-update-check-status{color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex}
-    .buka-skill-update-check-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
-    .buka-skill-update-check-notice{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex}
-    .buka-skill-update-check-failure{color:var(--dsw-alias-state-error-primary);align-items:flex-start;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex;overflow-wrap:anywhere}
-    .buka-skill-update-check-failure>:first-child{flex:none;margin-top:3px}
-    .buka-skill-update-check-list{flex-direction:column;gap:2px;max-height:320px;margin:0;padding:0;list-style:none;display:flex;overflow:auto}
-    .buka-skill-update-check-row{border-radius:var(--dsw-radius-md);align-items:center;gap:12px;min-height:40px;padding:4px 8px;display:flex}
-    @media (hover:hover){.buka-skill-update-check-row:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-    .buka-skill-update-check-rowMain{flex:1 1 auto;min-width:0;flex-direction:column;gap:1px;display:flex}
-    .buka-skill-update-check-name{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;overflow:hidden}
-    .buka-skill-update-check-source{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;overflow:hidden}
-    .buka-skill-update-check-rowStatus{flex:none;color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;font-size:12px;line-height:18px;display:inline-flex}
-    .buka-skill-update-check-empty{flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:40px 16px;text-align:center;display:flex}
-    .buka-skill-update-check-emptyIcon{color:var(--dsw-alias-state-success-primary);display:inline-flex}
-    .buka-skill-update-check-emptyIconNeutral{color:var(--dsw-alias-label-tertiary);display:inline-flex}
-    .buka-skill-update-check-emptyTitle{margin:0;color:var(--dsw-alias-label-secondary);font-size:14px;font-weight:500;line-height:20px}
-    .buka-skill-update-check-emptyHint{margin:0;max-width:40ch;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;text-wrap:balance}
-    .buka-skill-update-check-modified{color:var(--dsw-alias-state-warn-primary);align-items:center;gap:6px;margin:0;font-size:12px;line-height:18px;display:flex;overflow-wrap:anywhere}
+    const CSS = `.skill-update-check-badge{order:1;align-items:center;gap:5px;height:24px;min-width:0;max-width:200px;color:var(--dsw-alias-state-warn-primary);white-space:nowrap;cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);border:none;border-radius:var(--dsw-radius-sm);padding:0 8px;font-size:12px;font-weight:600;line-height:18px;display:inline-flex}
+    @media (hover:hover){.skill-update-check-badge:hover{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 18%,transparent)}}
+    .skill-update-check-badge[data-state=error]{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
+    @media (hover:hover){.skill-update-check-badge[data-state=error]:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 18%,transparent)}}
+    .skill-update-check-badge[data-state=done]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}
+    @media (hover:hover){.skill-update-check-badge[data-state=done]:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 18%,transparent)}}
+    .skill-update-check-badge:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary));outline-offset:2px}
+    .skill-update-check-text{min-width:0;overflow:hidden;text-overflow:ellipsis}
+    .skill-update-check-errorMark{font-size:12px;font-weight:700;line-height:1}
+    .skill-update-check-modal{max-height:100%}
+    .skill-update-check-modalContent{min-height:0;overflow:auto}
+    .skill-update-check-dialog{box-sizing:border-box;width:100%;min-width:0;flex-direction:column;gap:10px;display:flex}
+    .skill-update-check-status{color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex}
+    .skill-update-check-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+    .skill-update-check-notice{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex}
+    .skill-update-check-failure{color:var(--dsw-alias-state-error-primary);align-items:flex-start;gap:6px;margin:0;font-size:13px;line-height:20px;display:flex;overflow-wrap:anywhere}
+    .skill-update-check-failure>:first-child{flex:none;margin-top:3px}
+    .skill-update-check-list{flex-direction:column;gap:2px;max-height:320px;margin:0;padding:0;list-style:none;display:flex;overflow:auto}
+    .skill-update-check-row{border-radius:var(--dsw-radius-md);align-items:center;gap:12px;min-height:40px;padding:4px 8px;display:flex}
+    @media (hover:hover){.skill-update-check-row:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+    .skill-update-check-rowMain{flex:1 1 auto;min-width:0;flex-direction:column;gap:1px;display:flex}
+    .skill-update-check-name{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code);font-size:12px;line-height:18px;overflow:hidden}
+    .skill-update-check-source{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code);font-size:11px;line-height:16px;overflow:hidden}
+    .skill-update-check-rowStatus{flex:none;color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;font-size:12px;line-height:18px;display:inline-flex}
+    .skill-update-check-empty{flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:40px 16px;text-align:center;display:flex}
+    .skill-update-check-emptyIcon{color:var(--dsw-alias-state-success-primary);display:inline-flex}
+    .skill-update-check-emptyIconNeutral{color:var(--dsw-alias-label-tertiary);display:inline-flex}
+    .skill-update-check-emptyTitle{margin:0;color:var(--dsw-alias-label-secondary);font-size:14px;font-weight:500;line-height:20px}
+    .skill-update-check-emptyHint{margin:0;max-width:40ch;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;text-wrap:balance}
+    .skill-update-check-modified{color:var(--dsw-alias-state-warn-primary);align-items:center;gap:6px;margin:0;font-size:12px;line-height:18px;display:flex;overflow-wrap:anywhere}
     `;
     // .build/skill-update-check/client/index.js
     /**
@@ -958,17 +958,17 @@ window.__ModuleLoader__.load({
     	ctx.effect(() => ctx.locale.register(NS, {
     		zh,
     		en
-    	}), "buka-skill-update-check: dictionaries");
+    	}), "skill-update-check: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-skill-update-check";
     		tag.textContent = CSS;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-skill-update-check: styles");
+    	}, "skill-update-check: styles");
     	ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
     		name: "conversation.composer.dock",
-    		id: "buka-skill-update-check",
+    		id: "skill-update-check",
     		order: 20,
     		label: () => t("label"),
     		locale: NS

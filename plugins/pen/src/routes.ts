@@ -21,10 +21,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PenStateSource } from './controller.ts'
 
 /** 读取状态的路由；浏览器一半按同一常量访问。 */
-export const STATE_ROUTE = '/buka-pen/state'
+export const STATE_ROUTE = '/pen/state'
 
 /** 勾选 / 取消勾选的路由。 */
-export const TOGGLE_ROUTE = '/buka-pen/toggle'
+export const TOGGLE_ROUTE = '/pen/toggle'
 
 /** 两条路由的请求体都很小。 */
 const MAX_BODY_BYTES = 16 * 1024
@@ -114,7 +114,7 @@ export function registerRoutes(ctx: Context, source: PenStateSource): void {
             sendJson(res, 200, { ok: true, ...source.snapshot(sessionId) })
           },
         }),
-      `buka-pen: GET ${STATE_ROUTE}`,
+      `pen: GET ${STATE_ROUTE}`,
     )
 
     webCtx.effect(
@@ -144,7 +144,7 @@ export function registerRoutes(ctx: Context, source: PenStateSource): void {
             }
           },
         }),
-      `buka-pen: POST ${TOGGLE_ROUTE}`,
+      `pen: POST ${TOGGLE_ROUTE}`,
     )
   })
 }

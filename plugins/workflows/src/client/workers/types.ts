@@ -12,7 +12,7 @@ export type Translate = (key: string) => string
 /** 一个预设头像：`id` 与 Host 的 `lib/avatar.ts` 一一对应。 */
 export type { AvatarPreset } from '@buka/plugin-ui'
 
-/** 项目级 skill 一行（Host `/buka-workers/list` 返回）。 */
+/** 项目级 skill 一行（Host `/workflow/workers/list` 返回）。 */
 export interface WorkerSkill {
   name: string
   description: string
@@ -71,7 +71,7 @@ export interface WorkerModelGroup {
   models: WorkerModelEntry[]
 }
 
-/** `/buka-workers/models` 的成功响应。 */
+/** `/workflow/workers/models` 的成功响应。 */
 export interface WorkerModelCatalogData {
   available: boolean
   default: WorkerModelSelection | null
@@ -86,7 +86,7 @@ export interface WorkerModelCatalogState {
   error: string | null
 }
 
-/** `/buka-workers/presets` 返回的一个执行者预设。 */
+/** `/workflow/workers/presets` 返回的一个执行者预设。 */
 export interface WorkerAgentPreset {
   id: string
   name: string
@@ -95,7 +95,7 @@ export interface WorkerAgentPreset {
   broken: string | null
 }
 
-/** `/buka-workers/presets` 的成功响应。 */
+/** `/workflow/workers/presets` 的成功响应。 */
 export interface WorkerAgentPresetCatalogData {
   /** `agentPresets` 服务是否可用；不可用时页面禁用选择器并提示。 */
   available: boolean
@@ -137,7 +137,7 @@ export interface Worker {
   agentPreset?: string | null
 }
 
-/** `/buka-workers/list` 的成功响应。 */
+/** `/workflow/workers/list` 的成功响应。 */
 export interface ListData {
   root: string
   registry: string
@@ -162,7 +162,7 @@ export interface WorkerFileNode {
   children?: WorkerFileNode[]
 }
 
-/** `/buka-workers/files` 的成功响应。 */
+/** `/workflow/workers/files` 的成功响应。 */
 export interface WorkerFileTreeData {
   ok: true
   root: string
@@ -170,7 +170,7 @@ export interface WorkerFileTreeData {
   truncated: boolean
 }
 
-/** `/buka-workers/file` 的成功响应：只读预览。 */
+/** `/workflow/workers/file` 的成功响应：只读预览。 */
 export interface WorkerFileContentData {
   ok: true
   path: string
@@ -204,7 +204,7 @@ export interface WorkerUsageWorkflow {
   status: string
 }
 
-/** `/buka-workers/remove-impact` 的成功响应：删除影响面。 */
+/** `/workflow/workers/remove-impact` 的成功响应：删除影响面。 */
 export interface WorkerRemoveImpact {
   id: string
   name: string

@@ -110,8 +110,8 @@ tint，跟随浅色 / 深色主题。悬停显示前 5 个 skill 名与「点击
 Host 注册两条本机路由，并沿用 DSH web 组合的信任栅栏
 （`connection.requestRejection`）：非本机或未认证的请求会被拒绝。
 
-- `GET /buka-skill-update-check/status?sessionId=…&refresh=1`：检查。
-- `POST /buka-skill-update-check/update`：更新，请求体是
+- `GET /skill-update-check/status?sessionId=…&refresh=1`：检查。
+- `POST /skill-update-check/update`：更新，请求体是
   `{ sessionId, skills? }`。
 
 浏览器只能传会话 id、`refresh=1` 与 skill 名字，不能传路径——目录完全由 Host

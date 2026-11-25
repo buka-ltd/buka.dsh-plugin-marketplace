@@ -1,5 +1,5 @@
 /**
- * `buka_workers` 工具的单测：输出映射与渲染文本。
+ * `workflow_workers` 工具的单测：输出映射与渲染文本。
  *
  * `defineTool` 与 `listWorkers` 都用假实现，不读磁盘、不启动 DSH。
  */
@@ -91,7 +91,7 @@ function makeTool({ snapshot = SNAPSHOT, calls = [] } = {}) {
 test('createWorkersListTool：工具名、输出 schema 与依赖校验', () => {
   const tool = makeTool()
   assert.equal(tool.name, WORKERS_LIST_TOOL_NAME)
-  assert.equal(tool.name, 'buka_workers')
+  assert.equal(tool.name, 'workflow_workers')
 
   const workerProps = tool.output.schema.properties.workers.items.properties
   // skills 是可选字段（缺省视为空），但输出里总会带上。

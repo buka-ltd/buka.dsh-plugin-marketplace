@@ -23,7 +23,7 @@ import type { PenSnapshot, PenStatus } from '../state.ts'
 import { readPenState, setPenEnabled } from './api.ts'
 import type { PenKey } from './dictionary.ts'
 import { LABEL } from './dictionary.ts'
-import { PEN_LOGO } from './logo.ts'
+import { PenLogo } from './logo.ts'
 
 /** 勾选框的插槽 props：会话 id 来自框架，`t` 来自注册时的 `locale`。 */
 export interface PenToggleProps {
@@ -115,13 +115,7 @@ export function PenToggle({ sessionId, t }: PenToggleProps): ReactElement | null
         h(
           'span',
           { className: 'buka-pen-brand' },
-          h('img', {
-            className: 'buka-pen-logo',
-            src: PEN_LOGO,
-            alt: '',
-            'aria-hidden': 'true',
-            draggable: false,
-          }),
+          h(PenLogo, { className: 'buka-pen-logo', height: 14 }),
           LABEL,
         ),
       ),

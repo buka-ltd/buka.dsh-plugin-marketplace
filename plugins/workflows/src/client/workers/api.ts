@@ -1,7 +1,7 @@
 /**
  * 「执行者」页面与 Host 通信的请求 / 错误处理。
  *
- * 所有 `/buka-workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
+ * 所有 `/workflow/workers/*` 路由都返回 `{ ok, ... }`；非 2xx 或 `ok !== true` 时
  * 抛出带 `code` 的错误，页面再按错误码翻成可读文案。逐项更新是例外：请求
  * 成功但部分 skill 失败时回 200 + `ok:false`，由调用方读取 `update.failed`。
  *

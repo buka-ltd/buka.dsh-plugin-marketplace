@@ -39,7 +39,7 @@ const PLUGIN_DIR = new URL('../plugins/skill-update-check/', import.meta.url)
 const CLIENT_DIR = new URL('src/client/', PLUGIN_DIR)
 
 /** 临时目录，测试结束删除。 */
-async function tempDir(t, prefix = 'buka-skill-update-check-') {
+async function tempDir(t, prefix = 'skill-update-check-') {
   const root = await fs.mkdtemp(path.join(tmpdir(), prefix))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   return root
@@ -439,15 +439,15 @@ test('resolveWorkspaceDir：sessionIds 优先，其次 cwd 包含关系，最后
 })
 
 test('浏览器一半注册在输入框下方统计行，点击提示打开更新弹窗', async () => {
-  assert.equal(CHECK_ROUTE, '/buka-skill-update-check/status')
-  assert.equal(UPDATE_ROUTE, '/buka-skill-update-check/update')
+  assert.equal(CHECK_ROUTE, '/skill-update-check/status')
+  assert.equal(UPDATE_ROUTE, '/skill-update-check/update')
   const api = await source('api.ts', CLIENT_DIR)
   assert.ok(api.includes(`'${CHECK_ROUTE}'`), 'api.ts 的检查路由与 Host 不一致')
   assert.ok(api.includes(`'${UPDATE_ROUTE}'`), 'api.ts 的更新路由与 Host 不一致')
 
   const client = await source('index.ts', CLIENT_DIR)
   assert.ok(client.includes("'conversation.composer.dock'"), '没有注册到输入框下方的统计行')
-  assert.ok(client.includes("id: 'buka-skill-update-check'"))
+  assert.ok(client.includes("id: 'skill-update-check'"))
   assert.ok(client.includes('locale: NS'))
 
   const badge = await source('badge.ts', CLIENT_DIR)
@@ -469,7 +469,7 @@ test('浏览器一半注册在输入框下方统计行，点击提示打开更�
   assert.ok(dialog.includes('Modal'), '弹窗没有复用 DSH 的 Modal')
   assert.ok(!dialog.includes('dialogDescription'), '弹窗不应再展示多余的说明文案')
   assert.ok(!dialog.includes('snapshot.dir'), '弹窗不应再展示工作区路径')
-  assert.ok(dialog.includes('buka-skill-update-check-source'), '每行没有显示技能来源')
+  assert.ok(dialog.includes('skill-update-check-source'), '每行没有显示技能来源')
   assert.ok(dialog.includes('snapshot?.sources?.[name]'), '来源没有按 skill 名取')
   assert.ok(dialog.includes('FRESH_MS'), '弹窗没有判断快照是否还新鲜')
   assert.ok(
@@ -512,12 +512,8 @@ test('浏览器一半注册在输入框下方统计行，点击提示打开更�
 
   const styles = await source('styles.ts', CLIENT_DIR)
   assert.ok(styles.includes('--dsw-alias-state-warn-primary'), '提示没有使用 warn 色 token')
-  assert.match(
-    styles,
-    /\.buka-skill-update-check-badge\{order:1;/,
-    '提示没有排到「上下文已用」圆环之后',
-  )
-  assert.ok(styles.includes('.buka-skill-update-check-row{'), '弹窗没有逐行布局')
+  assert.match(styles, /\.skill-update-check-badge\{order:1;/, '提示没有排到「上下文已用」圆环之后')
+  assert.ok(styles.includes('.skill-update-check-row{'), '弹窗没有逐行布局')
 })
 
 test('bundle 清单、locale 与详情文件齐全', async () => {

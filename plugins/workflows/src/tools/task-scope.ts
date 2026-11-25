@@ -7,7 +7,7 @@
  * - 引擎在派发前就绑定「会话 → 任务」，host 的 `agent/created` 监听据此查出
  *   这张任务；
  * - 在 agent 作用域（`createScope(agent.ctx, agent)`）里各注册一份带本任务说明的
- *   `buka_task_create` / `buka_task_complete`，遮蔽同名全局工具；
+ *   `workflow_task_create` / `workflow_task_complete`，遮蔽同名全局工具；
  * - 会话释放或插件卸载时撤销。
  *
  * 作用域注册跟随 agent 的 fiber 释放；`agent/disposed` 再兜底一次。
@@ -59,14 +59,14 @@ export function installTaskScopedTools(deps: TaskScopeDeps): void {
     () => () => {
       for (const sessionId of [...scopes.keys()]) disposeScope(sessionId)
     },
-    'buka-workflows: dispose task tool scopes',
+    'workflow: dispose task tool scopes',
   )
 
   /** 会话开始执行任务时装配说明；`agent/created` 是串行事件，返回的 Promise 会被等待。 */
   const mount = async (agent: AgentLike, sessionId: string): Promise<undefined> => {
     const engine = await deps.ready().catch((error: unknown) => {
       deps.ctx.logger?.warn?.(
-        `buka-workflows: could not mount task tools for session ${sessionId}: ${
+        `workflow: could not mount task tools for session ${sessionId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       )

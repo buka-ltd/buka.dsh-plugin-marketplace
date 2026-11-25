@@ -55,7 +55,7 @@ export function openWorkflowStore(
     () => () => {
       if (domain !== undefined) void domain.close().catch(() => undefined)
     },
-    'buka-workflows: close workflow storage domain',
+    'workflow: close workflow storage domain',
   )
 
   return (async () => {

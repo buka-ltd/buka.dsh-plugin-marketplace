@@ -37,10 +37,10 @@ export function seedWorkersOnStartup({
       workspaceRegistry: ctx.workspaceRegistry,
     }).then((result) => {
       if (result.seeded.length > 0) {
-        ctx.logger?.info?.('buka-workers: 已初始化预设执行者：%s', result.seeded.join('、'))
+        ctx.logger?.info?.('workflow-workers: 已初始化预设执行者：%s', result.seeded.join('、'))
       }
     }),
   ).catch((error) => {
-    ctx.logger?.warn?.('buka-workers: 初始化预设执行者失败：%s', describeError(error))
+    ctx.logger?.warn?.('workflow-workers: 初始化预设执行者失败：%s', describeError(error))
   })
 }

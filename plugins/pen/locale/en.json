@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Pen",
-    "description": "Adds a “Pen” checkbox with the Pen logo to the top right of the New Session row. Checked, that session gets the Pen (pen.dev) MCP tools and a “Pen MCP” mark beside the conversation title; unchecked, DSH no longer keeps a global Pen MCP server around.",
+    "description": "Adds a “Pen” checkbox with the Pen logo to the top right of the New Session row. Checked, that session gets the Pen (pen.dev) MCP tools and a “Pen MCP” mark beside the conversation title. During a session, /pen enables the tools and /pen off disables them, so you never have to start another session; DSH no longer keeps a global Pen MCP server around.",
     "detail": "docs/DETAIL.md"
   }
 }

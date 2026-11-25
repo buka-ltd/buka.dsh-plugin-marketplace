@@ -53,7 +53,7 @@
 
 在列表页里：
 
-1. **单选 = 选中 + 试听**：列表是原生 `radio`，点一项就是选中它，同时立刻通过 `ctx.configForms` 写入 Host 的 volatile 配置字段，并请求 `POST /buka-bell/preview` 让 Host 播一次。没有额外的试听按钮——选哪个听哪个；已经选中的那一项再点一次会重播，方便反复听。点「无」只取消，不播放。
+1. **单选 = 选中 + 试听**：列表是原生 `radio`，点一项就是选中它，同时立刻通过 `ctx.configForms` 写入 Host 的 volatile 配置字段，并请求 `POST /bell/preview` 让 Host 播一次。没有额外的试听按钮——选哪个听哪个；已经选中的那一项再点一次会重播，方便反复听。点「无」只取消，不播放。
 2. **不自动返回**：点完还留在列表里，可以接着点下一项挨个听，满意后点左上角「返回」回到四行页面——「先听，再定」不用来回改配置，也不会被打断。
 
 列表页是整页替换，不用浮层：设置本身已经是浮层，再叠 Modal 或者行内展开都会打乱操作预期（弹窗套弹窗 / 布局跳动）。
@@ -88,7 +88,7 @@ Windows / Linux 的完成 / 等待 / 计划三列是**没选**「你干嘛~哎�
 | `cordis.patch.yml`                               | bundle 层唯一的一行：把自己作为 `sound-buka-bell` 插入组成                                                                                                 |
 | `src/index.ts`                                   | Host 入口：导出 `name` / `inject` / `Config` / `apply`，装配监听、播放器与试听路由；只做装配                                                               |
 | `src/sounds.ts`                                  | 零依赖的候选表与播放命令：macOS 系统声音清单、自带音频、四个默认值、各平台播放器、试听路由路径、`isPlayableSound` 校验；单测直接导入它                     |
-| `src/player.ts`、`src/watch.ts`、`src/routes.ts` | 播放器、四个时机的监听与 `POST /buka-bell/preview` 试听路由                                                                                                |
+| `src/player.ts`、`src/watch.ts`、`src/routes.ts` | 播放器、四个时机的监听与 `POST /bell/preview` 试听路由                                                                                                |
 | `src/client/index.ts`                            | 界面入口：在 设置 → 提示音 注册两级页面；只导出 `inject` / `apply`                                                                                         |
 | `src/client/**`                                  | 页面组件、词典、样式与试听请求；文案与逻辑从入口之外的模块导入                                                                                             |
 | `lib/index.js`                                   | 构建产物（ESM）：Host 一半的运行文件；由 `pnpm run build:code && pnpm run build:clients` 生成，不手改                                                      |

@@ -10,9 +10,9 @@
  * 1. 解析配置；
  * 2. `ensureReady`：硬切换迁移 → 打开 storageDomain → 构造引擎 → 恢复未完成作业；
  * 3. 注册工具（可见性按编排 preset / 编排工作区 / 任务会话收窄）；
- * 4. 注册 `/job` 命令（宿主不支持命令注册时降级为工具）；
+ * 4. 安装作业模式（提示词段落与目标缓存）并注册 `/job` 命令；宿主不支持命令注册时只能从页面建作业；
  * 5. 注册浏览器路由；
- * 6. 提供只读服务 `ctx.bukaWorkflows`（`workerUsage(id)`），供执行者删除前
+ * 6. 提供只读服务 `ctx.workflowQuery`（`workerUsage(id)`），供执行者删除前
  *    计算引用面与唯一阻塞（运行中作业）。
  *
  * `storageDomain` 不放进 `inject`：缺少它的组合里插件仍然加载，只在真正需要
@@ -32,6 +32,7 @@ import { WorkflowEngine } from './engine/engine.ts'
 import { createHostSessionDelivery } from './engine/session.ts'
 import type { WorkersServiceLike } from './engine/types.ts'
 import { describeError } from './engine/types.ts'
+import { installJobMode } from './job-mode.ts'
 import { runMigrations } from './migration.ts'
 import type { WorkflowsConfig } from './options.ts'
 import { resolveOptions } from './options.ts'
@@ -58,7 +59,7 @@ export function applyWorkflows(ctx: Context, config: WorkflowsConfig): void {
       engine?.dispose()
       engine = undefined
     },
-    'buka-workflows: dispose engine',
+    'workflow: dispose engine',
   )
 
   /**
@@ -78,7 +79,7 @@ export function applyWorkflows(ctx: Context, config: WorkflowsConfig): void {
         store,
         options,
         logger: ctx.logger,
-        workers: () => (ctx.get('bukaWorkers') ?? null) as WorkersServiceLike | null,
+        workers: () => (ctx.get('workflowWorkers') ?? null) as WorkersServiceLike | null,
         delivery: createHostSessionDelivery(ctx),
       })
       engine = created
@@ -90,8 +91,12 @@ export function applyWorkflows(ctx: Context, config: WorkflowsConfig): void {
 
   // 插件加载后就开始恢复未完成作业，不必等到第一次打开页面。
   void ensureReady().catch((error) => {
-    ctx.logger?.warn?.(`buka-workflows: 初始化工作流存储失败：${describeError(error)}`)
+    ctx.logger?.warn?.(`workflow: 初始化工作流存储失败：${describeError(error)}`)
   })
+
+  // 作业模式：`/job` 只把新会话切进这个模式，提示词与作业工具的可见性都由
+  // 同一份会话日志折叠结果决定；工作流列表由 `workflow_job_options` 提供。
+  installJobMode({ ctx })
 
   // 只读查询服务：执行者删除前用它算影响面与阻塞（服务名见 service.ts）。
   // 合并包内始终存在；兜底仍按服务缺失处理。
@@ -147,12 +152,19 @@ export function applyWorkflows(ctx: Context, config: WorkflowsConfig): void {
   // 任务会话带本任务说明的创建 / 完成工具；会话释放或卸载时撤销。
   installTaskScopedTools({ ctx, ready: ensureReady })
 
-  const commandRegistered = registerJobCommand({ ctx, ready: ensureReady })
-  if (!commandRegistered) {
-    ctx.logger?.info?.(
-      'buka-workflows: the host commands service cannot register /job; ordinary sessions can use the buka_job_start tool instead',
-    )
-  }
+  // 命令服务可能比本插件晚挂载：用 inject 等它就绪再注册 /job，而不是在 apply
+  // 时取一次。宿主不支持命令时不再有会话入口，作业只能从页面启动。
+  ctx.inject(['commands'], (commandCtx) => {
+    const commandRegistered = registerJobCommand({
+      ctx: commandCtx,
+      ready: ensureReady,
+    })
+    if (!commandRegistered) {
+      commandCtx.logger?.info?.(
+        'workflow: the host commands service cannot register /job; jobs can still be started from the Workflow page',
+      )
+    }
+  })
 
   registerWorkflowRoutes({ ctx, ready: ensureReady })
 }

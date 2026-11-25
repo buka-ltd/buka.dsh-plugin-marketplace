@@ -68,7 +68,7 @@ test('task tools: the scoped description lists this task’s targets and content
     const agent = { id: 'session-dev', ctx: root }
     await root.serial('agent/created', { agent })
     const tools = root.get('tools').schemas(agent)
-    const create = tools.find((tool) => tool.name === 'buka_task_create')
+    const create = tools.find((tool) => tool.name === 'workflow_task_create')
     assert.ok(create, 'the scoped create tool is visible')
     assert.match(create.description, /Targets this task can create:/u)
     assert.match(create.description, /qa\.verify \(验证\) — content schema: \{"type":"object"/u)
@@ -97,7 +97,7 @@ test('task tools: the scoped description lists the actions of a human task', asy
     const complete = root
       .get('tools')
       .schemas(agent)
-      .find((tool) => tool.name === 'buka_task_complete')
+      .find((tool) => tool.name === 'workflow_task_complete')
     assert.ok(complete, 'the scoped complete tool is visible')
     assert.match(complete.description, /approve \(批准\) — input schema: \{"type":"object"/u)
     assert.match(complete.description, /reject \(打回\) — no input form/u)
@@ -130,11 +130,11 @@ test('task tools: the scoped registration shadows the global tool only for that 
     const scoped = root
       .get('tools')
       .schemas(agent)
-      .find((tool) => tool.name === 'buka_task_create')
+      .find((tool) => tool.name === 'workflow_task_create')
     const generic = root
       .get('tools')
       .schemas(other)
-      .find((tool) => tool.name === 'buka_task_create')
+      .find((tool) => tool.name === 'workflow_task_create')
     assert.match(scoped.description, /cannot create follow-up tasks/u)
     assert.match(generic.description, /In a task session this description lists/u)
     assert.equal(
@@ -161,7 +161,7 @@ test('task tools: a session that is not executing a task gets no scoped tools', 
     const complete = root
       .get('tools')
       .schemas(agent)
-      .find((tool) => tool.name === 'buka_task_complete')
+      .find((tool) => tool.name === 'workflow_task_complete')
     assert.match(complete.description, /a task session lists the available actions/u)
   } finally {
     await root.fiber.dispose()
@@ -180,7 +180,7 @@ test('task tools: disposing the session removes the scoped registration', async 
     root
       .get('tools')
       .schemas(agent)
-      .find((tool) => tool.name === 'buka_task_create').description,
+      .find((tool) => tool.name === 'workflow_task_create').description,
     /cannot create follow-up tasks/u,
   )
   await root.serial('agent/disposed', { agent })
@@ -189,7 +189,7 @@ test('task tools: disposing the session removes the scoped registration', async 
       root
         .get('tools')
         .schemas(agent)
-        .find((tool) => tool.name === 'buka_task_create').description,
+        .find((tool) => tool.name === 'workflow_task_create').description,
     ),
   )
   await root.fiber.dispose()

@@ -1,7 +1,7 @@
 /**
  * 「执行者」页签（首页 Worker Tab 的内容）。
  *
- * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/buka-workers/list`，
+ * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/workflow/workers/list`，
  * 挂载 / 摘除 / 打开工作区则通过注入的 `getService` 取 DSH 的 Client
  * Service，两者都失败时用 Toast 说明原因。
  *

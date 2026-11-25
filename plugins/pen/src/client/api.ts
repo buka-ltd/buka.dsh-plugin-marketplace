@@ -12,10 +12,10 @@ import { requestJson } from '@buka/plugin-ui'
 import type { PenSnapshot } from '../state.ts'
 
 /** 与 Host 一致的读状态路由。 */
-const STATE_ROUTE = '/buka-pen/state'
+const STATE_ROUTE = '/pen/state'
 
 /** 与 Host 一致的勾选路由。 */
-const TOGGLE_ROUTE = '/buka-pen/toggle'
+const TOGGLE_ROUTE = '/pen/toggle'
 
 /** 路由响应：`ok` 之外就是快照字段。 */
 type PenResponse = PenSnapshot & { ok: true }

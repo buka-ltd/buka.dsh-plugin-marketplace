@@ -371,7 +371,7 @@ async function loadClient() {
       },
     })
     assert.equal(
-      typeof components['buka-workflows'],
+      typeof components['workflow'],
       'function',
       'client should register the merged home page component',
     )
@@ -389,7 +389,7 @@ async function loadClient() {
         // 首页（HomePage）的页签 useState 占第 0 位，执行者页状态从第 1 位开始。
         globalThis.__dshStateQueue = ['worker', ...states]
         globalThis.__dshStateIndex = 0
-        return components['buka-workflows']({
+        return components['workflow']({
           t: (key) => zh[key] ?? key,
           // 执行者页的 `t` 来自 main 插槽的 inject；这里刻意不再兜底成正确翻译，
           // 让「inject 多包一层函数」这类问题在测试里直接暴露成空文案。
@@ -762,8 +762,8 @@ test('执行者详情：下划线页签的 ARIA 与「技能」更新圆点', as
     [0, -1, -1],
     '只有选中页签是 Tab 停靠点',
   )
-  assert.equal(tabs[0].props?.['aria-controls'], 'buka-workers-panel-settings')
-  assert.equal(tabs[2].props?.['aria-controls'], 'buka-workers-panel-skills')
+  assert.equal(tabs[0].props?.['aria-controls'], 'workflow-workers-panel-settings')
+  assert.equal(tabs[2].props?.['aria-controls'], 'workflow-workers-panel-skills')
 
   const skillsTab = tabs[2]
   assert.ok(

@@ -1,7 +1,7 @@
 /**
  * 「执行者」页面的全部 UI 状态与派生值。
  *
- * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/buka-workers/list`。
+ * 页面只保存 UI 状态；执行者列表（登记表）来自 Host 的 `/workflow/workers/list`。
  * 状态集中在 `useWorkersState` 里，视图与动作模块只读写它，不各自持有副本。
  *
  * @module @buka/dsh-plugin-workflows/workers/client/state

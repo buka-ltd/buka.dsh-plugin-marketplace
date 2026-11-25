@@ -49,40 +49,40 @@ import type { WorkerRouteError } from './target.ts'
 import { resolveWorker } from './target.ts'
 
 /** 页面列出执行者用的路由；浏览器一半按同一常量访问。 */
-const LIST_ROUTE = '/buka-workers/list'
+const LIST_ROUTE = '/workflow/workers/list'
 
 /** 页面新建执行者用的路由。 */
-const CREATE_ROUTE = '/buka-workers/create'
+const CREATE_ROUTE = '/workflow/workers/create'
 
 /** 页面给执行者换头像用的路由。 */
-const AVATAR_ROUTE = '/buka-workers/avatar'
+const AVATAR_ROUTE = '/workflow/workers/avatar'
 
 /** 页面编辑执行者描述用的路由。 */
-const DESCRIPTION_ROUTE = '/buka-workers/description'
+const DESCRIPTION_ROUTE = '/workflow/workers/description'
 
 /** 页面读取可选模型目录用的路由。 */
-const MODELS_ROUTE = '/buka-workers/models'
+const MODELS_ROUTE = '/workflow/workers/models'
 
 /** 页面给智能体设置新会话模型用的路由。 */
-const MODEL_ROUTE = '/buka-workers/model'
+const MODEL_ROUTE = '/workflow/workers/model'
 
 /** 页面读取可用执行者预设（界面写作「模式」）列表用的路由。 */
-const PRESETS_ROUTE = '/buka-workers/presets'
+const PRESETS_ROUTE = '/workflow/workers/presets'
 
 /** 页面给智能体设置默认执行者预设用的路由。 */
-const PRESET_ROUTE = '/buka-workers/preset'
+const PRESET_ROUTE = '/workflow/workers/preset'
 
 /** 页面改执行者展示名（不移动目录）用的路由。 */
-const RENAME_ROUTE = '/buka-workers/rename'
+const RENAME_ROUTE = '/workflow/workers/rename'
 
 /** 页面读取删除影响面（阻塞作业 / 受影响工作流 / 历史作业数）用的路由。 */
-const REMOVE_IMPACT_ROUTE = '/buka-workers/remove-impact'
+const REMOVE_IMPACT_ROUTE = '/workflow/workers/remove-impact'
 
 /** 页面删除执行者（登记 + 目录 + 工作区注册）用的路由。 */
-const REMOVE_ROUTE = '/buka-workers/remove'
+const REMOVE_ROUTE = '/workflow/workers/remove'
 
 /** 页面「打开 Finder」用的路由。 */
-const REVEAL_ROUTE = '/buka-workers/reveal'
+const REVEAL_ROUTE = '/workflow/workers/reveal'
 
 /** 执行者路由的依赖：由入口装配时传入，路由本身不持有全局状态。 */
 export interface WorkerRouteDeps {
@@ -107,7 +107,7 @@ interface WorkerUsageWorkflowView {
   status: string
 }
 
-/** `bukaWorkflows.workerUsage()` 的本插件视图。 */
+/** `workflowQuery.workerUsage()` 的本插件视图。 */
 interface WorkerUsageView {
   runningJobs: WorkerUsageJobView[]
   workflows: WorkerUsageWorkflowView[]
@@ -209,7 +209,7 @@ export function registerWorkerRoutes(
    *
    */
   async function readWorkerUsage(id: string): Promise<WorkerUsageView> {
-    const service = optionalService<WorkflowUsageService>(ctx, 'bukaWorkflows')
+    const service = optionalService<WorkflowUsageService>(ctx, 'workflowQuery')
     if (service === null || service === undefined || typeof service.workerUsage !== 'function') {
       return { runningJobs: [], workflows: [], finishedJobs: 0 }
     }
@@ -240,12 +240,12 @@ export function registerWorkerRoutes(
             })
             sendJson(res, 200, { ok: true, ...snapshot })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取执行者列表失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取执行者列表失败：%s', describeError(error))
             sendError(res, 500, 'list-failed', `读取执行者列表失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${LIST_ROUTE}`,
+    `workflow-workers: GET ${LIST_ROUTE}`,
   )
 
   webCtx.effect(
@@ -303,7 +303,7 @@ export function registerWorkerRoutes(
               }),
             )
             webCtx.logger?.info?.(
-              'buka-workers: 已登记执行者 %s（%s，%s）',
+              'workflow-workers: 已登记执行者 %s（%s，%s）',
               result.worker.id,
               result.worker.name,
               result.worker.path,
@@ -339,12 +339,12 @@ export function registerWorkerRoutes(
               sendError(res, 409, String(errorCode(error)), describeError(error))
               return
             }
-            webCtx.logger?.warn?.('buka-workers: 创建执行者失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 创建执行者失败：%s', describeError(error))
             sendError(res, 500, 'create-failed', `创建执行者失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${CREATE_ROUTE}`,
+    `workflow-workers: POST ${CREATE_ROUTE}`,
   )
 
   webCtx.effect(
@@ -372,7 +372,7 @@ export function registerWorkerRoutes(
             const result = await serializeRegistry(() =>
               setWorkerAvatar({ file: registryFile, id, avatar }),
             )
-            webCtx.logger?.info?.('buka-workers: 执行者 %s 的头像改为 %s', id, avatar)
+            webCtx.logger?.info?.('workflow-workers: 执行者 %s 的头像改为 %s', id, avatar)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-avatar') {
@@ -395,12 +395,12 @@ export function registerWorkerRoutes(
               sendError(res, 409, 'registry-unreadable', describeError(error))
               return
             }
-            webCtx.logger?.warn?.('buka-workers: 修改执行者头像失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 修改执行者头像失败：%s', describeError(error))
             sendError(res, 500, 'avatar-failed', `修改执行者头像失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${AVATAR_ROUTE}`,
+    `workflow-workers: POST ${AVATAR_ROUTE}`,
   )
 
   webCtx.effect(
@@ -432,7 +432,7 @@ export function registerWorkerRoutes(
             const result = await serializeRegistry(() =>
               setWorkerDescription({ file: registryFile, id, description }),
             )
-            webCtx.logger?.info?.('buka-workers: 已更新执行者 %s 的描述', id)
+            webCtx.logger?.info?.('workflow-workers: 已更新执行者 %s 的描述', id)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-description') {
@@ -460,12 +460,12 @@ export function registerWorkerRoutes(
               sendError(res, 409, 'registry-unreadable', describeError(error))
               return
             }
-            webCtx.logger?.warn?.('buka-workers: 更新执行者描述失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 更新执行者描述失败：%s', describeError(error))
             sendError(res, 500, 'description-failed', `更新执行者描述失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${DESCRIPTION_ROUTE}`,
+    `workflow-workers: POST ${DESCRIPTION_ROUTE}`,
   )
 
   webCtx.effect(
@@ -486,12 +486,12 @@ export function registerWorkerRoutes(
             sendJson(res, 200, { ok: true, ...catalog })
           } catch (error) {
             if (controller.signal.aborted) return
-            webCtx.logger?.warn?.('buka-workers: 读取模型目录失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取模型目录失败：%s', describeError(error))
             sendError(res, 500, 'models-failed', `读取模型目录失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${MODELS_ROUTE}`,
+    `workflow-workers: GET ${MODELS_ROUTE}`,
   )
 
   webCtx.effect(
@@ -532,7 +532,7 @@ export function registerWorkerRoutes(
                   model === null || model === undefined ? null : (model as WorkerModelSelection),
               }),
             )
-            webCtx.logger?.info?.('buka-workers: 智能体 %s 的模型已更新', id)
+            webCtx.logger?.info?.('workflow-workers: 智能体 %s 的模型已更新', id)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             if (errorCode(error) === 'invalid-model') {
@@ -555,12 +555,12 @@ export function registerWorkerRoutes(
               sendError(res, 409, 'registry-unreadable', describeError(error))
               return
             }
-            webCtx.logger?.warn?.('buka-workers: 更新智能体模型失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 更新智能体模型失败：%s', describeError(error))
             sendError(res, 500, 'model-failed', `更新智能体模型失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${MODEL_ROUTE}`,
+    `workflow-workers: POST ${MODEL_ROUTE}`,
   )
 
   /** 读一次 `agentPresets` 服务声明的预设；服务缺失时返回 `null`。 */
@@ -592,12 +592,12 @@ export function registerWorkerRoutes(
               presets: presets ?? [],
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取执行者预设失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取执行者预设失败：%s', describeError(error))
             sendError(res, 500, 'presets-failed', `读取执行者预设失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: GET ${PRESETS_ROUTE}`,
+    `workflow-workers: GET ${PRESETS_ROUTE}`,
   )
 
   webCtx.effect(
@@ -644,7 +644,7 @@ export function registerWorkerRoutes(
             const result = await serializeRegistry(() =>
               setWorkerPreset({ file: registryFile, id, agentPreset: nextPreset }),
             )
-            webCtx.logger?.info?.('buka-workers: 智能体 %s 的执行者预设已更新', id)
+            webCtx.logger?.info?.('workflow-workers: 智能体 %s 的执行者预设已更新', id)
             sendJson(res, 200, { ok: true, worker: result.worker })
           } catch (error) {
             const code = errorCode(error)
@@ -664,12 +664,12 @@ export function registerWorkerRoutes(
               sendError(res, 409, code, describeError(error))
               return
             }
-            webCtx.logger?.warn?.('buka-workers: 更新执行者预设失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 更新执行者预设失败：%s', describeError(error))
             sendError(res, 500, 'preset-failed', `更新执行者预设失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${PRESET_ROUTE}`,
+    `workflow-workers: POST ${PRESET_ROUTE}`,
   )
 
   webCtx.effect(
@@ -726,7 +726,7 @@ export function registerWorkerRoutes(
               return { ...renamed, mount }
             })
             webCtx.logger?.info?.(
-              'buka-workers: 执行者 %s 的展示名改为 %s',
+              'workflow-workers: 执行者 %s 的展示名改为 %s',
               result.worker.id,
               result.worker.name,
             )
@@ -762,13 +762,13 @@ export function registerWorkerRoutes(
                 sendError(res, 409, 'robot-worker', describeError(error))
                 return
               default:
-                webCtx.logger?.warn?.('buka-workers: 改展示名失败：%s', describeError(error))
+                webCtx.logger?.warn?.('workflow-workers: 改展示名失败：%s', describeError(error))
                 sendError(res, 500, 'rename-failed', `改展示名失败：${describeError(error)}`)
             }
           }
         },
       }),
-    `buka-workers: POST ${RENAME_ROUTE}`,
+    `workflow-workers: POST ${RENAME_ROUTE}`,
   )
 
   webCtx.effect(
@@ -827,7 +827,7 @@ export function registerWorkerRoutes(
               finishedJobs: usage.finishedJobs,
             })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 读取删除影响面失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 读取删除影响面失败：%s', describeError(error))
             sendError(
               res,
               500,
@@ -837,7 +837,7 @@ export function registerWorkerRoutes(
           }
         },
       }),
-    `buka-workers: POST ${REMOVE_IMPACT_ROUTE}`,
+    `workflow-workers: POST ${REMOVE_IMPACT_ROUTE}`,
   )
 
   webCtx.effect(
@@ -882,7 +882,7 @@ export function registerWorkerRoutes(
               }),
             )
             webCtx.logger?.info?.(
-              'buka-workers: 已删除执行者 %s（目录 %s，工作区注册 %s）',
+              'workflow-workers: 已删除执行者 %s（目录 %s，工作区注册 %s）',
               result.worker.id,
               result.path,
               result.workspaceId ?? '无',
@@ -913,13 +913,13 @@ export function registerWorkerRoutes(
                 sendError(res, 404, 'unknown-worker', describeError(error))
                 return
               default:
-                webCtx.logger?.warn?.('buka-workers: 删除执行者失败：%s', describeError(error))
+                webCtx.logger?.warn?.('workflow-workers: 删除执行者失败：%s', describeError(error))
                 sendError(res, 500, 'remove-failed', `删除执行者失败：${describeError(error)}`)
             }
           }
         },
       }),
-    `buka-workers: POST ${REMOVE_ROUTE}`,
+    `workflow-workers: POST ${REMOVE_ROUTE}`,
   )
 
   webCtx.effect(
@@ -944,14 +944,14 @@ export function registerWorkerRoutes(
 
           try {
             await revealDirectory(resolved.worker.path)
-            webCtx.logger?.info?.('buka-workers: 已打开执行者目录（%s）', resolved.worker.path)
+            webCtx.logger?.info?.('workflow-workers: 已打开执行者目录（%s）', resolved.worker.path)
             sendJson(res, 200, { ok: true, path: resolved.worker.path })
           } catch (error) {
-            webCtx.logger?.warn?.('buka-workers: 打开执行者目录失败：%s', describeError(error))
+            webCtx.logger?.warn?.('workflow-workers: 打开执行者目录失败：%s', describeError(error))
             sendError(res, 500, 'reveal-failed', `打开执行者目录失败：${describeError(error)}`)
           }
         },
       }),
-    `buka-workers: POST ${REVEAL_ROUTE}`,
+    `workflow-workers: POST ${REVEAL_ROUTE}`,
   )
 }

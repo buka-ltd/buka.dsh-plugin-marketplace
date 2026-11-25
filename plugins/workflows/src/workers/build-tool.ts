@@ -1,5 +1,5 @@
 /**
- * `buka_worker_build` 工具的定义与执行包装。
+ * `workflow_worker_build` 工具的定义与执行包装。
  *
  * 放在独立模块里，`defineTool` 与真正的构建函数都由入口注入（与 `service.js`
  * 一致），这样工具的参数 / 结果映射可以脱离 DSH 运行时用假 `defineTool` 单测；
@@ -15,10 +15,10 @@
 import type { defineTool as defineToolType, ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 /** 工具名；入口注册与日志都用它。 */
-export const WORKER_BUILD_TOOL_NAME = 'buka_worker_build'
+export const WORKER_BUILD_TOOL_NAME = 'workflow_worker_build'
 
 /**
- * 构造 `buka_worker_build` 工具。
+ * 构造 `workflow_worker_build` 工具。
  *
  */
 export function createWorkerBuildTool({
@@ -61,7 +61,7 @@ export function createWorkerBuildTool({
   return defineTool({
     name: WORKER_BUILD_TOOL_NAME,
     description:
-      'Create or update one worker of the Buka Workers page and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the Workflow preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call buka_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ' +
+      'Create or update one worker of the Buka Workers page and mount it as a DSH workspace. A worker has an immutable identifier (id) and an optional display name. The id is the reference key used by workflows and the directory name: the plugin creates workers/<id> (default ~/.cache/dsh-plugin-workers/workers/<id>), whose AGENTS.md tells every session in it who the worker is and how it works. The display name is only shown in the UI and can be changed at any time; when it is empty the id is shown. Use this only in the Workflow preset, after understanding what the user wants the worker to do and after showing them the proposed id, display name, avatar, description and AGENTS.md and getting their approval. Call workflow_workers first so you do not duplicate an existing worker. The tool creates the directory, registers the worker, writes the provided AGENTS.md (the plugin template is used when agents is omitted on create), keeps the CLAUDE.md link, and mounts the worker as a workspace. An existing id is rejected unless update: true is passed; pass it only when the user asked to change that worker, and omit the fields that should stay unchanged. To change the display name, pass the same id together with the new name and update: true — this does not move the directory or re-register the workspace, and earlier conversations stay listed under the worker. The id itself can never be changed. Installing project-level skills is a page action (Workers page → the worker → 技能) and is not done by this tool; recommend sources instead. Each worker also needs a one-sentence description: it is what a workflow orchestrator reads to decide whether to delegate a node to that worker (like a skill description). Avatar ids: ' +
       `${avatars}. Workers created here are agents.`,
     parameters: {
       id: {

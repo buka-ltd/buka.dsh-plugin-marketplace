@@ -1,9 +1,11 @@
 /**
- * `@buka/dsh-plugin-pen` 的 Host 一半：把 pen MCP 变成新会话框里的一个勾选框。
+ * `@buka/dsh-plugin-pen` 的 Host 一半：把 pen MCP 变成按会话开启的能力。
  *
- * 勾选后，这条会话的 Agent 作用域里挂一个 `@deepseek-ai/dsh-mcp-client`，
- * 工具（`mcp__pencil__*`）只对该会话可见；不勾选的会话看不到、也不会为它
- * 启动 pen 进程。具体时机与状态机在 `controller.ts`，HTTP 路由在 `routes.ts`。
+ * 两个入口都走同一个控制器：新会话框里的勾选框，以及会话进行中的 `/pen`
+ * 与 `/pen off` 命令。开启后，这条会话的 Agent 作用域里挂一个
+ * `@deepseek-ai/dsh-mcp-client`，工具（`mcp__pencil__*`）只对该会话可见；
+ * 没开启的会话看不到、也不会为它启动 pen 进程。具体时机与状态机在
+ * `controller.ts`，命令在 `command.ts`，HTTP 路由在 `routes.ts`。
  *
  * 本文件只装配：导出 Cordis 插件名、依赖、配置与 `apply`。
  *
@@ -15,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 // 类型增强：`session/disposed` 与 `SessionId`。
 import type {} from '@deepseek-ai/dsh-session'
-
+import { registerPenCommand } from './command.ts'
 import type { PenConfig } from './config.ts'
 import { PenController } from './controller.ts'
 import { registerRoutes } from './routes.ts'
@@ -38,5 +40,6 @@ export const inject = ['agents']
 export function apply(ctx: Context, config: PenConfig): void {
   const pen = new PenController(ctx, config)
   pen.watch()
+  registerPenCommand(ctx, pen, { serverName: config.serverName })
   registerRoutes(ctx, pen)
 }

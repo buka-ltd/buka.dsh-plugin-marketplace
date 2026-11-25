@@ -6,7 +6,7 @@
  */
 
 /** 词典命名空间。 */
-export const NS = 'buka-bell'
+export const NS = 'bell'
 
 /** 英文文案。 */
 export const en = {

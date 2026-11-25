@@ -127,8 +127,8 @@ The Host registers two local routes behind DSH's web trust gate
 (`connection.requestRejection`): requests from other origins or unauthenticated
 clients are rejected.
 
-- `GET /buka-skill-update-check/status?sessionId=…&refresh=1` — check.
-- `POST /buka-skill-update-check/update` — update, with the body
+- `GET /skill-update-check/status?sessionId=…&refresh=1` — check.
+- `POST /skill-update-check/update` — update, with the body
   `{ sessionId, skills? }`.
 
 The browser can send only a session id, `refresh=1`, and skill names, never a

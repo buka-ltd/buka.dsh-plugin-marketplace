@@ -11,7 +11,7 @@
 /** 串行执行器：同一时刻只跑一段工作。 */
 export type SerialRunner = <T>(work: () => Promise<T>) => Promise<T>
 
-/** 可选提供共用队列的服务；`ctx.bukaSkills` 是它的实现。 */
+/** 可选提供共用队列的服务；`ctx.skillCatalog` 是它的实现。 */
 export interface SerialQueueService {
   runSerialized?: SerialRunner
 }

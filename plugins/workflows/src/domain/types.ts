@@ -110,7 +110,7 @@ export interface Claimant {
   readonly sessionId: string | null
 }
 
-/** 发起人：人（页面启动）或会话（`/job` 启动）。 */
+/** 发起人：人（页面启动）或会话（以 `/job` 作为第一条消息进入作业模式后启动）。 */
 export type Starter =
   | { readonly kind: 'human' }
   | { readonly kind: 'session'; readonly sessionId: string }
@@ -168,7 +168,7 @@ export interface ActionDefinition {
  * 只给任务类型与任务内容格式，不带岗位 / 通道：通道由引擎解析。
  */
 export interface CreatableTarget {
-  /** 创建时传给 `buka_task_create` 的 target。 */
+  /** 创建时传给 `workflow_task_create` 的 target。 */
   readonly target: string
   /** 任务类型展示名。 */
   readonly label: string

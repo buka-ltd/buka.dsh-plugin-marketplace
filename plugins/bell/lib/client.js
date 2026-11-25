@@ -199,7 +199,7 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-bell/client/preview
     */
     /** 与 Host 侧一致的试听路由：播放一次，不写配置。 */
-    const PREVIEW_ROUTE = "/buka-bell/preview";
+    const PREVIEW_ROUTE = "/bell/preview";
     /**
     * 请求 Host 播放一个候选声音。只负责试听，选中与否由列表页各自的写入
     * 决定，所以这里不发 `configForms` 请求。
@@ -358,7 +358,7 @@ window.__ModuleLoader__.load({
     * @module @buka/dsh-plugin-bell/client/dictionaries
     */
     /** 词典命名空间。 */
-    const NS = "buka-bell";
+    const NS = "bell";
     /** 英文文案。 */
     const en = {
     	nav: "Notification sounds",
@@ -437,7 +437,7 @@ window.__ModuleLoader__.load({
     * 页面本身不保存任何状态：读写都走 DSH 的设置表单服务 `ctx.configForms`
     * （Host 设置的浏览器镜像）。交互是两级的：设置页是四行，点一行进入该时机的
     * **独立声音列表页**；列表里点一项就同时「选中 + 试听」——写入配置并请求
-    * Host 播放一次（`POST /buka-bell/preview`），不自动返回，只有点「返回」才
+    * Host 播放一次（`POST /bell/preview`），不自动返回，只有点「返回」才
     * 回到四行页面，方便连着听几个再定。「无」表示那个时机不响。
     *
     * 不用 Modal、也不在行内展开：设置本身就是浮层，再叠一层弹窗或撑开页面都
@@ -462,14 +462,14 @@ window.__ModuleLoader__.load({
     	ctx.effect(() => ctx.locale.register(NS, {
     		zh,
     		en
-    	}), "buka-bell: dictionaries");
+    	}), "bell: dictionaries");
     	ctx.effect(() => {
     		const tag = document.createElement("style");
     		tag.dataset.plugin = "@buka/dsh-plugin-bell";
     		tag.textContent = CSS;
     		document.head.appendChild(tag);
     		return () => tag.remove();
-    	}, "buka-bell: styles");
+    	}, "bell: styles");
     	const form = ctx.configForms.get(NAMESPACE);
     	const bellForm = {
     		getSnapshot: () => form.getSnapshot(),
@@ -477,7 +477,7 @@ window.__ModuleLoader__.load({
     	};
     	ctx.slots.inject("settings.section", () => ctx.slots.register({
     		name: "settings.section",
-    		id: "buka-bell",
+    		id: "bell",
     		order: 16,
     		label: () => t("nav"),
     		locale: NS,

@@ -7,7 +7,7 @@
  *
  * v4 里服务只负责「会话 + turn 观测」：一个任务一条新会话（`dispatchSession`），
  * 恢复时只续接同一条会话（`openSession`）；压缩、结构化结果校验与结果追问都在
- * 工作流侧（`buka_task_complete`），这里不再有对应类型。
+ * 工作流侧（`workflow_task_complete`），这里不再有对应类型。
  *
  * @module @buka/dsh-plugin-workflows/workers/service/types
  */
